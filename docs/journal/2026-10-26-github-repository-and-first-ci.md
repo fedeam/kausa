@@ -360,6 +360,15 @@ The maintainer asked to carry on to the end. Result and method:
   ConfigMaps. The research note says so.
 - The test namespace was deleted afterwards; no kausa Event was written (`--no-events`).
 
+- **Gitea CI after the packaging change:** run 9 stayed `running` with no process left on the
+  runner, and Gitea cancelled it when the next push arrived; run 10 failed with its log cut off
+  while the release build compiled `kube-core`. No memory limit was hit (the cgroup counters
+  showed no OOM kill). The cause: the runner stops a job after 30 minutes (`timeout: 30m` in its
+  configuration), and the checks (about 20 minutes) and the release build no longer fit in one
+  job. The fix splits the Gitea workflow into `ci` and `image` (after `ci`); the `image` job
+  builds only the build and runtime stages, cut from the Dockerfile, because the classic builder
+  would otherwise repeat the ci stage, whose cache does not match a new checkout's `.git`.
+
 ### Pending
 
 - **The measurement on a Raspberry Pi 4.** kausa's image has to reach a node: no image is

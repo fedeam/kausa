@@ -13,6 +13,8 @@
 #
 # It comes after the ci target on purpose: the classic builder builds every stage up to the target,
 # so `--target ci` never compiles the release binary, and `--target runtime` runs the checks first.
+# The Gitea job, which has only the classic builder, cuts the file from the build stage's FROM line
+# on, so the build and runtime stages must stay last and must not use the ci stage.
 #
 # It works with BuildKit and with the classic builder (a runner without buildx falls back to the
 # classic one): no RUN --mount, no heredocs, no ADD --checksum, and TARGETARCH, which only

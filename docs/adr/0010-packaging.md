@@ -66,6 +66,10 @@ only, not published; the end-to-end tests in kind on GitHub Actions.
 - The distroless digest is bumped by hand, like the tools in the Dockerfile
   ([Maintain the repository](../how-to/maintain.md)): Dependabot's docker updates are grouped
   with the rust image.
-- The Gitea CI builds the release binary on the Pi after the checks, which makes its run longer.
+- The Gitea CI builds the release binary on its arm64 runner after the checks, in a job of its own
+  that takes only the build and runtime stages of the Dockerfile: the runner stops a job after 30
+  minutes, and the checks and the release build did not fit in one (found on 2026-10-26, when two
+  runs were stopped that way). The build and runtime stages must therefore stay last in the
+  Dockerfile and must not depend on the ci stage.
 - The kind test does not run until GitHub Actions run for the account; until then the chart is
   checked by the lint, the renders, and a server-side dry run against a live cluster.

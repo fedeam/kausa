@@ -216,14 +216,18 @@ git rev-parse origin/main github/main   # two identical SHAs
 
 1. Open the Gitea repository's **Actions** tab and find the `CI` run of the commit you synced (its
    title is the commit header: the pull request title and its number).
-2. Green: nothing to do.
+2. Green: nothing to do. The run has two jobs: `ci` (the checks) and then `image` (the arm64
+   image).
 3. Red because a download failed (a connection reset or a timeout while the image fetches the
    pinned tools): run it again. If downloads from GitHub keep failing, check the MTU of Docker's
    bridge on the runner against the pod network's first, the cause on 2026-10-23. Either use
    **Re-run all jobs** on the run's page, or start a manual run of the `CI` workflow on `main` from
    the Actions tab: the workflow accepts manual runs (`workflow_dispatch`), which check the latest
    commit of `main`.
-4. Red for a real reason (something that fails only on linux/arm64): `main` already has the
+4. A job stopped with no error, its log cut off in the middle of a step: the runner stops a job
+   after 30 minutes. If `ci` or `image` grew past that, split it again or make it faster; the
+   limit belongs to the runner's configuration, not to this repository.
+5. Red for a real reason (something that fails only on linux/arm64): `main` already has the
    change, so open an issue on GitHub and fix it in a new pull request.
 
 ## Review Dependabot pull requests
