@@ -45,14 +45,15 @@ fn version_prints_name_and_version() {
 }
 
 #[test]
-fn help_shows_usage_and_says_what_is_not_implemented() {
+fn help_shows_usage_and_the_options_of_run() {
     for flag in ["--help", "-h"] {
         let output = kausa(&[flag]);
         assert_eq!(output.status.code(), Some(0), "{flag}");
         let help = stdout(&output);
         assert!(help.starts_with(concat!("kausa ", env!("CARGO_PKG_VERSION"), "\n")));
         assert!(help.contains("Usage:"), "{flag}: {help}");
-        assert!(help.contains("NOT IMPLEMENTED YET"), "{flag}: {help}");
+        assert!(help.contains("--endpoint <URL>"), "{flag}: {help}");
+        assert!(help.lines().all(|l| l.len() <= 84), "{flag}: {help}");
         assert_eq!(stderr(&output), "", "{flag}");
     }
 }
@@ -146,6 +147,10 @@ fn run_rejects_unknown_arguments_and_bad_settle_values() {
             "--api-key-file",
             "/nonexistent/kausa-tests/key",
         ][..],
+        &["run", "--max-calls-per-hour", "many"][..],
+        &["run", "--dedup-hours", "-1"][..],
+        &["run", "--metrics-address", "localhost"][..],
+        &["run", "--metrics-address"][..],
     ] {
         let output = kausa(args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");

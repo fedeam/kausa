@@ -14,8 +14,9 @@ Pod status, groups the failures of one workload into one incident with determini
 a redacted context to one OpenAI-compatible model endpoint within a call and token budget, and
 writes the explanation as a Kubernetes Event on the failing object. Open source,
 `MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents, redacts their
-context and explains them with a model or logs the request (`--dry-run`); budget, deduplication,
-metrics and Events are not implemented yet (third weekend).
+context, explains them with a model within a call budget (or logs the request with `--dry-run`),
+reuses explanations of repeated incidents, writes them as Events and serves metrics; the image,
+the Helm chart and the kind tests are not there yet.
 Maintainer: FedeAM (GitHub: `fedeam`).
 
 ## How to work
@@ -80,8 +81,9 @@ read-only proxy that keeps it to its own reads. Tests never reach a cluster: `te
 the binary with a nonexistent kubeconfig, and a new test that starts `kausa run` must do the same.
 The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`,
 `src/record.rs`, `src/redact.rs`, `src/context.rs`, `src/prompt.rs`) is pure and tested without a
-cluster; `src/run.rs` and `src/explain.rs` talk to the API server and `src/model.rs` to the model
-endpoint.
+cluster, and so are `src/budget.rs`, `src/metrics.rs` (except its listener) and the building of
+Events in `src/events.rs`; `src/run.rs`, `src/explain.rs` and `src/events.rs` talk to the API
+server and `src/model.rs` to the model endpoint.
 
 ## Verification (same as CI)
 

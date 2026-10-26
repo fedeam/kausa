@@ -39,8 +39,9 @@ schema unless `--no-json-schema` is given. Nothing else.
 
 The system message is fixed in the kausa binary and versioned with it. Every value above sits in
 one JSON document marked as untrusted data, and the request asks for a JSON answer with a fixed
-schema. The provider's own `usage` numbers (tokens in and out) are written in kausa's log, and
-will feed the metrics and the budget (third weekend). The model gets no tools and no functions.
+schema. The provider's own `usage` numbers (tokens in and out) are written in kausa's log and
+counted in the metrics (`kausa_model_tokens_total`); the budget's token cap uses kausa's own
+estimate of the request, before it is sent. The model gets no tools and no functions.
 
 ## What a request never contains
 
@@ -61,7 +62,8 @@ will feed the metrics and the budget (third weekend). The model gets no tools an
   mapped back); and the `explanation skipped` and `log read failed` lines (the real namespace,
   owner, Pod and container). Whoever can read or ships kausa's log sees them ([Command line and log
   format](command-line.md)).
-- Planned for the third weekend: a short version of the explanation, up to the 1024-byte limit of
-  an Event note, in an Event about the failing workload.
-- The pseudonym mapping and, from the third weekend, the deduplication cache, in kausa's memory
-  only (fingerprints also appear in the log); nothing is written to disk.
+- A short version of the explanation, up to the 1024-byte limit of an Event note, in an Event
+  about the failing workload, with real names, visible to whoever can read Events in that
+  namespace (unless `--no-events`).
+- The pseudonym mapping and the deduplication cache, in kausa's memory only (fingerprints also
+  appear in the log and in the Events' names); nothing is written to disk.

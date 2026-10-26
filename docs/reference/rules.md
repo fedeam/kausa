@@ -69,7 +69,7 @@ that stays the same for the same failure: the example's message with the names o
 Pods, UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
 and other numbers normalized; for `D002`, whose message alternates between `ErrImagePull` and
 `ImagePullBackOff`, the image reference instead. It is computed before redaction and never sent;
-it appears in kausa's log and will key the deduplication cache (third weekend).
+it appears in kausa's log and keys the deduplication cache and the Event's name.
 
 ## Redaction rules
 

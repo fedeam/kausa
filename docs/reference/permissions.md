@@ -5,10 +5,11 @@ The Kubernetes API permissions kausa's chart grants, and the ones it never asks 
 Status as of 2026-10-23: **planned** for v0.1 (no chart exists yet). Why it is this list: [0009.
 Run with read-only permissions that never include Secrets](../adr/0009-least-privilege-rbac.md).
 The kind tests in CI will check the chart's role against this table. As of 2026-10-26,
-`kausa run` uses the read rows: the Pod and event watches, the metadata `get` of ReplicaSets and
-Jobs, and `pods/log` for the detections that read logs; it writes no Events yet. On 2026-10-26 it
-ran against a live cluster through a `kubectl proxy` that let only these reads through, and the
-proxy refused none of its requests ([Try kausa against a cluster with a local
+`kausa run` uses every row: the Pod and event watches, the metadata `get` of ReplicaSets and Jobs,
+`pods/log` for the detections that read logs, and `create` and `patch` on Events for its
+explanations (with `--endpoint`, unless `--no-events`). On 2026-10-26 it
+ran against a live cluster through a `kubectl proxy` that let only these reads through, plus
+`POST` and `PATCH` on Events in one test namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a local
 model](../how-to/try-with-a-local-model.md)).
 
 ## Granted

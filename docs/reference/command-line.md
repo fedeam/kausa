@@ -2,11 +2,12 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-26: what the first two implementation weekends built. `kausa run` detects and
-groups failures, logs incidents and, with `--endpoint` or `--dry-run`, builds a redacted request
-for each one and logs it or the model's explanation; it writes no Event yet ([0001. Build a small,
-read-only explainer that writes one redacted explanation per
-incident](../adr/0001-scope-and-positioning.md)).
+Status as of 2026-10-26: what the code of the first three implementation weekends does. `kausa
+run` detects and groups failures and logs incidents; with `--endpoint` it explains each one within
+a call budget, reuses explanations of repeated incidents, and writes the explanation as an Event
+on the failing workload; with `--dry-run` it logs the request instead; with `--metrics-address` it
+serves Prometheus metrics ([0001. Build a small, read-only explainer that writes one redacted
+explanation per incident](../adr/0001-scope-and-positioning.md)).
 
 ## Commands
 
@@ -28,8 +29,16 @@ Options of `kausa run`:
 | `--dry-run` | Build each request and log it instead of sending it; no endpoint needed |
 | `--no-logs` | Do not read container logs (the request has no `log_tail`) |
 | `--no-json-schema` | Do not send `response_format`, for servers without structured output; the answer is validated all the same |
+| `--no-events` | Do not write Events; the explanations are only logged. Events are never written in dry-run |
+| `--max-calls-per-hour <N>` | Model calls allowed in any hour, `30` by default; `0` allows none |
+| `--max-calls-per-day <N>` | Model calls allowed in any 24 hours, `200` by default |
+| `--max-input-tokens <N>` | Cap on a request's estimated input tokens (a quarter of its bytes), `6000` by default: the context is cut to fit, and an incident that still does not fit is skipped |
+| `--dedup-hours <N>` | How long an incident's explanation is reused when the same incident (same fingerprint) comes back, `6` by default; `0` turns the reuse off |
+| `--metrics-address <ADDR>` | Serve `/metrics`, `/healthz` and `/readyz` on this IP address and port, for example `0.0.0.0:9090` in a Pod or `127.0.0.1:9090` on a machine; not served by default |
 
-Without `--endpoint` or `--dry-run`, kausa only logs incidents. `--model`, `--api-key-file`,
+Without `--endpoint` or `--dry-run`, kausa only logs incidents. The Events are written as
+`kausa` with the reporting instance from the environment variable `POD_NAME` (set it from the
+Pod's name with the downward API, as the Helm chart will), or `kausa`. `--model`, `--api-key-file`,
 `--allow-http` and `--no-json-schema` alone are usage errors.
 
 `kausa run` connects with the in-cluster service account when it runs in a Pod (when
@@ -44,8 +53,8 @@ environment cannot make it impersonate anyone or talk to another server.
 | Code | Meaning |
 |---|---|
 | `0` | `--help` or `--version`, or a clean stop after `SIGTERM` or Ctrl-C |
-| `1` | kausa cannot start (no client configuration, the API server is unreachable) or a watch ended |
-| `2` | Usage error (unknown argument, invalid flag value, an `http://` endpoint without `--allow-http`, an unreadable API key file), or stdout cannot be written (also while running: `kausa run` stops when it cannot write its log, and says so on stderr) |
+| `1` | kausa cannot start (no client configuration, the API server is unreachable, it cannot listen on `--metrics-address`) or a watch ended |
+| `2` | Usage error (unknown argument, invalid flag value such as a `--metrics-address` that is not an address and port, an `http://` endpoint without `--allow-http`, an unreadable API key file), or stdout cannot be written (also while running: `kausa run` stops when it cannot write its log, and says so on stderr) |
 
 ## Log lines
 
@@ -62,8 +71,9 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `owner lookup failed` | warn | `namespace`, `pod` or `job`, `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's next update), the incident names the ReplicaSet or Job instead |
 | `stopped` | info | |
 | `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
-| `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them) and `redactions` |
-| `explanation skipped` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`: the endpoint failed, answered an error status, or gave an answer that did not validate |
+| `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them) and `redactions`; or, when it comes from the deduplication cache, `explanation` and `"cached": true` |
+| `explanation skipped` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`: the call budget is spent, the context does not fit `--max-input-tokens`, the endpoint failed or answered an error status, or the answer did not validate |
+| `event write failed` | warn | `fingerprint`, `error`: the Event could not be created or patched |
 | `explanation dropped` | warn | `fingerprint`, `reason`: the queue of 16 incidents waiting for an explanation was full |
 | `log read failed` | warn | `namespace`, `pod`, `container`, `error`; the request is built without the log |
 | `stopped on an error`, `cannot start the runtime` | error | `error` |
@@ -95,3 +105,24 @@ An `incident` line, with invented values:
 The log carries real names and messages from the cluster, as [Data sent to the
 provider](data-sent-to-the-provider.md) says under "What stays in the cluster": who can read
 kausa's log sees them.
+
+## Metrics
+
+With `--metrics-address`, `GET /metrics` returns these counters in the Prometheus text format;
+each is `0` until something counts. `GET /healthz` answers `200` while kausa runs, and `GET
+/readyz` answers `200` once both watches have listed, `503` before. Any other path answers `404`,
+and any other method `405`. The counters live in memory and start over when kausa restarts.
+
+| Counter | Labels | Counts |
+|---|---|---|
+| `kausa_incidents_total` | `detection` | Incidents that settled |
+| `kausa_model_calls_total` | `outcome` (`ok`, `error`, `invalid`) | Calls to the endpoint |
+| `kausa_model_tokens_total` | `direction` (`in`, `out`) | Tokens the endpoint reported |
+| `kausa_explanations_cached_total` | | Incidents explained again from the deduplication cache |
+| `kausa_explanations_skipped_total` | `reason` (`budget`, `context_too_large`, `endpoint`, `invalid_answer`) | Incidents not explained |
+| `kausa_explanations_dropped_total` | | Incidents dropped because the queue of 16 was full |
+| `kausa_requests_logged_total` | | Requests logged instead of sent (`--dry-run`) |
+| `kausa_redactions_total` | `rule` | Values replaced by redaction |
+| `kausa_events_written_total` | `reason` (`Explained`, `ExplanationSkipped`) | Events created or updated |
+| `kausa_event_write_errors_total` | | Events that could not be written |
+

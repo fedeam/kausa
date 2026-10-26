@@ -4,12 +4,12 @@
 
 ![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-0969da) ![rust: 1.99+](https://img.shields.io/badge/rust-1.99%2B-0969da)
 
-A tiny, read-only Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself.
+A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events.
 
-> **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context and asks
-> an OpenAI-compatible model to explain them, or logs the request with `--dry-run`. It writes no
-> Event yet, and there is no image or chart to install. What is not built yet is marked as
-> planned.
+> **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
+> OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
+> Event on the failing workload. There is no published image or chart yet. What is not built yet
+> is marked as planned.
 
 ## The problem
 
@@ -46,11 +46,12 @@ Events:
   Normal  Explained  20s   kausa  3 of 3 pods crash on start: the app cannot reach its
                                   PostgreSQL server (connection refused on port 5432).
                                   Likely cause: the database is down or the address in the
-                                  app's configuration is wrong. Check: the database Service
-                                  has ready endpoints; the host and port the app uses.
+                                  app's configuration is wrong. Check: 1. the database
+                                  Service has ready endpoints 2. the host and port the app
+                                  uses (confidence: medium)
 ```
 
-Planned output, for illustration only: wording and layout are not final. What the model saw was
+Output of this shape was seen on a live cluster on 2026-10-26; the wording is the model's. What the model saw was
 `deployment-1` in `namespace-1` and `<redacted:ip>:5432`; kausa maps the names back before writing
 the Event.
 
@@ -75,7 +76,7 @@ full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.
 
 ## Design principles
 
-- **Read-only.** It reads Pods, Events, and the metadata of ReplicaSets and Jobs to follow
+- **Read-only, except for its Events.** It reads Pods, Events, and the metadata of ReplicaSets and Jobs to follow
   owners; `pods/log` only for crash loops, out-of-memory kills and failed Jobs, and that can be
   turned off. It never reads
   Secrets or ConfigMaps, and the only thing it writes is Events
@@ -116,9 +117,11 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha: two of four implementation weekends are done. `kausa run` watches Pods and Warning
-events, groups failures by workload, builds a redacted context with the failed container's log,
-and logs the request (`--dry-run`) or the model's explanation as JSON lines ([Command line and log
+Pre-alpha: two of four implementation weekends are done, and the code of the third; its image, Helm chart and kind tests are next. `kausa run` watches Pods
+and Warning events, groups failures by workload, builds a redacted context with the failed
+container's log, asks the model within a call budget (or logs the request with `--dry-run`),
+reuses explanations of repeated incidents, writes each explanation as an Event on the failing
+workload, and serves Prometheus metrics with `--metrics-address`; its log lines are JSON ([Command line and log
 format](docs/reference/command-line.md)). Tested on 2026-10-26 against a live cluster with Ollama
 and a small local model ([Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md)). What has changed so far is in the
@@ -140,8 +143,9 @@ cargo run --locked -- run --dry-run
 cargo run --locked -- run --endpoint http://127.0.0.1:11434/v1 --model qwen3:0.6b --allow-http
 ```
 
-`kausa run` uses the current context of your kubeconfig and needs only read access to Pods, their
-logs, Events, ReplicaSets and Jobs; it has no flag to pick a context, so check
+`kausa run` uses the current context of your kubeconfig and needs read access to Pods, their
+logs, Events, ReplicaSets and Jobs, and, with `--endpoint` and without `--no-events`, permission
+to create and patch Events; it has no flag to pick a context, so check
 `kubectl config current-context` first, or follow [Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of it.
 

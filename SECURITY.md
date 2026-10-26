@@ -40,12 +40,14 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-26: two of four implementation weekends are done. `kausa run` reads Pods,
+Status as of 2026-10-26: two of four implementation weekends are done, and the code of the third. `kausa run` reads Pods,
 their logs (crash loops, out-of-memory kills and failed Jobs only), Events and the metadata of ReplicaSets and Jobs; it
 redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
 logs it with `--dry-run`; it logs incidents and explanations with real names to its own stdout.
-It has no call budget or deduplication yet (third weekend): each incident is explained once while
-it lasts, and the queue in front of the model holds 16. It writes no Events yet. The rest are the properties v0.1 is
+Calls to the model are capped per hour and per day, explanations of repeated incidents are
+reused, and the queue in front of the model holds 16. It writes the explanation as an Event in the
+failing workload's namespace (`create` and `patch` on Events only), and serves metrics only with
+`--metrics-address`. The rest are the properties v0.1 is
 designed to have ([Architecture](docs/explanation/architecture.md)); each one will be backed by
 tests before the release.
 
@@ -133,8 +135,11 @@ kausa must:
   access to kausa's namespace accordingly.
 - **Event writes cannot be limited to kausa's own Events.** `create` and `patch` on Events
   cluster-wide cannot be narrowed by RBAC, which has no filter on the reporting controller, so a
-  compromised kausa could create or rewrite any Event in the namespaces it covers. kausa patches
-  only Events it created, with its reporting controller, and the tests check it.
+  compromised kausa could create or rewrite any Event in the namespaces it covers. kausa names
+  its Events `kausa.<fingerprint>.<hash of the note>` (or `kausa.skipped.…`), patches one only
+  when it already exists with that name and with reporting controller `kausa`, refuses the patch
+  otherwise, and patches only its series (count and last time); it never changes another
+  Event's note.
 
 A missing detection or a weak explanation is a bug: open an issue. Anything in the list under
 [Reporting a vulnerability](#reporting-a-vulnerability) is a security issue: report it privately.

@@ -5,12 +5,12 @@ workload into one incident with deterministic rules, sends a redacted context to
 OpenAI-compatible endpoint within a budget, and writes the explanation as an Event on the failing
 workload.
 
-Status as of 2026-10-26: the **first two implementation weekends are done**: watching,
-detection, the settle window, owner correlation, fingerprints, the context with log tails,
-redaction, the prompt, the client of the endpoint, the validation of answers and dry-run run, and
-`kausa run` logs each incident and its request or explanation ([Command line and log
-format](../reference/command-line.md)). Cost controls (budget, deduplication, metrics) and the
-Event output are still the planned design. This page describes the target
+Status as of 2026-10-26: **the code of the first three implementation weekends is done**:
+watching, detection, the settle window, owner correlation, fingerprints, the context with log
+tails, redaction, the prompt, the client, the validation of answers, dry-run, the call and token
+budget, deduplication, the Events on the failing workload and the metrics ([Command line and log
+format](../reference/command-line.md)). The image, the Helm chart and the kind tests of the third
+weekend come in their own change; the measurement on a Raspberry Pi is the fourth. This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
 incident](../adr/0001-scope-and-positioning.md).
@@ -76,8 +76,8 @@ produces the same incident, the same fingerprint and the same request bytes.
   Pods of the same owner with the same detection form one incident: three crashing replicas are
   one explanation, not three.
 - **Fingerprint.** A hash of the detection, the owner and the normalized message (the image, for
-  `D002`), computed before redaction and never sent. It is written in kausa's log and will key
-  deduplication.
+  `D002`), computed before redaction and never sent. It is written in kausa's log and keys
+  deduplication and the Event's name.
 
 ## Context and redaction
 
@@ -120,51 +120,67 @@ produces the same incident, the same fingerprint and the same request bytes.
   client), no redirects, no proxy from the environment, a 10-second connect and a 120-second total
   timeout, and a 256 KiB cap on the answer. Plain HTTP only with `--allow-http`.
 - **One at a time.** Explanations run one after the other, inside the controller's loop, so a
-  slow endpoint never stops the watches; incidents wait in a queue of 16, and the oldest is dropped
+  slow endpoint never stops the watches (nor does a metrics client: up to 8 connections are
+  answered at once, each with 2-second timeouts); incidents wait in a queue of 16, and the oldest is dropped
   (and logged) when it overflows.
 
 ## Cost controls
 
-- **Budget.** A cap on calls per hour and per day, a cap on the estimated input tokens of a
-  request (the context is cut to fit), and a cap on the answer's tokens: `max_tokens` is 800 in
-  every request since the second weekend (whether some endpoints, such as OpenAI's reasoning
-  models, need `max_completion_tokens` instead is still to verify). The budget is global: one budget and one queue for
-  the whole cluster, not per namespace. When the budget is spent, incidents wait or are skipped,
-  and the metrics say how many.
-- **Deduplication.** A bounded cache, in memory, keyed by fingerprint with a time to live: a
-  repeated incident gets the stored explanation again, with no new call.
+- **Budget.** A cap on model calls per hour (`--max-calls-per-hour`, 30 by default) and per day
+  (`--max-calls-per-day`, 200), counted over sliding windows; a cap on the estimated input tokens
+  of a request (`--max-input-tokens`, 6000, estimated as a quarter of the request's bytes): the
+  log tail is halved until the request fits, then all but the first Pod and three events are
+  dropped, and an incident that still does not fit is skipped; and `max_tokens` 800 on the answer
+  (whether some endpoints, such as OpenAI's reasoning models, need `max_completion_tokens` instead
+  is still to verify). The budget is global: one budget and one queue for the whole cluster, not
+  per namespace. An incident over the budget is skipped, logged and counted, with an
+  `ExplanationSkipped` Event.
+- **Deduplication.** A cache in memory of up to 1024 explanations, keyed by fingerprint, for
+  `--dedup-hours` (6 by default): a repeated incident gets the stored explanation again, logged
+  with `"cached": true` and written as an Event, with no new call.
 - **Restarts.** The budget counters and the deduplication cache live in memory and start over
   when kausa restarts, so incidents that are still failing are explained again after a restart.
-- **Metrics.** Prometheus metrics on their own port: incidents by detection, calls, tokens in and
-  out as the provider reports them, cache hits, incidents skipped by the budget, redactions by
-  rule, validation failures and errors. Health and readiness endpoints on the same port.
+- **Metrics.** With `--metrics-address`, Prometheus counters on their own port: incidents by
+  detection, model calls by outcome, tokens in and out as the endpoint reports them, cache hits,
+  skipped explanations by reason, dropped ones, logged requests, redactions by rule, and Events
+  written and failed; `/healthz`, and `/readyz` once both watches have listed. A minimal HTTP/1.1
+  responder on `tokio::net`, with no framework. The list: [Command line and log
+  format](../reference/command-line.md#metrics).
 
 ## Output
 
-- **An Event on the failing workload.** `events.k8s.io/v1`, type `Normal`, reason `Explained`,
-  `regarding` the top-level owner (a Deployment, StatefulSet, DaemonSet, Job or CronJob, the
-  owner of another kind where the chain stops, as in Correlation above, or the Pod when it has
-  none) and `related` the Pod the context came from. `kubectl describe deployment <name>` shows
-  it, and its `related` field names the Pod whose events it explains (`kubectl describe pod`).
+- **An Event on the failing workload.** `events.k8s.io/v1`, `regarding` the top-level owner (a
+  Deployment, StatefulSet, DaemonSet, Job or CronJob, the owner of another kind where the chain
+  stops, as in Correlation above, or the Pod when it has none) and `related` the Pod the context
+  came from: type `Normal` and reason `Explained` for an explanation, type `Warning` and reason
+  `ExplanationSkipped` (with why) when the budget, the endpoint or the validation stopped it, or
+  the request did not fit `--max-input-tokens`.
+  `kubectl describe deployment <name>` shows it next to the Deployment's own events (seen on a live
+  cluster on 2026-10-26). Action `Explain`, reporting controller `kausa`, reporting instance the
+  Pod's name (`POD_NAME`). Written unless `--no-events`, never in dry-run.
+- **One Event per incident and text.** An Event's note cannot change once it is created (the API
+  server validates it as immutable), so the name is `kausa.<fingerprint>.<hash of the note>` (or
+  `kausa.skipped.<fingerprint>.<hash>`): when the same incident comes back with the same text, as
+  with an explanation from the deduplication cache, kausa patches only the existing Event's
+  series (count and last time) instead of adding an Event; new text is a new Event. It patches
+  only an Event whose reporting controller is `kausa`.
 - **Limits of an Event.** The note is limited to 1024 bytes and the reason to 128 bytes (UTF-8;
   the validation compares the string's byte length with Go's `len`; `NoteLengthLimit` and
   `ReasonLengthLimit` in Kubernetes' `pkg/apis/core/validation/events.go`, checked on
-  2026-10-23), and the API server keeps Events for one hour by default (`--event-ttl`). kausa
-  truncates the note at a UTF-8 character boundary to at most 1024 bytes, and a unit test uses
-  multi-byte text. The note carries the summary, the cause and the first steps; while the incident
-  lasts, kausa updates the Event's series instead of creating new ones.
+  2026-10-23), and the API server keeps Events for one hour by default (`--event-ttl`). The note
+  is the summary, `Likely cause:` and the numbered steps, cut at a UTF-8 character boundary with an
+  ellipsis when it does not fit.
 - **The full explanation** goes to kausa's own log, with real names mapped back. Longer text and
   history in a custom resource are planned for v0.2.
-- **If the explanation is skipped** (budget, validation, provider error), an Event with reason
-  `ExplanationSkipped` says why, once per incident.
 
 ## Configuration and modes
 
-- Command-line flags, which the chart will set: the endpoint, the model, whether plain HTTP is
+- Command-line flags, which the Helm chart (next) sets: the endpoint, the model, whether plain HTTP is
   allowed, the settle window, log collection and structured output ([Command line and log
   format](../reference/command-line.md)). The configuration file planned at first was dropped on
   2026-10-26: flags need no parser and no ConfigMap, and keep what kausa is told to do visible in
-  its Pod spec. The budget and the namespaces to watch come as flags too, on the third weekend.
+  its Pod spec. The budget is set with flags too. kausa watches every namespace; a flag to
+  narrow it is not implemented.
 - The API key from a file (`--api-key-file`, a Secret mounted by the kubelet) or the environment
   variable `KAUSA_API_KEY` (filled from a Secret), never from an argument.
 - **Dry-run:** the whole pipeline up to the request, which is logged and not sent. No Event is

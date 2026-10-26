@@ -1,15 +1,19 @@
-//! kausa: a tiny, read-only Kubernetes controller that explains failing workloads with an LLM.
+//! kausa: a tiny Kubernetes controller that explains failing workloads with an LLM. It reads the
+//! cluster and writes nothing but its own Events.
 //!
 //! Pre-alpha. `kausa run` watches the cluster and logs incidents and, with `--endpoint` or
-//! `--dry-run`, sends or logs a redacted request for each; the Event on the failing object comes
-//! with the next weekends.
+//! `--dry-run`, sends or logs a redacted request for each; with `--endpoint`, the explanation is
+//! also an Event on the failing object unless `--no-events`.
 
+mod budget;
 mod context;
 mod detect;
+mod events;
 mod explain;
 mod fingerprint;
 mod incident;
 mod log;
+mod metrics;
 mod model;
 mod owner;
 mod prompt;
@@ -38,8 +42,8 @@ const HELP: &str = concat!(
     ".\n",
     "\n",
     "Status: pre-alpha. `kausa run` detects and groups failures and logs them as\n",
-    "incidents; with --endpoint or --dry-run it also builds a redacted explanation\n",
-    "request for each. It writes no Event yet.\n",
+    "incidents; with --endpoint it explains each one with the model, within a call\n",
+    "budget, and writes the explanation as an Event on the failing workload.\n",
     "\n",
     "Usage:\n",
     "  kausa run [OPTIONS]    Run the controller\n",
@@ -56,16 +60,19 @@ const HELP: &str = concat!(
     "  --dry-run              Log the redacted request instead of sending it\n",
     "  --no-logs              Do not read container logs\n",
     "  --no-json-schema       Do not ask for structured output (response_format)\n",
+    "  --no-events            Do not write Events (log the explanations only)\n",
+    "  --max-calls-per-hour <N>  Model calls allowed per hour (default 30)\n",
+    "  --max-calls-per-day <N>   Model calls allowed per day (default 200)\n",
+    "  --max-input-tokens <N>    Cap on a request's estimated tokens (default 6000)\n",
+    "  --dedup-hours <N>         Reuse an explanation for N hours (default 6)\n",
+    "  --metrics-address <ADDR>  Serve /metrics, /healthz and /readyz there\n",
+    "                            (for example 0.0.0.0:9090)\n",
     "\n",
     "  kausa run uses the in-cluster service account when it runs in a Pod, and the\n",
     "  current context of the kubeconfig otherwise. It watches Pods and Warning\n",
     "  events, groups the failures of one workload into one incident once they\n",
     "  persist for the settle window, and writes one JSON object per line to\n",
     "  stdout. It stops on SIGTERM or Ctrl-C.\n",
-    "\n",
-    "Planned for v0.1 (NOT IMPLEMENTED YET; names and flags may change):\n",
-    "  a call and token budget, deduplication of repeated incidents, and the\n",
-    "  explanation written as a Kubernetes Event on the failing object.\n",
     "\n",
     "By design, kausa never reads Secrets or ConfigMaps, writes nothing but Events\n",
     "and sends nothing outside the cluster that has not been redacted first.\n",
@@ -111,6 +118,9 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let mut api_key_file: Option<OsString> = None;
     let (mut allow_http, mut dry_run, mut no_logs, mut no_json_schema) =
         (false, false, false, false);
+    let mut no_events = false;
+    let mut metrics_address: Option<String> = None;
+    let mut limits = Limits::default();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let flag = arg.to_string_lossy();
@@ -144,6 +154,35 @@ fn run_command(args: &[OsString]) -> ExitCode {
                 Some(path) => api_key_file = Some(path.clone()),
                 None => return usage_error("--api-key-file needs a value"),
             },
+            "--max-calls-per-hour"
+            | "--max-calls-per-day"
+            | "--max-input-tokens"
+            | "--dedup-hours" => {
+                let name = flag.to_string();
+                let parsed = match value() {
+                    Ok(v) => v.parse::<usize>().ok().filter(|&n| n <= 1_000_000),
+                    Err(code) => return code,
+                };
+                let Some(n) = parsed else {
+                    return usage_error(&format!("{name} takes a whole number from 0 to 1000000"));
+                };
+                match name.as_str() {
+                    "--max-calls-per-hour" => limits.per_hour = n,
+                    "--max-calls-per-day" => limits.per_day = n,
+                    "--max-input-tokens" => limits.input_tokens = n,
+                    _ => limits.dedup_hours = n,
+                }
+            }
+            "--metrics-address" => match value() {
+                Ok(v) if v.parse::<std::net::SocketAddr>().is_ok() => metrics_address = Some(v),
+                Ok(v) => {
+                    return usage_error(&format!(
+                        "--metrics-address takes an address and port such as 127.0.0.1:9090, not '{v}'"
+                    ));
+                }
+                Err(code) => return code,
+            },
+            "--no-events" => no_events = true,
             "--allow-http" => allow_http = true,
             "--dry-run" => dry_run = true,
             "--no-logs" => no_logs = true,
@@ -159,6 +198,8 @@ fn run_command(args: &[OsString]) -> ExitCode {
         dry_run,
         no_logs,
         no_json_schema,
+        no_events,
+        &limits,
     ) {
         Ok(settings) => settings,
         Err(message) => return usage_error(&message),
@@ -179,6 +220,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let options = run::Options {
         settle: SignedDuration::from_secs(i64::from(settle_seconds)),
         explain,
+        metrics_address,
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -200,6 +242,26 @@ fn run_command(args: &[OsString]) -> ExitCode {
 /// The explanation settings from the flags: `None` when neither `--endpoint` nor `--dry-run` is
 /// given (kausa then only logs incidents). The API key comes from `--api-key-file` or the
 /// environment variable `KAUSA_API_KEY`, never from an argument.
+/// The cost limits from the flags.
+struct Limits {
+    per_hour: usize,
+    per_day: usize,
+    input_tokens: usize,
+    dedup_hours: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            per_hour: 30,
+            per_day: 200,
+            input_tokens: 6000,
+            dedup_hours: 6,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // one argument per flag, called once
 fn explain_settings(
     endpoint: Option<String>,
     model: Option<String>,
@@ -208,6 +270,8 @@ fn explain_settings(
     dry_run: bool,
     no_logs: bool,
     no_json_schema: bool,
+    no_events: bool,
+    limits: &Limits,
 ) -> Result<Option<explain::Settings>, String> {
     if endpoint.is_none() && !dry_run {
         if model.is_some() || api_key_file.is_some() || allow_http || no_json_schema {
@@ -253,6 +317,15 @@ fn explain_settings(
             prompt::OutputMode::JsonSchema
         },
         max_tokens: 800,
+        max_input_tokens: limits.input_tokens,
+        events: !no_events && !dry_run,
+        calls_per_hour: limits.per_hour,
+        calls_per_day: limits.per_day,
+        dedup_ttl: std::time::Duration::from_secs(limits.dedup_hours as u64 * 3600),
+        instance: std::env::var("POD_NAME")
+            .ok()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "kausa".to_owned()),
     }))
 }
 

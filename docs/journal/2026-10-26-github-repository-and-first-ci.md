@@ -250,3 +250,48 @@ Request: carry on with v0.1.
 - The third weekend: call and token budget, deduplication, metrics, Events on the failing object,
   Helm chart, multi-architecture image, kind tests in CI.
 - `R011`'s token formats are to be checked against each issuer's documentation.
+
+## Later the same day: the code of the third implementation weekend
+
+Request: carry on with v0.1. The maintainer chose, for this weekend: a Helm chart, an image on
+distroless static (non-root), the image only built in CI until publication, and the kind tests on
+GitHub Actions; those come in their own change.
+
+### What was done
+
+- **Budget** (`src/budget.rs`): model calls per hour and per day over sliding windows
+  (`--max-calls-per-hour` 30, `--max-calls-per-day` 200), and a cap on a request's estimated
+  input tokens (`--max-input-tokens` 6000): the log tail is halved, then Pods and events dropped,
+  until it fits.
+- **Deduplication:** up to 1024 explanations by fingerprint, for `--dedup-hours` (6); a repeated
+  incident is explained again from the cache, with no call.
+- **Events** (`src/events.rs`): `Explained` (Normal) or `ExplanationSkipped` (Warning) Events,
+  `regarding` the top-level owner and `related` the Pod, named after the fingerprint and a hash
+  of the note: the note of an Event is immutable, so a repeat with the same text patches only the
+  series, and new text is a new Event; `--no-events`.
+- **Metrics** (`src/metrics.rs`): ten counters, `/healthz` and `/readyz`, with
+  `--metrics-address`, served by a minimal responder on `tokio::net`.
+- **Live test**, through the `kubectl proxy`, now letting `POST` and `PATCH` on Events in the test
+  namespace only, with the same seeded failures and Ollama, and `--max-calls-per-hour 3`: five
+  incidents, three explanations and two skipped for the budget, five Events in the cluster with the
+  expected names, owners and Pods, the metrics matching (1337 tokens in, 485 out), `/readyz` at
+  200, and 22.5 MiB resident. `kubectl describe deployment` showed the `Explained` Event next to
+  the Deployment's own events. The test namespace and its Events were deleted afterwards; no kausa
+  Event was left anywhere else.
+- **Review** of the third weekend's code before the pull request, by independent reviewers whose
+  findings were checked by others: 16 confirmed, 2 rejected, all fixed. The ones that changed the
+  code: the first version patched the note of a repeated Event, which the API server refuses (now
+  the name carries a hash of the note, and only the series is patched); an Event with kausa's name
+  but written by someone else would have been patched (now refused); a slow metrics client held
+  the loop (now up to 8 connections are answered beside it, and a failed accept waits 100 ms); the
+  budget and the cache used the wall clock (now the monotonic one); and `--metrics-address` is
+  checked when the flags are parsed. The rest were texts that still spoke of the second weekend.
+  Checked on the live cluster afterwards, in a throwaway namespace: a merge patch of the series
+  alone is accepted, a patch of the note is refused (`field is immutable`), and the field selector
+  on `metadata.name` finds the Event.
+- **Tests:** 83 unit tests and 8 command-line tests (7 outside Linux).
+
+### Pending
+
+- The image, the Helm chart and the kind tests (the rest of the third weekend).
+

@@ -1,11 +1,12 @@
 //! `kausa run`: the controller loop. It watches Pods and Warning events, keeps small records,
 //! correlates owners and logs each incident when it settles.
 //!
-//! Status as of 2026-10-26 (second implementation weekend): incidents are written to kausa's log
-//! and, with `--endpoint` or `--dry-run`, explained by the model or their request logged
-//! (`explain.rs`). No Event is written yet; the API calls are the two watches, the metadata reads
-//! of ReplicaSets and Jobs, and `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`
-//! (docs/reference/permissions.md).
+//! Status as of 2026-10-26 (code of the third implementation weekend): incidents are written to
+//! kausa's log and, with `--endpoint` or `--dry-run`, explained by the model or their request
+//! logged (`explain.rs`); with `--endpoint` and without `--no-events`, the explanation is also an
+//! Event (`events.rs`). The API calls are the two watches, the metadata reads of ReplicaSets and
+//! Jobs, `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`, and the Event writes
+//! (docs/reference/permissions.md). `--metrics-address` serves the counters (`metrics.rs`).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -15,6 +16,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
@@ -26,15 +28,18 @@ use kube::{Api, Client, Config};
 use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::budget::{Budget, Dedup};
 use crate::context::Gathered;
 use crate::detect::{Detection, detect_event};
-use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Work};
+use crate::events::Writer;
+use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Shared, Work};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals};
 use crate::log;
+use crate::metrics::{self, Metrics};
 use crate::owner::{Hop, OwnerLookup, top_owner};
 use crate::record::{EventRecord, OwnerRef, PodRecord, controller_of};
 
-/// The reporting controller of the Events kausa will write, excluded from its own watch.
+/// The reporting controller of the Events kausa writes, excluded from its own watch.
 pub const REPORTING_CONTROLLER: &str = "kausa";
 
 /// How often the current state is turned into signals.
@@ -47,6 +52,10 @@ pub const EVENT_FRESHNESS: SignedDuration = SignedDuration::from_mins(10);
 /// How long an owner lookup is reused, and how long a failed one is not retried.
 const OWNER_CACHE_TTL: Duration = Duration::from_secs(600);
 const OWNER_ERROR_TTL: Duration = Duration::from_secs(30);
+/// How many metrics connections are answered at once; more wait in the listen backlog.
+const MAX_CONNECTIONS: usize = 8;
+/// How long to wait after a failed accept (for example, out of file descriptors).
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// How long one owner lookup may take before it counts as failed.
 const OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -54,7 +63,12 @@ pub struct Options {
     pub settle: SignedDuration,
     /// How to explain incidents; `None` logs them only.
     pub explain: Option<Settings>,
+    /// Where to serve `/metrics`, `/healthz` and `/readyz`, if anywhere.
+    pub metrics_address: Option<String>,
 }
+
+/// How many explanations the deduplication cache keeps at most.
+const DEDUP_CAPACITY: usize = 1024;
 
 /// Why `kausa run` stopped with an error.
 pub enum RunError {
@@ -112,6 +126,23 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         cache: RefCell::new(HashMap::new()),
     };
     let explainer = client.clone();
+    let metrics = Metrics::default();
+    let listener = match &options.metrics_address {
+        Some(address) => Some(
+            tokio::net::TcpListener::bind(address)
+                .await
+                .map_err(|e| RunError::Failure(format!("cannot listen on {address}: {e}")))?,
+        ),
+        None => None,
+    };
+    let shared = options.explain.as_ref().map(|settings| Shared {
+        budget: RefCell::new(Budget::new(settings.calls_per_hour, settings.calls_per_day)),
+        dedup: RefCell::new(Dedup::new(settings.dedup_ttl, DEDUP_CAPACITY)),
+        writer: (settings.events && settings.model.is_some())
+            .then(|| Writer::new(client.clone(), settings.instance.clone())),
+        metrics: &metrics,
+    });
+    let (mut pods_listed, mut events_listed) = (false, false);
     let mut pods = watcher(Api::<Pod>::all(client.clone()), watcher::Config::default())
         .default_backoff()
         .boxed();
@@ -127,12 +158,19 @@ pub async fn run(options: Options) -> Result<(), RunError> {
     let mut ticker = tokio::time::interval(TICK);
     let mut queue: VecDeque<Work> = VecDeque::new();
     let mut running: Option<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> = None;
+    let mut connections = FuturesUnordered::new();
 
     loop {
         if running.is_none()
-            && let (Some(settings), Some(job)) = (options.explain.as_ref(), queue.pop_front())
+            && let (Some(settings), Some(shared), Some(job)) =
+                (options.explain.as_ref(), shared.as_ref(), queue.pop_front())
         {
-            running = Some(Box::pin(explain::run(job, explainer.clone(), settings)));
+            running = Some(Box::pin(explain::run(
+                job,
+                explainer.clone(),
+                settings,
+                shared,
+            )));
         }
         tokio::select! {
             result = async { running.as_mut().expect("guarded by the condition").await },
@@ -140,13 +178,34 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 running = None;
                 result?;
             }
+            accepted = async { listener.as_ref().expect("guarded by the condition").accept().await },
+                if listener.is_some() && connections.len() < MAX_CONNECTIONS => match accepted {
+                Ok((stream, _)) => connections.push(metrics::answer(stream, &metrics)),
+                Err(e) => {
+                    log::warn("metrics accept error", json!({"error": e.to_string()}))?;
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                }
+            },
+            Some(()) = connections.next(), if !connections.is_empty() => {}
             item = pods.next() => match item {
-                Some(Ok(event)) => state.on_pod(event, &lookup).await?,
+                Some(Ok(event)) => {
+                    pods_listed |= matches!(event, watcher::Event::InitDone);
+                    state.on_pod(event, &lookup).await?;
+                    if pods_listed && events_listed {
+                        metrics.set_ready();
+                    }
+                }
                 Some(Err(e)) => log::warn("pod watch error", json!({"error": e.to_string()}))?,
                 None => return Err(RunError::Failure("the pod watch ended".into())),
             },
             item = events.next() => match item {
-                Some(Ok(event)) => state.on_event(event, &lookup).await?,
+                Some(Ok(event)) => {
+                    events_listed |= matches!(event, watcher::Event::InitDone);
+                    state.on_event(event, &lookup).await?;
+                    if pods_listed && events_listed {
+                        metrics.set_ready();
+                    }
+                }
                 Some(Err(e)) => log::warn("event watch error", json!({"error": e.to_string()}))?,
                 None => return Err(RunError::Failure("the event watch ended".into())),
             },
@@ -154,11 +213,13 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 let now = Timestamp::now();
                 state.prune_events(now);
                 for incident in state.tick(&mut tracker, now) {
+                    metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
                     log_incident(&incident, state.pods_of(&incident.owner))?;
                     if options.explain.is_some() {
                         if queue.len() >= QUEUE_LIMIT
                             && let Some(dropped) = queue.pop_front()
                         {
+                            metrics.inc("kausa_explanations_dropped_total", &[]);
                             log::warn(
                                 "explanation dropped",
                                 json!({

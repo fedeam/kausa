@@ -1,23 +1,26 @@
-# kausa — a tiny, read-only Kubernetes controller that explains failing workloads with an LLM
+# kausa — a tiny Kubernetes controller that explains failing workloads with an LLM
 
 kausa is a Kubernetes controller for people who run small clusters and want to know why a workload
 fails: it watches Warning events and Pod status, groups the failures of one workload into one
 incident, sends a redacted context to one OpenAI-compatible model endpoint within a call and token
 budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
-ConfigMaps and never changes a workload.
+ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
+`--no-events`).
 
 Status as of 2026-10-26: **in development** (pre-alpha). Two of four implementation weekends are
-done: `kausa run` watches Pods and Warning events, groups failures by workload, redacts their
-context and explains them with an OpenAI-compatible model, or logs the request with `--dry-run`;
-nothing is written as an Event or released yet. The
+done, and the code of the third: `kausa run` watches Pods and Warning events, groups failures by
+workload, redacts their context, explains them with an OpenAI-compatible model within a call
+budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
+failing workload; the image, the Helm chart and the kind tests are next, and nothing is released
+yet. The
 private repositories exist on GitHub and on the maintainer's Gitea instance, and contributions and
 merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
 ([2026-10-26 — GitHub repository and first CI
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: GitHub Actions, which do
 not start jobs while the repository is private (the account's included minutes for October are
-used up; public repositories do not use them); the first Dependabot run; implementation
-weekends 3 and 4 of v0.1; and publication of the GitHub repository after validation.
+used up; public repositories do not use them); the first Dependabot run; the rest of
+implementation weekend 3 and weekend 4 of v0.1; and publication of the GitHub repository after validation.
 
 ## Key facts
 

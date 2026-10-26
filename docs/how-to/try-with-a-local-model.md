@@ -4,15 +4,16 @@ Run `kausa run` from your machine against a cluster you can read, with a model s
 the same machine, so that nothing leaves it; and, if you want, through a `kubectl proxy` that only
 lets kausa's own reads through.
 
-Status as of 2026-10-26: what the second implementation weekend can do. kausa logs each incident,
-the redacted request and the model's explanation; it writes no Event yet. Tested on 2026-10-26
+Status as of 2026-10-26: what the code of the third implementation weekend can do. kausa logs each
+incident, the redacted request and the model's explanation, and writes the explanation as an Event
+on the failing workload unless `--no-events`. Tested on 2026-10-26
 with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
 
 ## Before you start
 
 - A cluster you may read, and `kubectl` working against it. kausa reads Pods, Warning events, the
-  metadata of ReplicaSets and Jobs, and the logs of failed containers
-  ([Permissions](../reference/permissions.md)); it writes nothing yet.
+  metadata of ReplicaSets and Jobs, and the logs of failed containers, and writes Events
+  ([Permissions](../reference/permissions.md)). To keep it strictly read-only, add `--no-events`.
 - [Ollama](https://ollama.com) installed, and a model pulled (`ollama pull qwen3:0.6b` is about
   500 MB; a larger model explains better).
 - kausa built from source ([Set up a development environment and run the
@@ -52,6 +53,11 @@ with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
    export KUBECONFIG=$PWD/kubeconfig-proxy
    ```
 
+   This proxy refuses every write, so run kausa with `--no-events` behind it. To let it write its
+   Events in one namespace only (`<namespace>`), use `--reject-methods='^(PUT|DELETE)$'` and add
+   `|^/apis/events\.k8s\.io/v1/namespaces/<namespace>/events(/[^/]+)?$` to `--accept-paths`: the
+   other accepted paths are kausa's reads, and kausa sends no writes to them.
+
    Without the proxy, kausa uses the current context of your kubeconfig: check
    `kubectl config current-context` first.
 
@@ -67,11 +73,14 @@ with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
 4. **Ask the local model:**
 
    ```sh
-   ./target/release/kausa run --endpoint http://127.0.0.1:11434/v1 --model qwen3:0.6b --allow-http
+   ./target/release/kausa run --endpoint http://127.0.0.1:11434/v1 --model qwen3:0.6b --allow-http \
+     --metrics-address 127.0.0.1:9090
    ```
 
    `--allow-http` is needed because the endpoint is plain HTTP on your machine. Each incident gets
-   an `explanation` line with the real names mapped back, and the tokens the endpoint reported.
+   an `explanation` line with the real names mapped back and the tokens the endpoint reported, and
+   an Event: `kubectl describe deployment <name>` shows it next to the Deployment's own events.
+   `curl -s 127.0.0.1:9090/metrics` shows the counters.
 
 5. **Stop** kausa with Ctrl-C, then the proxy and the model server.
 
