@@ -104,8 +104,15 @@ pub fn collect_signals(
                     .or(container.terminated_exit_code);
                 ("OOMKilled".to_owned(), code)
             } else {
-                let reason = container.waiting_reason.clone().unwrap_or_default();
-                (reason, container.last_termination_exit_code)
+                let reason = container
+                    .waiting_reason
+                    .clone()
+                    .or_else(|| container.terminated_reason.clone())
+                    .unwrap_or_default();
+                let code = container
+                    .terminated_exit_code
+                    .or(container.last_termination_exit_code);
+                (reason, code)
             };
             signals.push(state(
                 detection,
@@ -193,6 +200,9 @@ struct Pending {
     last_seen: Timestamp,
     /// The last check that had a signal for this failure.
     last_signal_at: Timestamp,
+    /// Every Pod seen failing while the failure was pending, so that replicas whose crash loops
+    /// are out of step all count.
+    pods: BTreeSet<String>,
     emitted: bool,
 }
 
@@ -255,13 +265,18 @@ impl Tracker {
                 first_seen: first,
                 last_seen: last,
                 last_signal_at: now,
+                pods: BTreeSet::new(),
                 emitted: false,
             });
             entry.first_seen = entry.first_seen.min(first);
             entry.last_seen = entry.last_seen.max(last);
             entry.last_signal_at = now;
+            entry
+                .pods
+                .extend(group.iter().filter_map(|s| s.pod.clone()));
             let (first_seen, last_seen, emitted) =
                 (entry.first_seen, entry.last_seen, entry.emitted);
+            let pods = entry.pods.clone();
             if emitted || !self.settled(&key, first_seen, last_seen, &group) {
                 continue;
             }
@@ -276,7 +291,6 @@ impl Tracker {
                     &b.message,
                 ))
             });
-            let pods: BTreeSet<String> = group.iter().filter_map(|s| s.pod.clone()).collect();
             let sample = group.swap_remove(0);
             incidents.push(Incident {
                 fingerprint: incident_fingerprint(&key, &sample, &pods),
@@ -483,6 +497,26 @@ mod tests {
         let mut tracker = Tracker::new(SignedDuration::from_secs(600));
         let total: usize = checks(&mut tracker, &timeline, &deploy).iter().sum();
         assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn replicas_out_of_step_all_count() {
+        // Two replicas crash out of step: at each check only one of them is in back-off.
+        let deploy = owner("Deployment", "api");
+        let a = pod("api-a", "Running", Some("CrashLoopBackOff"));
+        let b = pod("api-b", "Running", Some("CrashLoopBackOff"));
+        let mut tracker = Tracker::new(SETTLE);
+        let mut found = Vec::new();
+        for (i, at) in (0..=60).step_by(5).enumerate() {
+            let record = if i % 2 == 0 { &a } else { &b };
+            let views = [PodView {
+                record,
+                owner: &deploy,
+            }];
+            found.extend(tracker.tick(t(at), collect_signals(&views, &[], t(at), FRESH)));
+        }
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].pods.iter().collect::<Vec<_>>(), ["api-a", "api-b"]);
     }
 
     #[test]

@@ -33,11 +33,12 @@ an incident, so a container that restarts once and recovers is not explained:
 - **A failed Job** is final and is an incident at once.
 
 Pods of the same top-level owner with the same detection form one incident, logged once while it
-lasts and again only if it clears and comes back.
+lasts and again only if it clears and comes back. The incident lists every Pod seen failing while
+it was pending, so replicas whose crash loops are out of step all count.
 
 | Id | Failure | Signal | Logs read |
 |---|---|---|---|
-| `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff` | Yes, previous container |
+| `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff`, or terminated with any reason but `Completed` after at least one restart (between restarts the kubelet reports it as terminated for much of each back-off) | Yes, previous container |
 | `D002` | Image cannot be pulled | Container waiting with `ErrImagePull`, `ImagePullBackOff` or `InvalidImageName` | No |
 | `D003` | Out of memory | Container waiting in `CrashLoopBackOff` whose last termination is `OOMKilled`, or terminated with `OOMKilled` and not restarted | Yes, previous container if it restarted, otherwise the terminated one |
 | `D004` | Container cannot be created | Container waiting with `CreateContainerConfigError` or `CreateContainerError` | No |

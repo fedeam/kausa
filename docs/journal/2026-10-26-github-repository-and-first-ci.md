@@ -151,3 +151,42 @@ Request: every commit and every text should name the maintainer `FedeAM` only.
   [Publish the repository on GitHub](../how-to/publish-the-repository.md) will list them.
 - **The GitHub profile name** of the maintainer has to read `FedeAM` before the next squash merge,
   which takes its author name from it.
+
+## Later the same day: the first run against a live cluster
+
+Request: test `kausa run` on a real cluster, then carry on.
+
+### What was done
+
+- **How it ran, without copying credentials:** `kubectl proxy` on `127.0.0.1` in front of the
+  maintainer's cluster (Kubernetes v1.36.5, k3s, three Raspberry Pi 4 nodes), with
+  `--reject-methods='^(POST|PUT|PATCH|DELETE)$'` and `--accept-paths` limited to `/version`, the
+  Pod and `events.k8s.io` watches and the metadata reads of ReplicaSets and Jobs; kausa used a
+  kubeconfig with no credentials that pointed at the proxy. The proxy refused a read of Secrets
+  and a write of an Event when probed, and refused nothing that kausa asked for: the permissions in
+  [Permissions](../reference/permissions.md) are enough for what is implemented.
+- **Footprint:** 18.8 to 19.8 MiB of resident memory and no measurable CPU while watching the
+  whole cluster (the release binary on macOS, 11.2 MB unstripped). A first measurement, not the
+  one on a Raspberry Pi planned for the fourth weekend.
+- **Seeded failures** in a namespace created for the test and deleted afterwards (`kausa-test`): a
+  Deployment that crash-loops (two replicas), an image tag that does not exist, a Pod that asks for
+  512 GiB, a container killed for memory and a Job with `backoffLimit: 1`. kausa logged one
+  incident for each, with the right owner: `D008` at once, then `D001`, `D002`, `D003` and `D005`
+  65 seconds after it started (a settle window and one check).
+- **Two defects found and fixed in this pull request:**
+  - On Kubernetes 1.36 the kubelet reports a crash-looping container as terminated (reason
+    `Error`) for much of each back-off and as waiting in `CrashLoopBackOff` only part of the time,
+    so `D001` took about four and a half minutes to settle. A failed container that has already
+    restarted now counts as the same crash loop.
+  - An incident listed only the Pods failing at the check where it settled, so two replicas whose
+    crash loops were out of step showed as `1 of 2`. It now lists every Pod seen failing while it
+    was pending.
+- **A real incident:** `D006` on the Deployment of Infisical in the maintainer's cluster, whose
+  Pods kept failing their readiness probe during a rollout (one Pod not ready for 50 minutes). A
+  true positive, left to the maintainer.
+- **The GitHub profile name** of the maintainer reads `FedeAM` since this afternoon, so squash
+  merges carry that name.
+
+### Pending
+
+- The run on a Raspberry Pi with an image built for linux/arm64 (fourth weekend).

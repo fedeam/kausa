@@ -99,6 +99,18 @@ pub fn detect_container(container: &ContainerRecord) -> Option<Detection> {
         // A container that does not restart (`restartPolicy: Never` or `OnFailure` in a Job's Pod
         // that has given up) stays terminated with the reason of its kill.
         _ if oom(&container.terminated_reason) => Some(Detection::OutOfMemory),
+        // Between restarts the kubelet reports a crash-looping container as terminated (reason
+        // `Error`) for much of each back-off, and as waiting in `CrashLoopBackOff` only part of
+        // the time (seen on Kubernetes 1.36 on 2026-10-26). A failed container that has already
+        // restarted is the same crash loop.
+        _ if container.restart_count > 0
+            && container
+                .terminated_reason
+                .as_deref()
+                .is_some_and(|reason| reason != "Completed") =>
+        {
+            Some(Detection::CrashLoop)
+        }
         _ => None,
     }
 }
@@ -196,6 +208,32 @@ mod tests {
         let mut container = waiting("CrashLoopBackOff");
         container.last_termination_reason = Some("OOMKilled".into());
         assert_eq!(detect_container(&container), Some(Detection::OutOfMemory));
+    }
+
+    #[test]
+    fn a_failed_container_that_restarted_is_a_crash_loop() {
+        let between_back_offs = ContainerRecord {
+            terminated_reason: Some("Error".into()),
+            terminated_exit_code: Some(1),
+            restart_count: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            detect_container(&between_back_offs),
+            Some(Detection::CrashLoop)
+        );
+        // Not a crash loop: the first failure of a Pod that never restarts (a Job's, handled by
+        // D008), and a container that completed.
+        let first_failure = ContainerRecord {
+            restart_count: 0,
+            ..between_back_offs.clone()
+        };
+        assert_eq!(detect_container(&first_failure), None);
+        let completed = ContainerRecord {
+            terminated_reason: Some("Completed".into()),
+            ..between_back_offs
+        };
+        assert_eq!(detect_container(&completed), None);
     }
 
     #[test]
