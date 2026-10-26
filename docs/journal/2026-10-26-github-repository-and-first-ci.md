@@ -341,5 +341,30 @@ yet](../adr/0010-packaging.md)).
 
 - The first run of the kind test and of the GitHub image job (GitHub Actions, from 2026-11-01).
 - The fourth weekend: memory and CPU on a Raspberry Pi 4, and tokens per incident compared with
-  k8sgpt.
+  k8sgpt (the comparison: done the same day, below).
+
+## Later the same day: tokens per incident compared with k8sgpt
+
+The maintainer asked to carry on to the end. Result and method:
+[Tokens per incident compared with k8sgpt](../research/2026-10-26-tokens-compared-with-k8sgpt.md).
+
+### What was done
+
+- k8sgpt upgraded on the maintainer's machine from 0.3.41 to 0.4.41 (Homebrew), so that the
+  comparison uses its current release.
+- The seeded failures and a counting proxy in front of Ollama, added to `tests/bench/`. kausa: 5
+  calls, 2,183 tokens in and 765 out. k8sgpt: 12 calls, 1,301 in and 3,827 out (1,401 and 4,035
+  with `--anonymize`).
+- A mistake caught while writing it up: the proxy's log showed a refused request for Secrets, but
+  it was the check of the proxy itself, made by hand before k8sgpt ran; k8sgpt asked only for
+  ConfigMaps. The research note says so.
+- The test namespace was deleted afterwards; no kausa Event was written (`--no-events`).
+
+### Pending
+
+- **The measurement on a Raspberry Pi 4.** kausa's image has to reach a node: no image is
+  published, and loading it into a node's containerd over SSH was not allowed in this session.
+  Either the maintainer loads it, or a registry token for kausa is created in Infisical (the
+  agent's identity cannot write there) so that CI or the agent can push it to the Gitea registry,
+  with a pull secret made by the Infisical operator.
 

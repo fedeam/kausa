@@ -124,7 +124,11 @@ container's log, asks the model within a call budget (or logs the request with `
 reuses explanations of repeated incidents, writes each explanation as an Event on the failing
 workload, and serves Prometheus metrics with `--metrics-address`; its log lines are JSON ([Command
 line and log format](docs/reference/command-line.md)). The image and the Helm chart are built and
-checked in CI, not published ([Install kausa with Helm](docs/how-to/install-with-helm.md)). Tested on 2026-10-26 against a live cluster with Ollama
+checked in CI, not published ([Install kausa with Helm](docs/how-to/install-with-helm.md)).
+On five seeded failures with the same small local model, kausa used 5 model calls and 2,948
+tokens where k8sgpt used 12 calls and 5,128 tokens (one run each: [Tokens per incident compared
+with k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)); the measurement on a
+Raspberry Pi 4 is still to do. Tested on 2026-10-26 against a live cluster with Ollama
 and a small local model ([Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md)). What has changed so far is in the
 [Changelog](CHANGELOG.md).

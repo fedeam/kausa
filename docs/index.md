@@ -74,7 +74,9 @@ checks](how-to/develop.md).
   incident](adr/0001-scope-and-positioning.md): why kausa exists, what is in and out of scope,
   and the roadmap.
 - [Competitive landscape](research/2026-10-23-competitive-landscape.md): k8sgpt, HolmesGPT,
-  kagent and the others, and the gap that is left.
+  kagent and the others, and the gap that is left; [Tokens per incident compared with
+  k8sgpt](research/2026-10-26-tokens-compared-with-k8sgpt.md): the same five failures, the same
+  model, calls and tokens counted.
 - [Architecture](explanation/architecture.md): the planned pipeline, the model call, cost
   controls, the Event output and the safety model.
 - [Data sent to the provider](reference/data-sent-to-the-provider.md) and
