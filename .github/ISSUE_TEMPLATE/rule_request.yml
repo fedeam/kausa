@@ -1,0 +1,53 @@
+name: Rule request
+description: Propose a failure kausa should recognise and group, or a kind of sensitive value it should redact.
+labels: ["rule", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        See "Propose a rule" in [CONTRIBUTING.md](https://github.com/fedeam/kausa/blob/main/CONTRIBUTING.md).
+        Rules are deterministic: they run before any LLM call and decide what is an incident and what never leaves the cluster.
+        If kausa already sent a real secret somewhere, that is a vulnerability: use the [security policy](https://github.com/fedeam/kausa/security/policy) instead.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of rule
+      options:
+        - Detection (a failure to recognise, or failures to group into one incident)
+        - Redaction (a kind of value that must not leave the cluster)
+    validations:
+      required: true
+  - type: textarea
+    id: case
+    attributes:
+      label: The case
+      description: For detection, the failure and how it shows in events or pod status. For redaction, the shape of the value (for example a token prefix or a connection string format).
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Sanitized example
+      description: An event message, a status or a log line with obviously fake values.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Upstream documentation for the failure, or the published format of the token.
+    validations:
+      required: true
+  - type: textarea
+    id: harmless
+    attributes:
+      label: Similar cases that must not match
+      description: Messages or values that look alike but are not this case.
+  - type: checkboxes
+    id: sanitized
+    attributes:
+      label: Before submitting
+      options:
+        - label: The examples contain no real secrets, internal hostnames, IP addresses or personal data.
+          required: true

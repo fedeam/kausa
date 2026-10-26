@@ -1,0 +1,82 @@
+name: CI
+
+# The arm64 CI, on the self-hosted Gitea Actions runner (act_runner, label "native", linux/arm64),
+# whose disk is shared between jobs. Pull requests are merged on GitHub; this job checks main after
+# the maintainer syncs it to Gitea (docs/adr/0007-contributions-and-merges-on-github.md). It has
+# no pull_request trigger and contributors' pull requests never reach Gitea, so outside code runs
+# on this runner only after it is merged on GitHub and synced. The maintainer's own branches are
+# pushed to Gitea too; on them the workflow runs only if the branch itself changes this file
+# (Gitea reads it from the pushed commit), which he reviews before pushing. Plain shell on purpose,
+# with no `uses:`: no action code is fetched at run time. What the build downloads is pinned in the
+# Dockerfile, except the Debian packages, the RustSec advisory database and the crates.io index,
+# which are fetched live (see docs/adr/0003-ci-in-one-pinned-container-build.md). Every check lives
+# in the Dockerfile's ci target; nothing is tagged or pushed.
+#
+# Needs one repository Actions variable, REPO_CLONE_URL: this repository's HTTP(S) clone URL as the
+# runner reaches it, without credentials. It is a variable so that no internal hostname is
+# written in this public file.
+on:
+  push:
+    branches: [main]
+  # Weekly, so that a new advisory about a dependency already on main shows up without waiting
+  # for the next push.
+  schedule:
+    - cron: '0 6 * * 1'
+  # A manual run from the Actions tab, e.g. after changing the repository variable.
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: native
+    steps:
+      - name: Fetch the commit and build the ci target
+        env:
+          GIT_URL: ${{ vars.REPO_CLONE_URL }}
+          # The job's automatic token. On Gitea 1.23 it can read and write this repository (only
+          # fork pull requests get a read-only one) and a workflow cannot narrow it; it is used
+          # here only for the fetch and is unset before docker build.
+          TOKEN: ${{ gitea.token }}
+          # The commit to check: the pushed commit; on the schedule, the latest commit of main (a
+          # hypothesis to verify on the first scheduled run).
+          SHA: ${{ gitea.sha }}
+          # A credential problem fails the fetch instead of waiting forever for a username.
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -eu
+          if [ -z "$GIT_URL" ]; then
+            echo "::error::Set the repository Actions variable REPO_CLONE_URL to this repository's clone URL."
+            exit 1
+          fi
+
+          # A directory of its own: the disk is shared. The EXIT trap removes it, but a cancelled
+          # or timed-out run is killed with SIGKILL, which no trap catches, so each run first
+          # removes the directories that earlier runs left behind. An hour is far longer than a
+          # run needs its directory (until docker build has read the context).
+          TMP=${TMPDIR:-/tmp}
+          find "$TMP" -mindepth 1 -maxdepth 1 -type d -name 'kausa-ci.*' -mmin +60 \
+            -exec rm -rf {} + || true
+          WORK=$(mktemp -d "$TMP/kausa-ci.XXXXXX")
+          trap 'set +e; rm -rf "$WORK"' EXIT
+          trap 'exit 143' INT TERM HUP
+
+          # The token goes in an HTTP header set through the environment: never in argv, and never
+          # in .git/config, which the build context copies into the image.
+          AUTH=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader
+          export GIT_CONFIG_VALUE_0="Authorization: Basic $AUTH"
+          unset AUTH TOKEN
+
+          # The triggering commit, not the tip of the branch, with its full history: the secret
+          # scan in the ci target reads every commit.
+          git init -q "$WORK/src"
+          cd "$WORK/src"
+          git fetch -q "$GIT_URL" "$SHA"
+          git checkout -q --detach "$SHA"
+          unset GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_0 GIT_CONFIG_COUNT
+
+          # Secret scan, formatting, dependency policy, advisories, lints and tests. --force-rm:
+          # this runner has no buildx, so docker build uses the classic builder, which keeps the
+          # container of a failed step (and the layers under it) unless told otherwise. The
+          # untagged image that every run leaves is removed by the runner's periodic cleanup of
+          # dangling images; until then its tool layers serve as cache.
+          docker build --force-rm --target ci .

@@ -1,0 +1,26 @@
+[package]
+name = "kausa"
+# Pre-release of the planned v0.1: nothing is implemented or released yet.
+version = "0.1.0-dev"
+edition = "2024"
+# Minimum supported Rust version: the toolchain pinned in rust-toolchain.toml when this was
+# written. It can stay behind when the toolchain moves on (clippy's incompatible_msrv lint, part
+# of the CI's -D warnings, flags code that needs a newer compiler).
+rust-version = "1.99"
+description = "A tiny, read-only Kubernetes controller that explains failing workloads with an LLM"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fedeam/kausa"
+readme = "README.md"
+keywords = ["kubernetes", "controller", "llm", "troubleshooting", "kube"]
+categories = ["development-tools"]
+# Not on crates.io until the name is reserved deliberately.
+publish = false
+
+# Standard library only for now: every dependency needs a reason (see AGENTS.md) and must pass
+# `cargo deny --locked check`. Dependencies arrive with the code that needs them: kube-rs with the
+# first implementation weekend, the HTTP client with the second
+# (docs/adr/0001-scope-and-positioning.md, docs/adr/0002-rust-and-dual-license.md).
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

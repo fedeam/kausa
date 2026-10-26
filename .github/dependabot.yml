@@ -1,0 +1,74 @@
+# Dependabot version updates (docs/adr/0007-contributions-and-merges-on-github.md). Pull request
+# titles become the commit header on main when they are squash-merged, so each one starts with a
+# Conventional Commits type and a scope: "build(deps): bump ...", "build(deps-dev): bump ..." (a
+# dev-dependency, as GitHub documents `include: "scope"`) or "ci(deps): bump ...". The maintainer
+# checks the title before merging (docs/how-to/maintain.md).
+#
+# Every ecosystem waits three days after a release before Dependabot proposes it (cooldown), so a
+# compromised crate, image or action has time to be yanked or to get an advisory before CI builds
+# it. GitHub's documentation gives three days as the default; it is written here so that it does
+# not change silently.
+#
+# The rust image in the Dockerfile and rust-toolchain.toml must name the same release (the CI build
+# fails while they differ), so the multi-ecosystem group "rust" moves both in one pull request.
+# Hypotheses to check on its first pull request: that both updates arrive together, the title it
+# gets, that the image keeps its -slim-trixie suffix and that its digest moves with the tag.
+#
+# Not covered, and bumped by hand (docs/how-to/maintain.md): cargo-deny, cargo-audit and gitleaks,
+# pinned by ARG in the Dockerfile with their SHA-256.
+version: 2
+
+multi-ecosystem-groups:
+  rust:
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+    # A multi-ecosystem group takes commit-message only here, not on its updates entries.
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    groups:
+      cargo-minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  # The Dockerfile's FROM line (its only image), in the "rust" group.
+  - package-ecosystem: "docker"
+    directory: "/"
+    multi-ecosystem-group: "rust"
+    patterns: ["rust"]
+    cooldown:
+      default-days: 3
+
+  # rust-toolchain.toml, in the "rust" group.
+  - package-ecosystem: "rust-toolchain"
+    directory: "/"
+    multi-ecosystem-group: "rust"
+    patterns: ["*"]
+    cooldown:
+      default-days: 3
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    groups:
+      actions-minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "ci"
+      include: "scope"

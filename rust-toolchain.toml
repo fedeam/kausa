@@ -1,0 +1,8 @@
+# The exact compiler CI uses: the Dockerfile's base image ships this release. Dependabot moves both
+# in one pull request (the "rust" group in .github/dependabot.yml; see docs/how-to/maintain.md),
+# and a mismatch fails the CI build instead of downloading another toolchain (RUSTUP_AUTO_INSTALL=0
+# in the Dockerfile).
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

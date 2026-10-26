@@ -1,0 +1,66 @@
+name: Bug report
+description: kausa failed, explained something wrong, missed a failure or used more resources or tokens than it should.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Vulnerabilities go through the [security policy](https://github.com/fedeam/kausa/security/policy), not here. That includes a secret or other sensitive value that kausa sent to the LLM provider or wrote into an Event.
+        Do not paste secrets, real logs, internal hostnames, IP addresses or account IDs: reduce the input to a minimal, sanitized example.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `kausa --version`, or the image tag or commit you run.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Cluster and provider
+      description: Kubernetes distribution and version, architecture (amd64 or arm64), and the kind of LLM endpoint (for example Ollama with a given model, or a hosted provider).
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What went wrong
+      options:
+        - Crash or error
+        - Missed a failure it should explain
+        - Explained something that was not failing
+        - Wrong or unhelpful explanation
+        - Too many LLM calls or tokens
+        - Too much memory or CPU
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Minimal reproduction
+      description: The smallest manifests that make a workload fail the same way, and the kausa configuration (without the API key).
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What kausa did
+      description: The Event it wrote, its own log lines, or the metric that looks wrong.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: checkboxes
+    id: sanitized
+    attributes:
+      label: Before submitting
+      options:
+        - label: The text contains no secrets, real logs, internal hostnames, IP addresses or personal data.
+          required: true

@@ -1,0 +1,37 @@
+name: CI
+
+# The same build as .gitea/workflows/ci.yml, on GitHub's hosted runners (linux/amd64). Pull
+# requests are merged on GitHub, so once GitHub Actions run for the account this job's "ci" check
+# is the one that gates them (docs/adr/0007-contributions-and-merges-on-github.md). As of
+# 2026-10-23 GitHub does not start its jobs while the repository is private: the account's
+# included minutes for private repositories were used up for October by another repository (they
+# renew monthly); public repositories do not use them. Every check lives in the Dockerfile's ci
+# target.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # Full history for the secret scan, and no token left in .git/config: the build context
+      # copies .git into the image.
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Secret scan, formatting, dependency policy, advisories, lints and tests.
+      - name: Build the ci target
+        run: docker build --target ci .

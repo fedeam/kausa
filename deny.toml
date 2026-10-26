@@ -1,0 +1,40 @@
+# Dependency policy, checked by `cargo deny --locked check` in CI (the Dockerfile's ci target).
+# Reference: https://embarkstudios.github.io/cargo-deny/ (written for cargo-deny 0.20.2).
+# Status as of 2026-10-23: kausa has no dependencies; this policy applies from the first one.
+
+[advisories]
+# RustSec advisory database (the default source). Unmaintained and unsound crates are reported
+# anywhere in the graph; a yanked version fails the check.
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+# Advisories accepted on purpose, each with a reason and an expiry:
+# { id = "RUSTSEC-0000-0000", reason = "...", expiry = "YYYY-MM-DD" }
+ignore = []
+
+[licenses]
+# Permissive licenses compatible with distributing kausa under MIT OR Apache-2.0. Add one only
+# with a reason in the pull request that needs it.
+allow = ["Apache-2.0", "MIT"]
+confidence-threshold = 0.93
+exceptions = []
+
+[licenses.private]
+# kausa itself is checked too, although it is not published (publish = false).
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = false
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# Crates come only from crates.io: no other registry and no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

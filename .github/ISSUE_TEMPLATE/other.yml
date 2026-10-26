@@ -1,0 +1,35 @@
+name: Feature, docs or question
+description: "Anything that is not a bug or a new rule: a feature, a documentation problem, a question, or the issue to open before a pull request."
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A bug goes in a **Bug report**, and a failure to recognise or a value to redact in a **Rule request**.
+        Vulnerabilities go through the [security policy](https://github.com/fedeam/kausa/security/policy), not here.
+        Do not paste secrets, real logs, internal hostnames or IP addresses.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Feature
+        - Documentation
+        - Question
+        - A change I want to make in a pull request (refactoring, tests, CI or other)
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What you need and why. For a pull request you plan to open, the approach you have in mind.
+    validations:
+      required: true
+  - type: checkboxes
+    id: sanitized
+    attributes:
+      label: Before submitting
+      options:
+        - label: The text contains no secrets, internal hostnames or personal data.
+          required: true

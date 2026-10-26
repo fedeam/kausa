@@ -1,0 +1,35 @@
+# Categories for the release notes that GitHub generates from merged pull requests, by label. The
+# label is set while reviewing each pull request (docs/how-to/maintain.md).
+# Hypothesis, not documented by GitHub: a pull request is listed only under the first category it
+# matches, which is why Security comes first (a security fix, such as a redaction gap, may also
+# carry "bug"). Check it on the first release. Documented: the catch-all "*" takes the pull
+# requests that matched no category above it.
+changelog:
+  exclude:
+    labels:
+      - needs-triage
+  categories:
+    - title: Security
+      labels:
+        - security
+    - title: Detection and redaction rules
+      labels:
+        - rule
+    - title: Features
+      labels:
+        - enhancement
+    - title: Bug fixes
+      labels:
+        - bug
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Documentation
+      labels:
+        - documentation
+    - title: CI
+      labels:
+        - ci
+    - title: Other changes
+      labels:
+        - "*"

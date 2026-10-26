@@ -1,0 +1,10 @@
+# Allowlist: only what the ci target reads reaches the build context. A new top-level file or
+# directory that the build needs (benches/, build.rs, a config file) must be added here.
+*
+!.git
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!deny.toml
+!src/
+!tests/
