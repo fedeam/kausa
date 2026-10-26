@@ -6,18 +6,19 @@ incident, sends a redacted context to one OpenAI-compatible model endpoint withi
 budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
 ConfigMaps and never changes a workload.
 
-Status as of 2026-10-23: **in development** (pre-alpha). Only a command-line skeleton
+Status as of 2026-10-26: **in development** (pre-alpha). Only a command-line skeleton
 (`kausa --help`, `kausa --version`) exists; nothing is watched, explained or released yet. The
-private repository exists on the maintainer's Gitea instance; the GitHub repository, where
-contributions and merges will happen ([0007. Take contributions and merge pull requests on
-GitHub](adr/0007-contributions-and-merges-on-github.md)), is not created yet. Pending: creating
-the GitHub repository; the maintainer's approval of [0008. Send only allowlisted, redacted data to
-one OpenAI-compatible endpoint](adr/0008-data-leaving-the-cluster.md) and [0009. Run with
-read-only permissions that never include Secrets](adr/0009-least-privilege-rbac.md); the first
-CI runs; GitHub Actions, which do not start jobs while the repository is private (the
-account's included minutes for October are used up; public repositories do not use them); the
-first Dependabot run; the four implementation weekends of v0.1; and publication of the GitHub
-repository after validation.
+private repositories exist on GitHub and on the maintainer's Gitea instance, and contributions and
+merges happen on GitHub ([0007. Take contributions and merge pull requests on
+GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
+([2026-10-26 — GitHub repository and first CI
+runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: the maintainer's approval of
+[0008. Send only allowlisted, redacted data to one OpenAI-compatible
+endpoint](adr/0008-data-leaving-the-cluster.md) and [0009. Run with read-only permissions that
+never include Secrets](adr/0009-least-privilege-rbac.md); GitHub Actions, which do not start jobs
+while the repository is private (the account's included minutes for October are used up; public
+repositories do not use them); the first Dependabot run; the four implementation weekends of
+v0.1; and publication of the GitHub repository after validation.
 
 ## Key facts
 
@@ -75,4 +76,5 @@ checks](how-to/develop.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
-  and what is pending.
+  and what is pending; [2026-10-26 — GitHub repository and first CI
+  runs](journal/2026-10-26-github-repository-and-first-ci.md): the first push and CI runs.

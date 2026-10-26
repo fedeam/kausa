@@ -6,12 +6,12 @@ publication works this way: [0006. Make the GitHub repository public only after 
 checklist](../adr/0006-publication-checklist.md) and [0007. Take contributions and merge pull
 requests on GitHub](../adr/0007-contributions-and-merges-on-github.md).
 
-Status as of 2026-10-23: the project is not yet validated, and nothing in this checklist has
+Status as of 2026-10-26: the project is not yet validated, and nothing in this checklist has
 been run. The copy on the maintainer's Gitea instance, which runs the arm64 CI, stays private;
-"public" here means the GitHub repository. That repository is not created yet (on 2026-10-23,
-`git ls-remote` with the maintainer's key answered "Repository not found"). When it is created,
-private, it gets the merge settings (squash only, title and message from the pull request), the
-labels, Dependabot alerts, the description and the topics, recorded in the journal of that day.
+"public" here means the GitHub repository. Already done when the private GitHub repository was
+created on 2026-10-26: the merge settings (squash only, title and message from the pull request),
+the labels, Dependabot alerts, the description and the topics ([2026-10-26 — GitHub repository
+and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
 
 ## Before you start
 
@@ -177,8 +177,8 @@ labels, Dependabot alerts, the description and the topics, recorded in the journ
 
    The last command turns on Dependabot **security updates**: pull requests that fix a known
    vulnerability without waiting for the weekly version updates of `.github/dependabot.yml`.
-   Dependabot **alerts** are turned on when the repository is created (pending on 2026-10-23);
-   the [Verify](#verify) section checks them.
+   Dependabot **alerts** have been on since 2026-10-26; the [Verify](#verify) section checks
+   them.
 
    Then restrict GitHub Actions. Only GitHub's own actions (`actions/*` and `github/*`) and the
    Scorecard action of step 11 may run, each pinned by a full commit SHA, as the workflows already
@@ -200,18 +200,16 @@ labels, Dependabot alerts, the description and the topics, recorded in the journ
    applies only to public repositories, and on 2026-10-23, while kaution was private, its approval
    endpoint answered "Fork PR approval is not allowed for private repositories". Dependabot's jobs
    bypass the Actions policy (GitHub's documentation on Dependabot on GitHub Actions runners), so
-   they still run. The job token stays read-only by default (`default_workflow_permissions: read`;
-   hypothesis for kausa, the account default seen on kaution on 2026-10-23, checked by the
-   [Verify](#verify) section).
+   they still run. The job token stays read-only by default (`default_workflow_permissions: read`,
+   checked on kausa on 2026-10-26).
 
 8. **Add a branch ruleset on `main`.** Rulesets need a public repository or GitHub Pro: on
-   2026-10-23, while private, GitHub answered kaution's `gh api repos/fedeam/kaution/rulesets`
-   call with "Upgrade to GitHub Pro or make this repository public to enable this feature". The
-   ruleset requires a pull request (with no required approval: a sole maintainer cannot approve
-   his own pull requests), the `ci` check of the `CI` workflow (the job id in
-   `.github/workflows/ci.yml`; hypothesis: GitHub names the check run after it, as seen on
-   kaution's runs on 2026-10-23. Confirm it on kausa's first GitHub run before this step), a
-   linear history, and blocks force pushes and deletion:
+   2026-10-26, while private, `gh api repos/fedeam/kausa/rulesets` answered "Upgrade to GitHub
+   Pro or make this repository public to enable this feature". The ruleset requires a pull
+   request (with no required approval: a sole maintainer cannot approve his own pull requests),
+   the `ci` check of the `CI` workflow (the check run name of the first run, on 2026-10-26, which
+   GitHub took from the job id in `.github/workflows/ci.yml`), a linear history, and blocks force
+   pushes and deletion:
 
    ```sh
    gh api -X POST repos/fedeam/kausa/rulesets --input - <<'EOF'
@@ -258,8 +256,8 @@ labels, Dependabot alerts, the description and the topics, recorded in the journ
    needed, give it `"bypass_mode": "pull_request"`, so that it applies only to pull requests, and
    expect OpenSSF Scorecard to count it against Branch-Protection (step 11).
 
-9. **Set the homepage and the social preview.** The description and the topics are set when the
-   repository is created (pending on 2026-10-23); check them:
+9. **Set the homepage and the social preview.** The description and the topics were set on
+   2026-10-26; check them:
 
    ```sh
    gh repo view fedeam/kausa --json description,repositoryTopics,homepageUrl
