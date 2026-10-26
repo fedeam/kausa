@@ -5,8 +5,8 @@ Why CI is built this way, and where it runs for pull requests and for `main`: [0
 one pinned container build, on GitHub Actions and Gitea
 Actions](../adr/0003-ci-in-one-pinned-container-build.md).
 
-Status as of 2026-10-26: two implementation weekends are done, and the third but for its first
-kind run. The unit tests cover the rules, grouping, fingerprints, owner correlation, redaction,
+Status as of 2026-10-26: the four implementation weekends of v0.1 are done, but for the first run
+of the kind test. The unit tests cover the rules, grouping, fingerprints, owner correlation, redaction,
 the context, the prompt, the validation of answers, the budget, the Events, the metrics and the
 HTTP client (against a local test server) without a cluster. The end-to-end test in kind
 (`tests/e2e/run.sh`) has not run yet: it runs on GitHub Actions, which do not start jobs while the

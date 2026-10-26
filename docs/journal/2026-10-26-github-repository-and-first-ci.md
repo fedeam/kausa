@@ -369,11 +369,26 @@ The maintainer asked to carry on to the end. Result and method:
   builds only the build and runtime stages, cut from the Dockerfile, because the classic builder
   would otherwise repeat the ci stage, whose cache does not match a new checkout's `.git`.
 
+- After that split, run 11 passed: `ci` in 21 minutes and `image` in 20.
+
+## Later the same day: memory and CPU on a Raspberry Pi 4
+
+Loading the image into a node's containerd over SSH was not allowed to the agent, so the
+maintainer ran that command. Result and method: [Memory and CPU on a Raspberry Pi
+4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md).
+
+- The chart installed in dry-run on one node, under the restricted Pod Security Standard: its
+  first install on a real cluster. 22 minutes, five seeded failures at minute 10: 2.12 MiB of
+  working set at the end, 0.67 seconds of CPU, five incidents, no restart.
+- 15 restarts of the Event watch with `etcd event received with PrevKv=nil`, recorded in the note
+  as an open question.
+- The release, the namespaces and the ClusterRole were removed afterwards. The image is still in
+  the node's containerd (`docker.io/library/kausa:bench`), since removing it needs the same SSH
+  access.
+
 ### Pending
 
-- **The measurement on a Raspberry Pi 4.** kausa's image has to reach a node: no image is
-  published, and loading it into a node's containerd over SSH was not allowed in this session.
-  Either the maintainer loads it, or a registry token for kausa is created in Infisical (the
-  agent's identity cannot write there) so that CI or the agent can push it to the Gitea registry,
-  with a pull secret made by the Infisical operator.
+- The first run of the kind test and of the GitHub image job (GitHub Actions).
+- Why the API server ends kausa's Event watch with `PrevKv=nil` on k3s.
+- Publication, when the maintainer validates the project.
 

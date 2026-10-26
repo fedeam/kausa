@@ -40,7 +40,7 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-26: two of four implementation weekends are done, and the code of the third. `kausa run` reads Pods,
+Status as of 2026-10-26: the four implementation weekends of v0.1 are done; nothing is released. `kausa run` reads Pods,
 their logs (crash loops, out-of-memory kills and failed Jobs only), Events and the metadata of ReplicaSets and Jobs; it
 redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
 logs it with `--dry-run`; it logs incidents and explanations with real names to its own stdout.

@@ -7,8 +7,8 @@ budget, and writes the explanation as an Event on the failing object. It never r
 ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
 `--no-events`).
 
-Status as of 2026-10-26: **in development** (pre-alpha). Two of four implementation weekends are
-done, and the code of the third: `kausa run` watches Pods and Warning events, groups failures by
+Status as of 2026-10-26: **in development** (pre-alpha). The four implementation weekends of v0.1
+are done, but for the first run of the kind test: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
 failing workload. The image and the Helm chart exist; the kind test waits for GitHub Actions, and
@@ -19,8 +19,8 @@ GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes
 ([2026-10-26 — GitHub repository and first CI
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: GitHub Actions, which do
 not start jobs while the repository is private (the account's included minutes for October are
-used up; public repositories do not use them); the first Dependabot run; the rest of
-implementation weekend 3 and weekend 4 of v0.1; and publication of the GitHub repository after validation.
+used up; public repositories do not use them), and with them the first run of the kind test;
+the first Dependabot run; and publication of the GitHub repository after validation.
 
 ## Key facts
 
@@ -76,7 +76,8 @@ checks](how-to/develop.md).
 - [Competitive landscape](research/2026-10-23-competitive-landscape.md): k8sgpt, HolmesGPT,
   kagent and the others, and the gap that is left; [Tokens per incident compared with
   k8sgpt](research/2026-10-26-tokens-compared-with-k8sgpt.md): the same five failures, the same
-  model, calls and tokens counted.
+  model, calls and tokens counted; [Memory and CPU on a Raspberry Pi
+  4](research/2026-10-26-resource-use-on-a-raspberry-pi.md).
 - [Architecture](explanation/architecture.md): the planned pipeline, the model call, cost
   controls, the Event output and the safety model.
 - [Data sent to the provider](reference/data-sent-to-the-provider.md) and

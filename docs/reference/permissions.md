@@ -41,15 +41,17 @@ incident](../adr/0001-scope-and-positioning.md)).
 
 ## The pod that runs kausa
 
-The chart's defaults, to be measured and adjusted on the fourth weekend:
+The chart's defaults:
 
 - One replica, `strategy: Recreate`, so that a rollout never runs two instances at once; a node
   partition can still briefly run two (hypothesis: the worst case is a duplicate Event, since
   kausa never changes a workload). Leader election with a Lease is not planned for v0.1.
 - `runAsNonRoot`, a numeric non-root user, `readOnlyRootFilesystem`, all capabilities dropped,
   `allowPrivilegeEscalation: false`, the `RuntimeDefault` seccomp profile.
-- Requests and limits for CPU and memory declared; the starting values are hypotheses until the
-  measurement on a Raspberry Pi 4.
+- Requests and limits for CPU and memory declared: requests of 10m and 32 MiB, limits of 200m
+  and 128 MiB, well above the 2 MiB and 1m measured on a Raspberry Pi 4 in dry-run ([Memory and
+  CPU on a Raspberry Pi 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)), to leave
+  room for larger clusters and for the explanation path.
 - The service account token is mounted, because kausa talks to the API server; the only other
   volume is the optional Secret with the provider's API key, mounted read-only as a file by the
   kubelet (or, outside the chart, passed as `KAUSA_API_KEY`), so kausa needs no permission on Secrets. kausa takes its

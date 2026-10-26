@@ -3,7 +3,8 @@
 The values of the chart in `charts/kausa`, what each one turns into, and the objects it creates.
 
 Status as of 2026-10-26: the chart exists and is checked by `helm lint` and renders in CI, by a
-server-side dry run against Kubernetes v1.36 (k3s), and, once GitHub Actions run, by the kind
+server-side dry run against Kubernetes v1.36 (k3s), by one install in dry-run on that cluster
+(admitted under the restricted Pod Security Standard), and, once GitHub Actions run, by the kind
 test. No image is published, so `image.repository` must point at one you built ([Install kausa
 with Helm](../how-to/install-with-helm.md)). Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
@@ -51,7 +52,7 @@ The full name is the release name when it contains `kausa`, and `<release>-kausa
 | `metrics.service.annotations` | `{}` | For example, scrape annotations |
 | `serviceAccount.name` | `""` | |
 | `serviceAccount.annotations` | `{}` | |
-| `resources` | requests `10m` CPU and `32Mi`, limits `200m` and `128Mi` | Starting values, to be measured on a Raspberry Pi 4 |
+| `resources` | requests `10m` CPU and `32Mi`, limits `200m` and `128Mi` | Room above the 2 MiB and 1m measured on a Raspberry Pi 4 in dry-run ([Memory and CPU on a Raspberry Pi 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)) |
 | `networkPolicy.enabled` | `false` | A NetworkPolicy with egress to DNS (port 53), the API server and the model endpoint only, and ingress to the metrics port only |
 | `networkPolicy.apiServer.cidrs` | `[]` | The API server's addresses; required with the policy |
 | `networkPolicy.apiServer.port` | `6443` | |

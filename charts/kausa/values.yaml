@@ -65,8 +65,9 @@ serviceAccount:
   name: ""
   annotations: {}
 
-# The starting values are hypotheses until they are measured on a Raspberry Pi 4 (resident memory
-# was 22.5 MiB in a test on 2026-10-26).
+# Room above what was measured on a Raspberry Pi 4 in dry-run (2 MiB, 1m CPU, on a small cluster;
+# docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md), for larger clusters and for the
+# explanation path.
 resources:
   requests:
     cpu: 10m

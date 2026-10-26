@@ -59,8 +59,9 @@ only, not published; the end-to-end tests in kind on GitHub Actions.
 ## Consequences
 
 - The image measured 4.3 MB compressed (9.6 MB uncompressed) for linux/arm64 on 2026-10-26, and
-  the container used 4.4 MiB of memory in a live test on Docker Desktop (not yet measured on a
-  Raspberry Pi 4: fourth weekend).
+  the container used 4.4 MiB of memory in a live test on Docker Desktop, and 2.1 MiB (working
+  set) installed with the chart on a Raspberry Pi 4, in dry-run ([Memory and CPU on a Raspberry Pi
+  4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)).
 - No image exists in any registry: users build their own until a release
   ([Install kausa with Helm](../how-to/install-with-helm.md)).
 - The distroless digest is bumped by hand, like the tools in the Dockerfile

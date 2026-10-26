@@ -5,13 +5,14 @@ workload into one incident with deterministic rules, sends a redacted context to
 OpenAI-compatible endpoint within a budget, and writes the explanation as an Event on the failing
 workload.
 
-Status as of 2026-10-26: **the code of the first three implementation weekends is done**:
+Status as of 2026-10-26: **the code of the four implementation weekends of v0.1 is done**:
 watching, detection, the settle window, owner correlation, fingerprints, the context with log
 tails, redaction, the prompt, the client, the validation of answers, dry-run, the call and token
 budget, deduplication, the Events on the failing workload and the metrics ([Command line and log
 format](../reference/command-line.md)). The image and the Helm chart are built and checked in CI,
-not published; the kind test waits for its first run on GitHub Actions; the measurement on a
-Raspberry Pi is the fourth weekend. This page describes the target
+not published; the kind test waits for its first run on GitHub Actions. Measured on a
+Raspberry Pi 4: about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
+4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)). This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
 incident](../adr/0001-scope-and-positioning.md).

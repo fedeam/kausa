@@ -88,8 +88,9 @@ full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.
 - **Budgeted.** Caps on calls per hour and per day and on tokens per request; repeated incidents
   reuse the stored explanation.
 - **Small.** One static binary for linux/amd64 and linux/arm64, a distroless non-root image of
-  4.3 MB compressed, and memory that does not grow with the number of healthy Pods (4.4 MiB in a
-  test container). The targets are to be measured on a Raspberry Pi 4 and published.
+  4.3 MB compressed, and memory that does not grow with the number of healthy Pods: 2 MiB and
+  0.67 seconds of CPU in 22 minutes on a Raspberry Pi 4, in dry-run (once, on a small cluster:
+  [Memory and CPU on a Raspberry Pi 4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)).
 - **No UI.** Events, logs and Prometheus metrics, which every existing tool already reads.
 
 ## How it relates to other tools
@@ -117,8 +118,8 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha: two of four implementation weekends are done, and the third but for the first run of
-its kind test, which waits for GitHub Actions. `kausa run` watches Pods
+Pre-alpha: the four implementation weekends of v0.1 are done, but for the first run of the kind
+test, which waits for GitHub Actions; nothing is released. `kausa run` watches Pods
 and Warning events, groups failures by workload, builds a redacted context with the failed
 container's log, asks the model within a call budget (or logs the request with `--dry-run`),
 reuses explanations of repeated incidents, writes each explanation as an Event on the failing
@@ -127,8 +128,8 @@ line and log format](docs/reference/command-line.md)). The image and the Helm ch
 checked in CI, not published ([Install kausa with Helm](docs/how-to/install-with-helm.md)).
 On five seeded failures with the same small local model, kausa used 5 model calls and 2,948
 tokens where k8sgpt used 12 calls and 5,128 tokens (one run each: [Tokens per incident compared
-with k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)); the measurement on a
-Raspberry Pi 4 is still to do. Tested on 2026-10-26 against a live cluster with Ollama
+with k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)), and on a Raspberry Pi 4
+it used about 2 MiB of memory ([Memory and CPU on a Raspberry Pi 4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)). Tested on 2026-10-26 against a live cluster with Ollama
 and a small local model ([Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md)). What has changed so far is in the
 [Changelog](CHANGELOG.md).
@@ -171,7 +172,8 @@ The weekends give the order of work, not dates.
   - Weekend 3: budget, deduplication, Prometheus metrics, Events on the failing object, a Helm
     chart, a multi-architecture image, end-to-end tests in kind.
   - Weekend 4: memory and CPU measured on a Raspberry Pi 4 and published; tokens per incident
-    compared with k8sgpt on the same seeded failures.
+    compared with k8sgpt on the same seeded failures. Done on 2026-10-26, with the first three;
+    the kind test waits for its first run.
 - **v0.2:** longer explanations and history in a custom resource, and a namespaced install mode
   if v0.1 ships only the cluster-wide one.
 

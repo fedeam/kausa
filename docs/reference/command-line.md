@@ -2,7 +2,7 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-26: what the code of the first three implementation weekends does. `kausa
+Status as of 2026-10-26: what the code of v0.1's four implementation weekends does. `kausa
 run` detects and groups failures and logs incidents; with `--endpoint` it explains each one within
 a call budget, reuses explanations of repeated incidents, and writes the explanation as an Event
 on the failing workload; with `--dry-run` it logs the request instead; with `--metrics-address` it
