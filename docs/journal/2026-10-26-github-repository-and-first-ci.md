@@ -5,14 +5,14 @@ runs. Repositories touched: kausa.
 
 ## What was done
 
-- **The first commit**, `b89d67e` (`chore(repo): set up repository skeleton, docs and ci`), the
+- **The first commit**, `61981a4` (`chore(repo): set up repository skeleton, docs and ci`), the
   only direct commit to `main` ([0007. Take contributions and merge pull requests on
   GitHub](../adr/0007-contributions-and-merges-on-github.md)), pushed to Gitea and to GitHub.
 - **Commit identity.** The first attempt carried the maintainer's personal address: the shell
   that committed exported `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, which take precedence
   over the clone's `user.name` and `user.email`. It was caught before any push and made again with
-  `FedeAM <98847815+fedeam@users.noreply.github.com>` as author and committer (the noreply
-  address from `gh api user`); only `b89d67e` was ever pushed. [Maintain the
+  the noreply address from `gh api user` as author and committer; only that commit was ever
+  pushed. [Maintain the
   repository](../how-to/maintain.md) now says to check for those variables and to look at each new
   commit's identity.
 - **GitHub repository** `fedeam/kausa`, private, with the settings of the maintainer's earlier
@@ -37,13 +37,12 @@ runs. Repositories touched: kausa.
   (its node refused every TCP connection while answering ping). Nothing was changed for it; the
   push waited until it was back.
 
-- **First merge on GitHub**, pull request #1, squash-merged as `a9e4533`, then synced to Gitea.
+- **First merge on GitHub**, pull request #1, squash-merged as `ad05308` (after the rewrite below), then synced to Gitea.
   The commit header is the pull request title followed by ` (#1)`, which confirms the hypothesis
   in [0007. Take contributions and merge pull requests on
   GitHub](../adr/0007-contributions-and-merges-on-github.md). Its author is the noreply address,
-  as on every recent commit the maintainer made on GitHub's web (checked before merging), with
-  the name of his GitHub profile, `FedeAM`, rather than `FedeAM`; the committer is
-  `GitHub <noreply@github.com>`.
+  as on every recent commit the maintainer made on GitHub's web (checked before merging); its
+  author name is the name of his GitHub profile, and its committer `GitHub <noreply@github.com>`.
 
 ## Decisions
 
@@ -61,8 +60,9 @@ runs. Repositories touched: kausa.
   linux/amd64.
 - **Dependabot's first run** and its titles, and the `rust` group (hypotheses in
   `.github/dependabot.yml`).
-- **Author name of squash merges:** GitHub writes the profile name, `FedeAM`. If the public
-  history should read `FedeAM`, change the name on the GitHub profile before more merges.
+- **Author name of squash merges:** GitHub writes the name of the maintainer's GitHub profile.
+  The profile name has to read `FedeAM` before the next merge, or the next squash commit carries
+  another name.
 - The rest of the list in [2026-10-23 — Repository setup](2026-10-23-repository-setup.md#pending)
   stands, except the creation of the GitHub repository, done here.
 
@@ -125,3 +125,29 @@ Request: carry on with everything, without asking but for decisions; the reposit
 - **Hypotheses from the first weekend:** that memory stays flat with the number of healthy Pods
   (measured on the fourth weekend); that the kubelet and scheduler reasons in the rules are the
   ones current releases emit.
+
+## Later the same day: the maintainer's name is FedeAM
+
+Request: every commit and every text should name the maintainer `FedeAM` only.
+
+### What was done
+
+- **History rewritten** before publication, while the repository is private: the author and the
+  committer of the four commits on `main` became `FedeAM <98847815+fedeam@users.noreply.github.com>`
+  (`git filter-branch --env-filter`; trees and dates unchanged): `b89d67e` → `61981a4`, `a9e4533` →
+  `ad05308`, `3ff74c6` → `5878cc8`, `7e044fe` → `1672e6f`. `main` was force-pushed to both forges,
+  with its protection on Gitea lifted for that push only and restored after it. This one commit,
+  which renames the maintainer in the texts, went to `main` with the rewrite, outside a pull
+  request: the exception that [0007. Take contributions and merge pull requests on
+  GitHub](../adr/0007-contributions-and-merges-on-github.md) makes for the first commit, taken once
+  more by the maintainer's decision.
+- **Texts:** `FedeAM` replaces the maintainer's full name in `LICENSE-MIT`, `AGENTS.md` (including
+  the rule on the only identity allowed), the ADRs, the front page and the how-tos.
+
+### Pending
+
+- **GitHub keeps the old commits** of pull requests #1 to #3 under `refs/pull/<number>/head`, with
+  the previous author names; the maintainer chose not to recreate the repository. Step 3 of
+  [Publish the repository on GitHub](../how-to/publish-the-repository.md) will list them.
+- **The GitHub profile name** of the maintainer has to read `FedeAM` before the next squash merge,
+  which takes its author name from it.
