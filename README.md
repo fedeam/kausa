@@ -6,9 +6,10 @@
 
 A tiny, read-only Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself.
 
-> **Status: pre-alpha.** `kausa run` detects and groups failures and logs them as incidents; it
-> does not call a model or write Events yet, and there is no image or chart to install. Everything
-> below describes the planned v0.1.
+> **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context and asks
+> an OpenAI-compatible model to explain them, or logs the request with `--dry-run`. It writes no
+> Event yet, and there is no image or chart to install. What is not built yet is marked as
+> planned.
 
 ## The problem
 
@@ -58,7 +59,8 @@ the Event.
 Only to the one endpoint you configure, and only after three deterministic steps:
 
 1. **An allowlist of fields:** detection, kinds, container states and exit codes, restart counts,
-   Warning events of the incident and, for crash-type failures, a capped log tail. Never labels,
+   Warning events of the incident and, for crash loops, out-of-memory kills and failed Jobs, a
+   capped log tail. Never labels,
    annotations, environment variables, command lines or anything from a Secret or a ConfigMap,
    which kausa cannot read.
 2. **Pseudonyms for names:** namespaces, workloads, Pods, containers, nodes and private registries
@@ -74,7 +76,8 @@ full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.
 ## Design principles
 
 - **Read-only.** It reads Pods, Events, and the metadata of ReplicaSets and Jobs to follow
-  owners; `pods/log` only for crash-type failures, and that can be turned off. It never reads
+  owners; `pods/log` only for crash loops, out-of-memory kills and failed Jobs, and that can be
+  turned off. It never reads
   Secrets or ConfigMaps, and the only thing it writes is Events
   ([Permissions](docs/reference/permissions.md)).
 - **Deterministic before the model.** Detection, grouping, fingerprints and redaction are rules,
@@ -113,9 +116,12 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha: the first of four implementation weekends is done. `kausa run` watches Pods and
-Warning events, groups failures by workload and logs each incident as a JSON line ([Command line
-and log format](docs/reference/command-line.md)). What has changed so far is in the
+Pre-alpha: two of four implementation weekends are done. `kausa run` watches Pods and Warning
+events, groups failures by workload, builds a redacted context with the failed container's log,
+and logs the request (`--dry-run`) or the model's explanation as JSON lines ([Command line and log
+format](docs/reference/command-line.md)). Tested on 2026-10-26 against a live cluster with Ollama
+and a small local model ([Try kausa against a cluster with a local
+model](docs/how-to/try-with-a-local-model.md)). What has changed so far is in the
 [Changelog](CHANGELOG.md).
 
 ## Build from source
@@ -128,11 +134,16 @@ cargo build --locked
 cargo run --locked -- --help
 # Watch the cluster of the kubeconfig's current context and log incidents (read-only):
 cargo run --locked -- run
+# Also log the redacted request each incident would send:
+cargo run --locked -- run --dry-run
+# Ask a model served by Ollama on this machine:
+cargo run --locked -- run --endpoint http://127.0.0.1:11434/v1 --model qwen3:0.6b --allow-http
 ```
 
-`kausa run` uses the current context of your kubeconfig and needs only read access to Pods,
-Events, ReplicaSets and Jobs; it has no flag to pick a context, so check
-`kubectl config current-context` first.
+`kausa run` uses the current context of your kubeconfig and needs only read access to Pods, their
+logs, Events, ReplicaSets and Jobs; it has no flag to pick a context, so check
+`kubectl config current-context` first, or follow [Try kausa against a cluster with a local
+model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of it.
 
 ## Roadmap
 
@@ -160,6 +171,7 @@ The weekends give the order of work, not dates.
 - [Command line and log format](docs/reference/command-line.md)
 - [Competitive landscape](docs/research/2026-10-23-competitive-landscape.md)
 - [Set up a development environment and run the checks](docs/how-to/develop.md)
+- [Try kausa against a cluster with a local model](docs/how-to/try-with-a-local-model.md)
 - [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 - [Instructions for coding agents](AGENTS.md)

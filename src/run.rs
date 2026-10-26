@@ -1,13 +1,17 @@
 //! `kausa run`: the controller loop. It watches Pods and Warning events, keeps small records,
 //! correlates owners and logs each incident when it settles.
 //!
-//! Status as of 2026-10-26 (first implementation weekend): incidents are written to kausa's log
-//! only. Nothing is sent to a model and no Event is written yet; the only API calls are the two
-//! watches and the metadata reads of ReplicaSets and Jobs (docs/reference/permissions.md).
+//! Status as of 2026-10-26 (second implementation weekend): incidents are written to kausa's log
+//! and, with `--endpoint` or `--dry-run`, explained by the model or their request logged
+//! (`explain.rs`). No Event is written yet; the API calls are the two watches, the metadata reads
+//! of ReplicaSets and Jobs, and `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`
+//! (docs/reference/permissions.md).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -22,7 +26,9 @@ use kube::{Api, Client, Config};
 use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::context::Gathered;
 use crate::detect::{Detection, detect_event};
+use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Work};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals};
 use crate::log;
 use crate::owner::{Hop, OwnerLookup, top_owner};
@@ -46,6 +52,8 @@ const OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Options {
     pub settle: SignedDuration,
+    /// How to explain incidents; `None` logs them only.
+    pub explain: Option<Settings>,
 }
 
 /// Why `kausa run` stopped with an error.
@@ -103,6 +111,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         client: client.clone(),
         cache: RefCell::new(HashMap::new()),
     };
+    let explainer = client.clone();
     let mut pods = watcher(Api::<Pod>::all(client.clone()), watcher::Config::default())
         .default_backoff()
         .boxed();
@@ -116,9 +125,21 @@ pub async fn run(options: Options) -> Result<(), RunError> {
     let mut state = State::default();
     let mut tracker = Tracker::new(options.settle);
     let mut ticker = tokio::time::interval(TICK);
+    let mut queue: VecDeque<Work> = VecDeque::new();
+    let mut running: Option<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> = None;
 
     loop {
+        if running.is_none()
+            && let (Some(settings), Some(job)) = (options.explain.as_ref(), queue.pop_front())
+        {
+            running = Some(Box::pin(explain::run(job, explainer.clone(), settings)));
+        }
         tokio::select! {
+            result = async { running.as_mut().expect("guarded by the condition").await },
+                if running.is_some() => {
+                running = None;
+                result?;
+            }
             item = pods.next() => match item {
                 Some(Ok(event)) => state.on_pod(event, &lookup).await?,
                 Some(Err(e)) => log::warn("pod watch error", json!({"error": e.to_string()}))?,
@@ -134,6 +155,20 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 state.prune_events(now);
                 for incident in state.tick(&mut tracker, now) {
                     log_incident(&incident, state.pods_of(&incident.owner))?;
+                    if options.explain.is_some() {
+                        if queue.len() >= QUEUE_LIMIT
+                            && let Some(dropped) = queue.pop_front()
+                        {
+                            log::warn(
+                                "explanation dropped",
+                                json!({
+                                    "fingerprint": dropped.gathered.incident.fingerprint,
+                                    "reason": "the queue is full",
+                                }),
+                            )?;
+                        }
+                        queue.push_back(state.job(incident));
+                    }
                 }
             }
             _ = terminate.recv() => break,
@@ -334,6 +369,88 @@ impl State {
             })
             .collect();
         tracker.tick(now, collect_signals(&pods, &events, now, EVENT_FRESHNESS))
+    }
+
+    /// What an explanation needs about an incident, copied out of the state: the incident's Pods
+    /// (sample first), their events, and which log to read.
+    fn job(&self, incident: Incident) -> Work {
+        let namespace = incident.key.namespace.clone();
+        let sample = incident.sample.pod.clone();
+        let mut pods: Vec<PodRecord> = self
+            .pods
+            .values()
+            .filter(|(record, owner, _)| {
+                record.namespace == namespace
+                    && owner.uid == incident.owner.uid
+                    && incident.pods.contains(&record.name)
+            })
+            .map(|(record, _, _)| record.clone())
+            .collect();
+        pods.sort_by_key(|p| (Some(&p.name) != sample.as_ref(), p.name.clone()));
+        let mut events: Vec<EventRecord> = self
+            .events
+            .values()
+            .filter(|(record, job_owner)| {
+                record.regarding.namespace == namespace
+                    && (incident.pods.contains(&record.regarding.name)
+                        || job_owner
+                            .as_ref()
+                            .is_some_and(|o| o.uid == incident.owner.uid))
+            })
+            .map(|(record, _)| record.clone())
+            .collect();
+        events.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.uid.cmp(&b.uid)));
+        let log = self.log_source(&incident, &pods);
+        Work {
+            gathered: Gathered {
+                pods_total: self.pods_of(&incident.owner),
+                incident,
+                pods,
+                events,
+                log_tail: None,
+            },
+            log,
+        }
+    }
+
+    /// The container whose log explains the incident, for the detections that read logs: the
+    /// sample's container, or for a failed Job the failed container of one of its Pods.
+    fn log_source(&self, incident: &Incident, pods: &[PodRecord]) -> Option<LogSource> {
+        if !explain::reads_logs(incident.key.detection) {
+            return None;
+        }
+        let candidates: Vec<&PodRecord> = if pods.is_empty() {
+            let mut of_owner: Vec<&PodRecord> = self
+                .pods
+                .values()
+                .filter(|(record, owner, _)| {
+                    record.namespace == incident.key.namespace && owner.uid == incident.owner.uid
+                })
+                .map(|(record, _, _)| record)
+                .collect();
+            of_owner.sort_by(|a, b| a.name.cmp(&b.name));
+            of_owner
+        } else {
+            pods.iter().collect()
+        };
+        candidates.into_iter().find_map(|pod| {
+            let container = pod.containers.iter().find(|c| {
+                incident.sample.container.as_deref() == Some(c.name.as_str())
+                    || c.terminated_reason
+                        .as_deref()
+                        .is_some_and(|r| r != "Completed")
+                    || c.last_termination_reason.is_some()
+            })?;
+            // The current instance runs or waits again after a crash: its log is the previous
+            // instance's. A container still terminated holds its own log.
+            let previous = container.restart_count > 0 && container.terminated_reason.is_none();
+            Some(LogSource {
+                namespace: pod.namespace.clone(),
+                pod: pod.name.clone(),
+                container: container.name.clone(),
+                previous,
+            })
+        })
     }
 
     fn pods_of(&self, owner: &OwnerRef) -> usize {

@@ -2,22 +2,35 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-26: what the first implementation weekend built. `kausa run` detects and
-groups failures and logs incidents; nothing is sent to a model and no Event is written yet
-([0001. Build a small, read-only explainer that writes one redacted explanation per
-incident](../adr/0001-scope-and-positioning.md)). The flags of the next weekends (`--config`,
-`--dry-run`) are not there yet.
+Status as of 2026-10-26: what the first two implementation weekends built. `kausa run` detects and
+groups failures, logs incidents and, with `--endpoint` or `--dry-run`, builds a redacted request
+for each one and logs it or the model's explanation; it writes no Event yet ([0001. Build a small,
+read-only explainer that writes one redacted explanation per
+incident](../adr/0001-scope-and-positioning.md)).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `kausa run [--settle-seconds <N>]` | Runs the controller until `SIGTERM` or Ctrl-C |
+| `kausa run [OPTIONS]` | Runs the controller until `SIGTERM` or Ctrl-C |
 | `kausa -h`, `kausa --help` | Prints the help |
 | `kausa -V`, `kausa --version` | Prints `kausa <version>` |
 
-`--settle-seconds <N>`: how long a failure has to persist before it is an incident, from `0` to
-`3600`; `60` by default. A failed Job (`D008`) is an incident at once, whatever the value.
+Options of `kausa run`:
+
+| Option | What it does |
+|---|---|
+| `--settle-seconds <N>` | How long a failure has to persist before it is an incident, from `0` to `3600`; `60` by default. A failed Job (`D008`) is an incident at once, whatever the value |
+| `--endpoint <URL>` | The base URL of an OpenAI-compatible endpoint, such as `https://api.example.com/v1` or `http://127.0.0.1:11434/v1` for Ollama. Each incident's redacted context is sent to `<URL>/chat/completions` and the answer is logged as an explanation. Needs `--model` |
+| `--model <NAME>` | The model to ask |
+| `--api-key-file <PATH>` | A file whose content (trimmed) is the API key, sent as `Authorization: Bearer`. Without it, the environment variable `KAUSA_API_KEY`; without both, no key. Never an argument |
+| `--allow-http` | Allow an `http://` endpoint, for one on the same machine, in the cluster or in the same private network. With `--dry-run` the endpoint is not used, so its scheme is not checked |
+| `--dry-run` | Build each request and log it instead of sending it; no endpoint needed |
+| `--no-logs` | Do not read container logs (the request has no `log_tail`) |
+| `--no-json-schema` | Do not send `response_format`, for servers without structured output; the answer is validated all the same |
+
+Without `--endpoint` or `--dry-run`, kausa only logs incidents. `--model`, `--api-key-file`,
+`--allow-http` and `--no-json-schema` alone are usage errors.
 
 `kausa run` connects with the in-cluster service account when it runs in a Pod (when
 `KUBERNETES_SERVICE_HOST` is set), and otherwise with the current context of the kubeconfig
@@ -32,7 +45,7 @@ environment cannot make it impersonate anyone or talk to another server.
 |---|---|
 | `0` | `--help` or `--version`, or a clean stop after `SIGTERM` or Ctrl-C |
 | `1` | kausa cannot start (no client configuration, the API server is unreachable) or a watch ended |
-| `2` | Usage error (unknown argument, invalid flag value), or stdout cannot be written (also while running: `kausa run` stops when it cannot write its log, and says so on stderr) |
+| `2` | Usage error (unknown argument, invalid flag value, an `http://` endpoint without `--allow-http`, an unreadable API key file), or stdout cannot be written (also while running: `kausa run` stops when it cannot write its log, and says so on stderr) |
 
 ## Log lines
 
@@ -48,6 +61,11 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `pod watch error`, `event watch error` | warn | `error`; the watch retries with backoff |
 | `owner lookup failed` | warn | `namespace`, `pod` or `job`, `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's next update), the incident names the ReplicaSet or Job instead |
 | `stopped` | info | |
+| `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
+| `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them) and `redactions` |
+| `explanation skipped` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`: the endpoint failed, answered an error status, or gave an answer that did not validate |
+| `explanation dropped` | warn | `fingerprint`, `reason`: the queue of 16 incidents waiting for an explanation was full |
+| `log read failed` | warn | `namespace`, `pod`, `container`, `error`; the request is built without the log |
 | `stopped on an error`, `cannot start the runtime` | error | `error` |
 
 An `incident` line, with invented values:

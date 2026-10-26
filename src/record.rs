@@ -66,6 +66,9 @@ pub struct PodRecord {
     /// The message of the `PodScheduled` condition when the scheduler cannot place the Pod
     /// (status `False`, reason `Unschedulable`).
     pub unschedulable: Option<String>,
+    /// The node and service account names, kept only so that redaction can replace them.
+    pub node_name: Option<String>,
+    pub service_account: Option<String>,
     pub containers: Vec<ContainerRecord>,
 }
 
@@ -133,6 +136,8 @@ impl PodRecord {
             controller: controller_of(metadata.owner_references.as_ref()),
             phase: status.and_then(|s| s.phase.clone()),
             unschedulable,
+            node_name: spec.and_then(|s| s.node_name.clone()),
+            service_account: spec.and_then(|s| s.service_account_name.clone()),
             containers,
         })
     }

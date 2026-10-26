@@ -7,7 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The first implementation weekend: detection and grouping. Nothing is released yet.
+The first two implementation weekends: detection, grouping, redaction and explanations. Nothing is
+released yet.
 
 ### Added
 
@@ -15,8 +16,13 @@ The first implementation weekend: detection and grouping. Nothing is released ye
   out-of-memory kills, container creation errors, scheduling failures, probe failures, volume
   failures and failed Jobs (`D001` to `D008`), groups the failures of one workload into one
   incident once they persist for the settle window (`--settle-seconds`, 60 by default), and logs
-  each incident as a JSON line with a fingerprint. Nothing is sent to a model and no Event is
-  written yet.
+  each incident as a JSON line with a fingerprint. No Event is written yet.
+- Explanations: with `--endpoint` and `--model`, each incident's context (container states, the
+  incident's Warning events and, for crash loops, out-of-memory kills and failed Jobs, the failed
+  container's last log lines) is redacted and sent to one OpenAI-compatible endpoint, and the
+  validated explanation is logged with the real names mapped back. `--dry-run` logs the exact
+  request instead. Redaction rules `R001` to `R013`, `--api-key-file` or `KAUSA_API_KEY`,
+  `--allow-http`, `--no-logs` and `--no-json-schema`.
 - `kausa --help` and `kausa --version`.
 - Documentation: scope and positioning after a competitive survey, the planned architecture, the
   detection and redaction rules, the permissions and the data sent to the model provider for

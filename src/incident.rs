@@ -377,6 +377,8 @@ mod tests {
             controller: None,
             phase: Some(phase.into()),
             unschedulable: None,
+            node_name: None,
+            service_account: None,
             containers: vec![ContainerRecord {
                 name: "api".into(),
                 image: Some("registry.example.com/shop/api:1.4.2".into()),

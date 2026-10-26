@@ -40,10 +40,12 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-26: the first implementation weekend is done. `kausa run` watches Pods and
-Warning events, reads only Pods, Events and the metadata of ReplicaSets and Jobs, and logs
-incidents with real names and messages to its own stdout; it reads no container logs, redacts
-nothing, sends nothing to a model and writes no Events yet. The rest are the properties v0.1 is
+Status as of 2026-10-26: two of four implementation weekends are done. `kausa run` reads Pods,
+their logs (crash loops, out-of-memory kills and failed Jobs only), Events and the metadata of ReplicaSets and Jobs; it
+redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
+logs it with `--dry-run`; it logs incidents and explanations with real names to its own stdout.
+It has no call budget or deduplication yet (third weekend): each incident is explained once while
+it lasts, and the queue in front of the model holds 16. It writes no Events yet. The rest are the properties v0.1 is
 designed to have ([Architecture](docs/explanation/architecture.md)); each one will be backed by
 tests before the release.
 

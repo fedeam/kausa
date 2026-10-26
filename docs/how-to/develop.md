@@ -5,9 +5,10 @@ Why CI is built this way, and where it runs for pull requests and for `main`: [0
 one pinned container build, on GitHub Actions and Gitea
 Actions](../adr/0003-ci-in-one-pinned-container-build.md).
 
-Status as of 2026-10-26: the first implementation weekend is done (`kausa run` detects, groups
-and logs incidents). The unit tests cover the rules, grouping, fingerprints and owner correlation
-without a cluster; there are no end-to-end tests against a cluster yet: the kind tests arrive on
+Status as of 2026-10-26: two implementation weekends are done (`kausa run` detects, groups,
+redacts and explains). The unit tests cover the rules, grouping, fingerprints, owner correlation,
+redaction, the context, the prompt, the validation of answers and the HTTP client (against a
+local test server) without a cluster; there are no end-to-end tests against a cluster yet: the kind tests arrive on
 the third implementation weekend.
 
 ## Before you start

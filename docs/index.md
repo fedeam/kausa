@@ -6,9 +6,10 @@ incident, sends a redacted context to one OpenAI-compatible model endpoint withi
 budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
 ConfigMaps and never changes a workload.
 
-Status as of 2026-10-26: **in development** (pre-alpha). The first implementation weekend is done:
-`kausa run` watches Pods and Warning events, groups failures by workload and logs incidents;
-nothing is redacted, sent to a model, written as an Event or released yet. The
+Status as of 2026-10-26: **in development** (pre-alpha). Two of four implementation weekends are
+done: `kausa run` watches Pods and Warning events, groups failures by workload, redacts their
+context and explains them with an OpenAI-compatible model, or logs the request with `--dry-run`;
+nothing is written as an Event or released yet. The
 private repositories exist on GitHub and on the maintainer's Gitea instance, and contributions and
 merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -16,7 +17,7 @@ GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: GitHub Actions, which do
 not start jobs while the repository is private (the account's included minutes for October are
 used up; public repositories do not use them); the first Dependabot run; implementation
-weekends 2 to 4 of v0.1; and publication of the GitHub repository after validation.
+weekends 3 and 4 of v0.1; and publication of the GitHub repository after validation.
 
 ## Key facts
 
@@ -73,6 +74,8 @@ checks](how-to/develop.md).
   controls, the Event output and the safety model.
 - [Data sent to the provider](reference/data-sent-to-the-provider.md) and
   [Permissions](reference/permissions.md): what leaves the cluster and what kausa may read.
+- [Try kausa against a cluster with a local model](how-to/try-with-a-local-model.md): a
+  read-only run with Ollama.
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

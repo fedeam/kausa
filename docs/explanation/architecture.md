@@ -5,10 +5,12 @@ workload into one incident with deterministic rules, sends a redacted context to
 OpenAI-compatible endpoint within a budget, and writes the explanation as an Event on the failing
 workload.
 
-Status as of 2026-10-26: the **first implementation weekend is done**: watching, detection, the
-settle window, owner correlation and fingerprints run, and `kausa run` logs each incident
-([Command line and log format](../reference/command-line.md)). Context, redaction, the model call,
-cost controls and the Event output are still the planned design. This page describes the target
+Status as of 2026-10-26: the **first two implementation weekends are done**: watching,
+detection, the settle window, owner correlation, fingerprints, the context with log tails,
+redaction, the prompt, the client of the endpoint, the validation of answers and dry-run run, and
+`kausa run` logs each incident and its request or explanation ([Command line and log
+format](../reference/command-line.md)). Cost controls (budget, deduplication, metrics) and the
+Event output are still the planned design. This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
 incident](../adr/0001-scope-and-positioning.md).
@@ -80,12 +82,13 @@ produces the same incident, the same fingerprint and the same request bytes.
 ## Context and redaction
 
 - **Context.** The incident's Pod records, its Warning events, the relevant probe and resource
-  settings, and for the detections that read logs the last lines of the failed container, capped
-  by lines and bytes: the previous instance (`previous=true`) when the container has restarted
-  (`D001`, and `D003` under a restarting policy), and the terminated container itself
-  (`previous=false`) for `D008` and any Pod that did not restart (a Job's Pod with
-  `restartPolicy: Never` has no previous instance). The exact fields are in [Data sent to the
-  provider](../reference/data-sent-to-the-provider.md).
+  settings, and for the detections that read logs (`D001`, `D003`, `D008`) the last lines of the
+  failed container: the previous instance (`previous=true`) when the container restarted and runs
+  or waits again, otherwise the terminated container itself (`previous=false`), as for a Job's Pod
+  with `restartPolicy: Never`. kausa asks the API server for the last 50 lines (at most 1 MiB),
+  streams them with a 10-second timeout, keeps their last 32 KiB with the partial first line
+  dropped and invalid UTF-8 replaced, and after redaction cuts the tail to its last 4 KiB. A request carries at most three Pods and ten events. The exact fields are in [Data sent
+  to the provider](../reference/data-sent-to-the-provider.md).
 - **Redaction**, in three steps: an allowlist of fields, pseudonymous names, and pattern
   redaction of free text ([0008. Send only allowlisted, redacted data to one OpenAI-compatible
   endpoint](../adr/0008-data-leaving-the-cluster.md)). Pseudonyms are numbered in order of
@@ -102,21 +105,30 @@ produces the same incident, the same fingerprint and the same request bytes.
   (`response_format` with a JSON schema) where the endpoint supports it, and otherwise relies on
   the instructions and validates.
 - **Validation.** The answer must parse and match the schema; strings are length-capped,
-  stripped of Unicode control characters (category Cc, except newline) and format characters
-  (category Cf, which include the bidirectional overrides U+202A–U+202E and U+2066–U+2069 and the
-  zero-width characters) and of markup, then normalized to NFC. The validation fixtures include
-  bidirectional and zero-width payloads. An answer that fails validation is dropped and
-  counted, never written.
-- **Client.** A small HTTP client with TLS through rustls, a connect and total timeout, a cap on
-  the response size, one request at a time and a bounded queue (the oldest incident is dropped
-  when it overflows, and counted).
+  normalized to NFC, stripped of Unicode control characters (category Cc, newlines included)
+  and of the format characters that matter for display (bidirectional controls U+202A–U+202E and
+  U+2066–U+2069, zero-width characters, the byte order mark), and of the markup characters `<`,
+  `>` and backticks except in kausa's own `<redacted:…>` markers; whitespace is collapsed. A
+  Markdown code fence around the JSON is tolerated. The validation fixtures include
+  bidirectional, zero-width and HTML payloads. The real names mapped back into the answer come
+  from the cluster, so the texts are cleaned and cut again after that. An answer that fails
+  validation is logged as skipped, never written.
+- **Template markers.** Chat-template markers in cluster text (`<|im_start|>`, `</s>`,
+  `<start_of_turn>`, `[INST]`) get their brackets swapped for look-alikes in the user message, so
+  that a server that renders the conversation as text cannot read them as turn boundaries.
+- **Client.** reqwest with rustls and the ring provider (the same TLS stack as the Kubernetes
+  client), no redirects, no proxy from the environment, a 10-second connect and a 120-second total
+  timeout, and a 256 KiB cap on the answer. Plain HTTP only with `--allow-http`.
+- **One at a time.** Explanations run one after the other, inside the controller's loop, so a
+  slow endpoint never stops the watches; incidents wait in a queue of 16, and the oldest is dropped
+  (and logged) when it overflows.
 
 ## Cost controls
 
 - **Budget.** A cap on calls per hour and per day, a cap on the estimated input tokens of a
-  request (the context is cut to fit), and a cap on the answer's tokens (`max_tokens`; whether
-  some endpoints, such as OpenAI's reasoning models, need `max_completion_tokens` instead is a
-  hypothesis to verify on the second weekend). The budget is global: one budget and one queue for
+  request (the context is cut to fit), and a cap on the answer's tokens: `max_tokens` is 800 in
+  every request since the second weekend (whether some endpoints, such as OpenAI's reasoning
+  models, need `max_completion_tokens` instead is still to verify). The budget is global: one budget and one queue for
   the whole cluster, not per namespace. When the budget is spent, incidents wait or are skipped,
   and the metrics say how many.
 - **Deduplication.** A bounded cache, in memory, keyed by fingerprint with a time to live: a
@@ -148,10 +160,13 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 ## Configuration and modes
 
-- One configuration file, mounted from a ConfigMap of kausa's own (kausa reads the file, not the
-  API): the endpoint, the model, whether plain HTTP is allowed, the budget, the settle window, log
-  collection and the namespaces to watch or skip.
-- The API key from a file or an environment variable, which the kubelet fills from a Secret.
+- Command-line flags, which the chart will set: the endpoint, the model, whether plain HTTP is
+  allowed, the settle window, log collection and structured output ([Command line and log
+  format](../reference/command-line.md)). The configuration file planned at first was dropped on
+  2026-10-26: flags need no parser and no ConfigMap, and keep what kausa is told to do visible in
+  its Pod spec. The budget and the namespaces to watch come as flags too, on the third weekend.
+- The API key from a file (`--api-key-file`, a Secret mounted by the kubelet) or the environment
+  variable `KAUSA_API_KEY` (filled from a Secret), never from an argument.
 - **Dry-run:** the whole pipeline up to the request, which is logged and not sent. No Event is
   written.
 
@@ -170,11 +185,9 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 ## Exit codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Clean shutdown after `SIGTERM` or Ctrl-C, or `--help` and `--version` |
-| `1` | Runtime failure: kausa cannot reach the API server at start, or a watch ends (watch errors are logged and retried with backoff) |
-| `2` | Usage or configuration error: unknown argument, invalid configuration file, cannot write to stdout |
+`0` on success or a clean stop, `1` when kausa cannot start or a watch ends, `2` on a usage error
+or when stdout cannot be written. The full table, with every usage error: [Command line and log
+format](../reference/command-line.md#exit-codes).
 
 ## Safety model
 

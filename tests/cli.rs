@@ -2,8 +2,21 @@
 
 use std::process::{Command, Output};
 
+/// Runs the binary with no cluster to reach: no kubeconfig and no in-cluster environment, so a
+/// test that starts `kausa run` by mistake fails at once instead of watching a real cluster.
+fn command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kausa"));
+    command
+        .env("KUBECONFIG", "/nonexistent/kausa-tests/kubeconfig")
+        .env("HOME", "/nonexistent/kausa-tests")
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env_remove("KUBERNETES_SERVICE_PORT")
+        .env_remove("KAUSA_API_KEY");
+    command
+}
+
 fn kausa(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_kausa"))
+    command()
         .args(args)
         .output()
         .expect("the kausa binary should start")
@@ -77,7 +90,7 @@ fn output_error_exits_with_2() {
         .write(true)
         .open("/dev/full")
         .expect("/dev/full should open for writing");
-    let output = Command::new(env!("CARGO_BIN_EXE_kausa"))
+    let output = command()
         .arg("--help")
         .stdout(full)
         .output()
@@ -103,12 +116,36 @@ fn extra_arguments_are_a_usage_error() {
 }
 
 #[test]
+fn run_without_a_cluster_fails_fast_with_1() {
+    let output = kausa(&["run"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).contains("cannot configure the Kubernetes client"));
+}
+
+#[test]
 fn run_rejects_unknown_arguments_and_bad_settle_values() {
     for args in [
-        &["run", "--dry-run"][..],
+        &["run", "--bogus"][..],
         &["run", "--settle-seconds"][..],
         &["run", "--settle-seconds", "soon"][..],
         &["run", "--settle-seconds", "3601"][..],
+        // The explanation flags, checked before anything connects.
+        &["run", "--endpoint", "https://llm.example.com/v1"][..],
+        &["run", "--model", "m"][..],
+        &[
+            "run",
+            "--endpoint",
+            "http://127.0.0.1:11434/v1",
+            "--model",
+            "m",
+        ][..],
+        &["run", "--endpoint", "ftp://example.com", "--model", "m"][..],
+        &[
+            "run",
+            "--dry-run",
+            "--api-key-file",
+            "/nonexistent/kausa-tests/key",
+        ][..],
     ] {
         let output = kausa(args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");

@@ -5,11 +5,10 @@ is an incident and how failures are grouped, and redaction rules decide what nev
 cluster.
 
 Status as of 2026-10-26: the **detection rules, grouping and fingerprint are implemented** (first
-implementation weekend, `src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`); container logs
-are not read yet (the "Logs read" column is the plan for the second weekend, with the redaction
-rules). Ids, triggers and defaults may change until v0.1 is
-released; after that an id is never reused. How the rules fit in the
-pipeline: [Architecture](../explanation/architecture.md). Why redaction works this way: [0008.
+implementation weekend, `src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`), and so are the
+redaction rules and the log reading of the "Logs read" column (second weekend). Ids, triggers and
+defaults may change until v0.1 is released; after that an id is never reused. How the rules fit in
+the pipeline: [Architecture](../explanation/architecture.md). Why redaction works this way: [0008.
 Send only allowlisted, redacted data to one OpenAI-compatible
 endpoint](../adr/0008-data-leaving-the-cluster.md).
 
@@ -38,14 +37,14 @@ it was pending, so replicas whose crash loops are out of step all count.
 
 | Id | Failure | Signal | Logs read |
 |---|---|---|---|
-| `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff`, or terminated with any reason but `Completed` after at least one restart (between restarts the kubelet reports it as terminated for much of each back-off) | Yes, previous container |
+| `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff`, or terminated with any reason but `Completed` after at least one restart (between restarts the kubelet reports it as terminated for much of each back-off) | Yes: the previous instance while the container runs or waits again, otherwise the terminated one |
 | `D002` | Image cannot be pulled | Container waiting with `ErrImagePull`, `ImagePullBackOff` or `InvalidImageName` | No |
 | `D003` | Out of memory | Container waiting in `CrashLoopBackOff` whose last termination is `OOMKilled`, or terminated with `OOMKilled` and not restarted | Yes, previous container if it restarted, otherwise the terminated one |
 | `D004` | Container cannot be created | Container waiting with `CreateContainerConfigError` or `CreateContainerError` | No |
 | `D005` | Pod cannot be scheduled | The Pod still `Pending`, with its `PodScheduled` condition `False` for reason `Unschedulable` | No |
 | `D006` | Probe failures | Warning event `Unhealthy` for a readiness, liveness or startup probe, happening again a settle window after it was first seen | No |
 | `D007` | Volume cannot be attached or mounted | Warning event `FailedMount` or `FailedAttachVolume` | No |
-| `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of the last failed Pod |
+| `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of one failed Pod of the Job (the first by name) |
 
 `D005` reads the Pod's condition rather than the scheduler's `FailedScheduling` events, which may
 stop being updated for a Pod that keeps failing (hypothesis about client-go's `events.k8s.io`
@@ -74,37 +73,48 @@ it appears in kausa's log and will key the deduplication cache (third weekend).
 
 ## Redaction rules
 
-Applied in this order to every request. `R001` and `R002` work on structure; the others are
-patterns over free text (event messages, status messages and log lines). Each match is replaced
-by a typed placeholder, such as `<redacted:jwt>`, and counted in the metrics.
+Implemented in `src/redact.rs` (second implementation weekend). `R001` works on structure: only
+the fields of [Data sent to the provider](data-sent-to-the-provider.md) are ever serialized. The
+others work on every name and free text that goes into a request (event messages, the waiting and
+scheduling messages, log lines). First, text from the cluster that already looks like one of
+kausa's placeholders (`pod-1`, `deployment-2`) has its hyphen turned into an underscore, unless it
+is a real name kausa registered, so that the answer cannot map it to a real name. Then the rules
+run in this order: the secrets first (`R009`, `R007`, `R008`, `R006`, `R010`, `R011`), so that a
+known name inside a secret's key cannot break the key apart; then `R002`; then `R005`, `R004`,
+`R003`, `R013` and `R012`. Each match is replaced by a placeholder, such as `<redacted:jwt>`, and
+counted; the counts per rule are in the `request` and `explanation` log lines ([Command line and
+log format](command-line.md)).
 
 | Id | What | How |
 |---|---|---|
-| `R001` | Fields outside the allowlist | Never serialized: the allowlist is [Data sent to the provider](data-sent-to-the-provider.md) |
-| `R002` | Known names | Namespace, owner, Pod, container, node and service account names, and image registry hosts and paths outside the public registries list, replaced by stable placeholders (`namespace-1`, `deployment-1`) wherever they appear |
-| `R003` | Names in Kubernetes messages | The quoted name in messages such as `secret "…" not found`, `configmap "…" not found` and `persistentvolumeclaim "…" not found` |
-| `R004` | IP addresses | IPv4 and IPv6 addresses (also in `address:port` and `[ipv6]:port` forms); the port is kept, since it is not sensitive |
-| `R005` | Email addresses | `local@domain` |
-| `R006` | Credentials in URLs | The user information part of a URL (`scheme://user:password@host`), and the host itself unless it is a public registry |
-| `R007` | Authorization values | `Authorization:` header values and `Bearer` or `Basic` tokens |
-| `R008` | JSON Web Tokens | Three base64url segments separated by dots, the first one a JSON header |
-| `R009` | Private keys and certificates | PEM blocks (`-----BEGIN … -----` to `-----END … -----`) |
-| `R010` | Values of secret-named keys | `key=value`, `key: value` and JSON `"key": "value"` where the key looks like a secret (`password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, `access_key`, `private_key`, `credential`, `auth`), any case and separator |
-| `R011` | Known token formats | Fixed prefixes published by the issuers (for example GitHub, GitLab, Slack, AWS access key ids and the common LLM providers' keys). The list, each format's source and its test vectors ship with the implementation |
-| `R012` | High-entropy strings | Runs of 32 or more characters from a token alphabet with high Shannon entropy that no rule above matched; threshold tuned on the test corpus |
-| `R013` | Hostnames | Fully qualified names that are not public registries or well-known public domains, replaced by numbered placeholders (`host-1`), which are never mapped back |
+| `R001` | Fields outside the allowlist | Never serialized |
+| `R002` | Known names | The namespace, the owner, the incident's Pods, their containers, nodes and service accounts, and the registry host and path of images outside the public registries (`docker.io`, `ghcr.io`, `quay.io`, `registry.k8s.io`, `gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`; an image with no registry is from Docker Hub), replaced by stable placeholders (`namespace-1`, `deployment-1`, `pod-1`, `container-1`, `node-1`, `serviceaccount-1`, `registry-1`, `image-1`; `object-1` for a custom resource's kind) wherever they appear as words, in any ASCII case: a hyphen, dot, slash, underscore or percent escape is a word boundary, so a Deployment's name is replaced inside its ReplicaSet's name and in `PAYMENTS_SERVICE_HOST` too. Mapped back in the answer in one pass, also when the model capitalizes them |
+| `R003` | Names in Kubernetes messages | The quoted name after `secret`, `configmap`, `persistentvolumeclaim`, `pvc`, `serviceaccount` or `service` (singular or plural, single or double quotes): `secret "<redacted:name>" not found`; the name in `Secret <namespace>/<name>` and `ConfigMap <namespace>/<name>`; the name in `system:serviceaccount:<namespace>:<name>` |
+| `R004` | IP addresses | IPv4 addresses, and IPv6 addresses that parse as such once the colons around them are dropped (so `10:05:00` and `Foo::Bar` stay); the port after them is kept |
+| `R005` | Email addresses | `local@domain.tld` |
+| `R006` | Credentials in URLs | The user information of a URL, empty user and passwords with `@` or `/` included: `postgres://<redacted:userinfo>@db:5432`, `redis://<redacted:userinfo>@redis:6379`. The host is left to `R013` |
+| `R007` | Authorization values and cookies | The value of `Authorization:`, `Proxy-Authorization:`, `Cookie:` and `Set-Cookie:` (quoted, escaped or to the end of the line, any scheme), and `Bearer` or `Basic` followed by eight or more token characters |
+| `R008` | JSON Web Tokens | Three base64url segments separated by dots, the first one starting with `eyJ` (a JSON header) |
+| `R009` | Private keys and certificates | PEM blocks, `-----BEGIN …-----` to `-----END …-----`, any case |
+| `R010` | Values of secret-named keys | The value in `key=value`, `key: value`, JSON `"key": "value"` (escaped JSON inside JSON too), `key%3Dvalue`, `--key value` and `<key>value</key>`, where the key ends in `password`, `passwd`, `passphrase`, `pass`, `pwd`, `secret`, `secret_key`, `secret_key_base`, `signing_key`, `encryption_key`, `master_key`, `auth_key`, `token`, `api_key`, `access_key`, `private_key`, `credential(s)`, `auth`, `signature`, `sig`, `session`, `session_id` or `sid`, in any case (`DB_PASSWORD=`, `client_secret:`, `MYSQL_PWD=`). A quoted value is redacted whole, spaces included |
+| `R011` | Known token formats | GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` and 36 characters; `github_pat_`), GitLab (`glpat-`), Slack (`xoxa-`, `xoxb-`, `xoxp-`, `xoxo-`, `xoxs-`, `xoxr-`), AWS access key ids (`AKIA` or `ASIA` and 16 characters), Stripe (`sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`), OpenAI and Anthropic style keys (`sk-`, `sk-proj-`, `sk-ant-` and 20 or more characters), Google API keys (`AIza` and 35 characters). Hypothesis to verify against each issuer's documentation: that these are the current formats; `R012` catches most long tokens anyway |
+| `R012` | High-entropy strings | Runs of 32 or more characters from `[A-Za-z0-9+/_-]` and percent escapes (with `=` padding) that contain a letter and a digit and have a Shannon entropy of at least 4 bits per character, or 3 for a hexadecimal run (whose ceiling is 4). A run with two or more slashes (a path or URL) is judged segment by segment, with segments of 20 or more characters |
+| `R013` | Hostnames | Lowercase dotted names ending in a common top-level domain or an internal suffix (`.com`, `.net`, `.org`, `.io`, `.dev`, `.local`, `.lan`, `.internal`, `.corp`, `.svc`, `.svc.cluster.local`, `.home.arpa` and others); the host of any URL (`http://api.shop/`), whatever its suffix; and `name.other:port` (a Service in another namespace), unless its last label is a file extension (`main.rs:10`). The public registries and a few public hosts (`github.com`, `kubernetes.io`, `k8s.io`, the `example` domains) stay. Replaced by `host-1`, `host-2`…, never mapped back. Lowercase only, so Java packages and class names (`com.example.App`) stay |
 
 Rules are tested with a corpus of invented lines that must be redacted and lines that must stay
-(ordinary log lines with numbers, timestamps, versions and paths), so that a change in a rule
-shows its effect on both sides. Fixtures use only fake values: `example.com`, the documentation
-ranges `192.0.2.0/24` and `2001:db8::/32`, and token strings that are visibly fake.
+(ordinary log lines with numbers, timestamps, versions, durations, paths and public URLs), so that
+a change in a rule shows its effect on both sides. Fixtures use only fake values: `example.com`,
+the documentation ranges `192.0.2.0/24` and `2001:db8::/32`, and token strings built to match a
+format, never ones that were issued.
 
 ## Limits
 
 - Redaction has false negatives: a secret in a format no rule knows, split across lines or
   encoded, still leaves. A local model is the answer for clusters where that is unacceptable
   ([Security policy](../../SECURITY.md)).
-- Pseudonyms cover the names kausa knows and the message formats above; a name that appears only
-  inside a log line is caught by `R013` if it looks like a hostname, and otherwise is sent.
+- Pseudonyms cover the names kausa knows (the incident's own objects) and the message formats
+  above; the name of another workload, Pod or node that appears only inside a log line or an event
+  message is caught by `R013` if it looks like a hostname, and otherwise is sent. So is an
+  uppercase hostname, or a bare `service.namespace` without a port or a scheme.
 - Detection covers common workload failures, not every problem: a misbehaving application whose
   Pods stay `Running` and `Ready` produces no incident.

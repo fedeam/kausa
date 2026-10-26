@@ -64,3 +64,7 @@ OpenAI-compatible endpoint](0008-data-leaving-the-cluster.md) decides.
   policy](../../SECURITY.md).
 - The kind tests in CI (third weekend) assert the chart's role against the reference list, so the
   documentation and the chart cannot drift apart.
+
+Update 2026-10-26: "crash-type detections" above means crash loops and out-of-memory kills, and
+the logs of failed Jobs are read too (`D008`), as [0008. Send only allowlisted, redacted data to one
+OpenAI-compatible endpoint](0008-data-leaving-the-cluster.md) decided when it was accepted.

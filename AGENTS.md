@@ -13,8 +13,9 @@ kausa: a small, read-only Kubernetes controller in Rust (kube-rs) that watches W
 Pod status, groups the failures of one workload into one incident with deterministic rules, sends
 a redacted context to one OpenAI-compatible model endpoint within a call and token budget, and
 writes the explanation as a Kubernetes Event on the failing object. Open source,
-`MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents (first
-implementation weekend); redaction, the model call and Events are not implemented yet.
+`MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents, redacts their
+context and explains them with a model or logs the request (`--dry-run`); budget, deduplication,
+metrics and Events are not implemented yet (third weekend).
 Maintainer: FedeAM (GitHub: `fedeam`).
 
 ## How to work
@@ -73,10 +74,14 @@ cargo run --locked -- run
 
 `rust-toolchain.toml` pins the compiler; rustup installs it the first time `cargo` runs in the
 checkout. `kausa run` connects to the current context of the kubeconfig: before running it, check
-`kubectl config current-context`, and never point it at a cluster you were not asked to use. The
-core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`, `src/record.rs`)
-is pure and tested without a cluster; `src/run.rs` is the only code that talks to the API
-server.
+`kubectl config current-context`, and never point it at a cluster you were not asked to use;
+[Try kausa against a cluster with a local model](docs/how-to/try-with-a-local-model.md) shows a
+read-only proxy that keeps it to its own reads. Tests never reach a cluster: `tests/cli.rs` runs
+the binary with a nonexistent kubeconfig, and a new test that starts `kausa run` must do the same.
+The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`,
+`src/record.rs`, `src/redact.rs`, `src/context.rs`, `src/prompt.rs`) is pure and tested without a
+cluster; `src/run.rs` and `src/explain.rs` talk to the API server and `src/model.rs` to the model
+endpoint.
 
 ## Verification (same as CI)
 

@@ -89,3 +89,9 @@ Around those steps:
 - Anything new that would leave the cluster (a field, a provider-specific API, telemetry) needs a
   new ADR and an update to [Data sent to the provider](../reference/data-sent-to-the-provider.md)
   and the [Security policy](../../SECURITY.md).
+
+Update 2026-10-26: as implemented on the second weekend, the output mode is chosen with
+`--no-json-schema`, with no automatic fallback, and is not logged; the redaction counts are in the
+`request` and `explanation` log lines until the metrics arrive (third weekend); and the
+configuration is a set of command-line flags, not a file ([Command line and log
+format](../reference/command-line.md)).

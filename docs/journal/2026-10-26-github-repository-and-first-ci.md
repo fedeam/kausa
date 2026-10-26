@@ -190,3 +190,63 @@ Request: test `kausa run` on a real cluster, then carry on.
 ### Pending
 
 - The run on a Raspberry Pi with an image built for linux/arm64 (fourth weekend).
+
+## Later the same day: the second implementation weekend
+
+Request: carry on with v0.1.
+
+### What was done
+
+- **Redaction** (`src/redact.rs`): pseudonyms for the names kausa knows (`R002`), numbered in order
+  of appearance and mapped back in the answer, and the patterns `R003` to `R013`, with a corpus of
+  invented lines that must and must not be redacted ([Detection and redaction
+  rules](../reference/rules.md)). Built on the `regex` crate, whose engine runs in linear time.
+- **Context** (`src/context.rs`): the allowlisted fields of [Data sent to the
+  provider](../reference/data-sent-to-the-provider.md), at most three Pods and ten events, and the
+  failed container's last 50 log lines (32 KiB asked for, 4 KiB kept after redaction) for the
+  crash-type and Job detections.
+- **Prompt and validation** (`src/prompt.rs`): a fixed system message (version `1`) that says the
+  data is untrusted, the context as one JSON document under `untrusted_cluster_data`, no tools,
+  `response_format` with a JSON schema unless `--no-json-schema`, and an answer validated and
+  cleaned (NFC; control, bidirectional, zero-width and markup characters removed; lengths cut).
+- **Client** (`src/model.rs`): reqwest with rustls and ring, no redirects, no proxy from the
+  environment, timeouts and a 256 KiB cap; plain HTTP only with `--allow-http`; the API key from
+  `--api-key-file` or `KAUSA_API_KEY`.
+- **Orchestration** (`src/explain.rs`): explanations run one at a time inside the controller's
+  loop, with a queue of 16, and log `request` (dry-run), `explanation` or `explanation skipped`.
+- **Configuration as flags:** the configuration file of the planned design was dropped; the flags
+  are in [Command line and log format](../reference/command-line.md).
+- **Review before the pull request:** a reviewer tried to get secrets and names through the
+  redaction with concrete strings, a second reviewed the client, the prompt and the
+  orchestration, a third the documentation against the code, and a skeptic re-checked every
+  finding: 33 confirmed and fixed, 4 rejected. The main ones: known names in uppercase
+  (`PAYMENTS_SERVICE_HOST`) or after a percent escape got through; hexadecimal secrets could never
+  reach the entropy threshold; `redis://:password@host` and passwords with `@` or `/` got through;
+  common keys (`SECRET_KEY`, `MYSQL_PWD`, `passphrase`), escaped JSON, `--password value`, XML
+  elements and cookies got through; Services in another namespace (`svc.ns:port`, `http://svc.ns/`)
+  got through; node and service account names were not replaced although ADR 0008 says so;
+  **reqwest read `HTTP_PROXY` from the environment** although the docs said otherwise (the client
+  now uses `no_proxy()`); a known name inside a secret's key could break the key apart (secrets now
+  run before names); `restore` could chain and could map placeholder-shaped text from the cluster
+  to real names; restored names skipped the cleaning; the log read failed on invalid UTF-8 and the
+  API server's byte limit cut the end of the log; and chat-template markers (`<|im_start|>`) went
+  through to the model.
+- **Tests:** 70 unit tests and 8 command-line tests (7 outside Linux). A command-line test had started `kausa run
+  --dry-run` against the developer's current kubeconfig context for about ten minutes, read-only,
+  after `--dry-run` became a valid flag: the tests now run the binary with a nonexistent
+  kubeconfig and without the in-cluster environment, so they can never reach a cluster, and
+  `AGENTS.md` says so.
+- **Live test**, read-only through the restricted `kubectl proxy`, now with the Pod log path, the
+  same seeded failures in a namespace created and deleted for it, and Ollama 0.9.2 with
+  `qwen3:0.6b` on the developer's machine: five incidents, five dry-run requests with no real
+  name, address or node in them, and five valid explanations with structured output (about 330 to
+  520 tokens in and 130 to 190 out each). The model capitalized a placeholder (`Pod-1`), which the
+  restore missed; fixed. The answers are those of a 0.6B model; quality is the model's.
+- Memory while watching the whole cluster and explaining: 22.1 MiB resident.
+- [Try kausa against a cluster with a local model](../how-to/try-with-a-local-model.md), new.
+
+### Pending
+
+- The third weekend: call and token budget, deduplication, metrics, Events on the failing object,
+  Helm chart, multi-architecture image, kind tests in CI.
+- `R011`'s token formats are to be checked against each issuer's documentation.
