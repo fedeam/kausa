@@ -1,0 +1,100 @@
+# Values of the kausa chart. The full reference, with what each one turns into:
+# docs/reference/helm-chart.md.
+
+image:
+  # No image is published yet: build it with `docker build --target runtime` and push it to a
+  # registry your cluster can pull from (docs/how-to/install-with-helm.md).
+  repository: ghcr.io/fedeam/kausa
+  # Defaults to the chart's appVersion.
+  tag: ""
+  # A digest (sha256:...) pins the image; it takes precedence over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The model endpoint. With no endpoint and no dryRun, kausa only logs incidents, and the chart
+# grants neither pods/log nor the Event writes.
+model:
+  # An OpenAI-compatible base URL, for example https://api.openai.com/v1 or
+  # http://ollama.ollama.svc:11434/v1. Each incident's redacted context is sent there.
+  endpoint: ""
+  # The model to ask (needed with an endpoint).
+  name: ""
+  # Allow a plain http:// endpoint: only for one in the cluster or on the same private network.
+  allowHttp: false
+  # Ask for structured output (response_format); turn off for servers that do not support it.
+  jsonSchema: true
+  # The API key, from a Secret you create (kausa never reads Secrets through the API: the kubelet
+  # mounts this one as a file).
+  apiKey:
+    existingSecret: ""
+    key: api-key
+
+# Log the redacted request of each incident instead of sending it. No Event is written.
+dryRun: false
+# Read the last lines of the failed container for crash loops, out-of-memory kills and failed
+# Jobs. false also removes pods/log from the ClusterRole.
+logs: true
+# Write each explanation as an Event on the failing workload. false also removes the Event writes
+# from the ClusterRole.
+events: true
+# How long a failure must persist before it is an incident, in seconds (0-3600).
+settleSeconds: 60
+# The call and token budget, and how long an explanation is reused for a repeated incident.
+budget:
+  callsPerHour: 30
+  callsPerDay: 200
+  maxInputTokens: 6000
+  dedupHours: 6
+
+# Prometheus counters, /healthz and /readyz. When enabled, the probes use them and a Service
+# exposes the port.
+metrics:
+  enabled: true
+  port: 9090
+  # The address to listen on. [::] accepts IPv4 and IPv6 on Linux, so the probes reach it on
+  # single-stack and dual-stack clusters; use 0.0.0.0 on nodes booted with IPv6 turned off in the
+  # kernel (ipv6.disable=1), where [::] cannot be bound.
+  bindAddress: "[::]"
+  service:
+    type: ClusterIP
+    annotations: {}
+
+serviceAccount:
+  # The name to use; defaults to the release's full name.
+  name: ""
+  annotations: {}
+
+# The starting values are hypotheses until they are measured on a Raspberry Pi 4 (resident memory
+# was 22.5 MiB in a test on 2026-10-26).
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Limit kausa's traffic with a NetworkPolicy: egress to DNS, the API server and the model
+# endpoint only, and ingress to the metrics port only. Needs a CNI that enforces NetworkPolicy.
+networkPolicy:
+  enabled: false
+  # The API server's addresses and port, as seen from Pods: `kubectl get endpointslices -n default
+  # -l kubernetes.io/service-name=kubernetes`. Required when the policy is enabled.
+  apiServer:
+    cidrs: []
+    port: 6443
+  # NetworkPolicy peers (to:) and ports of the model endpoint, for example a podSelector and
+  # namespaceSelector for one in the cluster, or an ipBlock for a hosted one. NetworkPolicy cannot
+  # select a hostname.
+  endpoint:
+    to: []
+    ports: []
+  # NetworkPolicy peers (from:) allowed to reach the metrics port; empty allows any.
+  metricsFrom: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

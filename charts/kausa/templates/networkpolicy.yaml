@@ -1,0 +1,49 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kausa.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kausa.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- if .Values.metrics.enabled }}
+    - ports:
+        - port: {{ int .Values.metrics.port }}
+          protocol: TCP
+      {{- with .Values.networkPolicy.metricsFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+  egress:
+    # DNS, to resolve the endpoint's name.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The API server.
+    - to:
+        {{- range .Values.networkPolicy.apiServer.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - port: {{ int .Values.networkPolicy.apiServer.port }}
+          protocol: TCP
+    {{- if and .Values.model.endpoint (not .Values.dryRun) }}
+    # The model endpoint.
+    - to:
+        {{- toYaml .Values.networkPolicy.endpoint.to | nindent 8 }}
+      {{- with .Values.networkPolicy.endpoint.ports }}
+      ports:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- end }}

@@ -8,8 +8,8 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. There is no published image or chart yet. What is not built yet
-> is marked as planned.
+> Event on the failing workload. The image and the Helm chart are in the repository, but nothing
+> is published yet. What is not built yet is marked as planned.
 
 ## The problem
 
@@ -87,9 +87,9 @@ full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.
   gets no tools, its answer must match a schema, and kausa never acts on it.
 - **Budgeted.** Caps on calls per hour and per day and on tokens per request; repeated incidents
   reuse the stored explanation.
-- **Small.** One static binary for linux/amd64 and linux/arm64, a minimal non-root image, and
-  memory that does not grow with the number of healthy Pods. Targets, to be measured on a
-  Raspberry Pi 4 and published.
+- **Small.** One static binary for linux/amd64 and linux/arm64, a distroless non-root image of
+  4.3 MB compressed, and memory that does not grow with the number of healthy Pods (4.4 MiB in a
+  test container). The targets are to be measured on a Raspberry Pi 4 and published.
 - **No UI.** Events, logs and Prometheus metrics, which every existing tool already reads.
 
 ## How it relates to other tools
@@ -117,12 +117,14 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha: two of four implementation weekends are done, and the code of the third; its image, Helm chart and kind tests are next. `kausa run` watches Pods
+Pre-alpha: two of four implementation weekends are done, and the third but for the first run of
+its kind test, which waits for GitHub Actions. `kausa run` watches Pods
 and Warning events, groups failures by workload, builds a redacted context with the failed
 container's log, asks the model within a call budget (or logs the request with `--dry-run`),
 reuses explanations of repeated incidents, writes each explanation as an Event on the failing
-workload, and serves Prometheus metrics with `--metrics-address`; its log lines are JSON ([Command line and log
-format](docs/reference/command-line.md)). Tested on 2026-10-26 against a live cluster with Ollama
+workload, and serves Prometheus metrics with `--metrics-address`; its log lines are JSON ([Command
+line and log format](docs/reference/command-line.md)). The image and the Helm chart are built and
+checked in CI, not published ([Install kausa with Helm](docs/how-to/install-with-helm.md)). Tested on 2026-10-26 against a live cluster with Ollama
 and a small local model ([Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md)). What has changed so far is in the
 [Changelog](CHANGELOG.md).
@@ -148,6 +150,10 @@ logs, Events, ReplicaSets and Jobs, and, with `--endpoint` and without `--no-eve
 to create and patch Events; it has no flag to pick a context, so check
 `kubectl config current-context` first, or follow [Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of it.
+
+To run it in a cluster, build the image (`docker build --target runtime -t <registry>/kausa .`),
+push it, and install the chart in `charts/kausa`: [Install kausa with
+Helm](docs/how-to/install-with-helm.md).
 
 ## Roadmap
 

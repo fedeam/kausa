@@ -5,11 +5,13 @@ Why CI is built this way, and where it runs for pull requests and for `main`: [0
 one pinned container build, on GitHub Actions and Gitea
 Actions](../adr/0003-ci-in-one-pinned-container-build.md).
 
-Status as of 2026-10-26: two implementation weekends are done (`kausa run` detects, groups,
-redacts and explains). The unit tests cover the rules, grouping, fingerprints, owner correlation,
-redaction, the context, the prompt, the validation of answers and the HTTP client (against a
-local test server) without a cluster; there are no end-to-end tests against a cluster yet: the kind tests arrive on
-the third implementation weekend.
+Status as of 2026-10-26: two implementation weekends are done, and the third but for its first
+kind run. The unit tests cover the rules, grouping, fingerprints, owner correlation, redaction,
+the context, the prompt, the validation of answers, the budget, the Events, the metrics and the
+HTTP client (against a local test server) without a cluster. The end-to-end test in kind
+(`tests/e2e/run.sh`) has not run yet: it runs on GitHub Actions, which do not start jobs while the
+account's included minutes for private repositories are used up (they renew on the 1st; public
+repositories do not use them).
 
 ## Before you start
 
@@ -19,11 +21,14 @@ the third implementation weekend.
   `rust-toolchain.toml` leaves nothing behind.
 - **cargo-deny** and **cargo-audit**, for the dependency policy and the RustSec advisories.
 - **gitleaks**, for the secret scan.
-- **Docker** (BuildKit or the classic builder), for the CI target.
+- **Docker** (BuildKit or the classic builder), for the CI target and the image.
+- **helm**, for the chart's lint (the CI image pins 4.3.1). For the end-to-end test only:
+  **kind** (the version and node image CI pins are in `.github/workflows/e2e.yml`), and
+  **kubectl** and **python3** (CI uses the ones preinstalled on GitHub's `ubuntu-24.04` runner).
 
 Versions on the maintainer's machine, verified on 2026-10-23: cargo-deny 0.20.2, cargo-audit
 0.22.2, gitleaks 8.30.1 and Docker 29.9.2 on macOS (arm64), the same tool versions as the CI image;
-his Rust comes from Homebrew, one patch release behind `rust-toolchain.toml`, so the CI build is
+the maintainer's Rust comes from Homebrew, one patch release behind `rust-toolchain.toml`, so the CI build is
 the check that uses the pinned compiler. Install cargo tools with `--locked` so they build with the
 dependency versions their authors tested:
 
@@ -55,6 +60,7 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    cargo fmt --all -- --check
    cargo deny --locked check
    cargo audit
+   helm lint --strict charts/kausa
    cargo clippy --locked --all-targets --all-features -- -D warnings
    cargo test --locked --all-features
    ```
@@ -69,9 +75,29 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    that checks `main`. GitHub's hosted runners, which check pull requests, are linux/amd64; to
    reproduce them, add `--platform linux/amd64` (emulated, and much slower).
 
+5. Build the controller image, for your machine's architecture:
+
+   ```sh
+   docker build --target runtime -t kausa:dev .
+   docker run --rm kausa:dev --version
+   ```
+
+6. Optionally, run the end-to-end test. It creates a kind cluster named `kausa-e2e` (and deletes
+   it at the end), installs the chart with the image, runs a fake model endpoint on your machine,
+   and checks the Events, what the endpoint received, the ClusterRole and the metrics:
+
+   ```sh
+   KIND_NODE_IMAGE=<the node image pinned in .github/workflows/e2e.yml> tests/e2e/run.sh
+   ```
+
+   It ends with `e2e: ok`. The fake endpoint runs on your machine. On Linux the cluster reaches it
+   through the kind network's gateway; on Docker Desktop, whose gateway belongs to Docker's VM,
+   the script uses the address the nodes give `host.docker.internal` instead. Only the Linux path
+   has run (on GitHub's runners); the Docker Desktop one is a hypothesis.
+
 ## Verify
 
-Every command in steps 2 to 4 exits with code `0`. `gitleaks` ends with `no leaks found`.
+Every command in steps 2 to 5 exits with code `0`. `gitleaks` ends with `no leaks found`.
 
 ## If something fails
 

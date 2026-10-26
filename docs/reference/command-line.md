@@ -34,11 +34,11 @@ Options of `kausa run`:
 | `--max-calls-per-day <N>` | Model calls allowed in any 24 hours, `200` by default |
 | `--max-input-tokens <N>` | Cap on a request's estimated input tokens (a quarter of its bytes), `6000` by default: the context is cut to fit, and an incident that still does not fit is skipped |
 | `--dedup-hours <N>` | How long an incident's explanation is reused when the same incident (same fingerprint) comes back, `6` by default; `0` turns the reuse off |
-| `--metrics-address <ADDR>` | Serve `/metrics`, `/healthz` and `/readyz` on this IP address and port, for example `0.0.0.0:9090` in a Pod or `127.0.0.1:9090` on a machine; not served by default |
+| `--metrics-address <ADDR>` | Serve `/metrics`, `/healthz` and `/readyz` on this IP address and port, for example `[::]:9090` in a Pod (IPv4 and IPv6 on Linux) or `127.0.0.1:9090` on a machine; not served by default |
 
 Without `--endpoint` or `--dry-run`, kausa only logs incidents. The Events are written as
 `kausa` with the reporting instance from the environment variable `POD_NAME` (set it from the
-Pod's name with the downward API, as the Helm chart will), or `kausa`. `--model`, `--api-key-file`,
+Pod's name with the downward API, as the Helm chart does), or `kausa`. `--model`, `--api-key-file`,
 `--allow-http` and `--no-json-schema` alone are usage errors.
 
 `kausa run` connects with the in-cluster service account when it runs in a Pod (when

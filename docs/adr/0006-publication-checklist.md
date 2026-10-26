@@ -6,7 +6,7 @@
 ## Context
 
 - The GitHub repository `fedeam/kausa` is private until the maintainer decides that the project is
-  validated, then public. The copy on his private Gitea instance, which runs the arm64 CI, stays
+  validated, then public. The copy on the maintainer's private Gitea instance, which runs the arm64 CI, stays
   private ([0007. Take contributions and merge pull requests on
   GitHub](0007-contributions-and-merges-on-github.md)).
 - Making a repository public exposes its whole history, commit metadata included, and every ref

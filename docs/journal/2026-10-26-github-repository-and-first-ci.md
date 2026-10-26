@@ -42,7 +42,7 @@ runs. Repositories touched: kausa.
   in [0007. Take contributions and merge pull requests on
   GitHub](../adr/0007-contributions-and-merges-on-github.md). Its author is the noreply address,
   as on every recent commit the maintainer made on GitHub's web (checked before merging); its
-  author name is the name of his GitHub profile, and its committer `GitHub <noreply@github.com>`.
+  author name is the name of the maintainer's GitHub profile, and its committer `GitHub <noreply@github.com>`.
 
 ## Decisions
 
@@ -51,7 +51,7 @@ runs. Repositories touched: kausa.
   that never include Secrets](../adr/0009-least-privilege-rbac.md) accepted by the maintainer,
   with log collection on by default for the crash-type and Job detections only.
 - The maintainer delegated the rest of the work to agents on 2026-10-26: they merge their own pull
-  requests and sync `main`, and ask only about decisions. The repository stays private until he
+  requests and sync `main`, and ask only about decisions. The repository stays private until the maintainer
   validates it.
 
 ## Pending
@@ -120,7 +120,7 @@ Request: carry on with everything, without asking but for decisions; the reposit
 - **A run against a real cluster.** The pure core is tested without one, but `kausa run` has not
   watched a live cluster yet: in this session, extracting a single-context kubeconfig of the
   maintainer's cluster and downloading kind were both refused by the agent's permission rules. The
-  maintainer can run `kausa run` himself (read-only), or allow kind; otherwise the kind tests of
+  maintainer can run `kausa run` themselves (read-only), or allow kind; otherwise the kind tests of
   the third weekend are the first live run.
 - **Hypotheses from the first weekend:** that memory stays flat with the number of healthy Pods
   (measured on the fourth weekend); that the kubelet and scheduler reasons in the rules are the
@@ -293,5 +293,53 @@ GitHub Actions; those come in their own change.
 
 ### Pending
 
-- The image, the Helm chart and the kind tests (the rest of the third weekend).
+- The image, the Helm chart and the kind tests: done the same day, below.
+
+## Later the same day: the image, the Helm chart and the kind test
+
+The rest of the third weekend, with the choices above
+([0010. Ship a static binary on distroless, with a Helm chart, built in CI and not published
+yet](../adr/0010-packaging.md)).
+
+### What was done
+
+- **Image:** the Dockerfile's `runtime` target, a static musl release build on distroless static
+  `nonroot`, after the `ci` target so that the classic builder's `--target ci` does not compile
+  it. Built locally for linux/arm64: 9.6 MB uncompressed, 4.3 MB compressed, the binary
+  `statically linked`, user 65532, 1 minute 28 seconds on the maintainer's machine.
+- **Live test of the image**, as a container with a read-only root filesystem and no
+  capabilities, against the seeded failures through the `kubectl proxy` (now also accepting the
+  host name Docker Desktop gives the host), with Ollama and `--max-calls-per-hour 3`: five
+  incidents, three explanations and two skipped for the budget, five Events named
+  `kausa.<fingerprint>.<hash>` (`kausa.skipped.…` for the two skipped), the proxy refusing none of
+  kausa's requests, and 4.4 MiB of memory in the container (`docker stats`). The test namespace
+  was deleted afterwards.
+- **Helm chart** in `charts/kausa`, with its reference and an install guide. Every combination of
+  the values that change the arguments was rendered and passed to the binary, which accepted
+  them; the binary takes a flag and its value as two arguments, not `--flag=value`, so the chart
+  writes them that way. A server-side dry run of the rendered chart (with the NetworkPolicy)
+  against Kubernetes v1.36 (k3s) passed, creating nothing.
+- **CI:** helm 4.3.1, pinned, in the `ci` target, which lints the chart and renders it with four
+  value sets; the Gitea job builds the arm64 image after the checks; on GitHub, an `image` job
+  builds it natively on amd64 and arm64, and an `e2e` workflow runs `tests/e2e/run.sh` in kind
+  (pinned kind v0.33.0 and `kindest/node` v1.36.4). Every pin was checked against its published
+  checksum or digest.
+- **The end-to-end test** did not run here: kind is not installed on the maintainer's machine,
+  and installing it was left out of this session. It runs on GitHub Actions once they run for the account; until then
+  the chart is checked by the lint, the renders, the parser and the server-side dry run.
+- The texts that said "he" or "his" of the maintainer now say "the maintainer" or "their".
+- **Review** of the change before the pull request, with each finding checked by another
+  reviewer: 11 confirmed, 2 rejected, all fixed. The ones that changed behaviour: the metrics
+  listened on `0.0.0.0` only, so on an IPv6 cluster the probes would have failed (now `[::]` by
+  default, which accepts both families, checked in the image, and `metrics.bindAddress` to
+  change it); and the kind test could not have passed on Docker Desktop, where the kind
+  network's gateway is not the host (now the script uses the address the nodes give
+  `host.docker.internal` there, a hypothesis until it runs). The rest were texts that still
+  called the image and the chart future.
+
+### Pending
+
+- The first run of the kind test and of the GitHub image job (GitHub Actions, from 2026-11-01).
+- The fourth weekend: memory and CPU on a Raspberry Pi 4, and tokens per incident compared with
+  k8sgpt.
 

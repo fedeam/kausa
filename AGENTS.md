@@ -15,8 +15,8 @@ a redacted context to one OpenAI-compatible model endpoint within a call and tok
 writes the explanation as a Kubernetes Event on the failing object. Open source,
 `MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents, redacts their
 context, explains them with a model within a call budget (or logs the request with `--dry-run`),
-reuses explanations of repeated incidents, writes them as Events and serves metrics; the image,
-the Helm chart and the kind tests are not there yet.
+reuses explanations of repeated incidents, writes them as Events and serves metrics. The image and the Helm
+chart are in the repository (not published); the kind test has not run yet.
 Maintainer: FedeAM (GitHub: `fedeam`).
 
 ## How to work
@@ -95,10 +95,16 @@ gitleaks git --redact .
 cargo fmt --all -- --check
 cargo deny --locked check
 cargo audit
+helm lint --strict charts/kausa
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 docker build --target ci .
 ```
+
+The ci target also renders the chart with the value sets that change its templates (see the
+Dockerfile). The image is `docker build --target runtime .`, and the end-to-end test in kind is
+`tests/e2e/run.sh` ([Set up a development environment and run the
+checks](docs/how-to/develop.md)); GitHub runs both.
 
 The checks that run no code from the crate or its dependencies come first: clippy and the tests
 compile and run build scripts, procedural macros and tests, which could tamper with whatever runs
@@ -115,8 +121,8 @@ after each sync, is linux/arm64.
   fake values: `example.com`, the documentation ranges `192.0.2.0/24` and `2001:db8::/32`, AWS
   account `123456789012`, and token strings that are visibly fake (a test for a token format uses
   a value built to match the format, never one that was ever issued).
-- **No internal hostnames, private IP addresses, the maintainer's usernames on his own systems,
-  the names of his clusters or personal data** in any file: the repository will be public. The
+- **No internal hostnames, private IP addresses, the maintainer's usernames on their own systems,
+  the names of their clusters or personal data** in any file: the repository will be public. The
   only maintainer identity allowed is "FedeAM" and the GitHub handle `fedeam`.
 - **Pin by digest or SHA:** container images by `@sha256:` digest, Actions by full commit SHA,
   crates through `Cargo.lock` and `--locked`. Take digests and SHAs from the registry or the forge
@@ -135,7 +141,7 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md). The maintainer's c
 
 - **GitHub is where changes land.** Issues, pull requests, reviews and merges happen on
   [`fedeam/kausa`](https://github.com/fedeam/kausa). Pull requests are squash-merged there.
-- **Nobody pushes new commits to `main`**, the maintainer included: every change, his own too, is
+- **Nobody pushes new commits to `main`**, the maintainer included: every change, the maintainer's own too, is
   a pull request from a branch of `github/main`, pushed with `git push origin <branch>`. The only
   push to `main` is the sync, which carries commits GitHub already has.
 - **Gitea is a private copy that runs the arm64 CI.** Its issues, pull requests and wiki are

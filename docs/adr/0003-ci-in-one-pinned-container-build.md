@@ -22,7 +22,7 @@ their final form.
   repository's macOS CI; they renew on the 1st of each month, and public repositories on
   GitHub-hosted runners do not use them. No payment is involved.
 - **Everything in the repository becomes public**, workflow files included. The Gitea hostname,
-  private addresses and the maintainer's usernames on his own systems must not appear in any
+  private addresses and the maintainer's usernames on their own systems must not appear in any
   file.
 - **The Gitea job token.** On Gitea 1.23 the automatic token of an Actions job can read and write
   the repository in every run except pull requests from forks, and a workflow cannot narrow it
@@ -49,8 +49,8 @@ FedeAM decided this on 2026-10-23, reusing kaution's setup.
 - **No `pull_request` trigger on Gitea.** Contributors' pull requests and Dependabot's branches
   never reach Gitea, so the self-hosted runner builds outside code only after it is merged on
   GitHub and synced. The maintainer's own branches are pushed to Gitea too, and Gitea reads the
-  workflow from the pushed commit: a branch of his that changes `.gitea/workflows/ci.yml` runs on
-  the runner, so he reviews such a change before pushing it ([Maintain the
+  workflow from the pushed commit: a branch of the maintainer's that changes `.gitea/workflows/ci.yml` runs on
+  the runner, so the maintainer reviews such a change before pushing it ([Maintain the
   repository](../how-to/maintain.md#open-a-pull-request-of-your-own)).
 - **The automatic job token** fetches the commit. It goes in an HTTP header through the
   environment (`http.extraHeader`), never in argv or `.git/config`, and is removed from the

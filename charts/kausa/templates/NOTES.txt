@@ -1,0 +1,18 @@
+kausa is running in {{ .Release.Namespace }}.
+{{- if include "kausa.writesEvents" . }}
+
+Its explanations are Events on the failing workloads, for example:
+
+  kubectl describe deployment -n <namespace> <name>
+  kubectl get events.events.k8s.io -A --field-selector reportingController=kausa
+{{- else if .Values.dryRun }}
+
+Dry-run: kausa logs the redacted request of each incident and sends nothing:
+
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "kausa.fullname" . }}
+{{- else }}
+
+kausa logs incidents (no endpoint is configured, or events is false):
+
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "kausa.fullname" . }}
+{{- end }}

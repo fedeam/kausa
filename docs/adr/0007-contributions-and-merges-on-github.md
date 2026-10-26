@@ -5,7 +5,7 @@
 
 ## Context
 
-- **The maintainer's standard** keeps every repository on his private Gitea instance, the source
+- **The maintainer's standard** keeps every repository on the maintainer's private Gitea instance, the source
   of truth, and mirrors it to GitHub through a second push URL.
 - **Outside contributors can only reach GitHub.** The Gitea instance is private and not reachable
   from the internet, so issues, pull requests (PRs) and reviews from anyone but the maintainer can
@@ -29,7 +29,7 @@
 Contributors work on GitHub ([`fedeam/kausa`](https://github.com/fedeam/kausa)): issues, PRs and
 reviews. PRs are merged on GitHub with the squash button, and the PR title, which becomes the
 commit header on `main` with GitHub's ` (#<number>)` after it, must be a Conventional Commit with a
-scope. Nobody pushes new commits to `main` directly, the maintainer included: his changes also go
+scope. Nobody pushes new commits to `main` directly, the maintainer included: the maintainer's changes also go
 through a PR. After each merge, the maintainer syncs `main` to Gitea, where the arm64 CI runs:
 
 ```sh

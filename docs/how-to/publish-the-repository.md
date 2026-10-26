@@ -55,13 +55,13 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
 
 - The [Contributor Covenant Code of Conduct](../../CODE_OF_CONDUCT.md) has a real contact address:
   `git grep -n 'TODO(maintainer)' -- CODE_OF_CONDUCT.md` prints nothing. Status as of
-  2026-10-23: done, `conduct@fedeam.com`, a forwarding address on the maintainer's domain, so his
+  2026-10-23: done, `conduct@fedeam.com`, a forwarding address on the maintainer's domain, so their
   personal address is not published. Before publishing, check that it still forwards: a message
   to it from another account arrives.
 - A **private patterns file** outside the repository (for example
   `~/kausa-private-patterns.txt`) lists, one extended regular expression per line, what must
   never be published: the internal domain and the Gitea hostname, the maintainer's usernames on
-  his own systems, his personal email address, and the names of his clusters, namespaces and
+  their own systems, their personal email address, and the names of their clusters, namespaces and
   services. It is never committed: it is itself the list of secrets
   to look for.
 
@@ -206,7 +206,7 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
 8. **Add a branch ruleset on `main`.** Rulesets need a public repository or GitHub Pro: on
    2026-10-26, while private, `gh api repos/fedeam/kausa/rulesets` answered "Upgrade to GitHub
    Pro or make this repository public to enable this feature". The ruleset requires a pull
-   request (with no required approval: a sole maintainer cannot approve his own pull requests),
+   request (with no required approval: a sole maintainer cannot approve their own pull requests),
    the `ci` check of the `CI` workflow (the check run name of the first run, on 2026-10-26, which
    GitHub took from the job id in `.github/workflows/ci.yml`), a linear history, and blocks force
    pushes and deletion:

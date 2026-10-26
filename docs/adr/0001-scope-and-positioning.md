@@ -29,7 +29,7 @@ before deciding anything ([Competitive landscape](../research/2026-10-23-competi
   repeated incidents; the explanation written as a **Kubernetes Event on the failing object**, so
   `kubectl describe` shows it; and permissions that never include Secrets or ConfigMaps.
 - Built naively, the project would be "k8sgpt-operator in Rust" and would lose to an active CNCF
-  project. Expected adoption is low; the value as a tool the maintainer uses on his own clusters,
+  project. Expected adoption is low; the value as a tool the maintainer uses on their own clusters,
   and as a public example of a careful controller, is high.
 
 ## Alternatives considered

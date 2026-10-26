@@ -11,8 +11,8 @@ Status as of 2026-10-26: **in development** (pre-alpha). Two of four implementat
 done, and the code of the third: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
-failing workload; the image, the Helm chart and the kind tests are next, and nothing is released
-yet. The
+failing workload. The image and the Helm chart exist; the kind test waits for GitHub Actions, and
+nothing is released yet. The
 private repositories exist on GitHub and on the maintainer's Gitea instance, and contributions and
 merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -25,7 +25,8 @@ implementation weekend 3 and weekend 4 of v0.1; and publication of the GitHub re
 ## Key facts
 
 - **What it is:** a Rust controller on kube-rs, one static binary for linux/amd64 and
-  linux/arm64, planned to ship as a minimal non-root image with a Helm chart.
+  linux/arm64, in a distroless non-root image (built in CI, not published) with a Helm chart in
+  `charts/kausa`.
 - **URL:** none: kausa runs in its users' clusters.
 - **Repository:** [`fedeam/kausa`](https://github.com/fedeam/kausa) on GitHub, private until the
   project is validated, then public. A private copy on the maintainer's Gitea instance, synced by
@@ -37,12 +38,13 @@ implementation weekend 3 and weekend 4 of v0.1; and publication of the GitHub re
 - **Maintainer:** FedeAM (GitHub: `fedeam`).
 - **License:** `MIT OR Apache-2.0` ([`LICENSE-MIT`](../LICENSE-MIT),
   [`LICENSE-APACHE`](../LICENSE-APACHE)).
-- **CI:** `docker build --target ci .` on two forges. GitHub Actions (linux/amd64) checks every
-  pull request once Actions run for the account; Gitea Actions (linux/arm64) checks `main` after
-  each sync and once a week.
+- **CI:** `docker build --target ci .` on two forges, then the image (`--target runtime`).
+  GitHub Actions (linux/amd64, plus an arm64 image build and the kind test) checks every pull
+  request once Actions run for the account; Gitea Actions (linux/arm64) checks `main` after each
+  sync and once a week.
 - **Dependency updates:** Dependabot on GitHub, weekly, for Cargo, GitHub Actions, and the
-  `rust` image together with `rust-toolchain.toml`; the three tools pinned in the `Dockerfile` by
-  hand ([Maintain the repository](how-to/maintain.md)).
+  `rust` image together with `rust-toolchain.toml`; the tools pinned in the `Dockerfile` and the
+  e2e workflow, and the distroless digest, by hand ([Maintain the repository](how-to/maintain.md)).
 - **Changelog:** [`CHANGELOG.md`](../CHANGELOG.md), in the Keep a Changelog format.
 - **Deploy:** none from this repository; users install kausa in their clusters.
 - **Secrets:** none needed to build or test. To run against a hosted provider, its API key, in a
@@ -79,6 +81,9 @@ checks](how-to/develop.md).
   [Permissions](reference/permissions.md): what leaves the cluster and what kausa may read.
 - [Try kausa against a cluster with a local model](how-to/try-with-a-local-model.md): a
   read-only run with Ollama.
+- [Install kausa with Helm](how-to/install-with-helm.md) and the [Helm
+  chart](reference/helm-chart.md) values; [0010. Ship a static binary on distroless, with a Helm
+  chart, built in CI and not published yet](adr/0010-packaging.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

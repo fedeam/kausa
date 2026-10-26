@@ -9,8 +9,9 @@ Status as of 2026-10-26: **the code of the first three implementation weekends i
 watching, detection, the settle window, owner correlation, fingerprints, the context with log
 tails, redaction, the prompt, the client, the validation of answers, dry-run, the call and token
 budget, deduplication, the Events on the failing workload and the metrics ([Command line and log
-format](../reference/command-line.md)). The image, the Helm chart and the kind tests of the third
-weekend come in their own change; the measurement on a Raspberry Pi is the fourth. This page describes the target
+format](../reference/command-line.md)). The image and the Helm chart are built and checked in CI,
+not published; the kind test waits for its first run on GitHub Actions; the measurement on a
+Raspberry Pi is the fourth weekend. This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
 incident](../adr/0001-scope-and-positioning.md).
@@ -175,7 +176,7 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 ## Configuration and modes
 
-- Command-line flags, which the Helm chart (next) sets: the endpoint, the model, whether plain HTTP is
+- Command-line flags, which the Helm chart sets ([Helm chart](../reference/helm-chart.md)): the endpoint, the model, whether plain HTTP is
   allowed, the settle window, log collection and structured output ([Command line and log
   format](../reference/command-line.md)). The configuration file planned at first was dropped on
   2026-10-26: flags need no parser and no ConfigMap, and keep what kausa is told to do visible in
@@ -188,16 +189,24 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 ## Packaging
 
-- **Binary:** one static executable for linux/amd64 and linux/arm64, with no OpenSSL (rustls).
-- **Image:** a minimal base (distroless static or scratch with CA certificates, chosen on the
-  third weekend), pinned by digest, running as a numeric non-root user, multi-architecture.
-  Target, to be measured: around 10 MB compressed, like the Rust controllers found in the
-  [Competitive landscape](../research/2026-10-23-competitive-landscape.md).
-- **Install:** a Helm chart with the permissions in [Permissions](../reference/permissions.md), the
-  pod security settings and declared requests and limits.
-- **Tests:** unit tests for rules, redaction and validation with fixtures; end-to-end tests in a
-  kind cluster that create failing workloads, run kausa against a fake model endpoint and check
-  the Events; the chart's role checked against the reference.
+Decided on 2026-10-26: [0010. Ship a static binary on distroless, with a Helm chart, built in CI
+and not published yet](../adr/0010-packaging.md).
+
+- **Binary:** one static executable, linked against musl, for linux/amd64 and linux/arm64, with no
+  OpenSSL (rustls with ring): a release build with LTO, stripped, that aborts on a panic.
+- **Image:** the binary alone on `gcr.io/distroless/static-debian13:nonroot` (CA certificates and
+  the non-root user, no shell), pinned by digest, running as user 65532. Each architecture is
+  built natively. 4.3 MB compressed for linux/arm64 on 2026-10-26, under the 10 MB of the Rust
+  controllers found in the [Competitive
+  landscape](../research/2026-10-23-competitive-landscape.md). Built in CI, not published.
+- **Install:** the Helm chart in `charts/kausa`, with the permissions in
+  [Permissions](../reference/permissions.md) (only those the settings use), the restricted Pod
+  Security settings, and declared requests and limits ([Helm chart](../reference/helm-chart.md)).
+- **Tests:** unit tests for rules, redaction, validation, the budget, Events and metrics with
+  fixtures; the chart linted and rendered in CI; an end-to-end test in kind (`tests/e2e/run.sh`)
+  that installs the chart, creates failing workloads, runs kausa against a fake model endpoint,
+  and checks the Events, that no real name reached the endpoint, the chart's role against the
+  reference, and the metrics.
 
 ## Exit codes
 

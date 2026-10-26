@@ -1,6 +1,6 @@
 # Maintain the repository
 
-The maintainer's recipes: triage issues, review and merge pull requests on GitHub, open his own
+The maintainer's recipes: triage issues, review and merge pull requests on GitHub, open their own
 pull requests, sync `main` to Gitea, check the arm64 CI run there, bump the tools pinned in the CI
 image and, later, cut a release. Why contributions and merges happen on GitHub, and why nobody
 pushes new commits to `main`: [0007. Take contributions and merge pull requests on
@@ -251,8 +251,11 @@ sync.
 
 ## Bump the pinned tools
 
-Dependabot does not see cargo-deny, cargo-audit and gitleaks: the `Dockerfile` pins each one by
-`ARG`, with a version and a SHA-256 checksum per architecture. Nothing reports their new releases,
+Dependabot does not see cargo-deny, cargo-audit, gitleaks and helm: the `Dockerfile` pins each
+one by `ARG`, with a version and a SHA-256 checksum per architecture. Nor does it see kind, its
+node image and helm in `.github/workflows/e2e.yml`, or the distroless digest of the `runtime`
+target (its docker updates are only for the `rust` image); those are covered under
+[Bump the packaging pins](#bump-the-packaging-pins). Nothing reports their new releases,
 so check them from time to time, for example with each Rust update.
 
 1. Find the latest versions:
@@ -303,14 +306,45 @@ so check them from time to time, for example with each Rust update.
 5. Open a pull request ([Open a pull request of your own](#open-a-pull-request-of-your-own)), for
    example `build(deps): bump gitleaks to <version>`, merge it and sync.
 
+## Bump the packaging pins
+
+The same idea for the image and the end-to-end test. From time to time, and when distroless or
+kind publish a security fix:
+
+1. **distroless:** the digest of the multi-architecture index of the tag in the `runtime` target:
+
+   ```sh
+   docker buildx imagetools inspect gcr.io/distroless/static-debian13:nonroot --format '{{json .Manifest.Digest}}'
+   ```
+
+   Replace the digest after `nonroot@` in the `Dockerfile`.
+2. **helm:** the version and both checksums in the `Dockerfile` (the `.sha256sum` file next to
+   each archive on `get.helm.sh`), and the same version and the amd64 checksum in
+   `.github/workflows/e2e.yml`:
+
+   ```sh
+   for arch in amd64 arm64; do curl -fsSL "https://get.helm.sh/helm-v<version>-linux-$arch.tar.gz.sha256sum"; done
+   ```
+
+3. **kind and its node image:** the version and the checksum of `kind-linux-amd64` (the
+   `.sha256sum` asset of the release), and the `kindest/node` image with the digest the release
+   notes list for that kind version:
+
+   ```sh
+   gh release download v<version> --repo kubernetes-sigs/kind --pattern 'kind-linux-amd64.sha256sum' --output -
+   gh release view v<version> --repo kubernetes-sigs/kind --json body --jq .body | grep 'kindest/node:'
+   ```
+
+4. Build both targets (`docker build --target ci .` and `docker build --target runtime .`) and
+   open a pull request, for example `build(deps): bump distroless to <date>`.
+
 ## Cut a release
 
-Not scheduled yet: the roadmap in [0001. Build a small, read-only explainer that writes one
-redacted explanation per incident](../adr/0001-scope-and-positioning.md) builds the
-multi-architecture image and the Helm chart on the third weekend but has no release step; nothing
-here has been run. There is no release tooling yet, the crate is not published (`publish = false` in
-`Cargo.toml`), and how the multi-architecture image and the Helm chart are built, signed and
-published will be decided before the first release. The steps below are a placeholder:
+Not scheduled yet; nothing here has been run. The image and the Helm chart are built in CI but
+not published ([0010. Ship a static binary on distroless, with a Helm chart, built in CI and not
+published yet](../adr/0010-packaging.md)), there is no release tooling yet, the crate is not
+published (`publish = false` in `Cargo.toml`), and where the multi-architecture image and the
+chart are published, and how they are signed, will be decided before the first release. The steps below are a placeholder:
 
 1. In `CHANGELOG.md`, move the entries under `Unreleased` to a section for the new version with
    its date, and update the links at the bottom.

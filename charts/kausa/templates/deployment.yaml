@@ -1,0 +1,152 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kausa.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+spec:
+  # One instance: Recreate stops the old Pod before the new one starts, so a rollout never runs
+  # two (docs/reference/permissions.md, "The pod that runs kausa").
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- include "kausa.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kausa.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kausa.serviceAccountName" . }}
+      # kausa talks to the API server with this token.
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the API key file readable by kausa's group, and by no one else.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kausa
+          image: {{ include "kausa.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - run
+            - --settle-seconds
+            - {{ int .Values.settleSeconds | quote }}
+            {{- with .Values.model.endpoint }}
+            - --endpoint
+            - {{ . | quote }}
+            {{- end }}
+            {{- if or .Values.model.endpoint .Values.dryRun }}
+            {{- with .Values.model.name }}
+            - --model
+            - {{ . | quote }}
+            {{- end }}
+            {{- if .Values.model.allowHttp }}
+            - --allow-http
+            {{- end }}
+            {{- if not .Values.model.jsonSchema }}
+            - --no-json-schema
+            {{- end }}
+            {{- if .Values.model.apiKey.existingSecret }}
+            - --api-key-file
+            - /var/run/secrets/kausa/api-key
+            {{- end }}
+            - --max-calls-per-hour
+            - {{ int .Values.budget.callsPerHour | quote }}
+            - --max-calls-per-day
+            - {{ int .Values.budget.callsPerDay | quote }}
+            - --max-input-tokens
+            - {{ int .Values.budget.maxInputTokens | quote }}
+            - --dedup-hours
+            - {{ int .Values.budget.dedupHours | quote }}
+            {{- end }}
+            {{- if .Values.dryRun }}
+            - --dry-run
+            {{- end }}
+            {{- if not .Values.logs }}
+            - --no-logs
+            {{- end }}
+            {{- if not .Values.events }}
+            - --no-events
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-address
+            - {{ printf "%s:%d" .Values.metrics.bindAddress (int .Values.metrics.port) | quote }}
+            {{- end }}
+          env:
+            # The reporting instance of kausa's Events.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ int .Values.metrics.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 3
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if and (or .Values.model.endpoint .Values.dryRun) .Values.model.apiKey.existingSecret }}
+          volumeMounts:
+            - name: api-key
+              mountPath: /var/run/secrets/kausa
+              readOnly: true
+          {{- end }}
+      {{- if and (or .Values.model.endpoint .Values.dryRun) .Values.model.apiKey.existingSecret }}
+      volumes:
+        - name: api-key
+          secret:
+            secretName: {{ .Values.model.apiKey.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.model.apiKey.key }}
+                path: api-key
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

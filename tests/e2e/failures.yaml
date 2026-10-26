@@ -1,0 +1,41 @@
+# Seeded failures for the end-to-end test. Both use kausa's own image, already loaded into the
+# kind cluster, with an argument it refuses (exit code 2), so the test pulls no other image.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: e2e-shop
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crasher
+  namespace: e2e-shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: crasher}
+  template:
+    metadata:
+      labels: {app: crasher}
+    spec:
+      containers:
+        - name: app
+          image: kausa:e2e
+          imagePullPolicy: Never
+          args: ["--no-such-flag"]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: failing-job
+  namespace: e2e-shop
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: task
+          image: kausa:e2e
+          imagePullPolicy: Never
+          args: ["--no-such-flag"]

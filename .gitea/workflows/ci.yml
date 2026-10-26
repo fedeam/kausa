@@ -6,11 +6,12 @@ name: CI
 # no pull_request trigger and contributors' pull requests never reach Gitea, so outside code runs
 # on this runner only after it is merged on GitHub and synced. The maintainer's own branches are
 # pushed to Gitea too; on them the workflow runs only if the branch itself changes this file
-# (Gitea reads it from the pushed commit), which he reviews before pushing. Plain shell on purpose,
+# (Gitea reads it from the pushed commit), which the maintainer reviews before pushing. Plain shell on purpose,
 # with no `uses:`: no action code is fetched at run time. What the build downloads is pinned in the
 # Dockerfile, except the Debian packages, the RustSec advisory database and the crates.io index,
 # which are fetched live (see docs/adr/0003-ci-in-one-pinned-container-build.md). Every check lives
-# in the Dockerfile's ci target; nothing is tagged or pushed.
+# in the Dockerfile's ci target, and the runtime target builds the arm64 image; nothing is tagged
+# or pushed.
 #
 # Needs one repository Actions variable, REPO_CLONE_URL: this repository's HTTP(S) clone URL as the
 # runner reaches it, without credentials. It is a variable so that no internal hostname is
@@ -80,3 +81,8 @@ jobs:
           # untagged image that every run leaves is removed by the runner's periodic cleanup of
           # dangling images; until then its tool layers serve as cache.
           docker build --force-rm --target ci .
+
+          # The arm64 controller image (docs/adr/0010-packaging.md). The classic builder runs the
+          # stages before the target too, so the ci stage comes from the cache of the build above.
+          # Not tagged, not pushed.
+          docker build --force-rm --target runtime .

@@ -1,13 +1,13 @@
 [package]
 name = "kausa"
-# Pre-release of the planned v0.1: detection runs (first weekend); nothing is released yet.
+# Pre-release of the planned v0.1; nothing is released yet.
 version = "0.1.0-dev"
 edition = "2024"
 # Minimum supported Rust version: the toolchain pinned in rust-toolchain.toml when this was
 # written. It can stay behind when the toolchain moves on (clippy's incompatible_msrv lint, part
 # of the CI's -D warnings, flags code that needs a newer compiler).
 rust-version = "1.99"
-description = "A tiny, read-only Kubernetes controller that explains failing workloads with an LLM"
+description = "A tiny Kubernetes controller that explains failing workloads with an LLM"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fedeam/kausa"
 readme = "README.md"
@@ -40,6 +40,14 @@ unicode-normalization = "0.1.26"
 # native TLS; the client is built with `no_proxy()`, so no proxy from the environment either.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+
+# The binary in the image: one optimized, stripped executable. A panic aborts, so it ends the
+# process and Kubernetes restarts the Pod, instead of unwinding.
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -7,7 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Detection, grouping, redaction, explanations, cost controls and Events. Nothing is released yet.
+Detection, grouping, redaction, explanations, cost controls, Events, the image and the Helm
+chart. Nothing is released yet.
 
 ### Added
 
@@ -28,6 +29,11 @@ Detection, grouping, redaction, explanations, cost controls and Events. Nothing 
   `events.k8s.io/v1` Event on the failing workload (`--no-events` to turn it off), and Prometheus
   metrics with health and readiness endpoints (`--metrics-address`).
 - `kausa --help` and `kausa --version`.
+- The controller image (`docker build --target runtime`): a static binary on distroless, non-root,
+  for linux/amd64 and linux/arm64. Not published.
+- A Helm chart in `charts/kausa`, with the permissions of the reference, the restricted Pod
+  Security settings, the API key as a file from your Secret, a metrics Service and an optional
+  NetworkPolicy.
 - Documentation: scope and positioning after a competitive survey, the planned architecture, the
   detection and redaction rules, the permissions and the data sent to the model provider for
   v0.1, how to build from source and run the checks, a security policy with a threat model, a

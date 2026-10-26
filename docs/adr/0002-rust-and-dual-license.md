@@ -27,7 +27,7 @@ What the competitive survey found on 2026-10-23
 
 - **Go with controller-runtime:** the ecosystem's default, more potential contributors and the
   option to borrow from k8sgpt. Images and memory are larger, and the footprint is part of the
-  positioning. The maintainer kept Rust, as in his earlier project kaution.
+  positioning. The maintainer kept Rust, as in their earlier project kaution.
 
 ## Decision
 

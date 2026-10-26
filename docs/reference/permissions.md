@@ -2,9 +2,13 @@
 
 The Kubernetes API permissions kausa's chart grants, and the ones it never asks for.
 
-Status as of 2026-10-23: **planned** for v0.1 (no chart exists yet). Why it is this list: [0009.
-Run with read-only permissions that never include Secrets](../adr/0009-least-privilege-rbac.md).
-The kind tests in CI will check the chart's role against this table. As of 2026-10-26,
+Status as of 2026-10-26: the chart in `charts/kausa` grants this table, `pods/log` only when
+kausa explains incidents (an endpoint or dry-run) with log collection on, and the Event writes
+only with an endpoint, outside dry-run, unless they are turned off ([Helm
+chart](helm-chart.md)). Why it is this list: [0009. Run with read-only permissions that never
+include Secrets](../adr/0009-least-privilege-rbac.md). The kind test (`tests/e2e/run.sh`) checks
+the installed role against this table with `kubectl auth can-i`, both what it allows and a list
+of what it must refuse; it has not run yet (GitHub Actions). As of 2026-10-26,
 `kausa run` uses every row: the Pod and event watches, the metadata `get` of ReplicaSets and Jobs,
 `pods/log` for the detections that read logs, and `create` and `patch` on Events for its
 explanations (with `--endpoint`, unless `--no-events`). On 2026-10-26 it
@@ -37,7 +41,7 @@ incident](../adr/0001-scope-and-positioning.md)).
 
 ## The pod that runs kausa
 
-Planned defaults of the chart, measured and adjusted on the fourth weekend:
+The chart's defaults, to be measured and adjusted on the fourth weekend:
 
 - One replica, `strategy: Recreate`, so that a rollout never runs two instances at once; a node
   partition can still briefly run two (hypothesis: the worst case is a duplicate Event, since
@@ -48,7 +52,7 @@ Planned defaults of the chart, measured and adjusted on the fourth weekend:
   measurement on a Raspberry Pi 4.
 - The service account token is mounted, because kausa talks to the API server; the only other
   volume is the optional Secret with the provider's API key, mounted read-only as a file by the
-  kubelet (or passed as `KAUSA_API_KEY`), so kausa needs no permission on Secrets. kausa takes its
+  kubelet (or, outside the chart, passed as `KAUSA_API_KEY`), so kausa needs no permission on Secrets. kausa takes its
   settings as command-line flags in its Pod spec: whoever can edit kausa's Deployment chooses
   where it sends data, so write access to it belongs to cluster administrators only.
 - An optional NetworkPolicy that limits egress to the API server, DNS and the configured model

@@ -6,5 +6,6 @@
 !Cargo.lock
 !rust-toolchain.toml
 !deny.toml
+!charts/
 !src/
 !tests/

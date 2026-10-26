@@ -14,8 +14,10 @@
 # Hypotheses to check on its first pull request: that both updates arrive together, the title it
 # gets, that the image keeps its -slim-trixie suffix and that its digest moves with the tag.
 #
-# Not covered, and bumped by hand (docs/how-to/maintain.md): cargo-deny, cargo-audit and gitleaks,
-# pinned by ARG in the Dockerfile with their SHA-256.
+# Not covered, and bumped by hand (docs/how-to/maintain.md): cargo-deny, cargo-audit, gitleaks and
+# helm, pinned by ARG in the Dockerfile with their SHA-256; the distroless image of the runtime
+# target (the docker updates below are for the rust image only); and kind, its node image and
+# helm in .github/workflows/e2e.yml.
 version: 2
 
 multi-ecosystem-groups:
@@ -43,7 +45,7 @@ updates:
       prefix: "build"
       include: "scope"
 
-  # The Dockerfile's FROM line (its only image), in the "rust" group.
+  # The Dockerfile's rust image (its ci and build stages), in the "rust" group.
   - package-ecosystem: "docker"
     directory: "/"
     multi-ecosystem-group: "rust"

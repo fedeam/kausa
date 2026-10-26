@@ -4,9 +4,15 @@
 #
 #     docker build --target ci .
 #
-# Nothing from this image is pushed or shipped. The controller image (multi-architecture, on a
-# minimal base chosen on the third implementation weekend; docs/explanation/architecture.md) is not
-# built here yet.
+# Nothing from this image is pushed or shipped.
+#
+# The runtime target is the controller image: a static binary on distroless, for the architecture
+# of the build (docs/adr/0010-packaging.md):
+#
+#     docker build --target runtime -t kausa .
+#
+# It comes after the ci target on purpose: the classic builder builds every stage up to the target,
+# so `--target ci` never compiles the release binary, and `--target runtime` runs the checks first.
 #
 # It works with BuildKit and with the classic builder (a runner without buildx falls back to the
 # classic one): no RUN --mount, no heredocs, no ADD --checksum, and TARGETARCH, which only
@@ -100,6 +106,26 @@ RUN set -eu; \
     rm -f /tmp/gitleaks.tar.gz /tmp/gitleaks; \
     gitleaks version
 
+# helm: lints and renders the chart in charts/. Checksums: the .sha256sum file published next to
+# each archive, https://github.com/helm/helm/releases (the archives are on get.helm.sh).
+ARG HELM_VERSION=4.3.1
+ARG HELM_SHA256_AMD64=0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+ARG HELM_SHA256_ARM64=8cf8f66ecbc252ac8f7f06cca68aba88508ddfde3a6a34feb1678ad1694b4f88
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) sum="$HELM_SHA256_AMD64" ;; \
+      arm64) sum="$HELM_SHA256_ARM64" ;; \
+      *) echo "no pinned helm for architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 20 --retry 5 --retry-all-errors -o /tmp/helm.tar.gz \
+      "https://get.helm.sh/helm-v$HELM_VERSION-linux-$arch.tar.gz"; \
+    echo "$sum  /tmp/helm.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/helm.tar.gz -C /tmp "linux-$arch/helm"; \
+    install -m 0755 "/tmp/linux-$arch/helm" /usr/local/bin/helm; \
+    rm -rf /tmp/helm.tar.gz "/tmp/linux-$arch"; \
+    helm version --short
+
 # The checks run as an unprivileged user.
 RUN groupadd --gid 10001 ci \
  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin ci \
@@ -119,10 +145,10 @@ COPY --chown=10001:10001 . .
 # writes. The base image leaves $CARGO_HOME (whose bin/ comes first in PATH) and $RUSTUP_HOME
 # writable for every user, and cargo and the advisory checks write to $CARGO_HOME; the sources and
 # target/ belong to the ci user. So that code could replace the tools of every later step, and the
-# checks that run no crate code (secret scan, formatting, dependency policy, advisories) come
-# first; nothing but the tests runs after clippy. Making the toolchain read-only would not protect
-# the tests (that code can rewrite the sources and target/ they are built from) and would copy the
-# whole toolchain into a new layer.
+# checks that run no crate code (secret scan, formatting, dependency policy, advisories, the
+# chart) come first; nothing but the tests runs after clippy. Making the toolchain read-only would
+# not protect the tests (that code can rewrite the sources and target/ they are built from) and
+# would copy the whole toolchain into a new layer.
 #
 # The advisory checks download the RustSec database and cargo audit refreshes the crates.io
 # index; cargo downloads crates once there are dependencies. gitleaks scans every commit reachable
@@ -131,5 +157,67 @@ RUN gitleaks git --no-banner --no-color --redact --verbose .
 RUN cargo fmt --all -- --check
 RUN cargo deny --locked check
 RUN cargo audit
+# The chart: lint, then render it with the values that change which templates and rules appear
+# (docs/reference/helm-chart.md). Rendering runs no code from the chart's values.
+RUN helm lint --strict charts/kausa
+RUN set -eu; \
+    for values in \
+      "" \
+      "--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k" \
+      "--set dryRun=true --set logs=false --set metrics.enabled=false" \
+      "--set model.endpoint=http://m.example.svc:11434/v1 --set model.name=m --set model.allowHttp=true --set events=false --set networkPolicy.enabled=true --set networkPolicy.apiServer.cidrs[0]=192.0.2.1/32 --set networkPolicy.endpoint.to[0].ipBlock.cidr=192.0.2.2/32"; \
+    do \
+      helm template kausa charts/kausa --kube-version 1.36.0 $values > /dev/null; \
+    done
 RUN cargo clippy --locked --all-targets --all-features -- -D warnings
 RUN cargo test --locked --all-features
+
+# The release binary, linked statically against musl, so the runtime image needs no libc. Built
+# for the architecture of the build: a multi-architecture image is two native builds
+# (the image job of .github/workflows/ci.yml, and the Gitea job for arm64), so no cross compiler is needed.
+FROM rust:1.99.1-slim-trixie@sha256:aab42391a986424e22d6a3ec14f37bc6dd3dacff4d457ca7cccd781e02297cc6 AS build
+
+ARG TARGETARCH
+
+# musl-gcc compiles ring's C and assembly for the musl target.
+RUN set -eu; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends musl-tools; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) triple=x86_64-unknown-linux-musl ;; \
+      arm64) triple=aarch64-unknown-linux-musl ;; \
+      *) echo "no musl target for architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    rustup target add "$triple"; \
+    echo "$triple" > /etc/kausa-triple
+
+ENV RUSTUP_AUTO_INSTALL=0 \
+    CC_x86_64_unknown_linux_musl=musl-gcc \
+    CC_aarch64_unknown_linux_musl=musl-gcc
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY src ./src
+RUN set -eu; \
+    triple=$(cat /etc/kausa-triple); \
+    cargo build --locked --release --target "$triple"; \
+    install -m 0755 "target/$triple/release/kausa" /kausa
+
+# The controller image. distroless static: CA certificates, /etc/passwd with the nonroot user,
+# time zone data, and nothing else (no shell, no package manager). The digest is the
+# multi-architecture index, so both architectures use the same pin.
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99 AS runtime
+
+LABEL org.opencontainers.image.title="kausa" \
+      org.opencontainers.image.description="A tiny Kubernetes controller that explains failing workloads with an LLM" \
+      org.opencontainers.image.source="https://github.com/fedeam/kausa" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
+
+COPY --from=build /kausa /kausa
+# The nonroot user of distroless, by number, so that runAsNonRoot can check it.
+USER 65532:65532
+ENTRYPOINT ["/kausa"]
+CMD ["run"]

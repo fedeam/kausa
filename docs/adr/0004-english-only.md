@@ -9,14 +9,14 @@ kausa is meant to become a public open-source project, read and contributed to b
 maintainer does not know ([0001. Build a small, read-only explainer that writes one redacted
 explanation per incident](0001-scope-and-positioning.md)).
 
-The maintainer's personal standard, which every one of his repositories follows, is written for
+The maintainer's personal standard, which every one of the maintainer's repositories follows, is written for
 Spanish:
 
 - Repositories, documentation and commits are written in **Spanish**.
 - Session logs live in **`docs/bitacoras/`**, and ADRs use Spanish field names and status words.
 - README badges read `repositorio`, `internet` and `estado`.
 
-His earlier open-source project, kaution, made the same exception on 2026-10-23.
+The maintainer's earlier open-source project, kaution, made the same exception on 2026-10-23.
 
 ## Alternatives considered
 

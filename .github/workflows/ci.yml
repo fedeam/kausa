@@ -35,3 +35,28 @@ jobs:
       # Secret scan, formatting, dependency policy, advisories, lints and tests.
       - name: Build the ci target
         run: docker build --target ci .
+
+  # The controller image, built natively on each architecture (no emulation, no cross compiler;
+  # docs/adr/0010-packaging.md). Nothing is tagged for a registry or pushed. The arm64 runner
+  # (ubuntu-24.04-arm) is free for public repositories.
+  image:
+    needs: ci
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the runtime target and check it
+        run: |
+          set -eu
+          docker build --target runtime -t kausa:ci .
+          docker run --rm kausa:ci --version
+          test "$(docker image inspect kausa:ci --format '{{.Config.User}}')" = 65532:65532
+          docker image ls kausa:ci --format 'uncompressed size: {{.Size}}'
+          echo "compressed size: $(docker save kausa:ci | gzip -9 | wc -c) bytes"
