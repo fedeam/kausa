@@ -50,8 +50,11 @@ schema. The provider's own `usage` numbers (tokens in and out) are recorded in t
 
 ## What stays in the cluster
 
-- The full explanation, with real names mapped back, in kausa's own log.
-- A short version, up to the 1024-byte limit of an Event note, in an Event about the failing
-  workload.
-- The pseudonym mapping, the fingerprints and the deduplication cache, in kausa's memory only;
-  nothing is written to disk.
+- Each incident line in kausa's own log, with the real namespace, owner and Pod names, the raw
+  event or waiting message and the fingerprint (as of 2026-10-26, the only output: [Command line
+  and log format](command-line.md)); later, the full explanation, with real names mapped back.
+  Whoever can read or ships kausa's log sees them.
+- A short version of the explanation, up to the 1024-byte limit of an Event note, in an Event
+  about the failing workload.
+- The pseudonym mapping and the deduplication cache, in kausa's memory only (fingerprints also
+  appear in the log); nothing is written to disk.

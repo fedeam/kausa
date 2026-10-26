@@ -6,8 +6,9 @@
 
 A tiny, read-only Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself.
 
-> **Status: pre-alpha.** Repository setup; nothing to install yet. Everything below describes the
-> planned v0.1.
+> **Status: pre-alpha.** `kausa run` detects and groups failures and logs them as incidents; it
+> does not call a model or write Events yet, and there is no image or chart to install. Everything
+> below describes the planned v0.1.
 
 ## The problem
 
@@ -112,18 +113,26 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha: repository setup; nothing to install yet. What has changed so far is in the
+Pre-alpha: the first of four implementation weekends is done. `kausa run` watches Pods and
+Warning events, groups failures by workload and logs each incident as a JSON line ([Command line
+and log format](docs/reference/command-line.md)). What has changed so far is in the
 [Changelog](CHANGELOG.md).
 
 ## Build from source
 
-Only `--help` and `--version` work yet. With Rust installed through [rustup](https://rustup.rs),
-which picks up the toolchain pinned in `rust-toolchain.toml`:
+With Rust installed through [rustup](https://rustup.rs), which picks up the toolchain pinned in
+`rust-toolchain.toml`:
 
 ```sh
 cargo build --locked
 cargo run --locked -- --help
+# Watch the cluster of the kubeconfig's current context and log incidents (read-only):
+cargo run --locked -- run
 ```
+
+`kausa run` uses the current context of your kubeconfig and needs only read access to Pods,
+Events, ReplicaSets and Jobs; it has no flag to pick a context, so check
+`kubectl config current-context` first.
 
 ## Roadmap
 
@@ -148,6 +157,7 @@ The weekends give the order of work, not dates.
 - [Detection and redaction rules](docs/reference/rules.md)
 - [Data sent to the provider](docs/reference/data-sent-to-the-provider.md)
 - [Permissions](docs/reference/permissions.md)
+- [Command line and log format](docs/reference/command-line.md)
 - [Competitive landscape](docs/research/2026-10-23-competitive-landscape.md)
 - [Set up a development environment and run the checks](docs/how-to/develop.md)
 - [Security policy](SECURITY.md)

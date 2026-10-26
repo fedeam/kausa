@@ -65,3 +65,63 @@ runs. Repositories touched: kausa.
   history should read `FedeAM`, change the name on the GitHub profile before more merges.
 - The rest of the list in [2026-10-23 — Repository setup](2026-10-23-repository-setup.md#pending)
   stands, except the creation of the GitHub repository, done here.
+
+## Later the same day: publication checks and the first implementation weekend
+
+Request: carry on with everything, without asking but for decisions; the repository stays private.
+
+### What was done
+
+- **Publication checklist, steps 1 to 3, as a dry run** ([Publish the repository on
+  GitHub](../how-to/publish-the-repository.md)), on a mirror clone of the GitHub repository with
+  every ref (`main`, `refs/pull/1/head`, `refs/pull/2/head`): `gitleaks` found no leaks; the
+  private patterns file (kept outside the repository), the search for `.local`, `.lan`,
+  `.internal` and `home.arpa` names and the search for private addresses found nothing; the only
+  identities are the noreply address and `GitHub <noreply@github.com>`. The mirror clone was
+  deleted afterwards. Steps 5 onwards wait for the maintainer's validation.
+- **The competitive survey, repeated:** [Competitive landscape, update of
+  2026-10-26](../research/2026-10-26-competitive-landscape-update.md). The gap is still open;
+  content redaction on by default exists in a small project the first survey missed.
+- **First implementation weekend**, in this pull request:
+  - `src/record.rs`: Pods and Warning events reduced to small records at once; the record drops
+    environment values, command lines and probe paths (a test checks it).
+  - `src/detect.rs`: the detection rules `D001` to `D008`, with `D003` before `D001`.
+  - `src/owner.rs`: owner correlation through ReplicaSets and Jobs only, with metadata reads.
+  - `src/incident.rs`: signals, grouping by namespace, top-level owner and detection, and the
+    settle window; `src/fingerprint.rs`: normalization and an FNV-1a fingerprint.
+  - `src/run.rs`: the watches (Pods; `events.k8s.io/v1` Events with the field selector
+    `type=Warning,reportingController!=kausa`), relists, a five-second tick and the incident log
+    lines; `src/main.rs`: `kausa run [--settle-seconds <N>]`.
+  - Dependencies: `kube` 4.2.0 (client, runtime, rustls with ring), `k8s-openapi` 0.28.0
+    (Kubernetes 1.32 API), `tokio`, `futures` and `serde_json`; 196 crates in all. `deny.toml`
+    now allows ISC, BSD-3-Clause, Zlib, Unicode-3.0 and CDLA-Permissive-2.0, each with the crates
+    that need it.
+  - A review before the pull request (a reviewer for the Rust code and one for code against
+    documentation, a skeptic re-checking each finding): 19 findings confirmed and fixed. Among
+    them: a crash loop was logged again on every back-off cycle (states now get a 330-second
+    grace period before they are forgotten); single events of different Pods added up to a false
+    `D006` (events now settle one by one); `D005` could never settle (it now reads the Pod's
+    `PodScheduled` condition); the fingerprint changed with the back-off duration and between
+    `ErrImagePull` and `ImagePullBackOff`; a hung owner lookup could stop the loop (5-second
+    timeout) and a Ctrl-C could be lost; a failed lookup was never retried; the event map kept
+    every Warning event; the client honoured kube-rs's debug variables; log write errors were
+    ignored; and documentation that did not match the code.
+  - 32 unit tests and 7 command-line tests; the CI build passed locally for linux/arm64.
+  - Documentation: [Command line and log format](../reference/command-line.md), new; the status
+    of [Architecture](../explanation/architecture.md), [Detection and redaction
+    rules](../reference/rules.md), the README, `AGENTS.md` and the front page.
+- **Facts checked in Kubernetes' source** (2026-10-26): the Job controller emits a Warning event
+  with reason `BackoffLimitExceeded` or `DeadlineExceeded` on the Job it marks failed, so `D008`
+  needs no watch on Jobs; `events.k8s.io/v1` accepts field selectors on `type` and
+  `reportingController`.
+
+### Pending
+
+- **A run against a real cluster.** The pure core is tested without one, but `kausa run` has not
+  watched a live cluster yet: in this session, extracting a single-context kubeconfig of the
+  maintainer's cluster and downloading kind were both refused by the agent's permission rules. The
+  maintainer can run `kausa run` himself (read-only), or allow kind; otherwise the kind tests of
+  the third weekend are the first live run.
+- **Hypotheses from the first weekend:** that memory stays flat with the number of healthy Pods
+  (measured on the fourth weekend); that the kubelet and scheduler reasons in the rules are the
+  ones current releases emit.

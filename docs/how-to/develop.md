@@ -5,9 +5,10 @@ Why CI is built this way, and where it runs for pull requests and for `main`: [0
 one pinned container build, on GitHub Actions and Gitea
 Actions](../adr/0003-ci-in-one-pinned-container-build.md).
 
-Status as of 2026-10-23: only a command-line skeleton exists (`kausa --help` and
-`kausa --version`); no controller is implemented, and the checks run over the skeleton. There
-is no cluster to test against yet: the kind tests arrive on the third implementation weekend.
+Status as of 2026-10-26: the first implementation weekend is done (`kausa run` detects, groups
+and logs incidents). The unit tests cover the rules, grouping, fingerprints and owner correlation
+without a cluster; there are no end-to-end tests against a cluster yet: the kind tests arrive on
+the third implementation weekend.
 
 ## Before you start
 

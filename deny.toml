@@ -1,6 +1,5 @@
 # Dependency policy, checked by `cargo deny --locked check` in CI (the Dockerfile's ci target).
 # Reference: https://embarkstudios.github.io/cargo-deny/ (written for cargo-deny 0.20.2).
-# Status as of 2026-10-23: kausa has no dependencies; this policy applies from the first one.
 
 [advisories]
 # RustSec advisory database (the default source). Unmaintained and unsound crates are reported
@@ -15,7 +14,20 @@ ignore = []
 [licenses]
 # Permissive licenses compatible with distributing kausa under MIT OR Apache-2.0. Add one only
 # with a reason in the pull request that needs it.
-allow = ["Apache-2.0", "MIT"]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    # The TLS stack of the Kubernetes client: ring, rustls-webpki and untrusted.
+    "ISC",
+    # subtle (constant-time primitives, under rustls) and encoding_rs (with Apache-2.0 OR MIT).
+    "BSD-3-Clause",
+    # foldhash, the hasher of hashbrown.
+    "Zlib",
+    # The Unicode data in unicode-ident (with MIT OR Apache-2.0).
+    "Unicode-3.0",
+    # The root certificates bundled by webpki-root-certs, used by rustls-platform-verifier.
+    "CDLA-Permissive-2.0",
+]
 confidence-threshold = 0.93
 exceptions = []
 

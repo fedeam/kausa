@@ -40,9 +40,12 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-23: kausa is not implemented yet. These are the properties v0.1 is designed to
-have ([Architecture](docs/explanation/architecture.md)); each one will be backed by tests before
-the release.
+Status as of 2026-10-26: the first implementation weekend is done. `kausa run` watches Pods and
+Warning events, reads only Pods, Events and the metadata of ReplicaSets and Jobs, and logs
+incidents with real names and messages to its own stdout; it reads no container logs, redacts
+nothing, sends nothing to a model and writes no Events yet. The rest are the properties v0.1 is
+designed to have ([Architecture](docs/explanation/architecture.md)); each one will be backed by
+tests before the release.
 
 **Who controls kausa's inputs.** Anyone who can create or change a workload in a watched namespace
 controls event messages, log lines, container names, image references and exit codes. In a shared

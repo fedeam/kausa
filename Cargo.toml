@@ -1,6 +1,6 @@
 [package]
 name = "kausa"
-# Pre-release of the planned v0.1: nothing is implemented or released yet.
+# Pre-release of the planned v0.1: detection runs (first weekend); nothing is released yet.
 version = "0.1.0-dev"
 edition = "2024"
 # Minimum supported Rust version: the toolchain pinned in rust-toolchain.toml when this was
@@ -16,11 +16,20 @@ categories = ["development-tools"]
 # Not on crates.io until the name is reserved deliberately.
 publish = false
 
-# Standard library only for now: every dependency needs a reason (see AGENTS.md) and must pass
-# `cargo deny --locked check`. Dependencies arrive with the code that needs them: kube-rs with the
-# first implementation weekend, the HTTP client with the second
-# (docs/adr/0001-scope-and-positioning.md, docs/adr/0002-rust-and-dual-license.md).
+# Every dependency needs a reason (see AGENTS.md) and must pass `cargo deny --locked check`.
 [dependencies]
+# Kubernetes client and watchers. rustls with ring for TLS (no OpenSSL); no default features, so
+# nothing else is compiled in (docs/adr/0002-rust-and-dual-license.md).
+kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls", "ring", "runtime"] }
+# The Kubernetes API types. The oldest API version this release supports: kausa uses only stable
+# APIs (core/v1 Pods, events.k8s.io/v1 Events, apps/v1, batch/v1), which newer servers keep.
+k8s-openapi = { version = "0.28.0", default-features = false, features = ["v1_32"] }
+# The async runtime: one thread is enough for a controller that waits on watches.
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt", "signal", "time"] }
+# Stream combinators for the watchers.
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+# kausa's log lines are JSON, one object per line.
+serde_json = "1.0.154"
 
 [lints.rust]
 unsafe_code = "forbid"

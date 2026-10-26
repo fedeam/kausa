@@ -6,16 +6,17 @@ incident, sends a redacted context to one OpenAI-compatible model endpoint withi
 budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
 ConfigMaps and never changes a workload.
 
-Status as of 2026-10-26: **in development** (pre-alpha). Only a command-line skeleton
-(`kausa --help`, `kausa --version`) exists; nothing is watched, explained or released yet. The
+Status as of 2026-10-26: **in development** (pre-alpha). The first implementation weekend is done:
+`kausa run` watches Pods and Warning events, groups failures by workload and logs incidents;
+nothing is redacted, sent to a model, written as an Event or released yet. The
 private repositories exist on GitHub and on the maintainer's Gitea instance, and contributions and
 merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
 ([2026-10-26 — GitHub repository and first CI
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: GitHub Actions, which do
 not start jobs while the repository is private (the account's included minutes for October are
-used up; public repositories do not use them); the first Dependabot run; the four implementation
-weekends of v0.1; and publication of the GitHub repository after validation.
+used up; public repositories do not use them); the first Dependabot run; implementation
+weekends 2 to 4 of v0.1; and publication of the GitHub repository after validation.
 
 ## Key facts
 
@@ -47,14 +48,16 @@ weekends of v0.1; and publication of the GitHub repository after validation.
 
 ## How to run it
 
-Only `--help` and `--version` work yet. To build and run the skeleton, and to run the same checks
-as CI:
+To build kausa, run it against the cluster of the kubeconfig's current context (read-only: it
+logs incidents), and run the same checks as CI:
 
 ```sh
 cargo build --locked
-cargo run --locked -- --help
+cargo run --locked -- run
 docker build --target ci .
 ```
+
+Flags, exit codes and log lines: [Command line and log format](reference/command-line.md).
 
 The full list of checks and the tools they need: [Set up a development environment and run the
 checks](how-to/develop.md).

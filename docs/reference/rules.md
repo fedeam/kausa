@@ -4,34 +4,56 @@ The deterministic rules kausa applies before any language model call: detection 
 is an incident and how failures are grouped, and redaction rules decide what never leaves the
 cluster.
 
-Status as of 2026-10-23: **planned** for v0.1, nothing implemented. Ids, triggers and defaults may
-change until v0.1 is released; after that an id is never reused. How the rules fit in the
+Status as of 2026-10-26: the **detection rules, grouping and fingerprint are implemented** (first
+implementation weekend, `src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`); container logs
+are not read yet (the "Logs read" column is the plan for the second weekend, with the redaction
+rules). Ids, triggers and defaults may change until v0.1 is
+released; after that an id is never reused. How the rules fit in the
 pipeline: [Architecture](../explanation/architecture.md). Why redaction works this way: [0008.
 Send only allowlisted, redacted data to one OpenAI-compatible
 endpoint](../adr/0008-data-leaving-the-cluster.md).
 
 ## Detection rules
 
-A detection matches a signal on a Pod (a container state in its status or a Warning event about
-it), and the failure must persist through the **settle window** (60 seconds by default) before it
-becomes an incident, so a container that restarts once and recovers is not explained. Pods of the
-same top-level owner with the same detection form one incident.
+A detection matches a signal: a **state** read from a Pod at every check (a container state, or
+the Pod's scheduling condition), or a Warning **event** about a Pod or a Job. The failure must
+persist through the **settle window** (60 seconds by default, `--settle-seconds`) before it becomes
+an incident, so a container that restarts once and recovers is not explained:
+
+- **A state** settles when it has been present, at the checks every 5 seconds, over at least the
+  window. It is forgotten only after 330 seconds without it, longer than the kubelet's longest
+  back-off (300 seconds), so the moments a crash-looping container runs between back-offs do not
+  split one failure into several incidents.
+- **An event** settles when the same event happens again at least a window after it was first
+  seen, by kausa or in its own series (`count` above 1 and a first occurrence a window before the
+  last). Single events of different Pods never add up: a rolling update whose new Pods fail one
+  readiness probe each is not an incident. An event counts as a signal for 10 minutes after it last
+  happened (hypothesis behind the value, to verify on a live cluster: client-go's event recorder
+  updates a repeated event about every 5 minutes at most).
+- **A failed Job** is final and is an incident at once.
+
+Pods of the same top-level owner with the same detection form one incident, logged once while it
+lasts and again only if it clears and comes back.
 
 | Id | Failure | Signal | Logs read |
 |---|---|---|---|
 | `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff` | Yes, previous container |
 | `D002` | Image cannot be pulled | Container waiting with `ErrImagePull`, `ImagePullBackOff` or `InvalidImageName` | No |
-| `D003` | Out of memory | Last termination with reason `OOMKilled` | Yes, previous container if it restarted, otherwise the terminated one |
+| `D003` | Out of memory | Container waiting in `CrashLoopBackOff` whose last termination is `OOMKilled`, or terminated with `OOMKilled` and not restarted | Yes, previous container if it restarted, otherwise the terminated one |
 | `D004` | Container cannot be created | Container waiting with `CreateContainerConfigError` or `CreateContainerError` | No |
-| `D005` | Pod cannot be scheduled | Warning event `FailedScheduling` and the Pod still `Pending` | No |
-| `D006` | Probe failures | Warning event `Unhealthy` for a readiness, liveness or startup probe, repeated within the settle window | No |
+| `D005` | Pod cannot be scheduled | The Pod still `Pending`, with its `PodScheduled` condition `False` for reason `Unschedulable` | No |
+| `D006` | Probe failures | Warning event `Unhealthy` for a readiness, liveness or startup probe, happening again a settle window after it was first seen | No |
 | `D007` | Volume cannot be attached or mounted | Warning event `FailedMount` or `FailedAttachVolume` | No |
-| `D008` | Job failed | Job condition `Failed` with reason `BackoffLimitExceeded` or `DeadlineExceeded` | Yes, the terminated container of the last failed Pod |
+| `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of the last failed Pod |
 
-Hypotheses to verify on the first weekend: that the event reasons above are the ones current
-kubelet and scheduler releases emit (they are the long-standing ones), and that `D008` can be
-detected from the Job's Warning events and Pod status alone, without watching Jobs (if not, it
-needs `list` and `watch` on `jobs`, an amendment to [Permissions](permissions.md)).
+`D005` reads the Pod's condition rather than the scheduler's `FailedScheduling` events, which may
+stop being updated for a Pod that keeps failing (hypothesis about client-go's `events.k8s.io`
+broadcaster, to verify on a live cluster); the condition holds as long as the failure. `D008` needs no watch on Jobs: the Job controller emits a Warning event on the Job, with the reason
+of its `Failed` condition, when it marks the Job failed (`pkg/controller/job/job_controller.go` in
+Kubernetes, checked on 2026-10-26). A container recovering after one out-of-memory kill, and the
+kubelet's own `BackOff` events (the container state already says it), match nothing. Hypothesis
+still to verify against live clusters: that the kubelet and scheduler reasons above are the ones
+current releases emit (they are the long-standing ones).
 
 **Grouping and fingerprint.** The incident key is the namespace, the top-level owner (found by
 following owner references: Pod → ReplicaSet → Deployment, Pod → StatefulSet, Pod → DaemonSet,
@@ -40,10 +62,14 @@ reference only through kinds it may `get` (ReplicaSet, Job). When the next owner
 kind, including a custom resource, that owner reference is the top-level owner. It is named in the
 incident key and in `regarding` from the reference alone (apiVersion, kind, name, uid), without
 reading the object. A container matches at most one detection, the most specific one: `D003`
-takes precedence over `D001` when the last termination is `OOMKilled`, before grouping. The
-fingerprint adds the normalized
-message: digits, hexadecimal runs, UUIDs and generated Pod name suffixes removed. It is computed in
-memory before redaction, is never sent, and keys the deduplication cache.
+takes precedence over `D001` when the last termination is `OOMKilled`, before grouping.
+
+The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
+that stays the same for the same failure: the example's message with the names of the incident's
+Pods, UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
+and other numbers normalized; for `D002`, whose message alternates between `ErrImagePull` and
+`ImagePullBackOff`, the image reference instead. It is computed before redaction and never sent;
+it appears in kausa's log and will key the deduplication cache (third weekend).
 
 ## Redaction rules
 

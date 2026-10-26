@@ -5,8 +5,11 @@ workload into one incident with deterministic rules, sends a redacted context to
 OpenAI-compatible endpoint within a budget, and writes the explanation as an Event on the failing
 workload.
 
-Status as of 2026-10-23: **planned design**, nothing implemented yet. This page describes the
-target for v0.1 and will be updated as the code lands. Why kausa exists and what it leaves out:
+Status as of 2026-10-26: the **first implementation weekend is done**: watching, detection, the
+settle window, owner correlation and fingerprints run, and `kausa run` logs each incident
+([Command line and log format](../reference/command-line.md)). Context, redaction, the model call,
+cost controls and the Event output are still the planned design. This page describes the target
+for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
 incident](../adr/0001-scope-and-positioning.md).
 
@@ -34,9 +37,14 @@ produces the same incident, the same fingerprint and the same request bytes.
   termination reason, exit code and restart count, and its image, probe types and timings, and
   memory and CPU limits) and drops the rest. Hypothesis to measure: that
   this keeps memory roughly flat with the number of healthy Pods.
-- **Server-side filtering where it exists.** Warning events are selected with a field selector on
-  `type` (hypothesis to verify for `events.k8s.io/v1`; otherwise the filter runs in kausa).
-- **Its own Events are ignored**, by their reporting controller.
+- **Server-side filtering.** The event watch uses the field selector
+  `type=Warning,reportingController!=kausa`: `events.k8s.io/v1` supports both fields (its field
+  label conversion in Kubernetes' `pkg/apis/events/v1/conversion.go`, checked on 2026-10-26).
+- **Its own Events are ignored**, by their reporting controller: excluded by the selector, and
+  checked again in kausa in case a server does not apply it.
+- **Only what can be a signal.** A Warning event is kept only if a detection matches it and it
+  happened in the last 10 minutes; messages and notes are cut at 1024 bytes. When a watch
+  restarts, it lists again, and records whose objects did not come back are dropped.
 
 ## Detection, settle and correlation
 
@@ -46,7 +54,12 @@ produces the same incident, the same fingerprint and the same request bytes.
   A container matches at most one detection, the most specific one (`D003` before `D001`), before
   grouping.
 - **Settle window.** A failure has to persist for a while (60 seconds by default) before it
-  becomes an incident. Transient restarts during a rollout are not explained.
+  becomes an incident. Every five seconds kausa turns its records into signals: states (a failing
+  container, a Pod that cannot be scheduled) and recent Warning events. A state settles when it
+  has been present over the window, and is forgotten only after 330 seconds without it, so a
+  crash loop that runs between back-offs stays one incident. An event settles when the same event
+  happens again a window after it was first seen; events of different Pods never add up. A failed
+  Job settles at once. The exact rules: [Detection and redaction rules](../reference/rules.md).
 - **Correlation.** kausa follows owner references up to the top-level owner. A Pod's reference
   already names its ReplicaSet, StatefulSet, DaemonSet or Job; only the ReplicaSet → Deployment
   and Job → CronJob hops need a `get`, a metadata-only request (PartialObjectMetadata), so
@@ -54,11 +67,15 @@ produces the same incident, the same fingerprint and the same request bytes.
   through kinds it may `get` (ReplicaSet, Job). When the next owner is of another kind, including
   a custom resource, that owner reference is the top-level owner. It is named in the incident key
   and in `regarding` from the reference alone (apiVersion, kind, name, uid), without reading the
-  object. Owners are cached briefly by UID.
+  object. Owner lookups have a 5-second timeout and are cached for ten minutes; a Pod's owner is
+  resolved again when its controller reference changes. A lookup that fails (a deleted ReplicaSet,
+  an API error, a timeout) stops the chain at the ReplicaSet or Job, is logged, and is retried on
+  the Pod's next update after 30 seconds.
   Pods of the same owner with the same detection form one incident: three crashing replicas are
   one explanation, not three.
-- **Fingerprint.** A hash of the detection, the owner and the normalized message, computed before
-  redaction and kept in memory. It keys deduplication.
+- **Fingerprint.** A hash of the detection, the owner and the normalized message (the image, for
+  `D002`), computed before redaction and never sent. It is written in kausa's log and will key
+  deduplication.
 
 ## Context and redaction
 
@@ -155,8 +172,8 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 | Code | Meaning |
 |---|---|
-| `0` | Clean shutdown after `SIGTERM`, or `--help` and `--version` |
-| `1` | Runtime failure: kausa cannot reach the API server at start, or a watch fails beyond its retries |
+| `0` | Clean shutdown after `SIGTERM` or Ctrl-C, or `--help` and `--version` |
+| `1` | Runtime failure: kausa cannot reach the API server at start, or a watch ends (watch errors are logged and retried with backoff) |
 | `2` | Usage or configuration error: unknown argument, invalid configuration file, cannot write to stdout |
 
 ## Safety model

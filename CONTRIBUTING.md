@@ -1,7 +1,7 @@
 # Contributing to kausa
 
-Thanks for your interest in kausa. The project is pre-alpha: the repository is being set up
-and there is nothing to install yet. Issues and ideas are welcome; for code, open an issue first
+Thanks for your interest in kausa. The project is pre-alpha: `kausa run` detects and groups
+failures, and there is no image or chart to install yet. Issues and ideas are welcome; for code, open an issue first
 so we agree on the approach before you spend time on it.
 
 ## Ground rules

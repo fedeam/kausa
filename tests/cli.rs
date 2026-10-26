@@ -32,7 +32,7 @@ fn version_prints_name_and_version() {
 }
 
 #[test]
-fn help_shows_usage_and_says_the_controller_is_not_implemented() {
+fn help_shows_usage_and_says_what_is_not_implemented() {
     for flag in ["--help", "-h"] {
         let output = kausa(&[flag]);
         assert_eq!(output.status.code(), Some(0), "{flag}");
@@ -46,11 +46,11 @@ fn help_shows_usage_and_says_the_controller_is_not_implemented() {
 
 #[test]
 fn unknown_command_is_a_usage_error() {
-    let output = kausa(&["run"]);
+    let output = kausa(&["explain"]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(stdout(&output), "");
     assert!(
-        stderr(&output).contains("error: unknown command or option 'run'"),
+        stderr(&output).contains("error: unknown command or option 'explain'"),
         "{}",
         stderr(&output)
     );
@@ -100,4 +100,23 @@ fn extra_arguments_are_a_usage_error() {
         "{}",
         stderr(&output)
     );
+}
+
+#[test]
+fn run_rejects_unknown_arguments_and_bad_settle_values() {
+    for args in [
+        &["run", "--dry-run"][..],
+        &["run", "--settle-seconds"][..],
+        &["run", "--settle-seconds", "soon"][..],
+        &["run", "--settle-seconds", "3601"][..],
+    ] {
+        let output = kausa(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert_eq!(stdout(&output), "", "{args:?}");
+        assert!(
+            stderr(&output).starts_with("error: "),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
 }

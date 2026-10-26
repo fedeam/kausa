@@ -4,7 +4,9 @@ The Kubernetes API permissions kausa's chart grants, and the ones it never asks 
 
 Status as of 2026-10-23: **planned** for v0.1 (no chart exists yet). Why it is this list: [0009.
 Run with read-only permissions that never include Secrets](../adr/0009-least-privilege-rbac.md).
-The kind tests in CI will check the chart's role against this table.
+The kind tests in CI will check the chart's role against this table. As of 2026-10-26,
+`kausa run` uses only the read rows: the Pod and event watches and the metadata `get` of
+ReplicaSets and Jobs; it reads no logs and writes no Events yet.
 
 ## Granted
 

@@ -13,8 +13,9 @@ kausa: a small, read-only Kubernetes controller in Rust (kube-rs) that watches W
 Pod status, groups the failures of one workload into one incident with deterministic rules, sends
 a redacted context to one OpenAI-compatible model endpoint within a call and token budget, and
 writes the explanation as a Kubernetes Event on the failing object. Open source,
-`MIT OR Apache-2.0`. Pre-alpha: only a command-line skeleton exists. Maintainer: FedeAM
-(GitHub: `fedeam`).
+`MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents (first
+implementation weekend); redaction, the model call and Events are not implemented yet.
+Maintainer: FedeAM (GitHub: `fedeam`).
 
 ## How to work
 
@@ -66,10 +67,16 @@ writes the explanation as a Kubernetes Event on the failing object. Open source,
 ```sh
 cargo build --locked
 cargo run --locked -- --help
+# Watch the cluster of the kubeconfig's current context and log incidents (read-only):
+cargo run --locked -- run
 ```
 
-Only `--help` and `--version` work yet. `rust-toolchain.toml` pins the compiler; rustup installs
-it the first time `cargo` runs in the checkout.
+`rust-toolchain.toml` pins the compiler; rustup installs it the first time `cargo` runs in the
+checkout. `kausa run` connects to the current context of the kubeconfig: before running it, check
+`kubectl config current-context`, and never point it at a cluster you were not asked to use. The
+core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`, `src/record.rs`)
+is pure and tested without a cluster; `src/run.rs` is the only code that talks to the API
+server.
 
 ## Verification (same as CI)
 

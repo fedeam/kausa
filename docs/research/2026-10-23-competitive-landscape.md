@@ -3,6 +3,10 @@
 The open-source tools that explain Kubernetes failures with a language model, as surveyed on
 2026-10-23, and what gap is left for kausa.
 
+Update 2026-10-26: the survey was repeated three days later, and found a small project it had
+missed that already redacts content by default: [Competitive landscape, update of
+2026-10-26](2026-10-26-competitive-landscape-update.md).
+
 The survey was done before the decision in [0001. Build a small, read-only explainer that writes
 one redacted explanation per incident](../adr/0001-scope-and-positioning.md): four researchers
 covered k8sgpt, HolmesGPT, kagent and the rest of the 2025–2026 field, and the candidate angles;
