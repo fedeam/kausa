@@ -1,6 +1,6 @@
 # 0008. Send only allowlisted, redacted data to one OpenAI-compatible endpoint
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-23
 
 ## Context
@@ -25,9 +25,9 @@ local option.
 
 kausa sends data to exactly one destination, an OpenAI-compatible Chat Completions endpoint
 (`POST <base URL>/chat/completions`) configured by whoever installs it, and only after three
-deterministic steps: an allowlist of fields, pseudonymous names, and pattern redaction. This is a
-proposal written while the repository was set up on 2026-10-23; it becomes accepted when the
-maintainer approves it, at the latest before the second implementation weekend.
+deterministic steps: an allowlist of fields, pseudonymous names, and pattern redaction. Proposed
+while the repository was set up on 2026-10-23; FedeAM accepted it on 2026-10-26, with log
+collection on by default for the crash-type and Job detections only.
 
 1. **Allowlist.** Only the fields listed in [Data sent to the
    provider](../reference/data-sent-to-the-provider.md) are serialized into a request. Everything

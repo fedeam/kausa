@@ -1,6 +1,6 @@
 # 0009. Run with read-only permissions that never include Secrets
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-23
 
 ## Context
@@ -23,9 +23,10 @@ needed; never read Secrets; `pods/log` only if needed, and documented.
 
 kausa's permissions are the fixed list in [Permissions](../reference/permissions.md): read Pods,
 read and write Events, `get` on ReplicaSets and Jobs to follow owner references, and `get` on
-`pods/log` only while log collection is on. Nothing else. This is a proposal written while the
-repository was set up on 2026-10-23; it becomes accepted when the maintainer approves it, at the
-latest before the first implementation weekend.
+`pods/log` only while log collection is on. Nothing else. Proposed while the repository was set
+up on 2026-10-23; FedeAM accepted it on 2026-10-26, with `pods/log` granted by default
+for the crash-type and Job detections, as [0008. Send only allowlisted, redacted data to one
+OpenAI-compatible endpoint](0008-data-leaving-the-cluster.md) decides.
 
 - **Never Secrets, never ConfigMaps.** Not even `list`, which returns their data. The API key
   reaches kausa through the kubelet ([0008. Send only allowlisted, redacted data to one

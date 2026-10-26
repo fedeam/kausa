@@ -37,11 +37,23 @@ runs. Repositories touched: kausa.
   (its node refused every TCP connection while answering ping). Nothing was changed for it; the
   push waited until it was back.
 
+- **First merge on GitHub**, pull request #1, squash-merged as `a9e4533`, then synced to Gitea.
+  The commit header is the pull request title followed by ` (#1)`, which confirms the hypothesis
+  in [0007. Take contributions and merge pull requests on
+  GitHub](../adr/0007-contributions-and-merges-on-github.md). Its author is the noreply address,
+  as on every recent commit the maintainer made on GitHub's web (checked before merging), with
+  the name of his GitHub profile, `FedeAM`, rather than `FedeAM`; the committer is
+  `GitHub <noreply@github.com>`.
+
 ## Decisions
 
-- None new. The flow is the one in [0007. Take contributions and merge pull requests on
-  GitHub](../adr/0007-contributions-and-merges-on-github.md); this change is the first pull
-  request.
+- [0008. Send only allowlisted, redacted data to one OpenAI-compatible
+  endpoint](../adr/0008-data-leaving-the-cluster.md) and [0009. Run with read-only permissions
+  that never include Secrets](../adr/0009-least-privilege-rbac.md) accepted by the maintainer,
+  with log collection on by default for the crash-type and Job detections only.
+- The maintainer delegated the rest of the work to agents on 2026-10-26: they merge their own pull
+  requests and sync `main`, and ask only about decisions. The repository stays private until he
+  validates it.
 
 ## Pending
 
@@ -49,7 +61,7 @@ runs. Repositories touched: kausa.
   linux/amd64.
 - **Dependabot's first run** and its titles, and the `rust` group (hypotheses in
   `.github/dependabot.yml`).
-- **First merge on GitHub:** confirm that the squash commit's header is the pull request title
-  followed by ` (#<number>)`.
+- **Author name of squash merges:** GitHub writes the profile name, `FedeAM`. If the public
+  history should read `FedeAM`, change the name on the GitHub profile before more merges.
 - The rest of the list in [2026-10-23 — Repository setup](2026-10-23-repository-setup.md#pending)
   stands, except the creation of the GitHub repository, done here.

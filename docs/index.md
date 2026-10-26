@@ -12,13 +12,10 @@ private repositories exist on GitHub and on the maintainer's Gitea instance, and
 merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
 ([2026-10-26 — GitHub repository and first CI
-runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: the maintainer's approval of
-[0008. Send only allowlisted, redacted data to one OpenAI-compatible
-endpoint](adr/0008-data-leaving-the-cluster.md) and [0009. Run with read-only permissions that
-never include Secrets](adr/0009-least-privilege-rbac.md); GitHub Actions, which do not start jobs
-while the repository is private (the account's included minutes for October are used up; public
-repositories do not use them); the first Dependabot run; the four implementation weekends of
-v0.1; and publication of the GitHub repository after validation.
+runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: GitHub Actions, which do
+not start jobs while the repository is private (the account's included minutes for October are
+used up; public repositories do not use them); the first Dependabot run; the four implementation
+weekends of v0.1; and publication of the GitHub repository after validation.
 
 ## Key facts
 
