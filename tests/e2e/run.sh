@@ -9,7 +9,6 @@ set -euo pipefail
 CLUSTER=kausa-e2e
 NAMESPACE=kausa
 TARGET=e2e-shop
-PORT=18080
 WORK=$(mktemp -d)
 CONTEXT="kind-$CLUSTER"
 k() { kubectl --context "$CONTEXT" "$@"; }
@@ -37,7 +36,7 @@ kind load docker-image kausa:e2e --name "$CLUSTER"
 
 # The fake endpoint runs on the host. On Linux the cluster reaches it through the gateway of the
 # kind network; on Docker Desktop that gateway belongs to Docker's VM, so the address the nodes
-# give host.docker.internal is used instead (a hypothesis: only the Linux path has run).
+# give host.docker.internal is used instead (passed on Docker Desktop on 2026-10-27).
 if [ "$(docker info --format '{{.OperatingSystem}}')" = "Docker Desktop" ]; then
   gateway=$(docker exec "$CLUSTER-control-plane" getent ahostsv4 host.docker.internal |
     awk 'NR == 1 { print $1 }')
@@ -46,8 +45,19 @@ else
     tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
 fi
 [ -n "$gateway" ] || fail "no IPv4 address of the host for the cluster"
+# A free port, and the endpoint answering on it before anything depends on it: a port already
+# in use would otherwise leave another program to answer kausa.
+PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
 python3 tests/e2e/fake_endpoint.py --port "$PORT" --log "$WORK/requests.jsonl" &
 ENDPOINT_PID=$!
+for _ in $(seq 1 20); do
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/v1/chat/completions" && break
+  kill -0 "$ENDPOINT_PID" 2>/dev/null || fail "the fake endpoint did not start"
+  sleep 0.5
+done
+curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/v1/chat/completions" ||
+  fail "the fake endpoint does not answer on port $PORT"
+: > "$WORK/requests.jsonl"
 
 # The restricted Pod Security Standard: the chart's Pod must be admitted under it.
 k create namespace "$NAMESPACE"

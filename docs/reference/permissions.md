@@ -8,7 +8,7 @@ only with an endpoint, outside dry-run, unless they are turned off ([Helm
 chart](helm-chart.md)). Why it is this list: [0009. Run with read-only permissions that never
 include Secrets](../adr/0009-least-privilege-rbac.md). The kind test (`tests/e2e/run.sh`) checks
 the installed role against this table with `kubectl auth can-i`, both what it allows and a list
-of what it must refuse; it has not run yet (GitHub Actions). As of 2026-10-26,
+of what it must refuse; it passed on 2026-10-27 on the maintainer's machine. As of 2026-10-26,
 `kausa run` uses every row: the Pod and event watches, the metadata `get` of ReplicaSets and Jobs,
 `pods/log` for the detections that read logs, and `create` and `patch` on Events for its
 explanations (with `--endpoint`, unless `--no-events`). On 2026-10-26 it

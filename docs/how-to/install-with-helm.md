@@ -2,9 +2,9 @@
 
 Build kausa's image, push it to a registry your cluster can pull from, and install the chart.
 
-Status as of 2026-10-26: no image is published, so you build your own. Checked with a server-side
-dry run against Kubernetes v1.36; the full install is what the kind test does
-(`tests/e2e/run.sh`), which runs on GitHub Actions.
+Status as of 2026-10-27: no image is published, so you build your own. Checked with a server-side
+dry run against Kubernetes v1.36, installed in dry-run on a Raspberry Pi 4 node (steps 1 to 3),
+and installed with an endpoint by the kind test (`tests/e2e/run.sh`, passed on 2026-10-27).
 
 ## Before you start
 

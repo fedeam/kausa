@@ -118,8 +118,8 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha: the four implementation weekends of v0.1 are done, but for the first run of the kind
-test, which waits for GitHub Actions; nothing is released. `kausa run` watches Pods
+Pre-alpha: the four implementation weekends of v0.1 are done, and nothing is released. The kind
+test passed on the maintainer's machine on 2026-10-27; on GitHub it waits for Actions. `kausa run` watches Pods
 and Warning events, groups failures by workload, builds a redacted context with the failed
 container's log, asks the model within a call budget (or logs the request with `--dry-run`),
 reuses explanations of repeated incidents, writes each explanation as an Event on the failing
@@ -173,7 +173,7 @@ The weekends give the order of work, not dates.
     chart, a multi-architecture image, end-to-end tests in kind.
   - Weekend 4: memory and CPU measured on a Raspberry Pi 4 and published; tokens per incident
     compared with k8sgpt on the same seeded failures. Done on 2026-10-26, with the first three;
-    the kind test waits for its first run.
+    the kind test first passed on 2026-10-27.
 - **v0.2:** longer explanations and history in a custom resource, and a namespaced install mode
   if v0.1 ships only the cluster-wide one.
 

@@ -10,7 +10,7 @@ watching, detection, the settle window, owner correlation, fingerprints, the con
 tails, redaction, the prompt, the client, the validation of answers, dry-run, the call and token
 budget, deduplication, the Events on the failing workload and the metrics ([Command line and log
 format](../reference/command-line.md)). The image and the Helm chart are built and checked in CI,
-not published; the kind test waits for its first run on GitHub Actions. Measured on a
+not published; the kind test passed on the maintainer's machine on 2026-10-27. Measured on a
 Raspberry Pi 4: about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)). This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:

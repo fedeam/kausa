@@ -16,7 +16,8 @@ writes the explanation as a Kubernetes Event on the failing object. Open source,
 `MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents, redacts their
 context, explains them with a model within a call budget (or logs the request with `--dry-run`),
 reuses explanations of repeated incidents, writes them as Events and serves metrics. The image and the Helm
-chart are in the repository (not published); the kind test has not run yet.
+chart are in the repository (not published); the kind test passes locally and waits for GitHub
+Actions.
 Maintainer: FedeAM (GitHub: `fedeam`).
 
 ## How to work

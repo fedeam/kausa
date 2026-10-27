@@ -5,13 +5,12 @@ Why CI is built this way, and where it runs for pull requests and for `main`: [0
 one pinned container build, on GitHub Actions and Gitea
 Actions](../adr/0003-ci-in-one-pinned-container-build.md).
 
-Status as of 2026-10-26: the four implementation weekends of v0.1 are done, but for the first run
-of the kind test. The unit tests cover the rules, grouping, fingerprints, owner correlation, redaction,
+Status as of 2026-10-27: the four implementation weekends of v0.1 are done. The unit tests cover the rules, grouping, fingerprints, owner correlation, redaction,
 the context, the prompt, the validation of answers, the budget, the Events, the metrics and the
 HTTP client (against a local test server) without a cluster. The end-to-end test in kind
-(`tests/e2e/run.sh`) has not run yet: it runs on GitHub Actions, which do not start jobs while the
-account's included minutes for private repositories are used up (they renew on the 1st; public
-repositories do not use them).
+(`tests/e2e/run.sh`) passed on the maintainer's machine (Docker Desktop, arm64) on 2026-10-27; on
+GitHub Actions it waits until they start jobs again (the account's included minutes for private
+repositories are used up until the 1st; public repositories do not use them).
 
 ## Before you start
 
@@ -87,13 +86,16 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    and checks the Events, what the endpoint received, the ClusterRole and the metrics:
 
    ```sh
-   KIND_NODE_IMAGE=<the node image pinned in .github/workflows/e2e.yml> tests/e2e/run.sh
+   KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the node image pinned in .github/workflows/e2e.yml> \
+     tests/e2e/run.sh
    ```
 
    It ends with `e2e: ok`. The fake endpoint runs on your machine. On Linux the cluster reaches it
    through the kind network's gateway; on Docker Desktop, whose gateway belongs to Docker's VM,
-   the script uses the address the nodes give `host.docker.internal` instead. Only the Linux path
-   has run (on GitHub's runners); the Docker Desktop one is a hypothesis.
+   the script uses the address the nodes give `host.docker.internal` instead. The Docker Desktop
+   path passed on 2026-10-27; the Linux one waits for GitHub's runners. kind writes its context to
+   the kubeconfig and makes it the current one: to leave yours as it is, run the test with
+   `KUBECONFIG` pointing at a file of its own.
 
 ## Verify
 

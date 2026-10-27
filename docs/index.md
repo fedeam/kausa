@@ -8,18 +8,18 @@ ConfigMaps, never changes a workload, and writes nothing but its own Events (non
 `--no-events`).
 
 Status as of 2026-10-26: **in development** (pre-alpha). The four implementation weekends of v0.1
-are done, but for the first run of the kind test: `kausa run` watches Pods and Warning events, groups failures by
+are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
-failing workload. The image and the Helm chart exist; the kind test waits for GitHub Actions, and
-nothing is released yet. The
+failing workload. The image and the Helm chart exist, the kind test passes on the maintainer's
+machine (2026-10-27), and nothing is released yet. The
 private repositories exist on GitHub and on the maintainer's Gitea instance, and contributions and
 merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
 ([2026-10-26 — GitHub repository and first CI
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: GitHub Actions, which do
 not start jobs while the repository is private (the account's included minutes for October are
-used up; public repositories do not use them), and with them the first run of the kind test;
+used up; public repositories do not use them), and with them the kind test and the image builds on GitHub;
 the first Dependabot run; and publication of the GitHub repository after validation.
 
 ## Key facts
@@ -91,4 +91,5 @@ checks](how-to/develop.md).
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
   and what is pending; [2026-10-26 — GitHub repository and first CI
-  runs](journal/2026-10-26-github-repository-and-first-ci.md): the first push and CI runs.
+  runs](journal/2026-10-26-github-repository-and-first-ci.md): the first push and CI runs;
+  [2026-10-27 — First run of the kind test](journal/2026-10-27-first-kind-run.md).
