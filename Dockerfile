@@ -23,7 +23,7 @@
 # Same release as rust-toolchain.toml: Dependabot moves both in one pull request (the "rust" group
 # in .github/dependabot.yml; see docs/how-to/maintain.md). The slim variant halves the image on the
 # runner's shared disk (about 0.8 GB instead of 1.6 GB for linux/arm64).
-FROM rust:1.99.1-slim-trixie@sha256:aab42391a986424e22d6a3ec14f37bc6dd3dacff4d457ca7cccd781e02297cc6 AS ci
+FROM rust:1.99.1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS ci
 
 ARG TARGETARCH
 
@@ -177,7 +177,7 @@ RUN cargo test --locked --all-features
 # The release binary, linked statically against musl, so the runtime image needs no libc. Built
 # for the architecture of the build: a multi-architecture image is two native builds
 # (the image job of .github/workflows/ci.yml, and the Gitea job for arm64), so no cross compiler is needed.
-FROM rust:1.99.1-slim-trixie@sha256:aab42391a986424e22d6a3ec14f37bc6dd3dacff4d457ca7cccd781e02297cc6 AS build
+FROM rust:1.99.1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS build
 
 ARG TARGETARCH
 
