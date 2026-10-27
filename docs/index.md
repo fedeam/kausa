@@ -85,7 +85,8 @@ checks](how-to/develop.md).
 - [Add a detection or redaction rule](how-to/add-a-rule.md): the files, tests and docs to change.
 - [Install kausa with Helm](how-to/install-with-helm.md) and the [Helm
   chart](reference/helm-chart.md) values; [0010. Ship a static binary on distroless, with a Helm
-  chart, built in CI and not published yet](adr/0010-packaging.md).
+  chart, built in CI and not published yet](adr/0010-packaging.md); [0011. Scan the code with
+  CodeQL's default setup](adr/0011-code-scanning-with-codeql.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
