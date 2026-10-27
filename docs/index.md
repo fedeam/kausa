@@ -7,20 +7,18 @@ budget, and writes the explanation as an Event on the failing object. It never r
 ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
 `--no-events`).
 
-Status as of 2026-10-26: **in development** (pre-alpha). The four implementation weekends of v0.1
+Status as of 2026-10-27: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
 failing workload. The image and the Helm chart exist, the kind test passes on the maintainer's
 machine (2026-10-27), and nothing is released yet. The
-private repositories exist on GitHub and on the maintainer's Gitea instance, and contributions and
-merges happen on GitHub ([0007. Take contributions and merge pull requests on
+repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
+contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
 ([2026-10-26 — GitHub repository and first CI
-runs](journal/2026-10-26-github-repository-and-first-ci.md)). Pending: GitHub Actions, which do
-not start jobs while the repository is private (the account's included minutes for October are
-used up; public repositories do not use them), and with them the kind test and the image builds on GitHub;
-the first Dependabot run; and publication of the GitHub repository after validation.
+runs](journal/2026-10-26-github-repository-and-first-ci.md)). GitHub Actions did not start jobs before the
+repository was public, on 2026-10-27; the first release is pending.
 
 ## Key facts
 
@@ -28,8 +26,8 @@ the first Dependabot run; and publication of the GitHub repository after validat
   linux/arm64, in a distroless non-root image (built in CI, not published) with a Helm chart in
   `charts/kausa`.
 - **URL:** none: kausa runs in its users' clusters.
-- **Repository:** [`fedeam/kausa`](https://github.com/fedeam/kausa) on GitHub, private until the
-  project is validated, then public. A private copy on the maintainer's Gitea instance, synced by
+- **Repository:** [`fedeam/kausa`](https://github.com/fedeam/kausa) on GitHub, public since
+  2026-10-27. A private copy on the maintainer's Gitea instance, synced by
   the maintainer after each merge, runs the arm64 CI; its issues and pull requests are disabled.
 - **Contributions:** on GitHub: issues, pull requests and reviews, the maintainer's own changes
   included. Pull requests are squash-merged, and the pull request title, a Conventional Commit

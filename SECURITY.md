@@ -13,8 +13,7 @@ fixes.
 ## Reporting a vulnerability
 
 Report it privately through GitHub private vulnerability reporting:
-<https://github.com/fedeam/kausa/security/advisories/new>. It will be enabled when the repository
-goes public; until then the repository is private.
+<https://github.com/fedeam/kausa/security/advisories/new>.
 
 Do not open a public issue, pull request or discussion for a vulnerability. Include the version
 or commit, a minimal sanitized input that reproduces it (an event message, a log line or a
@@ -175,5 +174,5 @@ A missing detection or a weak explanation is a bug: open an issue. Anything in t
 ## Exposure
 
 Nothing is deployed by this repository: kausa runs in the clusters of whoever installs it, and it
-serves only its own metrics and health endpoints, inside the cluster. The repository is private
-until the project is validated, then public.
+serves only its own metrics and health endpoints, inside the cluster. The GitHub repository is
+public; the copy that runs the arm64 CI stays private.
