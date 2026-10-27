@@ -60,6 +60,22 @@ it works), each with a second reviewer to verify the findings.
   failing Pods (help wanted), a test against a hosted provider, and the arm64 `ci` job on
   GitHub's runners.
 
+## Later the same day: the history rewritten and the repository recreated
+
+- The history of `main` was rewritten with `git filter-repo`: the maintainer's legal name and the
+  old profile name replaced by `FedeAM` in every file of every commit, and the ` (#N)` at the end
+  of the commit headers removed, since the pull request numbers of the first repository would
+  have linked to unrelated pull requests in the new one. The tree of the last commit is
+  byte-for-byte the same as before; every commit SHA changed, and the ones the docs cite were
+  updated to the new history in the same change as this entry.
+- The first GitHub repository was renamed `fedeam/kausa-old` and stays private, as a backup with
+  its thirteen pull requests; a new private `fedeam/kausa` was created with the same description
+  (now without "read-only"), settings, topics, labels and Actions permissions, and the rewritten
+  `main`. Pull request numbers start again at 1.
+- The copy on Gitea and the maintainer's clone still had the old history at the time of writing:
+  replacing Gitea's `main` needs a force push to a protected branch, which the agent was not
+  allowed to do; the maintainer does it.
+
 ## Pending
 
 - The same two checks on GitHub's runners (the Linux path of the kind test, and the arm64 runner),

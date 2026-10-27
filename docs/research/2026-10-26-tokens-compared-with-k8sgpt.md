@@ -36,7 +36,7 @@ magnitude, not a benchmark.
 
 ## Setup
 
-- kausa 0.1.0-dev at commit `0f807de`, release build, run on the maintainer's machine with
+- kausa 0.1.0-dev at commit `fde385c`, release build, run on the maintainer's machine with
   `--endpoint`, `--no-events` and the default budget, until it had explained the five incidents.
 - k8sgpt 0.4.41 (Homebrew), `k8sgpt analyze --explain --backend ollama --namespace <ns>
   --no-cache --output json`, with its default analyzers, once without and once with

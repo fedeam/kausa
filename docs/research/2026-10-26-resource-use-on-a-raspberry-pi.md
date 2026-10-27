@@ -28,7 +28,7 @@ Measured on 2026-10-26, once, on one cluster: a first data point, not a benchmar
 
 - The cluster: Kubernetes v1.36.5 (k3s), three Raspberry Pi 4 Model B (8 GB) nodes on Debian 13,
   89 Pods at the start and 96 with the seeded failures, 49 Events, 3 of them Warnings.
-- kausa 0.1.0-dev at commit `7970179`, the linux/arm64 `runtime` image built from the
+- kausa 0.1.0-dev at commit `fac976f`, the linux/arm64 `runtime` image built from the
   Dockerfile and loaded into one node's containerd (no image is published). Installed with
   `charts/kausa` in a namespace labelled `pod-security.kubernetes.io/enforce=restricted`, with
   `dryRun=true`, `image.pullPolicy=Never` and a `nodeSelector` for that node; the other values
