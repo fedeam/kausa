@@ -72,6 +72,8 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `stopped` | info | |
 | `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
 | `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them) and `redactions`; or, when it comes from the deduplication cache, `explanation` and `"cached": true` |
+| `explanation retried` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`, `detail` (the start of the endpoint's error body, at most 512 bytes on one line, or `null`), `retry_in_seconds`: the first call failed with a timeout, a failed connection, `429` or a `5xx` status, and is tried once more 30 seconds later. A call that never reached the endpoint (a failed connection) is given back to the budget |
+| `endpoint error` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`, `detail`: the endpoint's error body, logged before the `explanation skipped` line it leads to. The body is the provider's text, so it goes to the log only, not to the Event |
 | `explanation skipped` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`: the call budget is spent, the context does not fit `--max-input-tokens`, the endpoint failed or answered an error status, or the answer did not validate |
 | `event write failed` | warn | `fingerprint`, `error`: the Event could not be created or patched |
 | `explanation dropped` | warn | `fingerprint`, `reason`: the queue of 16 incidents waiting for an explanation was full |
@@ -120,9 +122,11 @@ and any other method `405`. The counters live in memory and start over when kaus
 | `kausa_model_tokens_total` | `direction` (`in`, `out`) | Tokens the endpoint reported |
 | `kausa_explanations_cached_total` | | Incidents explained again from the deduplication cache |
 | `kausa_explanations_skipped_total` | `reason` (`budget`, `context_too_large`, `endpoint`, `invalid_answer`) | Incidents not explained |
+| `kausa_explanations_retried_total` | | Calls tried again after a transient error |
 | `kausa_explanations_dropped_total` | | Incidents dropped because the queue of 16 was full |
 | `kausa_requests_logged_total` | | Requests logged instead of sent (`--dry-run`) |
 | `kausa_redactions_total` | `rule` | Values replaced by redaction |
 | `kausa_events_written_total` | `reason` (`Explained`, `ExplanationSkipped`) | Events created or updated |
 | `kausa_event_write_errors_total` | | Events that could not be written |
+| `kausa_watch_errors_total` | `watch` (`pods`, `events`) | Errors of the two watches, which retry with backoff; a steady rise with no incidents means kausa is not seeing the cluster |
 

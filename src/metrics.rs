@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 10] = [
+pub const COUNTERS: [(&str, &str); 12] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -34,6 +34,10 @@ pub const COUNTERS: [(&str, &str); 10] = [
         "Incidents not explained, by reason.",
     ),
     (
+        "kausa_explanations_retried_total",
+        "Calls tried again after a transient error.",
+    ),
+    (
         "kausa_explanations_dropped_total",
         "Incidents dropped because the explanation queue was full.",
     ),
@@ -52,6 +56,10 @@ pub const COUNTERS: [(&str, &str); 10] = [
     (
         "kausa_event_write_errors_total",
         "Events that could not be written.",
+    ),
+    (
+        "kausa_watch_errors_total",
+        "Errors of the Pod and Event watches, which retry with backoff, by watch.",
     ),
 ];
 

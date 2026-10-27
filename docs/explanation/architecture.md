@@ -125,6 +125,10 @@ produces the same incident, the same fingerprint and the same request bytes.
   slow endpoint never stops the watches (nor does a metrics client: up to 8 connections are
   answered at once, each with 2-second timeouts); incidents wait in a queue of 16, and the oldest is dropped
   (and logged) when it overflows.
+- **One retry.** A call that fails with a timeout, a failed connection, `429` or a `5xx` status
+  is tried once more 30 seconds later; then the incident is skipped. A call that never reached
+  the endpoint is given back to the budget. The start of an error body (at most 512 bytes) goes
+  to kausa's log, not to the Event.
 
 ## Cost controls
 

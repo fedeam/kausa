@@ -13,6 +13,7 @@ const MAX_EVENTS: usize = 10;
 pub const MAX_LOG_BYTES: usize = 4096;
 
 /// What kausa gathered about an incident, before redaction.
+#[derive(Clone)]
 pub struct Gathered {
     pub incident: Incident,
     /// The incident's Pods that kausa still knows, sample first.

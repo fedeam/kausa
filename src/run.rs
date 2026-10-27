@@ -157,7 +157,9 @@ pub async fn run(options: Options) -> Result<(), RunError> {
     let mut tracker = Tracker::new(options.settle);
     let mut ticker = tokio::time::interval(TICK);
     let mut queue: VecDeque<Work> = VecDeque::new();
-    let mut running: Option<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> = None;
+    let mut running: Option<Explaining<'_>> = None;
+    // Jobs whose first call failed with a transient error, and when they may be tried again.
+    let mut delayed: Vec<(Instant, Work)> = Vec::new();
     let mut connections = FuturesUnordered::new();
 
     loop {
@@ -176,7 +178,9 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             result = async { running.as_mut().expect("guarded by the condition").await },
                 if running.is_some() => {
                 running = None;
-                result?;
+                if let Some(job) = result? {
+                    delayed.push((Instant::now() + explain::RETRY_DELAY, job));
+                }
             }
             accepted = async { listener.as_ref().expect("guarded by the condition").accept().await },
                 if listener.is_some() && connections.len() < MAX_CONNECTIONS => match accepted {
@@ -195,7 +199,10 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                         metrics.set_ready();
                     }
                 }
-                Some(Err(e)) => log::warn("pod watch error", json!({"error": e.to_string()}))?,
+                Some(Err(e)) => {
+                    metrics.inc("kausa_watch_errors_total", &[("watch", "pods")]);
+                    log::warn("pod watch error", json!({"error": e.to_string()}))?;
+                }
                 None => return Err(RunError::Failure("the pod watch ended".into())),
             },
             item = events.next() => match item {
@@ -206,12 +213,19 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                         metrics.set_ready();
                     }
                 }
-                Some(Err(e)) => log::warn("event watch error", json!({"error": e.to_string()}))?,
+                Some(Err(e)) => {
+                    metrics.inc("kausa_watch_errors_total", &[("watch", "events")]);
+                    log::warn("event watch error", json!({"error": e.to_string()}))?;
+                }
                 None => return Err(RunError::Failure("the event watch ended".into())),
             },
             _ = ticker.tick() => {
                 let now = Timestamp::now();
                 state.prune_events(now);
+                let (ready, waiting): (Vec<_>, Vec<_>) =
+                    delayed.drain(..).partition(|(at, _)| *at <= Instant::now());
+                delayed = waiting;
+                queue.extend(ready.into_iter().map(|(_, job)| job));
                 for incident in state.tick(&mut tracker, now) {
                     metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
                     log_incident(&incident, state.pods_of(&incident.owner))?;
@@ -471,6 +485,7 @@ impl State {
                 log_tail: None,
             },
             log,
+            attempt: 0,
         }
     }
 
@@ -523,6 +538,9 @@ impl State {
 }
 
 /// A cached owner lookup: the answer (or the error) and when it was read.
+/// The explanation in progress: it ends with a job to retry, if its call failed transiently.
+type Explaining<'a> = Pin<Box<dyn Future<Output = io::Result<Option<Work>>> + 'a>>;
+
 type CachedLookup = (Result<Option<OwnerRef>, String>, Instant);
 
 /// Owner lookups against the API server: metadata only, with a timeout, cached for a while.

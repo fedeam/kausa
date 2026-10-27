@@ -76,10 +76,16 @@ pub struct LogSource {
 }
 
 /// One incident waiting for its explanation.
+#[derive(Clone)]
 pub struct Work {
     pub gathered: Gathered,
     pub log: Option<LogSource>,
+    /// How many calls for it failed with a transient error (it is tried at most twice).
+    pub attempt: u8,
 }
+
+/// How long a transient failure waits before its one retry.
+pub const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Whether a detection reads the failed container's log (docs/reference/rules.md).
 pub fn reads_logs(detection: Detection) -> bool {
@@ -92,13 +98,20 @@ pub fn reads_logs(detection: Detection) -> bool {
 /// Explains one incident and logs the outcome: from the deduplication cache when the same failure
 /// was explained recently; otherwise reads the log tail, builds and fits the request, and logs it
 /// (dry-run) or sends it within the budget and validates the answer. Explanations and skipped
-/// explanations are written as Events when that is on.
+/// explanations are written as Events when that is on. A first call that fails with a transient
+/// error (a timeout, a failed connection, `429` or a `5xx` status) returns the job, to be tried
+/// once more after `RETRY_DELAY`; a call that never reached the endpoint is given back to the
+/// budget.
 pub async fn run(
     job: Work,
     client: Client,
     settings: &Settings,
     shared: &Shared<'_>,
-) -> io::Result<()> {
+) -> io::Result<Option<Work>> {
+    let retry = (job.attempt == 0).then(|| Work {
+        attempt: 1,
+        ..job.clone()
+    });
     let mut gathered = job.gathered;
     let fingerprint = gathered.incident.fingerprint.clone();
     let about = json!({
@@ -128,7 +141,8 @@ pub async fn run(
                 &gathered,
                 Outcome::Explained(&explanation),
             )
-            .await;
+            .await
+            .map(|()| None);
         }
     }
 
@@ -157,7 +171,8 @@ pub async fn run(
             "context_too_large",
             "the context does not fit --max-input-tokens even without logs",
         )
-        .await;
+        .await
+        .map(|()| None);
     };
     let redactions = counts(redactor.counts());
     for (rule, n) in redactor.counts() {
@@ -171,11 +186,14 @@ pub async fn run(
         return log::info(
             "request",
             merge(about, json!({"request": body, "redactions": redactions})),
-        );
+        )
+        .map(|()| None);
     };
     let taken = shared.budget.borrow_mut().take(std::time::Instant::now());
     if let Err(why) = taken {
-        return skip(settings, shared, &gathered, about, "budget", why).await;
+        return skip(settings, shared, &gathered, about, "budget", why)
+            .await
+            .map(|()| None);
     }
     let answer = match model.complete(&body).await {
         Ok(answer) => answer,
@@ -183,7 +201,45 @@ pub async fn run(
             shared
                 .metrics
                 .inc("kausa_model_calls_total", &[("outcome", "error")]);
-            return skip(settings, shared, &gathered, about, "endpoint", &error).await;
+            if !error.reached {
+                shared.budget.borrow_mut().refund();
+            }
+            if error.transient
+                && let Some(retry) = retry
+            {
+                shared.metrics.inc("kausa_explanations_retried_total", &[]);
+                log::warn(
+                    "explanation retried",
+                    merge(
+                        about,
+                        json!({
+                            "reason": error.message,
+                            "detail": error.detail,
+                            "retry_in_seconds": RETRY_DELAY.as_secs(),
+                        }),
+                    ),
+                )?;
+                return Ok(Some(retry));
+            }
+            if let Some(detail) = &error.detail {
+                log::warn(
+                    "endpoint error",
+                    merge(
+                        about.clone(),
+                        json!({"reason": error.message, "detail": detail}),
+                    ),
+                )?;
+            }
+            return skip(
+                settings,
+                shared,
+                &gathered,
+                about,
+                "endpoint",
+                &error.message,
+            )
+            .await
+            .map(|()| None);
         }
     };
     if let Some(n) = answer.prompt_tokens {
@@ -203,7 +259,9 @@ pub async fn run(
                 .metrics
                 .inc("kausa_model_calls_total", &[("outcome", "invalid")]);
             let why = format!("invalid answer: {error}");
-            return skip(settings, shared, &gathered, about, "invalid_answer", &why).await;
+            return skip(settings, shared, &gathered, about, "invalid_answer", &why)
+                .await
+                .map(|()| None);
         }
     };
     shared
@@ -227,7 +285,9 @@ pub async fn run(
             }),
         ),
     )?;
-    emit(settings, shared, &gathered, Outcome::Explained(&restored)).await
+    emit(settings, shared, &gathered, Outcome::Explained(&restored))
+        .await
+        .map(|()| None)
 }
 
 /// Builds the request, cutting the context until it fits `max_input_tokens`: first the log tail

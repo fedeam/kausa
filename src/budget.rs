@@ -55,6 +55,11 @@ impl Budget {
         self.calls.push_back(now);
         Ok(())
     }
+
+    /// Gives back the call taken last, for a request that never reached the endpoint.
+    pub fn refund(&mut self) {
+        self.calls.pop_back();
+    }
 }
 
 /// A stored explanation and when it was stored.
@@ -164,6 +169,15 @@ mod tests {
         let mut budget = Budget::new(1, 10);
         assert!(budget.take(t(100)).is_ok());
         assert!(budget.take(t(50)).is_err());
+    }
+
+    #[test]
+    fn a_refunded_call_frees_its_place() {
+        let mut budget = Budget::new(1, 10);
+        assert!(budget.take(t(0)).is_ok());
+        budget.refund();
+        assert!(budget.take(t(1)).is_ok());
+        assert!(budget.take(t(2)).is_err());
     }
 
     #[test]

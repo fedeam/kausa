@@ -57,7 +57,7 @@ impl ModelClient {
     }
 
     /// Sends one request body and returns the answer.
-    pub async fn complete(&self, body: &Value) -> Result<Answer, String> {
+    pub async fn complete(&self, body: &Value) -> Result<Answer, CallError> {
         let mut request = self
             .http
             .post(&self.url)
@@ -66,32 +66,41 @@ impl ModelClient {
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);
         }
-        let mut response = request
-            .send()
-            .await
-            .map_err(|e| format!("the request failed: {}", without_url(&e)))?;
+        let mut response = request.send().await.map_err(|e| CallError {
+            message: format!("the request failed: {}", without_url(&e)),
+            detail: None,
+            transient: e.is_timeout() || e.is_connect(),
+            // A connect error means the endpoint never received the request.
+            reached: !e.is_connect(),
+        })?;
         let status = response.status();
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| format!("reading the answer failed: {}", without_url(&e)))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|e| CallError {
+            message: format!("reading the answer failed: {}", without_url(&e)),
+            detail: None,
+            transient: e.is_timeout(),
+            reached: true,
+        })? {
             if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                return Err(format!(
+                return Err(CallError::permanent(format!(
                     "the answer is larger than {MAX_RESPONSE_BYTES} bytes"
-                ));
+                )));
             }
             bytes.extend_from_slice(&chunk);
         }
         if !status.is_success() {
-            return Err(format!("the endpoint answered {status}"));
+            return Err(CallError {
+                message: format!("the endpoint answered {status}"),
+                detail: Some(error_detail(&bytes)),
+                transient: status.as_u16() == 429 || status.is_server_error(),
+                reached: true,
+            });
         }
-        let value: Value =
-            serde_json::from_slice(&bytes).map_err(|e| format!("the answer is not JSON: {e}"))?;
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| CallError::permanent(format!("the answer is not JSON: {e}")))?;
         let content = value["choices"][0]["message"]["content"]
             .as_str()
-            .ok_or("the answer has no choices[0].message.content")?
+            .ok_or_else(|| CallError::permanent("the answer has no choices[0].message.content"))?
             .to_owned();
         Ok(Answer {
             content,
@@ -99,6 +108,56 @@ impl ModelClient {
             completion_tokens: value["usage"]["completion_tokens"].as_u64(),
         })
     }
+}
+
+/// Why a call failed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CallError {
+    /// What went wrong, for the log and the `ExplanationSkipped` Event.
+    pub message: String,
+    /// The start of the endpoint's error body, for kausa's log only: it is the provider's text,
+    /// so it does not go into an Event.
+    pub detail: Option<String>,
+    /// Worth one more try: a timeout, a failed connection, `429` or a `5xx` status.
+    pub transient: bool,
+    /// Whether the endpoint received the request (and may have counted it).
+    pub reached: bool,
+}
+
+impl CallError {
+    fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            detail: None,
+            transient: false,
+            reached: true,
+        }
+    }
+}
+
+/// The longest part of an error body kept for the log.
+const MAX_ERROR_DETAIL: usize = 512;
+
+/// The start of an error body as one line of text: invalid UTF-8 replaced, control characters
+/// and runs of white space turned into single spaces, cut at a character boundary.
+fn error_detail(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let mut line = String::new();
+    for c in text.chars() {
+        let c = if c.is_control() || c.is_whitespace() {
+            ' '
+        } else {
+            c
+        };
+        if c == ' ' && (line.is_empty() || line.ends_with(' ')) {
+            continue;
+        }
+        if line.len() + c.len_utf8() > MAX_ERROR_DETAIL {
+            break;
+        }
+        line.push(c);
+    }
+    line.trim_end().to_owned()
 }
 
 /// A reqwest error without its URL, which may carry the base URL's user information.
@@ -202,7 +261,57 @@ mod tests {
         let error = block_on(client.complete(&serde_json::json!({})))
             .err()
             .expect("an error");
-        assert!(error.contains("307"), "{error}");
+        assert!(error.message.contains("307"), "{error:?}");
+        assert!(!error.transient);
         server.join().expect("the server");
+    }
+
+    #[test]
+    fn an_error_status_keeps_the_start_of_its_body_and_says_whether_to_retry() {
+        let body = format!("{{\"error\":\"rate\nlimited\"}}{}", "x".repeat(2000));
+        let (url, server) = serve_once(http_response("429 Too Many Requests", &body));
+        let client = ModelClient::new(&url, None, true).expect("a client");
+        let error = block_on(client.complete(&serde_json::json!({})))
+            .err()
+            .expect("an error");
+        assert_eq!(error.message, "the endpoint answered 429 Too Many Requests");
+        let detail = error.detail.expect("a detail");
+        assert!(
+            detail.starts_with("{\"error\":\"rate limited\"}"),
+            "{detail}"
+        );
+        assert!(detail.len() <= MAX_ERROR_DETAIL);
+        assert!(error.transient && error.reached);
+        server.join().expect("the server");
+
+        let (url, server) = serve_once(http_response("400 Bad Request", "{}"));
+        let client = ModelClient::new(&url, None, true).expect("a client");
+        let error = block_on(client.complete(&serde_json::json!({})))
+            .err()
+            .expect("an error");
+        assert!(!error.transient);
+        server.join().expect("the server");
+    }
+
+    #[test]
+    fn a_refused_connection_is_transient_and_never_reached_the_endpoint() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free port")
+            .port();
+        let client =
+            ModelClient::new(&format!("http://127.0.0.1:{port}/v1"), None, true).expect("a client");
+        let error = block_on(client.complete(&serde_json::json!({})))
+            .err()
+            .expect("an error");
+        assert!(error.transient && !error.reached, "{error:?}");
+    }
+
+    #[test]
+    fn error_details_are_one_short_line() {
+        assert_eq!(error_detail(b"  a\r\n\tb\x00c  "), "a b c");
+        let long = "é".repeat(400);
+        let detail = error_detail(long.as_bytes());
+        assert!(detail.len() <= MAX_ERROR_DETAIL && detail.chars().all(|c| c == 'é'));
     }
 }

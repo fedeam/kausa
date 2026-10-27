@@ -28,6 +28,11 @@ chart. Nothing is released yet.
   explanations for repeated incidents (`--dedup-hours`), the explanation written as an
   `events.k8s.io/v1` Event on the failing workload (`--no-events` to turn it off), and Prometheus
   metrics with health and readiness endpoints (`--metrics-address`).
+- One retry, 30 seconds later, for a call that fails with a timeout, a failed connection, `429`
+  or a `5xx` status; a call that never reached the endpoint does not count against the budget.
+  The start of the endpoint's error body is logged.
+- Counters for retried calls (`kausa_explanations_retried_total`) and watch errors
+  (`kausa_watch_errors_total`).
 - `kausa --help` and `kausa --version`.
 - The controller image (`docker build --target runtime`): a static binary on distroless, non-root,
   for linux/amd64 and linux/arm64. Not published.
