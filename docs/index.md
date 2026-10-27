@@ -84,6 +84,7 @@ checks](how-to/develop.md).
   [Permissions](reference/permissions.md): what leaves the cluster and what kausa may read.
 - [Try kausa against a cluster with a local model](how-to/try-with-a-local-model.md): a
   read-only run with Ollama.
+- [Add a detection or redaction rule](how-to/add-a-rule.md): the files, tests and docs to change.
 - [Install kausa with Helm](how-to/install-with-helm.md) and the [Helm
   chart](reference/helm-chart.md) values; [0010. Ship a static binary on distroless, with a Helm
   chart, built in CI and not published yet](adr/0010-packaging.md).

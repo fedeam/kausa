@@ -26,6 +26,40 @@ account's included minutes for private repositories are used up until 2026-11-01
   runtime`: it runs (`kausa 0.1.0-dev`), as user 65532, 4.6 MB compressed. The layers came from
   the cache of an earlier build of the same instructions.
 
+## Later the same day: an audit before publication
+
+The maintainer asked for an audit of the repository before publishing it, and whether kausa works
+well and is set up for others to contribute. Five read-only reviewers (the history and private
+data, the docs read as a stranger, the GitHub settings, readiness for contributors, and whether
+it works), each with a second reviewer to verify the findings.
+
+- **No secrets, internal names, addresses or personal email** anywhere GitHub would publish:
+  gitleaks found nothing in any ref, and the pull request texts are clean.
+- **Two blockers, both the maintainer's legal name:** the rewrite of 2026-10-26 changed the
+  commit metadata only, so the content of four old commits on `main` (the license, `AGENTS.md`,
+  ADRs) still had it; and the pull request refs `refs/pull/1` to `3`, which GitHub keeps and only
+  GitHub can delete, point at commits authored with it. The maintainer chose to rewrite the
+  history (content and authors) and to recreate the GitHub repository.
+- **Code:** a transient endpoint failure left an incident unexplained and still counted against
+  the budget, an error status lost the provider's reason, and watch errors had no metric. Fixed in
+  pull request #12, and checked live (an endpoint answering `503`, then one refusing connections
+  with a budget of one call per hour).
+- **Docs:** the README's claim that memory does not grow with the number of Pods (it grows by one
+  small record each), a checklist grep that could never print nothing, status lines the
+  checklist's greps missed, planning jargon, no quickstart, no step-by-step path to add a rule,
+  no way documented to propose a feature, `AGENTS.md` written for the maintainer's clone only, and
+  a committed `.pyc`. Fixed in the following pull request. The README's new quickstart was run as
+  written in a kind cluster: an incident and its request about 70 seconds after the failing
+  Deployment was created.
+- **Kept as they are, on purpose:** the mentions of the maintainer's earlier project kaution (a
+  name only); the journals' names of the software in the maintainer's own infrastructure.
+- **For after publication**, from the audit: good-first-issue candidates (more `R011` token
+  formats with their issuers' documentation, exhaustive `match` in `is_state` and `reads_logs`, a
+  cap on the Pod names an incident keeps, fewer repeated watch-error lines, a test that every rule
+  id appears in the rules reference, a check of pull request titles), owner lookups only for
+  failing Pods (help wanted), a test against a hosted provider, and the arm64 `ci` job on
+  GitHub's runners.
+
 ## Pending
 
 - The same two checks on GitHub's runners (the Linux path of the kind test, and the arm64 runner),

@@ -39,8 +39,10 @@ produces the same incident, the same fingerprint and the same request bytes.
   grow a controller's memory with the cluster. kausa reduces each watch event to a small record per
   Pod (namespace, name, owner reference, phase, and per container its waiting reason, last
   termination reason, exit code and restart count, and its image, probe types and timings, and
-  memory and CPU limits) and drops the rest. Hypothesis to measure: that
-  this keeps memory roughly flat with the number of healthy Pods.
+  memory and CPU limits) and drops the rest. Memory still grows with the number of Pods and
+  Warning events, by one small record each; with 96 Pods it was about 2 MiB on a Raspberry Pi 4
+  ([Memory and CPU on a Raspberry Pi
+  4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)). Larger clusters are not measured.
 - **Server-side filtering.** The event watch uses the field selector
   `type=Warning,reportingController!=kausa`: `events.k8s.io/v1` supports both fields (its field
   label conversion in Kubernetes' `pkg/apis/events/v1/conversion.go`, checked on 2026-10-26).

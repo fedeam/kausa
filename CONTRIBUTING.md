@@ -19,8 +19,10 @@ so we agree on the approach before you spend time on it.
 
 ## Build and test
 
-You need Rust (stable, through [rustup](https://rustup.rs)). For the full check you also need
-`cargo-deny`, `cargo-audit`, `gitleaks` and Docker.
+You need Rust through [rustup](https://rustup.rs), which installs the toolchain pinned in
+`rust-toolchain.toml`. For the full check you also need `cargo-deny`, `cargo-audit`, `gitleaks`,
+`helm` and Docker; for the end-to-end test, kind ([Set up a development environment and run the
+checks](docs/how-to/develop.md)). The tests need no cluster and no credentials.
 
 ```sh
 cargo build --locked
@@ -48,13 +50,40 @@ cluster. Open a **Rule request** issue first. A rule is accepted with all of the
   must be redacted and lines that look alike and must stay (version strings, hashes in paths,
   timestamps).
 - **Expected output**: the incident, or the redacted text, for each fixture, committed with the
-  rule. A change to an expected output is reviewed like code.
+  rule as unit tests next to the code. A change to an expected output is reviewed like code.
+
+Which files to change, step by step: [Add a detection or redaction
+rule](docs/how-to/add-a-rule.md).
 
 A redaction rule may only ever make kausa send less. A change that lets a value through that a
 rule caught before needs an ADR. Fixtures contain no real data, not even sanitized by hand:
 invent them, with `example.com`, the documentation ranges `192.0.2.0/24` and `2001:db8::/32`, the
 AWS documentation account `123456789012` and token strings built to match a format, never ones
 that were issued.
+
+## Propose a feature
+
+A feature that is not a rule (a new output, a new flag, a new mode, support for something kausa
+does not read today) starts with a **Feature, docs or question** issue. If the maintainer thinks
+it fits the scope ([0001. Build a small, read-only explainer that writes one redacted explanation
+per incident](docs/adr/0001-scope-and-positioning.md)), the next step is an ADR: a pull request
+that adds `docs/adr/NNNN-slug.md` with `Status: proposed`, in the format of the existing ones
+(Context, Alternatives, Decision, Consequences). The code comes once the ADR is accepted, in a
+pull request of its own or together with it.
+
+Model providers are not a code extension point: kausa speaks one OpenAI-compatible API
+([0008. Send only allowlisted, redacted data to one OpenAI-compatible
+endpoint](docs/adr/0008-data-leaving-the-cluster.md)). Support for a provider means checking that
+its OpenAI-compatible endpoint works with kausa and saying so in an issue or the docs, not a
+native client.
+
+## How decisions are made
+
+kausa has one maintainer, FedeAM, who reviews and merges pull requests and accepts ADRs. Decisions
+are recorded in [`docs/adr/`](docs/adr/), so that the reason for each one outlives the
+conversation that led to it. A contributor who reviews and lands changes over time can be asked
+to become a reviewer; that, and anything else about how the project is run, will be written here
+when it happens.
 
 ## Issues and pull requests
 
@@ -87,7 +116,8 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
   changes the `Dockerfile`, `.dockerignore`, `rust-toolchain.toml`, a build script (`build.rs` or
   the `build` key in `Cargo.toml`) or a workflow waits for GitHub Actions instead.
 - **After the merge** the maintainer copies `main` to a private Git server where the same build
-  runs on linux/arm64. If it fails there, the fix is a new pull request.
+  runs on linux/arm64. If it fails there, the maintainer opens an issue on GitHub that links your
+  pull request, and the fix is a new pull request.
 - **Changelog.** If users will notice your change, add a line under `Unreleased` in the
   [Changelog](CHANGELOG.md).
 - Do not add AI attribution trailers or footers. You are responsible for what you submit.

@@ -47,9 +47,11 @@ logs it with `--dry-run`; it logs incidents and explanations with real names to 
 Calls to the model are capped per hour and per day, explanations of repeated incidents are
 reused, and the queue in front of the model holds 16. It writes the explanation as an Event in the
 failing workload's namespace (`create` and `patch` on Events only), and serves metrics only with
-`--metrics-address`. The rest are the properties v0.1 is
-designed to have ([Architecture](docs/explanation/architecture.md)); each one will be backed by
-tests before the release.
+`--metrics-address`. Each of these is implemented: the redaction, the prompt's validation, the
+budget, the Event writes and the metrics responder have unit tests, and the permissions are
+checked by the kind test (`kubectl auth can-i`, what is allowed and what must be refused). Not
+tested yet: a hosted provider over HTTPS (the distroless CA bundle with rustls), clusters larger
+than about a hundred Pods, and long runs ([Architecture](docs/explanation/architecture.md)).
 
 **Who controls kausa's inputs.** Anyone who can create or change a workload in a watched namespace
 controls event messages, log lines, container names, image references and exit codes. In a shared

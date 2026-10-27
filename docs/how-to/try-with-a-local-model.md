@@ -80,6 +80,8 @@ with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
    `--allow-http` is needed because the endpoint is plain HTTP on your machine. Each incident gets
    an `explanation` line with the real names mapped back and the tokens the endpoint reported, and
    an Event: `kubectl describe deployment <name>` shows it next to the Deployment's own events.
+   Behind step 2's read-only proxy, add `--no-events`: the Event appears only without the proxy,
+   or with the proxy's one-namespace write filter.
    `curl -s 127.0.0.1:9090/metrics` shows the counters.
 
 5. **Stop** kausa with Ctrl-C, then the proxy and the model server.

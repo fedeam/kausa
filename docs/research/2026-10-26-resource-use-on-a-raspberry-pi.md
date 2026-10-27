@@ -46,7 +46,10 @@ Measured on 2026-10-26, once, on one cluster: a first data point, not a benchmar
   namespaces. kausa logs each one as `event watch error` and the watcher retries with backoff; no
   incident was missed. Why the API server sends that error for kausa's field-selected watch on
   this k3s cluster is not known yet (a hypothesis: Events that expire or are deleted while a
-  watch with a field selector is open); each restart costs one more list of the Warning events.
+  watch with a field selector is open). Whether each restart also costs a new list of the
+  Warning events or only a new watch from the last resource version was not checked; an audit on
+  2026-10-27 judged the second more likely, on the reading that kube-rs re-lists after `Expired`
+  and not after other errors (not verified). Since 2026-10-27 the restarts are counted in `kausa_watch_errors_total`.
 
 ## Limits
 

@@ -30,11 +30,13 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
   `CONTRIBUTING.md` (CI), `AGENTS.md` (Remotes, merges and CI), `SECURITY.md` (Secrets),
   `docs/index.md` (the status and the CI line of the key facts), [Maintain the
   repository](maintain.md) (the status, step 4 of "Review and merge a pull request" and step 4 of
-  "Bump the pinned tools") and the header comment of `.github/workflows/ci.yml`. ADRs and journal
+  "Bump the pinned tools"), the status of [Set up a development environment and run the
+  checks](develop.md), and the header comments of `.github/workflows/ci.yml` and
+  `.github/workflows/e2e.yml`. ADRs and journal
   entries keep what was true when they were written. Then this prints nothing:
 
   ```sh
-  git grep -n -E 'not start|[Oo]nce (GitHub )?Actions run|Until GitHub Actions run|Actions do not run' \
+  git grep -n -E 'does not start|do not start|not start jobs|[Oo]nce (GitHub )?Actions run|Until GitHub Actions run|Actions do not run|waits? (until|for) (GitHub )?Actions|until they start jobs' \
     -- ':!docs/adr' ':!docs/journal' ':!docs/how-to/publish-the-repository.md'
   ```
 
@@ -92,6 +94,7 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
 
    ```sh
    git -C "$MIRROR" log --all -p | grep -n -i -E -f ~/kausa-private-patterns.txt
+   git -C "$MIRROR" log --all --format='%B' | grep -n -i -E -f ~/kausa-private-patterns.txt
    git -C "$MIRROR" log --all -p | grep -n -i -E '\.(local|lan|internal|home\.arpa)\b'
    git -C "$MIRROR" log --all -p | grep -n -E '(^|[^0-9.])(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3})'
    ```
@@ -102,6 +105,22 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    ```sh
    git -C "$MIRROR" log --all --format='%an <%ae>%n%cn <%ce>' | sort -u
    git -C "$MIRROR" for-each-ref refs/tags --format='%(taggername) %(taggeremail)' | sort -u
+   ```
+
+   The patterns file holds the maintainer's legal name too, so the first command also finds it in
+   file contents, which the identity listing does not show. On 2026-10-27 an audit found it in the
+   content of old commits after a rewrite of the metadata only; the history was then rewritten
+   with `git filter-repo --replace-text` and the GitHub repository recreated
+   ([2026-10-27 — First run of the kind test](../journal/2026-10-27-first-kind-run.md)).
+
+   The text of pull requests, issues and comments becomes public as well; scan it the same way:
+
+   ```sh
+   { gh api --paginate 'repos/fedeam/kausa/pulls?state=all&per_page=100' --jq '.[] | .title, .body'
+     gh api --paginate 'repos/fedeam/kausa/issues?state=all&per_page=100' --jq '.[] | .title, .body'
+     gh api --paginate 'repos/fedeam/kausa/issues/comments?per_page=100' --jq '.[].body'
+     gh api --paginate 'repos/fedeam/kausa/pulls/comments?per_page=100' --jq '.[].body'
+   } | grep -n -i -E -f ~/kausa-private-patterns.txt
    ```
 
    Then delete the mirror clone, whatever the result: `rm -rf "$MIRROR"`.
@@ -138,15 +157,16 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    - In `AGENTS.md`, under README badges, drop the sentence that limits the project badges to
      static ones while the repository is private.
    - If GitHub Actions have not run yet, reword the privacy part of the Actions statements in
-     `AGENTS.md` (Remotes, merges and CI), in the header comment of `.github/workflows/ci.yml` and
-     in the status lines above to "GitHub Actions did not start jobs before the repository was
+     `AGENTS.md` (Remotes, merges and CI), in the header comments of `.github/workflows/ci.yml`
+     and `.github/workflows/e2e.yml`, in [Set up a development environment and run the
+     checks](develop.md) and in the status lines above to "GitHub Actions did not start jobs before the repository was
      public"; the pull request from [Before you start](#before-you-start) removes them after
      step 6.
    - Then this prints nothing:
 
      ```sh
-     git grep -n -E 'repository is private|private until|repository-private' \
-       -- ':!docs/adr' ':!docs/journal' ':!docs/how-to/publish-the-repository.md'
+     git grep -n -E 'repository is private|private until|repository-private|is private|private repositor|while private|stays private' \
+       -- ':!docs/adr' ':!docs/journal' ':!docs/research' ':!docs/how-to/publish-the-repository.md'
      ```
 
    - Merge it like any change, with the maintainer's approval: a pull request (for example
@@ -162,6 +182,9 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    If GitHub Actions had not run before, push to `main` or re-run `CI`, confirm that the `ci` job
    passes, then merge the pull request from [Before you start](#before-you-start) and run its
    grep, which must now print nothing, before step 8.
+
+   Do steps 6, 7 and 8 in one sitting: between them the public repository has no ruleset, no
+   Actions policy and no private vulnerability reporting.
 
 7. **Turn on the security features and restrict GitHub Actions.** Private vulnerability reporting
    is the channel that
@@ -209,7 +232,10 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    request (with no required approval: a sole maintainer cannot approve their own pull requests),
    the `ci` check of the `CI` workflow (the check run name of the first run, on 2026-10-26, which
    GitHub took from the job id in `.github/workflows/ci.yml`), a linear history, and blocks force
-   pushes and deletion:
+   pushes and deletion. Once the `image` jobs and the `kind` job of `e2e` have passed on GitHub,
+   add their check names too, read from that run (the image jobs are probably
+   `image (ubuntu-24.04)` and `image (ubuntu-24.04-arm)`), so that a change that breaks the image,
+   the chart or the end-to-end test cannot merge:
 
    ```sh
    gh api -X POST repos/fedeam/kausa/rulesets --input - <<'EOF'

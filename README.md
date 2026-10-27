@@ -8,8 +8,8 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The image and the Helm chart are in the repository, but nothing
-> is published yet. What is not built yet is marked as planned.
+> Event on the failing workload. The image and the Helm chart are in the repository; no release,
+> image or chart is published yet.
 
 ## The problem
 
@@ -30,7 +30,7 @@ Error: connect ECONNREFUSED 192.0.2.10:5432
 Someone has to connect the crash loop, the exit code, the log line and the owner, and know what
 they usually mean.
 
-## What kausa will do
+## What kausa does
 
 kausa watches Warning events and Pod status. When a failure persists, it groups the failing Pods of
 one workload into one incident, takes the relevant status, events and last log lines, redacts
@@ -51,9 +51,29 @@ Events:
                                   uses (confidence: medium)
 ```
 
-Output of this shape was seen on a live cluster on 2026-10-26; the wording is the model's. What the model saw was
-`deployment-1` in `namespace-1` and `<redacted:ip>:5432`; kausa maps the names back before writing
-the Event.
+Output of this shape was seen on a live cluster on 2026-10-26; the wording is the model's. What
+the model saw was `deployment-1` in `namespace-1` and `<redacted:ip>:5432`; kausa maps the names
+back before writing the Event.
+
+## Try it
+
+In a throwaway [kind](https://kind.sigs.k8s.io) cluster, with Docker, kind, kubectl and Helm, from
+a clone of this repository. In dry-run kausa logs the redacted request of each incident and sends
+nothing:
+
+```sh
+kind create cluster --name kausa-try
+docker build --target runtime -t kausa:try .
+kind load docker-image kausa:try --name kausa-try
+helm install kausa charts/kausa -n kausa --create-namespace --set dryRun=true \
+  --set image.repository=kausa --set image.tag=try --set image.pullPolicy=Never
+kubectl create deployment crasher --image=kausa:try -- /kausa --no-such-flag
+kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
+kind delete cluster --name kausa-try
+```
+
+To have it explain, point it at a model: [Install kausa with
+Helm](docs/how-to/install-with-helm.md).
 
 ## What leaves the cluster
 
@@ -76,11 +96,10 @@ full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.
 
 ## Design principles
 
-- **Read-only, except for its Events.** It reads Pods, Events, and the metadata of ReplicaSets and Jobs to follow
-  owners; `pods/log` only for crash loops, out-of-memory kills and failed Jobs, and that can be
-  turned off. It never reads
-  Secrets or ConfigMaps, and the only thing it writes is Events
-  ([Permissions](docs/reference/permissions.md)).
+- **Read-only, except for its Events.** It reads Pods, Events, and the metadata of ReplicaSets
+  and Jobs to follow owners; `pods/log` only for crash loops, out-of-memory kills and failed
+  Jobs, and that can be turned off. It never reads Secrets or ConfigMaps, and the only thing it
+  writes is Events ([Permissions](docs/reference/permissions.md)).
 - **Deterministic before the model.** Detection, grouping, fingerprints and redaction are rules,
   tested like code. One incident is one request.
 - **Cluster text is untrusted.** Logs and event messages are data inside the prompt. The model
@@ -88,9 +107,10 @@ full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.
 - **Budgeted.** Caps on calls per hour and per day and on tokens per request; repeated incidents
   reuse the stored explanation.
 - **Small.** One static binary for linux/amd64 and linux/arm64, a distroless non-root image of
-  4.3 MB compressed, and memory that does not grow with the number of healthy Pods: 2 MiB and
-  0.67 seconds of CPU in 22 minutes on a Raspberry Pi 4, in dry-run (once, on a small cluster:
-  [Memory and CPU on a Raspberry Pi 4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)).
+  about 4.5 MB compressed (4.3 MB for arm64, 4.6 MB for amd64), and a small record per Pod and
+  per Warning event instead of a cache of whole objects: 2 MiB and 0.67 seconds of CPU in 22
+  minutes on a Raspberry Pi 4 with 96 Pods, in dry-run (once, on a small cluster: [Memory and CPU
+  on a Raspberry Pi 4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)).
 - **No UI.** Events, logs and Prometheus metrics, which every existing tool already reads.
 
 ## How it relates to other tools
@@ -118,21 +138,22 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha: the four implementation weekends of v0.1 are done, and nothing is released. The kind
-test passed on the maintainer's machine on 2026-10-27; on GitHub it waits for Actions. `kausa run` watches Pods
-and Warning events, groups failures by workload, builds a redacted context with the failed
-container's log, asks the model within a call budget (or logs the request with `--dry-run`),
-reuses explanations of repeated incidents, writes each explanation as an Event on the failing
-workload, and serves Prometheus metrics with `--metrics-address`; its log lines are JSON ([Command
-line and log format](docs/reference/command-line.md)). The image and the Helm chart are built and
-checked in CI, not published ([Install kausa with Helm](docs/how-to/install-with-helm.md)).
-On five seeded failures with the same small local model, kausa used 5 model calls and 2,948
-tokens where k8sgpt used 12 calls and 5,128 tokens (one run each: [Tokens per incident compared
-with k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)), and on a Raspberry Pi 4
-it used about 2 MiB of memory ([Memory and CPU on a Raspberry Pi 4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)). Tested on 2026-10-26 against a live cluster with Ollama
-and a small local model ([Try kausa against a cluster with a local
-model](docs/how-to/try-with-a-local-model.md)). What has changed so far is in the
-[Changelog](CHANGELOG.md).
+Pre-alpha. v0.1 is feature-complete and not released: `kausa run` watches Pods and Warning
+events, groups failures by workload, builds a redacted context with the failed container's log,
+asks the model within a call budget (or logs the request with `--dry-run`), reuses explanations
+of repeated incidents, writes each explanation as an Event on the failing workload, and serves
+Prometheus metrics with `--metrics-address`; its log lines are JSON ([Command line and log
+format](docs/reference/command-line.md)). The image and the Helm chart are built and checked in
+CI, and the end-to-end test in kind passes; nothing is published yet.
+
+What was measured, once each and on small setups: on five seeded failures with the same small
+local model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 calls and 5,128
+([Tokens per incident compared with
+k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)); on a Raspberry Pi 4 it used
+about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
+4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)). Explanations were tested with
+Ollama and small local models; a hosted provider over HTTPS has not been tried yet. What has
+changed so far is in the [Changelog](CHANGELOG.md).
 
 ## Build from source
 
@@ -156,26 +177,21 @@ to create and patch Events; it has no flag to pick a context, so check
 `kubectl config current-context` first, or follow [Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of it.
 
-To run it in a cluster, build the image (`docker build --target runtime -t <registry>/kausa .`),
-push it, and install the chart in `charts/kausa`: [Install kausa with
-Helm](docs/how-to/install-with-helm.md).
+To run it in a cluster, build the image (`docker build --target runtime -t <registry>/kausa:<tag>
+.`), push it, and install the chart in `charts/kausa` with `--set image.tag=<tag>`: [Install
+kausa with Helm](docs/how-to/install-with-helm.md).
 
 ## Roadmap
 
-The weekends give the order of work, not dates.
-
-- **v0.1**
-  - Weekend 1: watches, detection rules, settle window, owner correlation, incident
-    fingerprints.
-  - Weekend 2: redaction with a test corpus, the untrusted-data prompt, the OpenAI-compatible
-    client, dry-run.
-  - Weekend 3: budget, deduplication, Prometheus metrics, Events on the failing object, a Helm
-    chart, a multi-architecture image, end-to-end tests in kind.
-  - Weekend 4: memory and CPU measured on a Raspberry Pi 4 and published; tokens per incident
-    compared with k8sgpt on the same seeded failures. Done on 2026-10-26, with the first three;
-    the kind test first passed on 2026-10-27.
+- **v0.1** (feature-complete, not released): the watches, eight detection rules, the settle
+  window, owner correlation and fingerprints; redaction with a test corpus, the untrusted-data
+  prompt, the OpenAI-compatible client and dry-run; the budget, deduplication, metrics and
+  Events; the image, the Helm chart and the kind test; a measurement on a Raspberry Pi 4 and a
+  token comparison with k8sgpt.
+- **Before the first release:** CI on GitHub's runners, a test against a hosted provider, and a
+  published image and chart.
 - **v0.2:** longer explanations and history in a custom resource, and a namespaced install mode
-  if v0.1 ships only the cluster-wide one.
+  (v0.1 installs cluster-wide only).
 
 ## Documentation
 
@@ -185,9 +201,14 @@ The weekends give the order of work, not dates.
 - [Data sent to the provider](docs/reference/data-sent-to-the-provider.md)
 - [Permissions](docs/reference/permissions.md)
 - [Command line and log format](docs/reference/command-line.md)
-- [Competitive landscape](docs/research/2026-10-23-competitive-landscape.md)
-- [Set up a development environment and run the checks](docs/how-to/develop.md)
+- [Helm chart](docs/reference/helm-chart.md)
+- [Install kausa with Helm](docs/how-to/install-with-helm.md)
 - [Try kausa against a cluster with a local model](docs/how-to/try-with-a-local-model.md)
+- [Set up a development environment and run the checks](docs/how-to/develop.md)
+- [Add a detection or redaction rule](docs/how-to/add-a-rule.md)
+- [Competitive landscape](docs/research/2026-10-23-competitive-landscape.md),
+  [tokens compared with k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md) and
+  [memory and CPU on a Raspberry Pi 4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)
 - [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 - [Instructions for coding agents](AGENTS.md)
