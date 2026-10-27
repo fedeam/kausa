@@ -6,11 +6,9 @@ image and, later, cut a release. Why contributions and merges happen on GitHub, 
 pushes new commits to `main`: [0007. Take contributions and merge pull requests on
 GitHub](../adr/0007-contributions-and-merges-on-github.md).
 
-Status as of 2026-10-26: the GitHub repository exists since 2026-10-26 and is private until
-publication; GitHub Actions do not start jobs while it is private (the account's included minutes
-for October are used up; they renew on the 1st of each month, and public repositories do not use
-them), so no pull request has a CI result on GitHub yet; Dependabot has not run yet; nothing has
-been released.
+Status as of 2026-10-27: the GitHub repository is public since 2026-10-27; GitHub Actions did not start
+jobs before the repository was public, so the pull requests before that have no CI result on
+GitHub; Dependabot's first pull request was merged on 2026-10-27; nothing has been released.
 
 ## Before you start
 

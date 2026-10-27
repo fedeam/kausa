@@ -1,6 +1,6 @@
 # kausa
 
-![repository: private](https://img.shields.io/badge/repository-private-0969da) ![internet: no](https://img.shields.io/badge/internet-no-0969da) ![status: in development](https://img.shields.io/badge/status-in%20development-9a6700)
+![repository: public](https://img.shields.io/badge/repository-public-bc4c00) ![internet: no](https://img.shields.io/badge/internet-no-0969da) ![status: in development](https://img.shields.io/badge/status-in%20development-9a6700)
 
 ![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-0969da) ![rust: 1.99+](https://img.shields.io/badge/rust-1.99%2B-0969da)
 

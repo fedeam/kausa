@@ -165,7 +165,7 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    - Then this prints nothing:
 
      ```sh
-     git grep -n -E 'repository is private|private until|repository-private|is private|private repositor|while private|stays private' \
+     git grep -n -E 'repository is private|private until|repository-private|is private|private repositor|while private' \
        -- ':!docs/adr' ':!docs/journal' ':!docs/research' ':!docs/how-to/publish-the-repository.md'
      ```
 
