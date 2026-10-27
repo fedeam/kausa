@@ -229,7 +229,8 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
 8. **Add a branch ruleset on `main`.** Rulesets need a public repository or GitHub Pro: on
    2026-10-26, while private, `gh api repos/fedeam/kausa/rulesets` answered "Upgrade to GitHub
    Pro or make this repository public to enable this feature". The ruleset requires a pull
-   request (with no required approval: a sole maintainer cannot approve their own pull requests),
+   request with one approving review, given after the last push (so nothing can change after the
+   maintainer approved it),
    the `ci` check of the `CI` workflow (the check run name of the first run, on 2026-10-26, which
    GitHub took from the job id in `.github/workflows/ci.yml`), a linear history, and blocks force
    pushes and deletion. Once the `image` jobs and the `kind` job of `e2e` have passed on GitHub,
@@ -244,6 +245,9 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
      "target": "branch",
      "enforcement": "active",
      "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+     "bypass_actors": [
+       { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request" }
+     ],
      "rules": [
        { "type": "deletion" },
        { "type": "non_fast_forward" },
@@ -251,10 +255,10 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
        {
          "type": "pull_request",
          "parameters": {
-           "required_approving_review_count": 0,
-           "dismiss_stale_reviews_on_push": false,
+           "required_approving_review_count": 1,
+           "dismiss_stale_reviews_on_push": true,
            "require_code_owner_review": false,
-           "require_last_push_approval": false,
+           "require_last_push_approval": true,
            "required_review_thread_resolution": false,
            "allowed_merge_methods": ["squash"]
          }
@@ -275,12 +279,21 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    before it merges, so the check ran on top of the latest `main`; the update-branch button brings
    it up to date.
 
-   The ruleset has no bypass actors: nobody pushes new commits to `main`, the maintainer included
-   ([0007. Take contributions and merge pull requests on
-   GitHub](../adr/0007-contributions-and-merges-on-github.md)). The sync needs no bypass either:
-   GitHub's `main` already has the commit, so git sends GitHub no update. If a bypass is ever
-   needed, give it `"bypass_mode": "pull_request"`, so that it applies only to pull requests, and
-   expect OpenSSF Scorecard to count it against Branch-Protection (step 11).
+   Only the maintainer can land a change: nobody else has write access, so a contributor can only
+   open a pull request from a fork, which needs the maintainer's approving review and the
+   maintainer's merge. GitHub does not let an author approve their own pull request, so the
+   ruleset has one bypass actor, the repository's admin role (the maintainer), in
+   `"bypass_mode": "pull_request"`: it lets the maintainer merge their own pull requests without a
+   second person's review, and it does not allow a direct push, a force push or a deletion, which
+   the ruleset still blocks for everyone ([0007. Take contributions and merge pull requests on
+   GitHub](../adr/0007-contributions-and-merges-on-github.md)). That `actor_id` 5 is the admin
+   role is a hypothesis to check in the ruleset GitHub returns (its `bypass_actors`). OpenSSF
+   Scorecard counts the bypass against Branch-Protection (step 11). The sync needs no bypass:
+   GitHub's `main` already has the commit, so git sends GitHub no update.
+
+   An agent that works with the maintainer's GitHub credentials acts as the maintainer, so these
+   rules do not stop it; what stops it is `AGENTS.md` (no merge without the maintainer's
+   approval). To enforce that too, give agents an account or a token without write access.
 
 9. **Set the homepage and the social preview.** The description and the topics were set on
    2026-10-26; check them:
@@ -320,8 +333,9 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
     - **Expected results**, compared with the first run and recorded in step 14. Sources: the
       check documentation of Scorecard (`docs/checks.md` in `ossf/scorecard`) and the README of
       scorecard-action, read on 2026-10-23.
-      - **Branch-Protection:** 3/10 expected. The ruleset blocks force pushes and deletion (tier
-        1) but requires no approval, and tier 2 needs at least one. No personal access token: the
+      - **Branch-Protection:** a middling score expected (hypothesis). The ruleset blocks force
+        pushes and deletion (tier 1) and requires one approval (tier 2), but has a bypass actor,
+        which Scorecard counts against it. No personal access token: the
         scorecard-action README says that the workflow's default token can read rulesets, so
         `SECURITY.md` ("No repository secrets are configured") stays true.
       - **Code-Review:** a low score expected. Scorecard counts a change as reviewed when someone
@@ -387,6 +401,8 @@ gh api repos/fedeam/kausa/actions/permissions/selected-actions             # git
 gh api repos/fedeam/kausa/actions/permissions/fork-pr-contributor-approval --jq .approval_policy   # all_external_contributors
 gh api repos/fedeam/kausa/actions/permissions/workflow                     # default_workflow_permissions: read, can_approve_pull_request_reviews: false
 gh api repos/fedeam/kausa/rulesets --jq '.[].name'                         # main
+gh api repos/fedeam/kausa/rulesets/$(gh api repos/fedeam/kausa/rulesets --jq '.[0].id') \
+  --jq '.bypass_actors, (.rules[] | select(.type == "pull_request") | .parameters.required_approving_review_count)'   # the admin role in pull_request mode; 1
 grep -oE 'badge/(repository|internet|status)-[^-]*' README.md                # repository-public, internet-no, status-...
 ```
 

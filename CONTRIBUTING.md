@@ -94,6 +94,9 @@ bug fix. Fork the repository, push a branch to your fork and open a pull request
 Why it works this way: [0007. Take contributions and merge pull requests on
 GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
 
+- **Every change goes through a pull request and the maintainer's approval.** Nobody pushes to
+  `main` directly, the maintainer included; a pull request needs the maintainer's approving
+  review, given after its last push, and only the maintainer merges.
 - **Squash merges.** The maintainer merges with GitHub's squash button. Your pull request becomes
   one commit on `main`: its header is the pull request title, followed by GitHub's
   ` (#<number>)`, and its body the pull request description. The commits in your branch are
