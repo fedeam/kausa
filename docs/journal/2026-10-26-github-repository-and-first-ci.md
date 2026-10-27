@@ -5,7 +5,7 @@ runs. Repositories touched: kausa.
 
 ## What was done
 
-- **The first commit**, `61981a4` (`chore(repo): set up repository skeleton, docs and ci`), the
+- **The first commit**, `13ed6e7` (`chore(repo): set up repository skeleton, docs and ci`), the
   only direct commit to `main` ([0007. Take contributions and merge pull requests on
   GitHub](../adr/0007-contributions-and-merges-on-github.md)), pushed to Gitea and to GitHub.
 - **Commit identity.** The first attempt carried the maintainer's personal address: the shell
@@ -37,7 +37,7 @@ runs. Repositories touched: kausa.
   (its node refused every TCP connection while answering ping). Nothing was changed for it; the
   push waited until it was back.
 
-- **First merge on GitHub**, pull request #1, squash-merged as `ad05308` (after the rewrite below), then synced to Gitea.
+- **First merge on GitHub**, pull request #1, squash-merged as `a20bcf4` (after the rewrite below), then synced to Gitea.
   The commit header is the pull request title followed by ` (#1)`, which confirms the hypothesis
   in [0007. Take contributions and merge pull requests on
   GitHub](../adr/0007-contributions-and-merges-on-github.md). Its author is the noreply address,
@@ -134,8 +134,8 @@ Request: every commit and every text should name the maintainer `FedeAM` only.
 
 - **History rewritten** before publication, while the repository is private: the author and the
   committer of the four commits on `main` became `FedeAM <98847815+fedeam@users.noreply.github.com>`
-  (`git filter-branch --env-filter`; trees and dates unchanged): `b89d67e` → `61981a4`, `a9e4533` →
-  `ad05308`, `3ff74c6` → `5878cc8`, `7e044fe` → `1672e6f`. `main` was force-pushed to both forges,
+  (`git filter-branch --env-filter`; trees and dates unchanged): `b89d67e` → `13ed6e7`, `a9e4533` →
+  `a20bcf4`, `3ff74c6` → `40015aa`, `7e044fe` → `c038200`. `main` was force-pushed to both forges,
   with its protection on Gitea lifted for that push only and restored after it. This one commit,
   which renames the maintainer in the texts, went to `main` with the rewrite, outside a pull
   request: the exception that [0007. Take contributions and merge pull requests on
