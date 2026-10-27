@@ -17,8 +17,9 @@ repository is public on GitHub, with a private copy on the maintainer's Gitea in
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
 ([2026-10-26 — GitHub repository and first CI
-runs](journal/2026-10-26-github-repository-and-first-ci.md)). GitHub Actions did not start jobs before the
-repository was public, on 2026-10-27; the first release is pending.
+runs](journal/2026-10-26-github-repository-and-first-ci.md)). GitHub Actions run since the repository became
+public, on 2026-10-27: the checks, both images and the kind test passed on their first run. The
+first release is pending.
 
 ## Key facts
 
@@ -38,7 +39,7 @@ repository was public, on 2026-10-27; the first release is pending.
   [`LICENSE-APACHE`](../LICENSE-APACHE)).
 - **CI:** `docker build --target ci .` on two forges, then the image (`--target runtime`).
   GitHub Actions (linux/amd64, plus an arm64 image build and the kind test) checks every pull
-  request once Actions run for the account; Gitea Actions (linux/arm64) checks `main` after each
+  request; Gitea Actions (linux/arm64) checks `main` after each
   sync and once a week.
 - **Dependency updates:** Dependabot on GitHub, weekly, for Cargo, GitHub Actions, and the
   `rust` image together with `rust-toolchain.toml`; the tools pinned in the `Dockerfile` and the
@@ -91,4 +92,5 @@ checks](how-to/develop.md).
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
   and what is pending; [2026-10-26 — GitHub repository and first CI
   runs](journal/2026-10-26-github-repository-and-first-ci.md): the first push and CI runs;
-  [2026-10-27 — First run of the kind test](journal/2026-10-27-first-kind-run.md).
+  [2026-10-27 — First run of the kind test](journal/2026-10-27-first-kind-run.md);
+  [2026-10-27 — Publication](journal/2026-10-27-publication.md).

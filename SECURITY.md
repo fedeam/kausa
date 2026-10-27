@@ -155,16 +155,11 @@ A missing detection or a weak explanation is a bug: open an issue. Anything in t
   Gitea Actions the automatic token cannot be narrowed and has write access to this repository;
   the workflow uses it only to fetch the commit and removes it from the environment before the
   build.
-- Pull requests are built and tested on GitHub's hosted runners, once GitHub Actions run for the
-  repository. The maintainer's self-hosted runner builds and tests `main`, its dependencies
+- Pull requests are built and tested on GitHub's hosted runners; an outside contributor's runs
+  wait for the maintainer's approval. The maintainer's self-hosted runner builds and tests `main`, its dependencies
   included, with network access, and only after the maintainer has reviewed and merged a change
   on GitHub and copied `main` to the private Git server that the runner serves; code from a
   contributor's pull request never reaches it before that.
-- Until GitHub Actions run, the maintainer builds a pull request locally with
-  `docker build --target ci .`, only after reading it, in a disposable clone of the GitHub
-  repository; that build has network access, like the runner's. A pull request that changes the
-  `Dockerfile`, `.dockerignore`, `rust-toolchain.toml`, a build script (`build.rs` or the `build`
-  key in `Cargo.toml`) or a workflow is not built locally: it waits for GitHub Actions.
 - If the project ever needs a secret (for example, to sign releases or to push the image), it
   lives in the maintainer's secret manager (Infisical) and reaches CI as a repository secret. Never
   in git.

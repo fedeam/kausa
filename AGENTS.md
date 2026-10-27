@@ -163,8 +163,8 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md). The maintainer's c
 - **Start from GitHub's `main`.** Between a merge on GitHub and the sync, `github/main` is ahead
   of `origin/main`: run `git fetch github` and branch from `github/main`.
 - **Never write the Gitea hostname** (or any internal URL) in a file, a badge or a commit.
-- **CI:** the `CI` workflow on GitHub Actions (linux/amd64) checks every pull request (GitHub
-  Actions did not start jobs before the repository was public, on 2026-10-27). Gitea Actions
+- **CI:** the `CI` and `e2e` workflows on GitHub Actions check every pull request: the checks
+  on linux/amd64, the image on both architectures, and the kind test. Gitea Actions
   (linux/arm64) checks `main` after each sync and once a week. Both run `docker build --target ci .`.
 - **Dependency updates** come from Dependabot on GitHub (`.github/dependabot.yml`), which moves
   the `rust` image and `rust-toolchain.toml` together. The tools pinned by `ARG` in the

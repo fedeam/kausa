@@ -6,9 +6,8 @@ image and, later, cut a release. Why contributions and merges happen on GitHub, 
 pushes new commits to `main`: [0007. Take contributions and merge pull requests on
 GitHub](../adr/0007-contributions-and-merges-on-github.md).
 
-Status as of 2026-10-27: the GitHub repository is public since 2026-10-27; GitHub Actions did not start
-jobs before the repository was public, so the pull requests before that have no CI result on
-GitHub; Dependabot's first pull request was merged on 2026-10-27; nothing has been released.
+Status as of 2026-10-27: the GitHub repository is public since 2026-10-27; GitHub Actions run since then
+(the pull requests before that have no CI result on GitHub); Dependabot's first pull request was merged on 2026-10-27; nothing has been released.
 
 ## Before you start
 
@@ -118,7 +117,8 @@ release notes (`.github/release.yml`).
    gh pr edit <number> --repo fedeam/kausa --add-label <label>
    ```
 
-4. **Check CI.** Once GitHub Actions run, the `ci` check must be green:
+4. **Check CI.** The `ci`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and `kind` checks must be green (the ruleset on `main`
+   requires them):
 
    ```sh
    gh pr checks <number> --repo fedeam/kausa
@@ -128,14 +128,10 @@ release notes (`.github/release.yml`).
    of [Publish the repository on GitHub](publish-the-repository.md) makes it wait for every
    outside contributor): approve the run only after step 1.
 
-   Until GitHub Actions run for the account, build the pull request locally instead, only after
-   step 1. The build runs the pull request's code (build scripts, procedural macros and tests)
-   with network access, like the runner's: from your machine it reaches whatever your network
-   reaches. So:
+   To build a pull request locally as well, do it only after step 1: the build runs the pull
+   request's code (build scripts, procedural macros and tests) with network access, from your
+   machine. So:
 
-   - If the pull request changes the `Dockerfile`, `.dockerignore`, `rust-toolchain.toml`, a
-     build script (`build.rs` or the `build` key in `Cargo.toml`) or a workflow, do not build it
-     locally: it waits for GitHub Actions.
    - Build it in a disposable clone of GitHub, never in your own clone. The build context
      includes `.git`, and your clone's `.git/config` names the Gitea remote; a changed
      `.dockerignore` would also let in your ignored files (`.claude/`, `.env*`). A fresh clone
@@ -297,8 +293,9 @@ so check them from time to time, for example with each Rust update.
    `*_SHA256_ARM64` values. Then update the versions that name the tool elsewhere:
    [Set up a development environment and run the checks](develop.md) (the versions and the
    `cargo install` line) and the `cargo-deny` version in the comment at the top of `deny.toml`.
-4. Build the CI image for both architectures. On an arm64 Mac the second build is emulated and
-   slow, but while GitHub Actions do not run it is the only check of the amd64 checksums:
+4. Build the CI image for both architectures, or let the pull request's CI do it (GitHub's
+   runners are linux/amd64, Gitea's linux/arm64). On an arm64 Mac the second build is emulated
+   and slow:
 
    ```sh
    docker build --target ci .

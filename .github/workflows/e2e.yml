@@ -1,8 +1,7 @@
 name: e2e
 
 # The end-to-end test (tests/e2e/run.sh): kausa's image and Helm chart in a kind cluster, against a
-# fake model endpoint, with seeded failures. Like ci.yml, GitHub Actions did not start it before the
-# repository was public (docs/index.md).
+# fake model endpoint, with seeded failures. Its kind check gates pull requests, like ci.yml's.
 on:
   push:
     branches: [main]
