@@ -344,9 +344,18 @@ mod tests {
         // The failure messages name what leaked, not the record: printing a record that holds a
         // secret would log it (CodeQL's rust/cleartext-logging).
         let debug = format!("{record:?}");
-        assert!(!debug.contains("not-a-real-password"), "the password reached the record");
-        assert!(!debug.contains("not-a-real-token"), "the token reached the record");
-        assert!(!debug.contains("/ready"), "the probe path reached the record");
+        assert!(
+            !debug.contains("not-a-real-password"),
+            "the password reached the record"
+        );
+        assert!(
+            !debug.contains("not-a-real-token"),
+            "the token reached the record"
+        );
+        assert!(
+            !debug.contains("/ready"),
+            "the probe path reached the record"
+        );
     }
 
     #[test]
