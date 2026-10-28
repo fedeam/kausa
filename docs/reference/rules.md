@@ -86,9 +86,14 @@ on a node under pressure (`Pod was rejected: The node had condition: [DiskPressu
 consequence of the node's state, not of the workload, and no signal. `D009` reads no logs: the
 evicted container's log is gone, and node pressure is not the application's fault. A node-pressure
 eviction can hit many workloads at once, one incident each, which the call budget bounds. All of
-this was seen on kind (Kubernetes 1.37) on 2026-10-28. The request carries each Pod's status reason
-and message, redacted, because only the message tells the three causes apart ([0016. Send each
-Pod's status reason and message to the model, redacted and
+this was seen on kind (Kubernetes 1.37) on 2026-10-28. In the kubelet, the eviction manager sets
+phase `Failed`, reason `Evicted` and the message on the Pod it evicts (`evictPod` in
+`pkg/kubelet/eviction/eviction_manager.go`; the reason and the message formats, among them the
+`emptyDir` one that names the volume, in `pkg/kubelet/eviction/helpers.go`), and a Pod refused at
+admission gets the same reason with its message prefixed `Pod was rejected: ` (`rejectPod` in
+`pkg/kubelet/kubelet.go`); checked in Kubernetes v1.37.0 and on `master` on 2026-10-28. The
+request carries each Pod's status reason and message, redacted, because only the message tells the
+three causes apart ([0016. Send each Pod's status reason and message to the model, redacted and
 bounded](../adr/0016-send-the-pod-status-reason-and-message.md)).
 
 `D010` covers a Pod whose sandbox the container runtime cannot create: a `RuntimeClass` whose
@@ -98,6 +103,11 @@ retries about every 12 seconds and writes each failure as its own event (count 1
 in each message), until its event aggregation folds them into one event with the prefix `(combined
 from similar events): ` that it keeps updating; that event settles like `D006` and `D007`, grouped
 by the Pod's owner, so the first incident comes about three minutes after the Pod was created.
+The kubelet emits the event, with the note `Failed to create pod sandbox: <error>`, when creating
+the sandbox fails in `SyncPod` (`pkg/kubelet/kuberuntime/kuberuntime_manager.go`; the reason is
+defined in `pkg/kubelet/events/event.go`), and the prefix is the one client-go's event aggregator
+adds (`staging/src/k8s.io/client-go/tools/record/events_cache.go`); checked in Kubernetes v1.37.0
+and on `master` on 2026-10-28.
 `D010` reads no logs: no container ran. The note names the runtime handler, and the 64-character
 sandbox id in it is redacted (`R012`). Transient sandbox failures while a node starts should be
 absorbed by the settle window (hypothesis, not reproduced), and a network plugin broken on a whole
