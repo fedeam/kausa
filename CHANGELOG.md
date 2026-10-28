@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Each release also attaches `kausa-X.Y.Z.intoto.jsonl`, the SLSA build provenance of the chart and
+  `SHA256SUMS`, which `gh attestation verify --bundle` checks.
+
 ## [0.1.0] - 2026-10-28
 
 The first release: detection, grouping, redaction, explanations, cost controls, Events, the image

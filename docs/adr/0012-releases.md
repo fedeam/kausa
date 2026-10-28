@@ -22,7 +22,10 @@ criteria on version tags all ask for real releases. FedeAM decided on 2026-10-28
   identity, recorded in Sigstore's transparency log), and GitHub attests its SLSA build provenance.
   Nothing secret is kept, so `SECURITY.md` ("No repository secrets are configured") stays true.
 - **The chart** is attached to the GitHub release as `kausa-X.Y.Z.tgz`, with `SHA256SUMS` and its
-  cosign signature bundle; `helm install` takes its URL. It is not pushed to an OCI registry yet:
+  cosign signature bundle; `helm install` takes its URL. Since 2026-10-28, also with
+  `kausa-X.Y.Z.intoto.jsonl`, the SLSA build provenance of the chart and `SHA256SUMS` (the
+  attestation bundle GitHub makes), which Scorecard's Signed-Releases check looks for and
+  `gh attestation verify --bundle` checks offline. It is not pushed to an OCI registry yet:
   one package to keep public on GHCR is enough for now.
 - **The notes** are the version's section of `CHANGELOG.md`, plus how to install and verify.
 - **Only GitHub's own actions** run in the workflow, pinned by SHA; cosign and helm are downloaded
