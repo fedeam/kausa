@@ -95,3 +95,9 @@ Update 2026-10-26: as implemented on the second weekend, the output mode is chos
 `request` and `explanation` log lines until the metrics arrive (third weekend); and the
 configuration is a set of command-line flags, not a file ([Command line and log
 format](../reference/command-line.md)).
+
+Update 2026-10-28: [0015. Post each new explanation to one optional webhook, as JSON, Slack or
+Telegram](0015-notifications.md) adds a second, optional destination: the webhook the operator
+configures, which receives the explanation with the real namespace and top-level owner names, the
+rule and the fingerprint, and never logs or the context sent to the model ([Data sent to the
+provider](../reference/data-sent-to-the-provider.md) lists it once implemented).

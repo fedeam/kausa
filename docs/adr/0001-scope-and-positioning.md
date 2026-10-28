@@ -108,3 +108,9 @@ Roadmap, as planned on 2026-10-23 (the weekends give the order of work, not date
   Apache-2.0](0002-rust-and-dual-license.md), [0004. Write everything in
   English](0004-english-only.md) and [0005. Name the repository kausa, without a type
   prefix](0005-name-without-prefix.md).
+
+Update 2026-10-28: [0015. Post each new explanation to one optional webhook, as JSON, Slack or
+Telegram](0015-notifications.md) brings one-way notifications into scope: kausa may post each new
+explanation to one optional webhook, the only network call besides the Kubernetes API and the LLM
+endpoint. A user interface and interactive chat (a bot that reads replies or commands) stay out of
+scope.

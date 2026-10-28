@@ -1,6 +1,6 @@
 # 0015. Post each new explanation to one optional webhook, as JSON, Slack or Telegram
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-28
 - Builds on: [0001. Build a small, read-only explainer that writes one redacted explanation per
   incident](0001-scope-and-positioning.md), [0008. Send only allowlisted, redacted data to one

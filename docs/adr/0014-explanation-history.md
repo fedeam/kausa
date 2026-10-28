@@ -1,6 +1,6 @@
 # 0014. Keep each incident's full explanations in a namespaced Explanation resource, off by default
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-28
 - Builds on: [0001. Build a small, read-only explainer that writes one redacted explanation per
   incident](0001-scope-and-positioning.md) (its v0.2 roadmap row), [0008. Send only allowlisted,
