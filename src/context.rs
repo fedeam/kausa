@@ -280,4 +280,55 @@ mod tests {
         assert!(tail.len() <= MAX_LOG_BYTES);
         assert!(tail.ends_with("last line"));
     }
+
+    #[test]
+    fn an_eviction_message_reaches_the_model_only_redacted() {
+        // The kubelet's status message is what tells a Pod's own ephemeral-storage limit from
+        // node pressure; it is sent like the other messages, through redaction.
+        let evicted = |message: &str| -> PodRecord {
+            let pod = serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": "api-7d9c8b6f4d-2xkqp", "namespace": "shop",
+                             "uid": "11111111-1111-4111-8111-111111111111"},
+                "spec": {"nodeName": "worker-7",
+                         "containers": [{"name": "filler", "image": "busybox:1.37"}]},
+                "status": {
+                    "phase": "Failed",
+                    "reason": "Evicted",
+                    "message": message,
+                    "containerStatuses": [{
+                        "name": "filler", "image": "busybox:1.37", "imageID": "",
+                        "ready": false, "restartCount": 0,
+                        "state": {"terminated": {"reason": "Error", "exitCode": 137}}
+                    }]
+                }
+            }))
+            .expect("the fixture is a valid Pod");
+            PodRecord::from_pod(&pod).expect("a complete Pod")
+        };
+        for (message, kept) in [
+            (
+                "Pod ephemeral local storage usage exceeds the total limit of containers 50Mi. ",
+                "exceeds the total limit of containers 50Mi",
+            ),
+            (
+                "The node was low on resource: ephemeral-storage. Threshold quantity: 14711Mi, \
+                 available: 14523Mi. Container filler was using 48Ki, request is 0, has larger \
+                 consumption of ephemeral-storage. ",
+                "The node was low on resource: ephemeral-storage",
+            ),
+        ] {
+            let mut g = gathered();
+            g.pods = vec![evicted(message)];
+            g.log_tail = None;
+            let (context, _) = build(&g);
+            let sent = context.to_string();
+            assert!(sent.contains(kept), "{sent}");
+            assert!(sent.contains("\"Evicted\""), "{sent}");
+            for leaked in ["shop", "api-7d9c8b6f4d", "filler", "worker-7"] {
+                assert!(!sent.contains(leaked), "{leaked} in {sent}");
+            }
+        }
+    }
 }

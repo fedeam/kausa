@@ -131,6 +131,7 @@ pub fn detect_event(event: &EventRecord) -> Option<Detection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explain::reads_logs;
     use crate::record::Regarding;
 
     fn waiting(reason: &str) -> ContainerRecord {
@@ -290,5 +291,24 @@ mod tests {
         assert_eq!(detect_event(&event("Pod", "FailedScheduling")), None);
         assert_eq!(detect_event(&event("Node", "FailedMount")), None);
         assert_eq!(detect_event(&event("Deployment", "FailedCreate")), None);
+    }
+
+    #[test]
+    fn a_sandbox_that_cannot_be_created_is_d010() {
+        // The kubelet's Warning event when the runtime cannot create the Pod's sandbox (a missing
+        // RuntimeClass handler on kind; CNI failures give the same reason).
+        let detection = detect_event(&event("Pod", "FailedCreatePodSandBox"));
+        assert_eq!(detection.map(Detection::id), Some("D010"));
+        let detection = detection.expect("a detection");
+        // An event, settled like D006 and D007, and no log to read: no container ran.
+        assert!(detection.settles());
+        assert!(!detection.is_state());
+        assert!(!reads_logs(detection));
+        // Only about a Pod.
+        assert_eq!(detect_event(&event("Node", "FailedCreatePodSandBox")), None);
+        assert_eq!(
+            detect_event(&event("Deployment", "FailedCreatePodSandBox")),
+            None
+        );
     }
 }

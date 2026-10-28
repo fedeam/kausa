@@ -354,7 +354,9 @@ fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{ContainerRecord, Regarding};
+    use crate::explain::reads_logs;
+    use crate::record::{ContainerRecord, MAX_TEXT_BYTES, Regarding};
+    use serde_json::{Value, json};
 
     fn t(seconds: i64) -> Timestamp {
         Timestamp::from_second(1_800_000_000 + seconds).expect("a valid timestamp")
@@ -719,5 +721,291 @@ mod tests {
             run("api-1-a", "ErrImagePull", "rpc error: code = NotFound"),
             run("api-1-a", "ImagePullBackOff", "Back-off pulling image"),
         );
+    }
+
+    // The shapes below follow what the kubelet and the scheduler wrote on kind (Kubernetes 1.37,
+    // 2026-10-28); names, quantities and identifiers are invented.
+
+    /// The kubelet's message when a Pod's containers outgrow their `ephemeral-storage` limits.
+    const LIMIT: &str =
+        "Pod ephemeral local storage usage exceeds the total limit of containers 50Mi. ";
+    /// The kubelet's message when an `emptyDir` outgrows its `sizeLimit`.
+    const EMPTY_DIR: &str = "Usage of EmptyDir volume \"scratch\" exceeds the limit \"20Mi\". ";
+    /// The kubelet's message when it evicts a Pod to relieve node pressure.
+    const PRESSURE: &str = "The node was low on resource: ephemeral-storage. Threshold quantity: \
+        14711Mi, available: 14523Mi. Container cache was using 48Ki, request is 0, has larger \
+        consumption of ephemeral-storage. ";
+    /// The kubelet's message when it refuses a new Pod on a node under pressure (also reason
+    /// `Evicted`): a consequence of the node's state, not of the workload.
+    const REJECTED: &str = "Pod was rejected: The node had condition: [DiskPressure]. ";
+    /// The kubelet's message for a Pod past its `activeDeadlineSeconds`.
+    const DEADLINE: &str = "Pod was active on the node longer than the specified deadline";
+
+    /// A Pod record reduced from a whole Pod, the way the watch delivers it.
+    fn record_of(pod: Value) -> PodRecord {
+        let pod = serde_json::from_value(pod).expect("the fixture is a valid Pod");
+        PodRecord::from_pod(&pod).expect("a complete Pod")
+    }
+
+    /// A Pod of the Deployment `cache` that the kubelet failed at `t(at)` with `reason` and
+    /// `message`: phase `Failed`, its container terminated `Error` with exit code 137 after
+    /// `restarts` restarts, and `Ready` turned `False` for `PodFailed` at the same time.
+    fn failed_pod(name: &str, reason: &str, message: &str, restarts: i32, at: i64) -> Value {
+        let (started, at) = (t(at - 20).to_string(), t(at).to_string());
+        let last_state = if restarts > 0 {
+            json!({"terminated": {"reason": "Error", "exitCode": 1}})
+        } else {
+            json!({})
+        };
+        json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": name,
+                "namespace": "shop",
+                "uid": format!("uid-{name}"),
+                "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                                     "name": "cache-6b7f9d8c5d", "uid": "uid-cache-rs",
+                                     "controller": true}]
+            },
+            "spec": {
+                "nodeName": "worker-2",
+                "containers": [{"name": "cache", "image": "busybox:1.37",
+                                "resources": {"limits": {"ephemeral-storage": "50Mi"}}}]
+            },
+            "status": {
+                "phase": "Failed",
+                "reason": reason,
+                "message": message,
+                "conditions": [
+                    {"type": "PodReadyToStartContainers", "status": "False",
+                     "lastTransitionTime": at},
+                    {"type": "Initialized", "status": "True", "lastTransitionTime": started},
+                    {"type": "Ready", "status": "False", "reason": "PodFailed",
+                     "lastTransitionTime": at},
+                    {"type": "ContainersReady", "status": "False", "reason": "PodFailed",
+                     "lastTransitionTime": at},
+                    {"type": "PodScheduled", "status": "True", "lastTransitionTime": started}
+                ],
+                "containerStatuses": [{
+                    "name": "cache", "image": "busybox:1.37", "imageID": "", "ready": false,
+                    "restartCount": restarts,
+                    "state": {"terminated": {"reason": "Error", "exitCode": 137,
+                                             "startedAt": started, "finishedAt": at}},
+                    "lastState": last_state
+                }]
+            }
+        })
+    }
+
+    /// A Pod of the Deployment `db` still `Pending`, whose `PodScheduled` condition is `False`
+    /// for `reason` with `message`.
+    fn unscheduled_pod(name: &str, reason: &str, message: &str) -> Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": "shop", "uid": format!("uid-{name}")},
+            "spec": {"containers": [{"name": "db", "image": "busybox:1.37"}]},
+            "status": {
+                "phase": "Pending",
+                "conditions": [{"type": "PodScheduled", "status": "False", "reason": reason,
+                                "message": message,
+                                "lastTransitionTime": t(0).to_string()}]
+            }
+        })
+    }
+
+    /// The signals of `records`, all correlated to the Deployment `cache`, at `now`.
+    fn state_signals(records: &[PodRecord], now: Timestamp) -> Vec<Signal> {
+        let deploy = owner("Deployment", "cache");
+        let views: Vec<_> = records
+            .iter()
+            .map(|record| PodView {
+                record,
+                owner: &deploy,
+            })
+            .collect();
+        collect_signals(&views, &[], now, FRESH)
+    }
+
+    fn ids(signals: &[Signal]) -> Vec<&'static str> {
+        signals.iter().map(|s| s.key.detection.id()).collect()
+    }
+
+    #[test]
+    fn a_failed_pod_is_never_a_crash_loop() {
+        // On kind, a container that had restarted once and was then evicted for its
+        // ephemeral-storage limit was reported as D001 with exit code 137, for every replacement
+        // Pod, and the incident never cleared. A Pod past its deadline after a restart has the
+        // same container state.
+        for (reason, message) in [("Evicted", LIMIT), ("DeadlineExceeded", DEADLINE)] {
+            let failed = record_of(failed_pod("cache-a", reason, message, 1, -30));
+            let found = ids(&state_signals(&[failed], t(0)));
+            assert!(!found.contains(&"D001"), "{reason}: {found:?}");
+        }
+        // The same container state in a Pod that still runs is the crash loop.
+        let mut running = failed_pod("cache-a", "Evicted", LIMIT, 1, -30);
+        running["status"]["phase"] = json!("Running");
+        let status = running["status"].as_object_mut().expect("a status");
+        status.remove("reason");
+        status.remove("message");
+        assert_eq!(ids(&state_signals(&[record_of(running)], t(0))), ["D001"]);
+        // A Job's Pod that failed for good with an out-of-memory kill is still D003.
+        let mut oom = failed_pod("report-a", "Evicted", LIMIT, 0, -30);
+        let status = oom["status"].as_object_mut().expect("a status");
+        status.remove("reason");
+        status.remove("message");
+        oom["status"]["containerStatuses"][0]["state"]["terminated"]["reason"] = json!("OOMKilled");
+        assert_eq!(ids(&state_signals(&[record_of(oom)], t(0))), ["D003"]);
+    }
+
+    #[test]
+    fn an_evicted_pod_is_a_d009_state_that_reads_no_logs() {
+        for message in [LIMIT, EMPTY_DIR, PRESSURE] {
+            let evicted = record_of(failed_pod("cache-a", "Evicted", message, 0, -30));
+            let signals = state_signals(&[evicted], t(0));
+            assert_eq!(ids(&signals), ["D009"], "{message}");
+            let signal = &signals[0];
+            assert_eq!(signal.reason, "Evicted");
+            assert!(
+                signal.message.contains(message.trim()),
+                "the status message is the signal's message: {:?}",
+                signal.message
+            );
+            assert_eq!(signal.pod.as_deref(), Some("cache-a"));
+            assert_eq!(signal.key.owner_name, "cache");
+            // A state read from the Pod at every check; the evicted container's log is gone.
+            assert!(signal.key.detection.is_state());
+            assert!(!reads_logs(signal.key.detection));
+        }
+        // Not an eviction incident: the kubelet refusing a new Pod on a node under pressure (the
+        // conditions are fresh, so only the message tells it apart), and a Pod past its deadline.
+        let mut rejected = failed_pod("cache-b", "Evicted", REJECTED, 0, -30);
+        let status = rejected["status"].as_object_mut().expect("a status");
+        status.remove("containerStatuses");
+        assert!(state_signals(&[record_of(rejected)], t(0)).is_empty());
+        let deadline = record_of(failed_pod("cache-c", "DeadlineExceeded", DEADLINE, 0, -30));
+        assert!(!ids(&state_signals(&[deadline], t(0))).contains(&"D009"));
+    }
+
+    #[test]
+    fn only_a_recent_eviction_is_a_signal() {
+        // Evicted Pods are not deleted: they stay in phase Failed for days. An old eviction must
+        // not become an incident again each time kausa starts.
+        let recent = record_of(failed_pod("cache-a", "Evicted", LIMIT, 0, -30));
+        assert_eq!(ids(&state_signals(&[recent], t(0))), ["D009"]);
+        let three_days = 3 * 24 * 3600;
+        let old = record_of(failed_pod("cache-a", "Evicted", LIMIT, 0, -three_days));
+        assert!(state_signals(&[old], t(0)).is_empty());
+    }
+
+    #[test]
+    fn evictions_of_one_workload_are_one_incident() {
+        // The ReplicaSet replaces each evicted Pod and the replacement is evicted again, every
+        // 15 to 20 seconds; these containers had restarted once first.
+        let pods: Vec<_> = [("cache-a", 0), ("cache-b", 20), ("cache-c", 40)]
+            .into_iter()
+            .map(|(name, at)| record_of(failed_pod(name, "Evicted", LIMIT, 1, at)))
+            .collect();
+        let mut tracker = Tracker::new(SETTLE);
+        let mut found = Vec::new();
+        for at in [40, 75, 110] {
+            found.extend(tracker.tick(t(at), state_signals(&pods, t(at))));
+        }
+        let found_ids: Vec<_> = found.iter().map(|i| i.key.detection.id()).collect();
+        assert_eq!(found_ids, ["D009"]);
+        assert_eq!(
+            found[0].pods.iter().collect::<Vec<_>>(),
+            ["cache-a", "cache-b", "cache-c"]
+        );
+        assert_eq!(found[0].key.owner_name, "cache");
+    }
+
+    #[test]
+    fn the_eviction_message_is_bounded() {
+        let long = format!("{LIMIT}{}", "x".repeat(4 * MAX_TEXT_BYTES));
+        let evicted = record_of(failed_pod("cache-a", "Evicted", &long, 0, -30));
+        let signals = state_signals(&[evicted], t(0));
+        assert_eq!(ids(&signals), ["D009"]);
+        assert!(signals[0].message.len() <= MAX_TEXT_BYTES);
+    }
+
+    #[test]
+    fn a_pod_the_scheduler_failed_on_is_unschedulable() {
+        // A claim the scheduler cannot bind in PreBind (a ReadWriteMany claim on a
+        // WaitForFirstConsumer class): the Pod stayed Pending for 25 minutes with this condition.
+        let message =
+            "running PreBind plugin \"VolumeBinding\": binding volumes: context deadline exceeded";
+        let pending = record_of(unscheduled_pod("db-a", "SchedulerError", message));
+        let signals = state_signals(std::slice::from_ref(&pending), t(0));
+        assert_eq!(ids(&signals), ["D005"]);
+        assert_eq!(signals[0].reason, "SchedulerError");
+        assert_eq!(signals[0].message, message);
+        // It settles like a state.
+        let deploy = owner("Deployment", "db");
+        let mut tracker = Tracker::new(SETTLE);
+        let timeline = [
+            (0, vec![pending.clone()]),
+            (30, vec![pending.clone()]),
+            (65, vec![pending]),
+        ];
+        assert_eq!(checks(&mut tracker, &timeline, &deploy), [0, 0, 1]);
+        // A Pod held on purpose by its scheduling gates is not a failure.
+        let gated = record_of(unscheduled_pod(
+            "db-b",
+            "SchedulingGated",
+            "Scheduling is blocked due to non-empty scheduling gates",
+        ));
+        assert!(state_signals(&[gated], t(0)).is_empty());
+    }
+
+    #[test]
+    fn a_sandbox_that_cannot_be_created_settles_like_an_event() {
+        // A RuntimeClass whose handler the nodes do not have: the Pod waits in ContainerCreating,
+        // which matches no state, and the kubelet keeps updating one Warning event.
+        let deploy = owner("Deployment", "api");
+        let pods = [pod("api-a", "Pending", Some("ContainerCreating"))];
+        let views: Vec<_> = pods
+            .iter()
+            .map(|record| PodView {
+                record,
+                owner: &deploy,
+            })
+            .collect();
+        let mut once = event("es", "FailedCreatePodSandBox", "Pod", "api-a", t(0));
+        once.reporting_controller = Some("kubelet".into());
+        once.note = Some(format!(
+            "Failed to create pod sandbox: rpc error: code = Unknown desc = unable to get OCI \
+             runtime for sandbox \"{}\": no runtime for \"no-such-handler\" is configured",
+            "0123456789abcdef".repeat(4)
+        ));
+        let check = |tracker: &mut Tracker, record: &EventRecord, now: i64| {
+            let ev = [EventView {
+                record,
+                job_owner: None,
+            }];
+            tracker.tick(t(now), collect_signals(&views, &ev, t(now), FRESH))
+        };
+        let ev = [EventView {
+            record: &once,
+            job_owner: None,
+        }];
+        let signals = collect_signals(&views, &ev, t(10), FRESH);
+        assert_eq!(ids(&signals), ["D010"]);
+        let detection = signals[0].key.detection;
+        assert!(detection.settles());
+        assert!(!detection.is_state());
+        assert!(!reads_logs(detection));
+        // One event does not settle; the same event updated a settle window later does.
+        let mut tracker = Tracker::new(SETTLE);
+        assert!(check(&mut tracker, &once, 10).is_empty());
+        let mut again = once.clone();
+        again.last_seen = Some(t(65));
+        again.count = 2;
+        let incidents = check(&mut tracker, &again, 70);
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].key.detection.id(), "D010");
+        assert_eq!(incidents[0].key.owner_name, "api");
+        assert_eq!(incidents[0].pods.iter().collect::<Vec<_>>(), ["api-a"]);
     }
 }

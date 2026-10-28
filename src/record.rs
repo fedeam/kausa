@@ -387,6 +387,37 @@ mod tests {
     }
 
     #[test]
+    fn a_pod_the_scheduler_failed_on_keeps_the_scheduler_message() {
+        // Seen on kind for a claim the scheduler could not bind in PreBind.
+        let message =
+            "running PreBind plugin \"VolumeBinding\": binding volumes: context deadline exceeded";
+        let mut pod = crashing_pod();
+        let status = pod.status.as_mut().expect("a status");
+        status.phase = Some("Pending".into());
+        status.container_statuses = None;
+        status.conditions = Some(vec![
+            serde_json::from_value(json!({
+                "type": "PodScheduled", "status": "False", "reason": "SchedulerError",
+                "message": message
+            }))
+            .expect("a condition"),
+        ]);
+        let record = PodRecord::from_pod(&pod).expect("a complete Pod");
+        assert_eq!(record.unschedulable.as_deref(), Some(message));
+        // A Pod held by its scheduling gates waits on purpose.
+        let status = pod.status.as_mut().expect("a status");
+        status.conditions = Some(vec![
+            serde_json::from_value(json!({
+                "type": "PodScheduled", "status": "False", "reason": "SchedulingGated",
+                "message": "Scheduling is blocked due to non-empty scheduling gates"
+            }))
+            .expect("a condition"),
+        ]);
+        let record = PodRecord::from_pod(&pod).expect("a complete Pod");
+        assert_eq!(record.unschedulable, None);
+    }
+
+    #[test]
     fn a_pod_without_a_uid_is_skipped() {
         let mut pod = crashing_pod();
         pod.metadata.uid = None;
