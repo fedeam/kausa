@@ -44,13 +44,32 @@ maintainer approves.
   recorded in ADR 0011, which comes with the Scorecard workflow in its own pull request.
 - **Step 10:** the CI badge, in this pull request.
 
-## Pending
+## The next morning: the merges and the first Scorecard result
 
-- The maintainer merges the Scorecard pull request; after its first run, its badge and the
-  first result of each check against step 11's expectations.
+The maintainer merged the Scorecard pull request and the one with these docs on 2026-10-28,
+using the admin bypass (GitHub does not let an author approve their own pull request), and
+`main` was synced to Gitea. The first Scorecard result (v5.6.0), on 2026-10-28: **6.5** of 10.
+Against step 11's expectations:
+
+- **The gates, all 10:** Dangerous-Workflow, Token-Permissions, Pinned-Dependencies (so the
+  Debian packages and `rustup component add` in the `Dockerfile` do not count against it),
+  Vulnerabilities, Security-Policy; also Binary-Artifacts, Dependency-Update-Tool and License.
+- **Branch-Protection: 8**, better than the middling score expected: the bypass actor costs less
+  than thought.
+- **Code-Review: 0**, as expected: no change was approved by someone other than its author.
+- **SAST: 1**: CodeQL had just been turned on, so it had not run on the older commits; it should
+  rise as it runs on new ones (hypothesis).
+- **CI-Tests: 3**: the pull requests merged before the publication had no CI result on GitHub.
+- **Maintained: 0** (the repository is less than 90 days old), **Contributors: 0**,
+  **CII-Best-Practices: 0** (step 12 is pending), **Fuzzing: 0**; Packaging and Signed-Releases
+  do not apply yet (no release).
+
+The Scorecard badge was added to the README. The same morning the maintainer sent a test message
+to `conduct@fedeam.com`, and it arrived: the conduct address forwards.
+
+## Pending
 - **Step 9:** the social preview image (none exists yet); the homepage stays empty.
 - **Step 12:** OpenSSF Best Practices registration, at bestpractices.dev, with the maintainer's
   GitHub login.
 - **Step 13:** the crates.io name, with the first real release.
-- Check that `conduct@fedeam.com` still forwards.
 - `fedeam/kausa-old`, the private backup of the history before the rewrite, can be deleted.
