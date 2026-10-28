@@ -31,7 +31,7 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | File | What it does | Change it when |
 |---|---|---|
 | `src/main.rs` | Flags, usage errors (`--namespace` checked before any connection, at most `MAX_NAMESPACES`), the settings passed to `run` | A flag is added or changed |
-| `src/run.rs` | The controller loop: one Pod watch and one event watch for the whole cluster, or a pair per `--namespace`, merged per kind and tagged with their watch; relists and `403` drops per watch; readiness once every watch has listed; the tick, the explanation queue, the metrics listener, owner lookups with a cache | The loop's scheduling or what it watches changes |
+| `src/run.rs` | The controller loop: one Pod watch and one event watch for the whole cluster, or a pair per `--namespace`, merged per kind and tagged with their watch; relists, `403` drops and a new watcher after a `403` (`Restarting`) per watch; readiness once every watch has listed; the tick, the explanation queue, the metrics listener, owner lookups with a cache | The loop's scheduling or what it watches changes |
 | `src/record.rs` | Reduces a Pod or an Event to the few fields kausa keeps; the object is dropped at once | A rule needs a field that is not recorded |
 | `src/detect.rs` | The detection rules `D001`–`D010`: pure functions of a record | A detection rule is added or changed |
 | `src/incident.rs` | Signals, grouping by top-level owner, the settle window | Grouping or settling changes |

@@ -15,10 +15,11 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
 use futures::stream::{self, BoxStream, FuturesUnordered, SelectAll};
+use futures::{Stream, StreamExt};
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
@@ -27,7 +28,8 @@ use k8s_openapi::jiff::{SignedDuration, Timestamp};
 use k8s_openapi::serde::de::DeserializeOwned;
 use kube::config::KubeConfigOptions;
 use kube::core::NamespaceResourceScope;
-use kube::runtime::{WatchStreamExt, watcher};
+use kube::runtime::utils::Backoff;
+use kube::runtime::watcher;
 use kube::{Api, Client, Config, Resource};
 use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
@@ -145,9 +147,69 @@ type Tagged<K> = (WatchKey, Option<Result<watcher::Event<K>, watcher::Error>>);
 /// The watches of one kind, merged: one on the whole cluster, or one per namespace.
 type Watches<K> = SelectAll<BoxStream<'static, Tagged<K>>>;
 
+/// One watch that starts over with a fresh watcher after a `403`, so that it lists again once
+/// access is back: kube-runtime 4.2.0 relists only after a failed list, and resumes a refused
+/// watch (`WatchStartFailed`, or an error in the open stream) from its resource version, which
+/// would never bring back the objects that did not change while `State` had dropped them
+/// (docs/adr/0013-namespaced-install-mode.md). After every error it waits for `backoff` before
+/// the next poll, as `StreamBackoff` does, but `Init` does not reset the delay: every fresh
+/// watcher sends `Init` before it lists, so a refused namespace still backs off to the longest
+/// delay instead of being retried at the shortest one.
+struct Restarting<S, F, B> {
+    start: F,
+    watch: Option<S>,
+    backoff: B,
+    delay: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<S, F, B> Restarting<S, F, B> {
+    fn new(start: F, backoff: B) -> Self {
+        Restarting {
+            start,
+            watch: None,
+            backoff,
+            delay: None,
+        }
+    }
+}
+
+impl<K, S, F, B> Stream for Restarting<S, F, B>
+where
+    S: Stream<Item = Result<watcher::Event<K>, watcher::Error>> + Unpin,
+    F: FnMut() -> S + Unpin,
+    B: Backoff,
+{
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        if let Some(delay) = this.delay.as_mut() {
+            ready!(delay.as_mut().poll(cx));
+            this.delay = None;
+        }
+        let watch = this.watch.get_or_insert_with(&mut this.start);
+        let item = ready!(watch.poll_next_unpin(cx));
+        match &item {
+            Some(Err(error)) => {
+                if forbidden(error) {
+                    this.watch = None;
+                }
+                // The default backoff never runs out; one that did would retry without a delay.
+                if let Some(delay) = this.backoff.next() {
+                    this.delay = Some(Box::pin(tokio::time::sleep(delay)));
+                }
+            }
+            Some(Ok(watcher::Event::Init)) | None => {}
+            Some(Ok(_)) => this.backoff.reset(),
+        }
+        Poll::Ready(item)
+    }
+}
+
 /// Starts one watch of `K` per namespace, or one on the whole cluster when `namespaces` is empty,
-/// each with `config` and the default backoff. Each watch ends with a `(watch, None)` item, so
-/// the loop knows which one ended.
+/// each with `config` and kube-runtime's default backoff (0.8 to 30 seconds), started over after
+/// a `403` (`Restarting`). Each watch ends with a `(watch, None)` item, so the loop knows which
+/// one ended.
 fn watches<K>(client: &Client, namespaces: &[String], config: &watcher::Config) -> Watches<K>
 where
     K: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Debug + Send + 'static,
@@ -163,8 +225,9 @@ where
     };
     stream::select_all(apis.into_iter().map(|(watch, api)| {
         let end = watch.clone();
-        watcher(api, config.clone())
-            .default_backoff()
+        let config = config.clone();
+        let start = move || watcher(api.clone(), config.clone()).boxed();
+        Restarting::new(start, watcher::DefaultBackoff::default())
             .map(move |item| (watch.clone(), Some(item)))
             .chain(stream::once(async move { (end, None) }))
             .boxed()
@@ -560,6 +623,7 @@ impl State {
 
     /// Forgets what a watch had shown when the API server refuses it (`403`): that kind's records
     /// inside the watch and its open relist, so that a revoked namespace stops giving signals.
+    /// `Restarting` then starts a new watcher, whose relist brings them back once access is.
     /// Any other error keeps the records, and the watcher retries.
     fn on_watch_error(&mut self, kind: Kind, watch: &WatchKey, error: &watcher::Error) {
         if !forbidden(error) {
@@ -759,7 +823,8 @@ impl OwnerLookup for KubeLookup {
 
 // Tests of the namespaced mode (docs/adr/0013-namespaced-install-mode.md), without a cluster: the
 // relists and refusals of each watch (`State::on_pod`, `State::on_event`,
-// `State::on_watch_error`, `forbidden`), readiness (`Readiness`) and the error of an ended watch
+// `State::on_watch_error`, `forbidden`), the new watcher after a refusal and its backoff
+// (`Restarting`, over scripted watchers), readiness (`Readiness`) and the error of an ended watch
 // (`ended`).
 #[cfg(test)]
 mod tests {
@@ -783,6 +848,7 @@ mod tests {
 
     fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
             .expect("a runtime")
             .block_on(future)
@@ -1019,31 +1085,197 @@ mod tests {
         }
     }
 
+    /// An item of a watcher of Pods, as kube sends it.
+    type PodItem = Result<watcher::Event<Pod>, watcher::Error>;
+
+    /// What the loop sees of an item: its kind, and the Pod's name.
+    fn label(item: &PodItem) -> String {
+        let name = |pod: &Pod| pod.metadata.name.clone().unwrap_or_default();
+        match item {
+            Ok(watcher::Event::Init) => "Init".into(),
+            Ok(watcher::Event::InitApply(pod)) => format!("InitApply {}", name(pod)),
+            Ok(watcher::Event::InitDone) => "InitDone".into(),
+            Ok(watcher::Event::Apply(pod)) => format!("Apply {}", name(pod)),
+            Ok(watcher::Event::Delete(pod)) => format!("Delete {}", name(pod)),
+            Err(error) if forbidden(error) => "forbidden".into(),
+            Err(_) => "error".into(),
+        }
+    }
+
+    /// A backoff with no delay that records how `Restarting` uses it.
+    #[derive(Clone, Default)]
+    struct Recorded(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+    impl Recorded {
+        fn calls(&self) -> Vec<&'static str> {
+            self.0.lock().expect("not poisoned").clone()
+        }
+    }
+
+    impl Iterator for Recorded {
+        type Item = Duration;
+
+        fn next(&mut self) -> Option<Duration> {
+            self.0.lock().expect("not poisoned").push("next");
+            Some(Duration::ZERO)
+        }
+    }
+
+    impl Backoff for Recorded {
+        fn reset(&mut self) {
+            self.0.lock().expect("not poisoned").push("reset");
+        }
+    }
+
+    /// Runs `Restarting` over scripted watchers, the first script for the first watcher and so
+    /// on, until a watcher's script ends. Returns the items and how many watchers were started.
+    fn restarting(scripts: Vec<Vec<PodItem>>, backoff: Recorded) -> (Vec<PodItem>, usize) {
+        let scripts = RefCell::new(VecDeque::from(scripts));
+        let started = std::cell::Cell::new(0);
+        let start = || {
+            started.set(started.get() + 1);
+            stream::iter(scripts.borrow_mut().pop_front().unwrap_or_default())
+        };
+        let items = block_on(Restarting::new(start, backoff).collect::<Vec<_>>());
+        (items, started.get())
+    }
+
     #[test]
-    fn a_forbidden_watch_during_its_relist_drops_its_records_and_the_relist() {
+    fn a_forbidden_resumed_watch_lists_again_and_brings_back_its_pods() {
+        // A tenant deletes kausa's RoleBinding in a: the open watch ends at its timeout and
+        // resuming it is refused. kube-runtime would resume from its resource version once access
+        // is back, sending only the Pods that changed (p3); Restarting starts a new watcher, which
+        // lists a again.
+        let scripts = vec![
+            vec![
+                Ok(watcher::Event::Init),
+                Ok(watcher::Event::InitApply(pod("a", "p1"))),
+                Ok(watcher::Event::InitApply(pod("a", "p2"))),
+                Ok(watcher::Event::InitDone),
+                Err(watcher::Error::WatchStartFailed(api_error(403))),
+                Ok(watcher::Event::Apply(pod("a", "p3"))),
+            ],
+            vec![
+                Ok(watcher::Event::Init),
+                Ok(watcher::Event::InitApply(pod("a", "p1"))),
+                Ok(watcher::Event::InitApply(pod("a", "p2"))),
+                Ok(watcher::Event::InitDone),
+            ],
+        ];
+        let (items, started) = restarting(scripts, Recorded::default());
+        assert_eq!(started, 2);
+        assert_eq!(
+            items.iter().map(label).collect::<Vec<_>>(),
+            [
+                "Init",
+                "InitApply p1",
+                "InitApply p2",
+                "InitDone",
+                "forbidden",
+                "Init",
+                "InitApply p1",
+                "InitApply p2",
+                "InitDone",
+            ]
+        );
         let mut state = two_namespaces();
-        on_pod(&mut state, &ns("a"), watcher::Event::Init);
-        on_pod(
-            &mut state,
-            &ns("a"),
-            watcher::Event::InitApply(pod("a", "p1")),
-        );
-        state.on_watch_error(
-            Kind::Pods,
-            &ns("a"),
-            &watcher::Error::WatchStartFailed(api_error(403)),
-        );
-        assert!(!has_pod(&state, "a", "p1") && !has_pod(&state, "a", "p2"));
-        // The watcher restarts with a new relist once access is back.
-        on_pod(&mut state, &ns("a"), watcher::Event::Init);
-        on_pod(
-            &mut state,
-            &ns("a"),
-            watcher::Event::InitApply(pod("a", "p2")),
-        );
-        on_pod(&mut state, &ns("a"), watcher::Event::InitDone);
-        assert!(!has_pod(&state, "a", "p1") && has_pod(&state, "a", "p2"));
+        for item in items {
+            match item {
+                Ok(event) => on_pod(&mut state, &ns("a"), event),
+                Err(error) => {
+                    state.on_watch_error(Kind::Pods, &ns("a"), &error);
+                    assert!(!has_pod(&state, "a", "p1") && !has_pod(&state, "a", "p2"));
+                    assert!(has_pod(&state, "b", "p1") && has_pod(&state, "b", "p2"));
+                }
+            }
+        }
+        assert!(has_pod(&state, "a", "p1") && has_pod(&state, "a", "p2"));
+        assert!(!has_pod(&state, "a", "p3"), "the resumed watch was dropped");
         assert!(has_pod(&state, "b", "p1") && has_pod(&state, "b", "p2"));
+    }
+
+    #[test]
+    fn every_shape_of_a_refusal_starts_a_new_watcher() {
+        for error in forbidden_errors() {
+            let text = error.to_string();
+            let scripts = vec![
+                vec![
+                    Ok(watcher::Event::InitDone),
+                    Err(error),
+                    Ok(watcher::Event::Apply(pod("a", "p3"))),
+                ],
+                vec![Ok(watcher::Event::Init), Ok(watcher::Event::InitDone)],
+            ];
+            let (items, started) = restarting(scripts, Recorded::default());
+            assert_eq!(started, 2, "{text}");
+            assert_eq!(
+                items.iter().map(label).collect::<Vec<_>>(),
+                ["InitDone", "forbidden", "Init", "InitDone"],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_watch_errors_keep_the_watcher() {
+        let errors = vec![
+            watcher::Error::InitialListFailed(api_error(500)),
+            watcher::Error::WatchStartFailed(api_error(401)),
+            watcher::Error::WatchError(status(410, "Expired")),
+            watcher::Error::WatchError(status(0, "Forbidden")),
+            watcher::Error::NoResourceVersion,
+        ];
+        for error in errors {
+            let text = error.to_string();
+            let scripts = vec![
+                vec![
+                    Ok(watcher::Event::InitDone),
+                    Err(error),
+                    Ok(watcher::Event::Apply(pod("a", "p3"))),
+                ],
+                vec![Ok(watcher::Event::Init)],
+            ];
+            let backoff = Recorded::default();
+            let (items, started) = restarting(scripts, backoff.clone());
+            assert_eq!(started, 1, "{text}");
+            assert_eq!(
+                items.iter().map(label).collect::<Vec<_>>(),
+                ["InitDone", "error", "Apply p3"],
+                "{text}"
+            );
+            assert_eq!(backoff.calls(), ["reset", "next", "reset"], "{text}");
+        }
+    }
+
+    #[test]
+    fn a_namespace_that_keeps_refusing_backs_off_across_new_watchers() {
+        // Every new watcher sends Init before its list is refused; Init must not reset the
+        // delay, or a revoked namespace would be retried at the shortest delay forever.
+        let refused = || {
+            vec![
+                Ok(watcher::Event::Init),
+                Err(watcher::Error::InitialListFailed(api_error(403))),
+            ]
+        };
+        let scripts = vec![
+            refused(),
+            refused(),
+            refused(),
+            vec![
+                Ok(watcher::Event::Init),
+                Ok(watcher::Event::InitApply(pod("a", "p1"))),
+                Ok(watcher::Event::InitDone),
+            ],
+        ];
+        let backoff = Recorded::default();
+        let (items, started) = restarting(scripts, backoff.clone());
+        assert_eq!(started, 4);
+        assert_eq!(items.len(), 9);
+        assert_eq!(
+            backoff.calls(),
+            ["next", "next", "next", "reset", "reset"],
+            "one growing delay per refusal, reset only once the list worked"
+        );
     }
 
     #[test]

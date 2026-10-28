@@ -101,6 +101,15 @@ All with Kubernetes v1.36.4 and Helm 3.16.1, on 2026-10-28:
   `--set-json 'rbac.namespaces=[]'` or a values file with `namespaces: []` worked, while `--set
   rbac.namespaces=null` and `--set 'rbac.namespaces={}'` left a list (`{}` renders as one empty
   name) and the chart refused. [Install kausa with Helm](../how-to/install-with-helm.md) says so.
+- **A review found that a `403` could lose records for good.** kube-runtime 4.2.0 relists only
+  after a failed list; a refused resumed watch (`WatchStartFailed`) or a `403` in an open stream
+  keeps its resource version, so once a deleted RoleBinding was restored the watcher would have
+  resumed without a relist, and the Pods kausa had dropped that did not change meanwhile (a
+  Pending Pod for `D005`, a static waiting state for `D004`, an evicted Pod for `D009`) would not
+  have come back. kausa now starts a new watcher after any `403` (`Restarting` in `src/run.rs`),
+  with a backoff that the `Init` of each new watcher does not reset; ADR 0013 has an `Update
+  2026-10-28` paragraph. The unit test that fed an `Init` after `WatchStartFailed`, which kube
+  never sends, now drives that sequence through `Restarting` over scripted watchers.
 
 ## Follow-ups
 

@@ -40,7 +40,8 @@ produces the same incident, the same fingerprint and the same request bytes.
   one event watch across all namespaces (`Api::all`); with `--namespace`, one of each in every
   listed namespace (`Api::namespaced`), since kube-rs has no watcher of several namespaces and a
   field selector cannot pick several. All through kube-rs watchers, with restarts and backoff
-  (0.8 to 30 seconds) handled by the library; each is one HTTP connection to the API server.
+  (0.8 to 30 seconds) handled by the library, except after a `403` (below); each is one HTTP
+  connection to the API server.
 - **Merged per kind, tagged with their watch.** The Pod watches are merged into one stream with
   `futures`' `select_all`, and so are the event watches, each item carrying its watch (a namespace,
   or none for the whole cluster) and each watch ending with an "ended" item: the loop keeps one Pod
@@ -70,7 +71,11 @@ produces the same incident, the same fingerprint and the same request bytes.
   gone), kausa can no longer see its objects go away, so it drops that watch's records of that
   kind, in that namespace only (in cluster mode, every record of that kind). Other errors keep
   them, so a transient failure does not reset the settle window. kausa never exits on a refusal
-  and never widens its watch: the other namespaces keep working.
+  and never widens its watch: the other namespaces keep working. The refused watch then starts
+  over with a new watcher, which lists again once access is back and so brings back the objects
+  that did not change meanwhile: kube-rs itself would resume a refused watch from where it was,
+  sending only the changes. The delay between tries still grows to 30 seconds across new
+  watchers.
 - **Only within the namespace an Event is in.** An Event whose `regarding` object is in another
   namespace, or that has none, is ignored, so an incident's namespace is always that of a watched
   Pod or Event, and its owner lookups, log read and Event write stay there.

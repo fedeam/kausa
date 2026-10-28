@@ -27,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or with an invalid list, the chart refuses to render and Helm changes nothing, so a values
   reset can no longer widen a namespaced install to the whole cluster.
 - `/readyz` answers `200` once every watch has listed: the two of the whole cluster, or the two of
-  each watched namespace. A watch refused with `403` drops the records it had brought in, and its
-  namespace's records only.
+  each watched namespace. A watch refused with `403` drops the records it had brought in (its
+  namespace's only) and lists again once access is back.
 - The chart's `templates/clusterrole.yaml` became `templates/rbac.yaml`, and its rules moved to the
   `kausa.rules` helper, which the ClusterRole and every Role render.
 
