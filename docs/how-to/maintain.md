@@ -335,26 +335,41 @@ kind publish a security fix:
    gh release view v<version> --repo kubernetes-sigs/kind --json body --jq .body | grep 'kindest/node:'
    ```
 
-4. Build both targets (`docker build --target ci .` and `docker build --target runtime .`) and
+4. **cosign** (`.github/workflows/release.yml`): the version and the checksum of
+   `cosign-linux-amd64` from the `cosign_checksums.txt` of its release:
+
+   ```sh
+   gh release download <version> --repo sigstore/cosign --pattern cosign_checksums.txt --output - | grep ' cosign-linux-amd64$'
+   ```
+
+5. Build both targets (`docker build --target ci .` and `docker build --target runtime .`) and
    open a pull request, for example `build(deps): bump distroless to <date>`.
 
 ## Cut a release
 
-Not scheduled yet; nothing here has been run. The image and the Helm chart are built in CI but
-not published ([0010. Ship a static binary on distroless, with a Helm chart, built in CI and not
-published yet](../adr/0010-packaging.md)), there is no release tooling yet, the crate is not
-published (`publish = false` in `Cargo.toml`), and where the multi-architecture image and the
-chart are published, and how they are signed, will be decided before the first release. The steps below are a placeholder:
+Why releases work this way: [0012. Release from a tag: a signed image on GHCR and the chart on the
+GitHub release](../adr/0012-releases.md). Status as of 2026-10-28: v0.1.0 is the first.
 
-1. In `CHANGELOG.md`, move the entries under `Unreleased` to a section for the new version with
-   its date, and update the links at the bottom.
-2. Set the new `version` in `Cargo.toml`. `Cargo.lock` records it too, so run `cargo build` once
-   without `--locked` (which would refuse to change the lock file) and check that the lock file
-   changed only there.
-3. Merge both in one pull request of your own and sync Gitea.
-4. Tag the merged commit on `main`, push the tag through `origin` (it reaches both forges), and
-   create the GitHub release with the notes GitHub generates from the labels
-   (`.github/release.yml`).
+1. In a pull request of your own (for example `chore(release): v0.1.1`):
+   - set the new `version` in `Cargo.toml`, and run `cargo build` once without `--locked` so that
+     `Cargo.lock` records it (check that the lock file changed only there);
+   - set the same `version` and `appVersion` in `charts/kausa/Chart.yaml`;
+   - in `CHANGELOG.md`, move the entries under `Unreleased` to a `## [X.Y.Z] - YYYY-MM-DD` section
+     and update the links at the bottom.
+2. Merge it, sync Gitea, and tag the merged commit on `main`:
+
+   ```sh
+   git fetch github && git switch main && git merge --ff-only github/main
+   git tag -a vX.Y.Z -m "kausa X.Y.Z" && git push origin vX.Y.Z
+   ```
+
+3. The `Release` workflow on GitHub builds the image on both architectures, publishes
+   `ghcr.io/fedeam/kausa:X.Y.Z`, signs it, attests its provenance and creates the GitHub release
+   with the chart. Watch it with `gh run watch --repo fedeam/kausa`; if the tag does not match the
+   versions, it stops before publishing anything.
+4. Verify what was published with the commands in the release notes (`cosign verify`,
+   `gh attestation verify`, `cosign verify-blob`), and that the image can be pulled without
+   logging in: `docker pull ghcr.io/fedeam/kausa:X.Y.Z` from a machine logged out of GHCR.
 
 ## If something fails
 

@@ -1,0 +1,192 @@
+name: Release
+
+# A release starts with a tag vX.Y.Z on main that matches the version of Cargo.toml and of the
+# chart (docs/how-to/maintain.md, "Cut a release"; docs/adr/0012-releases.md). It publishes:
+#   - the image ghcr.io/fedeam/kausa:X.Y.Z, for linux/amd64 and linux/arm64 (each built natively),
+#     signed with cosign keyless (the workflow's OIDC identity, no key to keep) and with SLSA build
+#     provenance attested by GitHub;
+#   - a GitHub release with the notes of CHANGELOG.md, the packaged chart, SHA256SUMS and its
+#     cosign signature bundle.
+# Only GitHub's own actions run here, pinned by full commit SHA; cosign and helm are downloaded
+# and checked against their SHA-256, like the tools of the Dockerfile.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/fedeam/kausa
+
+jobs:
+  image:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the tag matches the version
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          chart=$(sed -n 's/^version: //p' charts/kausa/Chart.yaml)
+          app=$(sed -n 's/^appVersion: //p' charts/kausa/Chart.yaml)
+          if [ "$version" != "$cargo" ] || [ "$version" != "$chart" ] || [ "$version" != "$app" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, Cargo.toml $cargo, chart $chart, appVersion $app"
+            exit 1
+          fi
+
+      - name: Build and push the image for this architecture
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --target runtime -t "$IMAGE:$version-$ARCH" .
+          docker push "$IMAGE:$version-$ARCH"
+          docker image inspect "$IMAGE:$version-$ARCH" --format '{{index .RepoDigests 0}}' > "digest-$ARCH.txt"
+          cat "digest-$ARCH.txt"
+
+      - name: Keep the digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digest-${{ matrix.arch }}.txt
+          retention-days: 1
+
+  publish:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      # cosign: the checksums published with each release, https://github.com/sigstore/cosign/releases
+      COSIGN_VERSION: v3.1.4
+      COSIGN_SHA256: 424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+      # helm: the same version and checksum as the Dockerfile's ci target.
+      HELM_VERSION: v4.3.1
+      HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Get the digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Install cosign and helm
+        run: |
+          set -eu
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o /tmp/cosign \
+            "https://github.com/sigstore/cosign/releases/download/$COSIGN_VERSION/cosign-linux-amd64"
+          echo "$COSIGN_SHA256  /tmp/cosign" | sha256sum -c -
+          sudo install -m 0755 /tmp/cosign /usr/local/bin/cosign
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o /tmp/helm.tar.gz \
+            "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
+          echo "$HELM_SHA256  /tmp/helm.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/helm.tar.gz -C /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          cosign version
+          helm version --short
+
+      - name: Publish the multi-architecture image
+        id: index
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create -t "$IMAGE:$version" "$(cat digest-amd64.txt)" "$(cat digest-arm64.txt)"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$version" --format '{{json .Manifest}}' | jq -r .digest)
+          case "$digest" in sha256:*) ;; *) echo "::error::no digest for $IMAGE:$version"; exit 1 ;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          docker buildx imagetools inspect "$IMAGE:$version"
+
+      - name: Sign the image
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+
+      - name: Attest the image's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/fedeam/kausa
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+
+      - name: Package the chart, sum and sign the assets
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          mkdir dist
+          helm package charts/kausa --destination dist
+          (cd dist && sha256sum "kausa-$version.tgz" > SHA256SUMS)
+          cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+          {
+            awk -v h="## [$version]" 'index($0, h) == 1 { on = 1; next } on && (/^## / || /^\[/) { exit } on' CHANGELOG.md
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "helm install kausa https://github.com/fedeam/kausa/releases/download/$GITHUB_REF_NAME/kausa-$version.tgz \\"
+            echo "  -n kausa --create-namespace --set dryRun=true"
+            echo '```'
+            echo
+            echo "Image: \`$IMAGE:$version\` (\`$IMAGE@$DIGEST\`), linux/amd64 and linux/arm64."
+            echo
+            echo "## Verify"
+            echo
+            echo '```sh'
+            echo "cosign verify $IMAGE@$DIGEST \\"
+            echo "  --certificate-identity https://github.com/fedeam/kausa/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo "gh attestation verify oci://$IMAGE@$DIGEST --repo fedeam/kausa"
+            echo "cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \\"
+            echo "  --certificate-identity https://github.com/fedeam/kausa/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo "sha256sum -c SHA256SUMS"
+            echo '```'
+          } > notes.md
+          cat notes.md
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md --verify-tag \
+            "dist/kausa-$version.tgz" dist/SHA256SUMS dist/SHA256SUMS.sigstore.json

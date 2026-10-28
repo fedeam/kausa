@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Detection, grouping, redaction, explanations, cost controls, Events, the image and the Helm
-chart. Nothing is released yet.
+## [0.1.0] - 2026-10-28
+
+The first release: detection, grouping, redaction, explanations, cost controls, Events, the image
+and the Helm chart. The image is `ghcr.io/fedeam/kausa:0.1.0` (linux/amd64 and linux/arm64,
+signed with cosign), and the chart is attached to the GitHub release.
 
 ### Added
 
@@ -44,4 +47,5 @@ chart. Nothing is released yet.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/commits/main
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/fedeam/kausa/releases/tag/v0.1.0
