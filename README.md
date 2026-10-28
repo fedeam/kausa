@@ -109,8 +109,10 @@ full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.
 - **Small.** One static binary for linux/amd64 and linux/arm64, a distroless non-root image of
   about 4.5 MB compressed (4.3 MB for arm64, 4.6 MB for amd64), and a small record per Pod and
   per Warning event instead of a cache of whole objects: 2 MiB and 0.67 seconds of CPU in 22
-  minutes on a Raspberry Pi 4 with 96 Pods, in dry-run (once, on a small cluster: [Memory and CPU
-  on a Raspberry Pi 4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)).
+  minutes on a Raspberry Pi 4 with 96 Pods, in dry-run, and 31 MiB with 10,000 Pods, ready 1.6
+  seconds after start (once each: [Memory and CPU on a Raspberry Pi
+  4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md), [Thousands of
+  Pods](docs/research/2026-10-28-thousands-of-pods.md)).
 - **No UI.** Events, logs and Prometheus metrics, which every existing tool already reads.
 
 ## How it relates to other tools
