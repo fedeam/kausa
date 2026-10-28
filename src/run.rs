@@ -76,6 +76,30 @@ pub struct Options {
 /// namespace `n` (docs/adr/0013-namespaced-install-mode.md).
 pub type WatchKey = Option<String>;
 
+/// Which kind of object a watch reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Pods,
+    Events,
+}
+
+/// Whether a record in `namespace` comes from `watch`: every record does for the cluster-wide
+/// watch, and only its namespace's records for a namespace's watch.
+fn inside(watch: &WatchKey, namespace: &str) -> bool {
+    watch.as_deref().is_none_or(|n| n == namespace)
+}
+
+/// Whether a watch error is the API server refusing the list or the watch (`403`). The status
+/// code decides, not the reason (docs/adr/0013-namespaced-install-mode.md).
+fn forbidden(error: &watcher::Error) -> bool {
+    match error {
+        watcher::Error::InitialListFailed(kube::Error::Api(status))
+        | watcher::Error::WatchStartFailed(kube::Error::Api(status))
+        | watcher::Error::WatchError(status) => status.code == 403,
+        _ => false,
+    }
+}
+
 /// An item of one watch, tagged with its watch; `None` once that watch has ended.
 type Tagged<K> = (WatchKey, Option<Result<watcher::Event<K>, watcher::Error>>);
 
@@ -230,32 +254,34 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             },
             Some(()) = connections.next(), if !connections.is_empty() => {}
             item = pods.next() => match item {
-                Some((_, Some(Ok(event)))) => {
+                Some((watch, Some(Ok(event)))) => {
                     pods_listed |= matches!(event, watcher::Event::InitDone);
-                    state.on_pod(event, &lookup).await?;
+                    state.on_pod(&watch, event, &lookup).await?;
                     if pods_listed && events_listed {
                         metrics.set_ready();
                     }
                 }
-                Some((_, Some(Err(e)))) => {
+                Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "pods")]);
                     log::warn("pod watch error", json!({"error": e.to_string()}))?;
+                    state.on_watch_error(Kind::Pods, &watch, &e);
                 }
                 Some((_, None)) | None => {
                     return Err(RunError::Failure("the pod watch ended".into()));
                 }
             },
             item = events.next() => match item {
-                Some((_, Some(Ok(event)))) => {
+                Some((watch, Some(Ok(event)))) => {
                     events_listed |= matches!(event, watcher::Event::InitDone);
-                    state.on_event(event, &lookup).await?;
+                    state.on_event(&watch, event, &lookup).await?;
                     if pods_listed && events_listed {
                         metrics.set_ready();
                     }
                 }
-                Some((_, Some(Err(e)))) => {
+                Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "events")]);
                     log::warn("event watch error", json!({"error": e.to_string()}))?;
+                    state.on_watch_error(Kind::Events, &watch, &e);
                 }
                 Some((_, None)) | None => {
                     return Err(RunError::Failure("the event watch ended".into()));
@@ -334,29 +360,37 @@ struct State {
     pods: HashMap<String, PodEntry>,
     /// Only Warning events that a detection matches, with the Job's top-level owner for `D008`.
     events: HashMap<String, (EventRecord, Option<OwnerRef>)>,
-    /// The UIDs seen during a relist of each watch, to drop the ones that disappeared.
-    pod_relist: Option<HashSet<String>>,
-    event_relist: Option<HashSet<String>>,
+    /// The UIDs seen during the open relist of each watch, to drop the ones that disappeared
+    /// from that watch.
+    pod_relist: HashMap<WatchKey, HashSet<String>>,
+    event_relist: HashMap<WatchKey, HashSet<String>>,
 }
 
 impl State {
+    /// Applies an item of the Pod watch `watch`. A relist (`Init` to `InitDone`) drops only the
+    /// Pods inside that watch that it did not see.
     async fn on_pod<L: OwnerLookup>(
         &mut self,
+        watch: &WatchKey,
         event: watcher::Event<Pod>,
         lookup: &L,
     ) -> io::Result<()> {
         match event {
-            watcher::Event::Init => self.pod_relist = Some(HashSet::new()),
+            watcher::Event::Init => {
+                self.pod_relist.insert(watch.clone(), HashSet::new());
+            }
             watcher::Event::InitDone => {
-                if let Some(seen) = self.pod_relist.take() {
-                    self.pods.retain(|uid, _| seen.contains(uid));
+                if let Some(seen) = self.pod_relist.remove(watch) {
+                    self.pods.retain(|uid, (record, _, _)| {
+                        !inside(watch, &record.namespace) || seen.contains(uid)
+                    });
                 }
             }
             watcher::Event::Apply(pod) | watcher::Event::InitApply(pod) => {
                 let Some(record) = PodRecord::from_pod(&pod) else {
                     return Ok(());
                 };
-                if let Some(seen) = &mut self.pod_relist {
+                if let Some(seen) = self.pod_relist.get_mut(watch) {
                     seen.insert(record.uid.clone());
                 }
                 let (owner, resolved) = match self.pods.get(&record.uid) {
@@ -400,23 +434,31 @@ impl State {
         Ok(())
     }
 
+    /// Applies an item of the event watch `watch`. A relist drops only the events inside that
+    /// watch that it did not see; an event is inside by the namespace of the object it is about,
+    /// which `EventRecord::from_event` makes equal to the Event's own namespace.
     async fn on_event<L: OwnerLookup>(
         &mut self,
+        watch: &WatchKey,
         event: watcher::Event<Event>,
         lookup: &L,
     ) -> io::Result<()> {
         match event {
-            watcher::Event::Init => self.event_relist = Some(HashSet::new()),
+            watcher::Event::Init => {
+                self.event_relist.insert(watch.clone(), HashSet::new());
+            }
             watcher::Event::InitDone => {
-                if let Some(seen) = self.event_relist.take() {
-                    self.events.retain(|uid, _| seen.contains(uid));
+                if let Some(seen) = self.event_relist.remove(watch) {
+                    self.events.retain(|uid, (record, _)| {
+                        !inside(watch, &record.regarding.namespace) || seen.contains(uid)
+                    });
                 }
             }
             watcher::Event::Apply(event) | watcher::Event::InitApply(event) => {
                 let Some(record) = EventRecord::from_event(&event) else {
                     return Ok(());
                 };
-                if let Some(seen) = &mut self.event_relist {
+                if let Some(seen) = self.event_relist.get_mut(watch) {
                     seen.insert(record.uid.clone());
                 }
                 let now = Timestamp::now();
@@ -459,6 +501,27 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    /// Forgets what a watch had shown when the API server refuses it (`403`): that kind's records
+    /// inside the watch and its open relist, so that a revoked namespace stops giving signals.
+    /// Any other error keeps the records, and the watcher retries.
+    fn on_watch_error(&mut self, kind: Kind, watch: &WatchKey, error: &watcher::Error) {
+        if !forbidden(error) {
+            return;
+        }
+        match kind {
+            Kind::Pods => {
+                self.pod_relist.remove(watch);
+                self.pods
+                    .retain(|_, (record, _, _)| !inside(watch, &record.namespace));
+            }
+            Kind::Events => {
+                self.event_relist.remove(watch);
+                self.events
+                    .retain(|_, (record, _)| !inside(watch, &record.regarding.namespace));
+            }
+        }
     }
 
     /// Drops events that can no longer be a signal, so the map holds only what happened in the
