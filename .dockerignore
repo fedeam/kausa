@@ -9,3 +9,7 @@
 !charts/
 !src/
 !tests/
+# The fuzz targets and the image ClusterFuzzLite builds them in (.clusterfuzzlite/Dockerfile
+# uses this same context).
+!fuzz/
+!.clusterfuzzlite/

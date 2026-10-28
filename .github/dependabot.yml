@@ -61,6 +61,21 @@ updates:
     cooldown:
       default-days: 3
 
+  # The fuzz targets' own crate (fuzz/Cargo.toml).
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    groups:
+      fuzz-dependencies:
+        patterns: ["*"]
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

@@ -1,0 +1,36 @@
+# Fuzz targets for kausa's parsers of untrusted text (cargo-fuzz, run by ClusterFuzzLite;
+# .clusterfuzzlite/ and .github/workflows/cflite_pr.yml). A crate of its own, outside kausa's
+# build: it needs a nightly compiler, and kausa is a binary with no library to link against, so
+# each target includes the module it tests by path. Same dependency versions as Cargo.lock.
+[package]
+name = "kausa-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+regex = "1.13.1"
+serde_json = "1.0.154"
+unicode-normalization = "0.1.26"
+
+# Not part of a parent workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "redact"
+path = "fuzz_targets/redact.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate"
+path = "fuzz_targets/validate.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,40 @@
+name: ClusterFuzzLite
+
+# Fuzzes the parsers of untrusted text (fuzz/: redaction of cluster text, validation of the
+# model's answers) with ClusterFuzzLite (https://google.github.io/clusterfuzzlite/): a short run on
+# pull requests that change the fuzzed code, and a longer one every week on main, which keeps the
+# corpus. A crash fails the job and leaves the input that caused it as an artifact.
+on:
+  pull_request:
+    paths:
+      - 'src/redact.rs'
+      - 'src/prompt.rs'
+      - 'fuzz/**'
+      - '.clusterfuzzlite/**'
+      - '.github/workflows/cflite.yml'
+  schedule:
+    - cron: '41 5 * * 3'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Build the fuzz targets
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run the fuzz targets
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: address
+          mode: ${{ github.event_name == 'pull_request' && 'code-change' || 'batch' }}
+          fuzz-seconds: ${{ github.event_name == 'pull_request' && 300 || 1800 }}

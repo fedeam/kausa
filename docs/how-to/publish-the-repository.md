@@ -203,8 +203,8 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    Dependabot **alerts** have been on since 2026-10-26; the [Verify](#verify) section checks
    them.
 
-   Then restrict GitHub Actions. Only GitHub's own actions (`actions/*` and `github/*`) and the
-   Scorecard action of step 11 may run, each pinned by a full commit SHA, as the workflows already
+   Then restrict GitHub Actions. Only GitHub's own actions (`actions/*` and `github/*`), the
+   Scorecard action of step 11 and, since 2026-10-28, ClusterFuzzLite's actions may run, each pinned by a full commit SHA, as the workflows already
    pin them; and the workflow runs of every outside contributor's pull request wait for the
    maintainer's approval:
 
@@ -213,7 +213,7 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
      -F enabled=true -f allowed_actions=selected -F sha_pinning_required=true
    gh api -X PUT repos/fedeam/kausa/actions/permissions/selected-actions --input - <<'EOF'
    { "github_owned_allowed": true, "verified_allowed": false,
-     "patterns_allowed": ["ossf/scorecard-action@*"] }
+     "patterns_allowed": ["ossf/scorecard-action@*", "google/clusterfuzzlite/actions/*@*"] }
    EOF
    gh api -X PUT repos/fedeam/kausa/actions/permissions/fork-pr-contributor-approval \
      -f approval_policy=all_external_contributors
@@ -397,7 +397,7 @@ gh api repos/fedeam/kausa --jq .security_and_analysis                      # sec
 gh api -i repos/fedeam/kausa/vulnerability-alerts | head -1                # status 204 (404 means alerts are off)
 gh api repos/fedeam/kausa/automated-security-fixes --jq .enabled           # true
 gh api repos/fedeam/kausa/actions/permissions                              # allowed_actions: selected, sha_pinning_required: true
-gh api repos/fedeam/kausa/actions/permissions/selected-actions             # github_owned_allowed: true, patterns_allowed: ossf/scorecard-action@*
+gh api repos/fedeam/kausa/actions/permissions/selected-actions             # github_owned_allowed: true, patterns_allowed: the Scorecard and ClusterFuzzLite actions
 gh api repos/fedeam/kausa/actions/permissions/fork-pr-contributor-approval --jq .approval_policy   # all_external_contributors
 gh api repos/fedeam/kausa/actions/permissions/workflow                     # default_workflow_permissions: read, can_approve_pull_request_reviews: false
 gh api repos/fedeam/kausa/rulesets --jq '.[].name'                         # main

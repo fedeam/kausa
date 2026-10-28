@@ -96,6 +96,23 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    the kubeconfig and makes it the current one: to leave yours as it is, run the test with
    `KUBECONFIG` pointing at a file of its own.
 
+## Fuzz
+
+`fuzz/` holds fuzz targets for the code that parses untrusted text: `redact` (redaction of
+anything a cluster could produce) and `validate` (validation of anything a model could answer).
+GitHub Actions run them with ClusterFuzzLite on pull requests that change that code and every
+week (`.github/workflows/cflite.yml`). To run one locally you need a nightly toolchain and
+[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (`cargo install cargo-fuzz`):
+
+```sh
+cd fuzz
+cargo +nightly fuzz run redact -- -max_total_time=60
+```
+
+A new target is a file in `fuzz/fuzz_targets/` and a `[[bin]]` entry in `fuzz/Cargo.toml`; kausa
+has no library, so a target includes the module it tests by path, which works for modules that
+use nothing else from the crate.
+
 ## Verify
 
 Every command in steps 2 to 5 exits with code `0`. `gitleaks` ends with `no leaks found`.
