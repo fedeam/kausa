@@ -2,13 +2,16 @@
 
 The values of the chart in `charts/kausa`, what each one turns into, and the objects it creates.
 
-Status as of 2026-10-26: the chart exists and is checked by `helm lint` and renders in CI, by a
+Status as of 2026-10-28: the chart exists and is checked by `helm lint` and renders in CI, by a
 server-side dry run against Kubernetes v1.36 (k3s), by one install in dry-run on that cluster
 (admitted under the restricted Pod Security Standard), and by the kind test, which installs it
-with an endpoint (passed on 2026-10-27 on the maintainer's machine). No image is published, so `image.repository` must point at one you built ([Install kausa
+with an endpoint (passed on 2026-10-27 on the maintainer's machine). Since v0.1.0 (2026-10-28)
+each release attaches the packaged chart to its GitHub release and publishes the image it uses
+by default, and the v0.1.0 chart was installed in dry-run in kind with that image ([Install kausa
 with Helm](../how-to/install-with-helm.md)). Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
-yet](../adr/0010-packaging.md).
+yet](../adr/0010-packaging.md) and [0012. Release from a tag: a signed image on GHCR and the
+chart on the GitHub release](../adr/0012-releases.md).
 
 ## Objects
 
@@ -26,7 +29,7 @@ The full name is the release name when it contains `kausa`, and `<release>-kausa
 
 | Value | Default | Becomes |
 |---|---|---|
-| `image.repository` | `ghcr.io/fedeam/kausa` | The image; nothing is published there yet |
+| `image.repository` | `ghcr.io/fedeam/kausa` | The image, published by each release for linux/amd64 and linux/arm64 |
 | `image.tag` | the chart's `appVersion` | |
 | `image.digest` | `""` | `repository@digest`, which takes precedence over the tag |
 | `image.pullPolicy` | `IfNotPresent` | |

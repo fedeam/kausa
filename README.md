@@ -8,8 +8,8 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The image and the Helm chart are in the repository; no release,
-> image or chart is published yet.
+> Event on the failing workload. The first release, [v0.1.0](https://github.com/fedeam/kausa/releases/tag/v0.1.0),
+> publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
 
@@ -57,17 +57,14 @@ back before writing the Event.
 
 ## Try it
 
-In a throwaway [kind](https://kind.sigs.k8s.io) cluster, with Docker, kind, kubectl and Helm, from
-a clone of this repository. In dry-run kausa logs the redacted request of each incident and sends
-nothing:
+In a throwaway [kind](https://kind.sigs.k8s.io) cluster, with Docker, kind, kubectl and Helm. In
+dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-docker build --target runtime -t kausa:try .
-kind load docker-image kausa:try --name kausa-try
-helm install kausa charts/kausa -n kausa --create-namespace --set dryRun=true \
-  --set image.repository=kausa --set image.tag=try --set image.pullPolicy=Never
-kubectl create deployment crasher --image=kausa:try -- /kausa --no-such-flag
+helm install kausa https://github.com/fedeam/kausa/releases/download/v0.1.0/kausa-0.1.0.tgz \
+  -n kausa --create-namespace --set dryRun=true
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.1.0 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -140,13 +137,15 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.1 is feature-complete and not released: `kausa run` watches Pods and Warning
+Pre-alpha. v0.1.0 is released (2026-10-28): `kausa run` watches Pods and Warning
 events, groups failures by workload, builds a redacted context with the failed container's log,
 asks the model within a call budget (or logs the request with `--dry-run`), reuses explanations
 of repeated incidents, writes each explanation as an Event on the failing workload, and serves
 Prometheus metrics with `--metrics-address`; its log lines are JSON ([Command line and log
-format](docs/reference/command-line.md)). The image and the Helm chart are built and checked in
-CI, and the end-to-end test in kind passes; nothing is published yet.
+format](docs/reference/command-line.md)). The image is published at `ghcr.io/fedeam/kausa`,
+signed with cosign and with SLSA build provenance, and the chart is attached to each [GitHub
+release](https://github.com/fedeam/kausa/releases), next to its signed checksums; how to verify
+them is in the release notes.
 
 What was measured, once each and on small setups: on five seeded failures with the same small
 local model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 calls and 5,128
@@ -179,19 +178,19 @@ to create and patch Events; it has no flag to pick a context, so check
 `kubectl config current-context` first, or follow [Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of it.
 
-To run it in a cluster, build the image (`docker build --target runtime -t <registry>/kausa:<tag>
-.`), push it, and install the chart in `charts/kausa` with `--set image.tag=<tag>`: [Install
-kausa with Helm](docs/how-to/install-with-helm.md).
+To run it in a cluster, install the released chart, which uses the published image: [Install
+kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build the image
+(`docker build --target runtime -t <registry>/kausa:<tag> .`), push it, and install the chart with
+`--set image.repository=<registry>/kausa --set image.tag=<tag>`.
 
 ## Roadmap
 
-- **v0.1** (feature-complete, not released): the watches, eight detection rules, the settle
+- **v0.1** (released as v0.1.0 on 2026-10-28): the watches, eight detection rules, the settle
   window, owner correlation and fingerprints; redaction with a test corpus, the untrusted-data
   prompt, the OpenAI-compatible client and dry-run; the budget, deduplication, metrics and
   Events; the image, the Helm chart and the kind test; a measurement on a Raspberry Pi 4 and a
   token comparison with k8sgpt.
-- **Before the first release:** CI on GitHub's runners, a test against a hosted provider, and a
-  published image and chart.
+- **Next:** a test against a hosted provider.
 - **v0.2:** longer explanations and history in a custom resource, and a namespaced install mode
   (v0.1 installs cluster-wide only).
 
