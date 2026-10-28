@@ -64,12 +64,12 @@ Against step 11's expectations:
   **CII-Best-Practices: 0** (step 12 is pending), **Fuzzing: 0**; Packaging and Signed-Releases
   do not apply yet (no release).
 
-The Scorecard badge was added to the README.
+The Scorecard badge was added to the README. The same morning the maintainer sent a test message
+to `conduct@fedeam.com`, and it arrived: the conduct address forwards.
 
 ## Pending
 - **Step 9:** the social preview image (none exists yet); the homepage stays empty.
 - **Step 12:** OpenSSF Best Practices registration, at bestpractices.dev, with the maintainer's
   GitHub login.
 - **Step 13:** the crates.io name, with the first real release.
-- Check that `conduct@fedeam.com` still forwards.
 - `fedeam/kausa-old`, the private backup of the history before the rewrite, can be deleted.
