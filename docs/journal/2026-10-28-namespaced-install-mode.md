@@ -35,15 +35,19 @@ that a kind cluster can settle.
   `kind (namespaced)`.
 - **Integration:** the chart track was merged into the code track, then `main` (ADRs 0013 to 0016,
   `D009` and `D010`, and #38) was merged in; the changelog's `Security` line, which both sides
-  carried, was kept once. Then the docs: [Permissions](../reference/permissions.md), [Helm
-  chart](../reference/helm-chart.md), [Command line and log
-  format](../reference/command-line.md), [Install kausa with
+  carried, was kept once.
+- **Docs:** [Permissions](../reference/permissions.md), [Helm chart](../reference/helm-chart.md),
+  [Command line and log format](../reference/command-line.md), [Install kausa with
   Helm](../how-to/install-with-helm.md), [Try kausa against a cluster with a local
   model](../how-to/try-with-a-local-model.md), [Architecture](../explanation/architecture.md),
   [Set up a development environment and run the checks](../how-to/develop.md), the [Security
   policy](../../SECURITY.md), `ARCHITECTURE.md`, the README, the changelog, and an `Update` in
   [0009. Run with read-only permissions that never include
   Secrets](../adr/0009-least-privilege-rbac.md).
+- **v0.2.0 came out meanwhile.** While the docs were written, `main` released v0.2.0 (#39)
+  without this mode and moved it to v0.3 in the roadmap. `main` was merged in again: this mode's
+  changelog entries stay under `Unreleased`, and the docs say "planned for v0.3" and name the
+  v0.2.0 chart and image as ones without `rbac.scope` and `--namespace`.
 
 ## How it was checked
 
@@ -70,7 +74,7 @@ All with Kubernetes v1.36.4 and Helm 3.16.1, on 2026-10-28:
   So the check was needed.
 - **`/version` needs no grant:** in namespaced scope, with nothing cluster-wide granted, kausa
   read the server version and became ready. Which default ClusterRole allows it was not checked.
-- **v0.1's stored values have no `rbac` map:** `helm upgrade --reuse-values` from the v0.1.0
+- **An earlier release's stored values have no `rbac` map:** `helm upgrade --reuse-values` from the v0.1.0
   chart failed with `rbac.scope is not set`, without a new revision; with `--set
   rbac.scope=cluster` it passed, and the ClusterRole's rules were identical to v0.1.0's. Later
   `--reuse-values` upgrades carried the scope on.

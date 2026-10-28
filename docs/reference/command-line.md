@@ -2,7 +2,7 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-28: what the code of v0.1 does, with the namespaced mode of v0.2
+Status as of 2026-10-28: what the code of v0.2.0 does, with the namespaced mode planned for v0.3
 (`--namespace`, not in a release yet). `kausa
 run` detects and groups failures and logs incidents; with `--endpoint` it explains each one within
 a call budget, reuses explanations of repeated incidents, and writes the explanation as an Event
@@ -117,7 +117,7 @@ namespaces, with invented values:
 
 ```json
 {"ts":"2026-10-28T12:00:00Z","level":"info","msg":"started","namespaces":["payments","shop"],
- "server":"v1.36.4","settle_seconds":60,"version":"0.1.0"}
+ "server":"v1.36.4","settle_seconds":60,"version":"0.2.0"}
 {"ts":"2026-10-28T12:00:01Z","level":"warn","msg":"pod watch error","error":"<kube-rs's text>",
  "namespace":"payments"}
 ```

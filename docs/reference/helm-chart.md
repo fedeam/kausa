@@ -9,8 +9,8 @@ with an endpoint in each `rbac.scope` (both passed on 2026-10-28 on the maintain
 Since v0.1.0 (2026-10-28) each release attaches the packaged chart to its GitHub release and
 publishes the image it uses by default, and the v0.1.0 chart was installed in dry-run in kind with
 that image ([Install kausa with Helm](../how-to/install-with-helm.md)). `rbac.scope` and
-`rbac.namespaces` are in the chart of the repository, not in a release yet: the v0.1.0 chart has
-neither and always creates the ClusterRole. Why it is built this way: [0010. Ship a static binary
+`rbac.namespaces` are in the chart of the repository, not in a release yet: the v0.2.0 and v0.1.0
+charts have neither and always create the ClusterRole. Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
 yet](../adr/0010-packaging.md), [0012. Release from a tag: a signed image on GHCR and the
 chart on the GitHub release](../adr/0012-releases.md) and [0013. Offer a namespaced install mode:
@@ -83,7 +83,7 @@ reason, and nothing is applied) in these cases, checked in this order, with thes
 
 | When | Message |
 |---|---|
-| `rbac.scope` is empty or missing (the defaults, `--set rbac=null`, `helm upgrade --reset-values`, or a v0.1 release upgraded with `--reuse-values`) | `rbac.scope is not set: set rbac.scope=cluster to let kausa read every namespace, or rbac.scope=namespaced with rbac.namespaces` |
+| `rbac.scope` is empty or missing (the defaults, `--set rbac=null`, `helm upgrade --reset-values`, or a release of the v0.2.0 or v0.1.0 chart upgraded with `--reuse-values`) | `rbac.scope is not set: set rbac.scope=cluster to let kausa read every namespace, or rbac.scope=namespaced with rbac.namespaces` |
 | `rbac.scope` is another value | `rbac.scope must be cluster or namespaced, not '<value>'` |
 | `namespaced` with an empty list | `rbac.scope=namespaced needs rbac.namespaces: the namespaces kausa may read` |
 | `cluster` with a list | `rbac.namespaces is set but rbac.scope is cluster, which grants every namespace: set rbac.scope=namespaced` |

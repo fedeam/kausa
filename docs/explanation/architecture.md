@@ -15,8 +15,8 @@ Raspberry Pi 4: about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)). This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
-incident](../adr/0001-scope-and-positioning.md). Status as of 2026-10-28, the namespaced mode of
-v0.2 is in the code, not in a release yet ([0013. Offer a namespaced install mode: one watch pair
+incident](../adr/0001-scope-and-positioning.md). Status as of 2026-10-28, the namespaced mode
+planned for v0.3 is in the code, not in a release yet ([0013. Offer a namespaced install mode: one watch pair
 and one Role per listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)).
 
 ## Pipeline

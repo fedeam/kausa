@@ -50,8 +50,8 @@ cluster-wide](../adr/0013-namespaced-install-mode.md)).
    ```
 
    `rbac.scope=cluster` lets kausa read Pods, Events and (when it explains) container logs in
-   every namespace. The chart requires the value, on every install and upgrade; the v0.1.0 chart
-   ignores it. To grant less, see [Watch only some namespaces](#watch-only-some-namespaces).
+   every namespace. The chart requires the value, on every install and upgrade; the v0.2.0 chart
+   and earlier ignore it. To grant less, see [Watch only some namespaces](#watch-only-some-namespaces).
 
    Each `request` line is the redacted body that would leave the cluster. In dry-run the chart
    grants `pods/log` but no Event writes.
@@ -85,18 +85,19 @@ helm install kausa charts/kausa -n kausa --set rbac.scope=cluster \
   --set image.repository=<registry>/kausa --set image.tag=<tag> --set dryRun=true
 ```
 
-## Upgrade from v0.1
+## Upgrade from a chart without rbac.scope
 
-The v0.1.0 chart had no `rbac.scope`, so the first upgrade to a chart that requires it sets it
-once, `--reuse-values` included: `--reuse-values` reuses the values of v0.1's release, which have
-no `rbac` map, and the chart refuses to render without it (checked in kind on 2026-10-28 with Helm
-3.16.1: the upgrade fails with `rbac.scope is not set` and the release stays as it was).
+The charts of v0.2.0 and v0.1.0 have no `rbac.scope`, so the first upgrade to a chart that requires
+it sets it once, `--reuse-values` included: `--reuse-values` reuses the values of the earlier
+release, which have no `rbac` map, and the chart refuses to render without it (checked in kind on
+2026-10-28 with Helm 3.16.1, from the v0.1.0 chart: the upgrade fails with `rbac.scope is not set`
+and the release stays as it was; the v0.2.0 chart's values have no `rbac` map either).
 
 ```sh
 helm upgrade kausa <chart> -n kausa --reuse-values --set rbac.scope=cluster
 ```
 
-`rbac.scope=cluster` keeps v0.1's ClusterRole, its rules and the whole-cluster watch. After that,
+`rbac.scope=cluster` keeps the ClusterRole, its rules and the whole-cluster watch. After that,
 `--reuse-values` carries the scope on. Without `--reuse-values`, pass the scope every time, best
 from a values file: `helm upgrade --reset-values`, or an upgrade with `--set` and neither
 `--reuse-values` nor a values file, renders the chart's defaults, which have no scope, and fails.
@@ -109,8 +110,8 @@ ClusterRole, no access to `kube-system`, to other namespaces or to its own names
 listed ([Permissions](../reference/permissions.md)).
 
 Status as of 2026-10-28, no release has this scope yet: it needs the chart and the image of the
-same commit ([Run your own build](#run-your-own-build)). The v0.1.0 image refuses `--namespace`,
-and the v0.1.0 chart ignores `rbac` and creates a ClusterRole.
+same commit ([Run your own build](#run-your-own-build)). The v0.2.0 image refuses `--namespace`,
+and the v0.2.0 chart ignores `rbac` and creates a ClusterRole.
 
 1. **Create the namespaces first.** The chart creates none, and Helm cannot create a Role in a
    namespace that does not exist.
@@ -171,9 +172,9 @@ and the v0.1.0 chart ignores `rbac` and creates a ClusterRole.
 - **`ErrImagePull`** → the cluster cannot pull the image → check that the nodes reach `ghcr.io`,
   or, for your own build, the registry, the tag and `imagePullSecrets`.
 - **`helm install` or `helm upgrade` fails with `rbac.scope is not set`** → the scope is required
-  on every install and upgrade → pass `--set rbac.scope=cluster` (as v0.1), or `namespaced` with
-  `rbac.namespaces`, or the values file you installed with; upgrading from v0.1, once, even with
-  `--reuse-values`.
+  on every install and upgrade → pass `--set rbac.scope=cluster` (as before), or `namespaced` with
+  `rbac.namespaces`, or the values file you installed with; upgrading from the v0.2.0 or v0.1.0
+  chart, once, even with `--reuse-values`.
 - **`helm install` fails with `model.name is required`** (or another of the chart's checks) → set
   the value it names ([Helm chart](../reference/helm-chart.md)).
 - **`helm install` fails with `namespaces "<name>" not found`** → a listed namespace does not

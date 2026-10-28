@@ -21,8 +21,8 @@ GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes
 ([2026-10-26 — GitHub repository and first CI
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). GitHub Actions run since the repository became
 public, on 2026-10-27: the checks, both images and the kind test passed on their first run.
-The namespaced install mode of v0.2 (`kausa run --namespace`, the chart's required `rbac.scope`)
-is in the code, not in a release yet; the kind test passed in both scopes on 2026-10-28
+The namespaced install mode planned for v0.3 (`kausa run --namespace`, the chart's required
+`rbac.scope`) is in the code, not in a release yet; the kind test passed in both scopes on 2026-10-28
 ([2026-10-28 — Namespaced install mode](journal/2026-10-28-namespaced-install-mode.md)).
 
 ## Key facts

@@ -39,8 +39,8 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-28: v0.1.0 is released, and the namespaced install mode of v0.2 is in the
-code and the chart, not in a release yet. `kausa run` reads Pods,
+Status as of 2026-10-28: v0.2.0 is released, and the namespaced install mode planned for v0.3 is
+in the code and the chart, not in a release yet. `kausa run` reads Pods,
 their logs (crash loops, out-of-memory kills and failed Jobs only), Events and the metadata of ReplicaSets and Jobs; it
 redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
 logs it with `--dry-run`; it logs incidents and explanations with real names to its own stdout.
