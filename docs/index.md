@@ -23,7 +23,8 @@ runs](journal/2026-10-26-github-repository-and-first-ci.md)). GitHub Actions run
 public, on 2026-10-27: the checks, both images and the kind test passed on their first run.
 The namespaced install mode planned for v0.3 (`kausa run --namespace`, the chart's required
 `rbac.scope`) is in the code, not in a release yet; the kind test passed in both scopes on 2026-10-28
-([2026-10-28 — Namespaced install mode](journal/2026-10-28-namespaced-install-mode.md)).
+([2026-10-28 — First release](journal/2026-10-28-first-release.md), "the namespaced install
+mode").
 
 ## Key facts
 
@@ -111,5 +112,4 @@ checks](how-to/develop.md).
   runs](journal/2026-10-26-github-repository-and-first-ci.md): the first push and CI runs;
   [2026-10-27 — First run of the kind test](journal/2026-10-27-first-kind-run.md);
   [2026-10-27 — Publication](journal/2026-10-27-publication.md);
-  [2026-10-28 — First release](journal/2026-10-28-first-release.md);
-  [2026-10-28 — Namespaced install mode](journal/2026-10-28-namespaced-install-mode.md).
+  [2026-10-28 — First release](journal/2026-10-28-first-release.md).
