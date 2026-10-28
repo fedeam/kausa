@@ -38,7 +38,7 @@ signed with cosign), and the chart is attached to the GitHub release.
   (`kausa_watch_errors_total`).
 - `kausa --help` and `kausa --version`.
 - The controller image (`docker build --target runtime`): a static binary on distroless, non-root,
-  for linux/amd64 and linux/arm64. Not published.
+  for linux/amd64 and linux/arm64.
 - A Helm chart in `charts/kausa`, with the permissions of the reference, the restricted Pod
   Security settings, the API key as a file from your Secret, a metrics Service and an optional
   NetworkPolicy.

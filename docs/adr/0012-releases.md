@@ -43,6 +43,7 @@ criteria on version tags all ask for real releases. FedeAM decided on 2026-10-28
 
 - Users install a published, signed image, and can verify it before running it (the release notes
   show the `cosign verify` and `gh attestation verify` commands).
-- The first push creates the GHCR package; whether it inherits the repository's public visibility
-  is checked after the first release, and set to public by hand if not.
+- The first push creates the GHCR package as private (GitHub's default for a new package; it
+  inherits the repository's permissions, not its visibility): it is made public by hand once,
+  after the first release.
 - cosign's version and checksum are bumped by hand, like the other pinned tools.

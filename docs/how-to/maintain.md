@@ -367,7 +367,10 @@ GitHub release](../adr/0012-releases.md). Status as of 2026-10-28: v0.1.0 is the
    `ghcr.io/fedeam/kausa:X.Y.Z`, signs it, attests its provenance and creates the GitHub release
    with the chart. Watch it with `gh run watch --repo fedeam/kausa`; if the tag does not match the
    versions, it stops before publishing anything.
-4. Verify what was published with the commands in the release notes (`cosign verify`,
+4. **Only after the first release (v0.1.0):** GitHub creates a new package as private. Make it
+   public once, in the package's page (`https://github.com/users/fedeam/packages/container/package/kausa`)
+   → Package settings → Change visibility → Public; it cannot be made private again.
+5. Verify what was published with the commands in the release notes (`cosign verify`,
    `gh attestation verify`, `cosign verify-blob`), and that the image can be pulled without
    logging in: `docker pull ghcr.io/fedeam/kausa:X.Y.Z` from a machine logged out of GHCR.
 

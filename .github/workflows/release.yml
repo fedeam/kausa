@@ -41,12 +41,21 @@ jobs:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Check that the tag matches the version
+      - name: Check the tag, the versions and the changelog
         run: |
           set -eu
           version=${GITHUB_REF_NAME#v}
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main"
+            exit 1
+          fi
+          if ! grep -q "^## \[$version\] - " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
           cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           chart=$(sed -n 's/^version: //p' charts/kausa/Chart.yaml)
           app=$(sed -n 's/^appVersion: //p' charts/kausa/Chart.yaml)
@@ -135,7 +144,8 @@ jobs:
       - name: Sign the image
         env:
           DIGEST: ${{ steps.index.outputs.digest }}
-        run: cosign sign --yes "$IMAGE@$DIGEST"
+        # --recursive also signs the image of each architecture, for whoever verifies one of them.
+        run: cosign sign --yes --recursive "$IMAGE@$DIGEST"
 
       - name: Attest the image's build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -167,6 +177,8 @@ jobs:
             echo "Image: \`$IMAGE:$version\` (\`$IMAGE@$DIGEST\`), linux/amd64 and linux/arm64."
             echo
             echo "## Verify"
+            echo
+            echo "With cosign v3 or later and the GitHub CLI:"
             echo
             echo '```sh'
             echo "cosign verify $IMAGE@$DIGEST \\"
