@@ -2,12 +2,15 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-26: what the code of v0.1's four implementation weekends does. `kausa
+Status as of 2026-10-28: what the code of v0.1 does, with the namespaced mode of v0.2
+(`--namespace`, not in a release yet). `kausa
 run` detects and groups failures and logs incidents; with `--endpoint` it explains each one within
 a call budget, reuses explanations of repeated incidents, and writes the explanation as an Event
 on the failing workload; with `--dry-run` it logs the request instead; with `--metrics-address` it
 serves Prometheus metrics ([0001. Build a small, read-only explainer that writes one redacted
-explanation per incident](../adr/0001-scope-and-positioning.md)).
+explanation per incident](../adr/0001-scope-and-positioning.md)); with `--namespace` it watches
+only the namespaces given ([0013. Offer a namespaced install mode: one watch pair and one Role per
+listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)).
 
 ## Commands
 
@@ -22,6 +25,7 @@ Options of `kausa run`:
 | Option | What it does |
 |---|---|
 | `--settle-seconds <N>` | How long a failure has to persist before it is an incident, from `0` to `3600`; `60` by default. A failed Job (`D008`) is an incident at once, whatever the value |
+| `--namespace <NAME>` | Watch only this namespace: one Pod watch and one Warning event watch in it. Repeat it for more, one name each time, up to 32; the order does not matter. Without it, kausa watches the whole cluster (one watch of each kind across all namespaces). The scope comes only from this flag, never from the kubeconfig's context or the service account's namespace |
 | `--endpoint <URL>` | The base URL of an OpenAI-compatible endpoint, such as `https://api.example.com/v1` or `http://127.0.0.1:11434/v1` for Ollama. Each incident's redacted context is sent to `<URL>/chat/completions` and the answer is logged as an explanation. Needs `--model` |
 | `--model <NAME>` | The model to ask |
 | `--api-key-file <PATH>` | A file whose content (trimmed) is the API key, sent as `Authorization: Bearer`. Without it, the environment variable `KAUSA_API_KEY`; without both, no key. Never an argument |
@@ -41,6 +45,21 @@ Without `--endpoint` or `--dry-run`, kausa only logs incidents. The Events are w
 Pod's name with the downward API, as the Helm chart does), or `kausa`. `--model`, `--api-key-file`,
 `--allow-http` and `--no-json-schema` alone are usage errors.
 
+The usage errors of `--namespace`, checked in argument order before kausa connects (each name
+first as a name, then against the earlier ones; the count last):
+
+| Case | Message after `error: ` |
+|---|---|
+| No value, or an empty one | `--namespace needs a value` |
+| Not a namespace name (a DNS-1123 label: 1 to 63 lowercase letters, digits and `-`, starting and ending with a letter or digit) | `--namespace takes a namespace name (lowercase letters, digits and '-', starting and ending with a letter or digit, at most 63 characters), not '<value>'` |
+| A name given twice | `--namespace '<name>' is given twice` |
+| More than 32 | `--namespace is given <n> times; kausa watches at most 32 namespaces (watch the whole cluster instead)` |
+
+kausa does not check that a listed namespace exists: that would need `get` on `namespaces`, a
+cluster-wide permission. With broad credentials, a missing namespace is watched as an empty one
+(seen in kind on 2026-10-28; see [Install kausa with Helm](../how-to/install-with-helm.md) for
+what the chart does instead); the `started` line shows the list.
+
 `kausa run` connects with the in-cluster service account when it runs in a Pod (when
 `KUBERNETES_SERVICE_HOST` is set), and otherwise with the current context of the kubeconfig
 (`KUBECONFIG` or `~/.kube/config`). It has no flag to pick a context: run it with a kubeconfig
@@ -53,7 +72,7 @@ environment cannot make it impersonate anyone or talk to another server.
 | Code | Meaning |
 |---|---|
 | `0` | `--help` or `--version`, or a clean stop after `SIGTERM` or Ctrl-C |
-| `1` | kausa cannot start (no client configuration, the API server is unreachable, it cannot listen on `--metrics-address`) or a watch ended |
+| `1` | kausa cannot start (no client configuration, the API server is unreachable, it cannot listen on `--metrics-address`) or a watch ended: `the pod watch ended` or `the event watch ended` for the whole cluster, `the pod watch of namespace <name> ended` or `the event watch of namespace <name> ended` with `--namespace`, in the `stopped on an error` line. Watch errors do not end a watch: they are logged and retried |
 | `2` | Usage error (unknown argument, invalid flag value such as a `--metrics-address` that is not an address and port, an `http://` endpoint without `--allow-http`, an unreadable API key file), or stdout cannot be written (also while running: `kausa run` stops when it cannot write its log, and says so on stderr) |
 
 ## Log lines
@@ -65,9 +84,9 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 
 | `msg` | Level | Other fields |
 |---|---|---|
-| `started` | info | `version`, `server` (the API server's version), `settle_seconds` |
+| `started` | info | `version`, `server` (the API server's version), `settle_seconds`, `namespaces` (the watched namespaces, sorted, or `null` for the whole cluster) |
 | `incident` | info | See below |
-| `pod watch error`, `event watch error` | warn | `error`; the watch retries with backoff |
+| `pod watch error`, `event watch error` | warn | `namespace` (the namespace of the failing watch, or `null` for the cluster-wide one), `error` (kube-rs's text); the watch retries with backoff, from 0.8 up to 30 seconds. A refusal (`403`) drops the records that watch brought in, until it lists again |
 | `owner lookup failed` | warn | `namespace`, `pod` or `job`, `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's next update), the incident names the ReplicaSet or Job instead |
 | `stopped` | info | |
 | `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
@@ -93,7 +112,17 @@ An `incident` line, with invented values:
            "reason":"CrashLoopBackOff"}}
 ```
 
-(Wrapped here for reading; kausa writes it on one line.)
+A `started` line with `--namespace shop --namespace payments`, and a watch error of one of those
+namespaces, with invented values:
+
+```json
+{"ts":"2026-10-28T12:00:00Z","level":"info","msg":"started","namespaces":["payments","shop"],
+ "server":"v1.36.4","settle_seconds":60,"version":"0.1.0"}
+{"ts":"2026-10-28T12:00:01Z","level":"warn","msg":"pod watch error","error":"<kube-rs's text>",
+ "namespace":"payments"}
+```
+
+(Wrapped here for reading; kausa writes each line on one line.)
 
 - `detection`, `detection_name`: the rule, from [Detection and redaction rules](rules.md).
 - `owner`: the top-level owner the Pods were correlated to.
@@ -112,7 +141,10 @@ kausa's log sees them.
 
 With `--metrics-address`, `GET /metrics` returns these counters in the Prometheus text format;
 each is `0` until something counts. `GET /healthz` answers `200` while kausa runs, and `GET
-/readyz` answers `200` once both watches have listed, `503` before. Any other path answers `404`,
+/readyz` answers `200` with `ready` once every watch has listed at least once (the two of the whole
+cluster, or two per namespace with `--namespace`: 2 × N), and `503` with `starting` before. It
+never goes back to `503`; a watch refused before its first list keeps kausa not ready. No path,
+label or body names a namespace. Any other path answers `404`,
 and any other method `405`. The counters live in memory and start over when kausa restarts.
 
 | Counter | Labels | Counts |
@@ -128,5 +160,5 @@ and any other method `405`. The counters live in memory and start over when kaus
 | `kausa_redactions_total` | `rule` | Values replaced by redaction |
 | `kausa_events_written_total` | `reason` (`Explained`, `ExplanationSkipped`) | Events created or updated |
 | `kausa_event_write_errors_total` | | Events that could not be written |
-| `kausa_watch_errors_total` | `watch` (`pods`, `events`) | Errors of the two watches, which retry with backoff; a steady rise with no incidents means kausa is not seeing the cluster |
+| `kausa_watch_errors_total` | `watch` (`pods`, `events`) | Errors of the Pod watches and of the event watches (every namespace's together; the namespace is in the log line), which retry with backoff; a steady rise with no incidents means kausa is not seeing the cluster |
 

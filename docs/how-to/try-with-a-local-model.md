@@ -58,6 +58,13 @@ with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
    `|^/apis/events\.k8s\.io/v1/namespaces/<namespace>/events(/[^/]+)?$` to `--accept-paths`: the
    other accepted paths are kausa's reads, and kausa sends no writes to them.
 
+   To watch only some namespaces (step 3's `--namespace`), let through the namespaced paths of the
+   two watches instead of the cluster-wide ones: replace `^/api/v1/pods$` with
+   `^/api/v1/namespaces/<namespace>/pods$` and `^/apis/events\.k8s\.io/v1/events$` with
+   `^/apis/events\.k8s\.io/v1/namespaces/<namespace>/events$`, one pair per namespace (or
+   `(shop|payments)` in place of `<namespace>`). The other paths are already per namespace, and
+   kausa only follows them in the namespaces it watches.
+
    Without the proxy, kausa uses the current context of your kubeconfig: check
    `kubectl config current-context` first.
 
@@ -69,6 +76,9 @@ with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
 
    Each `request` line holds the exact body kausa would send: placeholders instead of names,
    `<redacted:…>` markers instead of addresses and secrets, and the counts per redaction rule.
+
+   To look at some namespaces only, add `--namespace <name>` once per namespace, for example
+   `./target/release/kausa run --dry-run --namespace shop`; the `started` line lists them.
 
 4. **Ask the local model:**
 
