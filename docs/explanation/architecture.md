@@ -58,9 +58,9 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 - **Detection** is a fixed set of rules over the Pod records and events, listed in [Detection and
   redaction rules](../reference/rules.md): crash loops, image pull failures, out-of-memory kills,
-  container creation errors, scheduling failures, probe failures, volume failures, failed Jobs
-  and evicted Pods. A container matches at most one detection, the most specific one (`D003` before `D001`), before
-  grouping.
+  container creation errors, scheduling failures, probe failures, volume failures, failed Jobs,
+  evicted Pods and Pod sandboxes that cannot be created. A container matches at most one
+  detection, the most specific one (`D003` before `D001`), before grouping.
 - **Settle window.** A failure has to persist for a while (60 seconds by default) before it
   becomes an incident. Every five seconds kausa turns its records into signals: states (a failing
   container, a Pod that cannot be scheduled, a Pod evicted in the last 10 minutes) and recent Warning events. A state settles when it

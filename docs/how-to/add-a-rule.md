@@ -5,7 +5,7 @@ an existing one. What a rule needs to be accepted (an id, evidence, fixtures, ex
 in [Contributing to kausa](../../CONTRIBUTING.md#propose-a-rule); the rules themselves are in
 [Detection and redaction rules](../reference/rules.md).
 
-Status as of 2026-10-28: nine detection rules (`D001` to `D009`) and thirteen redaction rules
+Status as of 2026-10-28: ten detection rules (`D001` to `D010`) and thirteen redaction rules
 (`R001` to `R013`); the paths below are the ones in the code today.
 
 ## Before you start

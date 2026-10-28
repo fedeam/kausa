@@ -46,6 +46,7 @@ it was pending, so replicas whose crash loops are out of step all count.
 | `D007` | Volume cannot be attached or mounted | Warning event `FailedMount` or `FailedAttachVolume` | No |
 | `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of one failed Pod of the Job (the first by name) |
 | `D009` | Pod evicted | The Pod in phase `Failed` with `status.reason` `Evicted` (its containers' `ephemeral-storage` limits, an `emptyDir` `sizeLimit`, or node pressure; the status message says which), failed in the last 10 minutes, unless the message starts with `Pod was rejected:` | No |
+| `D010` | Pod sandbox cannot be created | Warning event `FailedCreatePodSandBox` about a Pod | No |
 
 `D005` reads the Pod's condition rather than the scheduler's `FailedScheduling` events, which may
 stop being updated for a Pod that keeps failing (hypothesis about client-go's `events.k8s.io`
@@ -86,6 +87,19 @@ consequence of the node's state, not of the workload, and no signal. `D009` read
 evicted container's log is gone, and node pressure is not the application's fault. A node-pressure
 eviction can hit many workloads at once, one incident each, which the call budget bounds. All of
 this was seen on kind (Kubernetes 1.37) on 2026-10-28.
+
+`D010` covers a Pod whose sandbox the container runtime cannot create: a `RuntimeClass` whose
+handler the nodes do not have, or (hypothesis, not reproduced) a network plugin that cannot set up
+the Pod's network. The Pod waits in `ContainerCreating`, which matches no state. The kubelet
+retries about every 12 seconds and writes each failure as its own event (count 1, a new sandbox id
+in each message), until its event aggregation folds them into one event with the prefix `(combined
+from similar events): ` that it keeps updating; that event settles like `D006` and `D007`, grouped
+by the Pod's owner, so the first incident comes about three minutes after the Pod was created.
+`D010` reads no logs: no container ran. The note names the runtime handler, and the 64-character
+sandbox id in it is redacted (`R012`). Transient sandbox failures while a node starts should be
+absorbed by the settle window (hypothesis, not reproduced), and a network plugin broken on a whole
+node gives one incident per workload on it, which the call budget bounds. Seen on kind (Kubernetes
+1.37) on 2026-10-28.
 
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
 that stays the same for the same failure: the example's message with the names of the incident's
