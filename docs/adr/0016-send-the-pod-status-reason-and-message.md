@@ -1,6 +1,6 @@
 # 0016. Send each Pod's status reason and message to the model, redacted and bounded
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-28
 - Builds on: [0008. Send only allowlisted, redacted data to one OpenAI-compatible
   endpoint](0008-data-leaving-the-cluster.md)
