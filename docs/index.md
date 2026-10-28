@@ -13,7 +13,8 @@ workload, redacts their context, explains them with an OpenAI-compatible model w
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
 failing workload. The image and the Helm chart exist, the kind test passes, and the first
 release, [v0.1.0](https://github.com/fedeam/kausa/releases/tag/v0.1.0), came out on 2026-10-28
-([2026-10-28 — First release](journal/2026-10-28-first-release.md)). The
+([2026-10-28 — First release](journal/2026-10-28-first-release.md)), followed the same day by
+[v0.2.0](https://github.com/fedeam/kausa/releases/tag/v0.2.0). The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -92,13 +93,13 @@ checks](how-to/develop.md).
   chart, built in CI and not published yet](adr/0010-packaging.md); [0011. Scan the code with
   CodeQL's default setup](adr/0011-code-scanning-with-codeql.md); [0012. Release from a tag: a
   signed image on GHCR and the chart on the GitHub release](adr/0012-releases.md). Accepted for
-  v0.2: [0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace,
+  v0.3: [0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace,
   and nothing cluster-wide](adr/0013-namespaced-install-mode.md), [0014. Keep each incident's full
   explanations in a namespaced Explanation resource, off by
   default](adr/0014-explanation-history.md) and [0015. Post each new explanation to one optional
   webhook, as JSON, Slack or Telegram](adr/0015-notifications.md).
   [0016. Send each Pod's status reason and message to the model, redacted and
-  bounded](adr/0016-send-the-pod-status-reason-and-message.md) comes with the v0.2 detection rules.
+  bounded](adr/0016-send-the-pod-status-reason-and-message.md) came with v0.2.0's detection rules.
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
