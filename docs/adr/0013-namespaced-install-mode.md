@@ -1,6 +1,6 @@
 # 0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace, and nothing cluster-wide
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-28
 - Builds on: [0009. Run with read-only permissions that never include
   Secrets](0009-least-privilege-rbac.md), which planned this mode without deciding it, and [0001.
