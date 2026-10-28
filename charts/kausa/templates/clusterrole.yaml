@@ -8,28 +8,7 @@ metadata:
   labels:
     {{- include "kausa.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
-  {{- if and .Values.logs (include "kausa.explains" .) }}
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get"]
-  {{- end }}
-  - apiGroups: ["events.k8s.io"]
-    resources: ["events"]
-    verbs: ["list", "watch"]
-  {{- if include "kausa.writesEvents" . }}
-  - apiGroups: ["events.k8s.io"]
-    resources: ["events"]
-    verbs: ["create", "patch"]
-  {{- end }}
-  - apiGroups: ["apps"]
-    resources: ["replicasets"]
-    verbs: ["get"]
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["get"]
+  {{- include "kausa.rules" . | nindent 2 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
