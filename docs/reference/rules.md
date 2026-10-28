@@ -115,7 +115,7 @@ it appears in kausa's log and keys the deduplication cache and the Event's name.
 Implemented in `src/redact.rs` (second implementation weekend). `R001` works on structure: only
 the fields of [Data sent to the provider](data-sent-to-the-provider.md) are ever serialized. The
 others work on every name and free text that goes into a request (event messages, the waiting,
-scheduling and Pod status messages, log lines). First, text from the cluster that already looks like one of
+scheduling and Pod status messages, the Pod status reason, log lines). First, text from the cluster that already looks like one of
 kausa's placeholders (`pod-1`, `deployment-2`) has its hyphen turned into an underscore, unless it
 is a real name kausa registered, so that the answer cannot map it to a real name. Then the rules
 run in this order: the secrets first (`R009`, `R007`, `R008`, `R006`, `R010`, `R011`), so that a

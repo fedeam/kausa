@@ -129,7 +129,7 @@ fn pod_context(pod: &PodRecord, r: &mut Redactor) -> Value {
         "name": r.name(NameKind::Pod, &pod.name),
         "phase": pod.phase,
         "unschedulable": pod.unschedulable.as_deref().map(|m| r.text(m)),
-        "reason": pod.reason,
+        "reason": pod.reason.as_deref().map(|m| r.text(m)),
         "message": pod.message.as_deref().map(|m| r.text(m)),
         "containers": containers,
     })
@@ -335,6 +335,26 @@ mod tests {
             for leaked in ["shop", "api-7d9c8b6f4d", "filler", "worker-7"] {
                 assert!(!sent.contains(leaked), "{leaked} in {sent}");
             }
+        }
+    }
+
+    #[test]
+    fn the_pod_status_reason_is_redacted_like_the_message() {
+        // Kubernetes sets one-word reasons such as `Evicted`, but any writer of pods/status can
+        // set any text there.
+        let mut g = gathered();
+        g.log_tail = None;
+        g.pods[0].reason = Some("Evicted".into());
+        let (context, _) = build(&g);
+        assert_eq!(context["pods"][0]["reason"], "Evicted");
+
+        g.pods[0].reason =
+            Some("Drained api-7d9c8b6f4d-2xkqp from 192.0.2.7 password=hunter2-example".into());
+        let (context, _) = build(&g);
+        let reason = context["pods"][0]["reason"].as_str().expect("a reason");
+        assert!(reason.starts_with("Drained "), "{reason}");
+        for leaked in ["api-7d9c8b6f4d", "192.0.2.7", "hunter2"] {
+            assert!(!reason.contains(leaked), "{leaked} in {reason}");
         }
     }
 }
