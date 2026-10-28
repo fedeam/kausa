@@ -5,7 +5,9 @@ contains.
 
 Status as of 2026-10-28: **implemented** (second implementation weekend, `src/context.rs`,
 `src/redact.rs`, `src/prompt.rs`). Why it works this way: [0008. Send only allowlisted, redacted
-data to one OpenAI-compatible endpoint](../adr/0008-data-leaving-the-cluster.md). Run kausa with
+data to one OpenAI-compatible endpoint](../adr/0008-data-leaving-the-cluster.md) and, for the
+Pods' status reason and message, [0016. Send each Pod's status reason and message to the model,
+redacted and bounded](../adr/0016-send-the-pod-status-reason-and-message.md). Run kausa with
 `--dry-run` to see the requests it would send ([Try kausa against a cluster with a local
 model](../how-to/try-with-a-local-model.md)).
 

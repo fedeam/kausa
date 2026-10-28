@@ -86,7 +86,10 @@ on a node under pressure (`Pod was rejected: The node had condition: [DiskPressu
 consequence of the node's state, not of the workload, and no signal. `D009` reads no logs: the
 evicted container's log is gone, and node pressure is not the application's fault. A node-pressure
 eviction can hit many workloads at once, one incident each, which the call budget bounds. All of
-this was seen on kind (Kubernetes 1.37) on 2026-10-28.
+this was seen on kind (Kubernetes 1.37) on 2026-10-28. The request carries each Pod's status reason
+and message, redacted, because only the message tells the three causes apart ([0016. Send each
+Pod's status reason and message to the model, redacted and
+bounded](../adr/0016-send-the-pod-status-reason-and-message.md)).
 
 `D010` covers a Pod whose sandbox the container runtime cannot create: a `RuntimeClass` whose
 handler the nodes do not have, or (hypothesis, not reproduced) a network plugin that cannot set up

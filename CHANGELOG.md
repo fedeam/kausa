@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `D009`, pod evicted: a Pod the kubelet evicted in the last 10 minutes (its `ephemeral-storage`
   limits, an `emptyDir` `sizeLimit`, or node pressure) is an incident of its workload, without
   reading logs; the kubelet refusing a new Pod on a node under pressure is not. The request to the
-  model now carries each Pod's `status.reason` and `status.message`, both redacted.
+  model now carries each Pod's `status.reason` and `status.message`, both redacted ([0016. Send
+  each Pod's status reason and message to the model, redacted and
+  bounded](docs/adr/0016-send-the-pod-status-reason-and-message.md)).
 - `D010`, pod sandbox cannot be created: the kubelet's Warning event `FailedCreatePodSandBox` about
   a Pod (a `RuntimeClass` handler the nodes do not have, for example), settled like `D006` and
   `D007` and grouped by the Pod's owner, without reading logs. Such a Pod waits in
