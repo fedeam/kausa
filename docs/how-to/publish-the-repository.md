@@ -343,8 +343,8 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
         requests are neither.
       - **SAST:** 0 expected. Scorecard recognises CodeQL and SonarCloud only; clippy does not
         count. GitHub's CodeQL documentation lists Rust among its languages (checked on
-        2026-10-23). Decide here between CodeQL code scanning and accepting 0, and record the
-        decision in an ADR.
+        2026-10-23). Decided on 2026-10-27: CodeQL's default setup ([0011. Scan the code with
+        CodeQL's default setup](../adr/0011-code-scanning-with-codeql.md)).
       - **Dangerous-Workflow:** a gate. No `pull_request_target` or `workflow_run` trigger, and no
         `${{ github.event.* }}` expression inside a `run:` script.
       - **Token-Permissions:** a gate. Read-only permissions at the top of every workflow,

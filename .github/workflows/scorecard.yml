@@ -1,0 +1,50 @@
+name: Scorecard
+
+# OpenSSF Scorecard (https://github.com/ossf/scorecard-action): checks the repository's security
+# practices and publishes the result, which feeds the badge in README.md
+# (docs/how-to/publish-the-repository.md, step 11). Publishing works only on a public repository.
+# The action's README lists push and schedule as the supported triggers. Actions are pinned by
+# full commit SHA, as the repository's Actions policy requires.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 6 * * 2'
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Upload the results to code scanning.
+      security-events: write
+      # Publish the results (badge and API): the OIDC token proves which repository they are for.
+      id-token: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Keep the SARIF file
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: results.sarif
