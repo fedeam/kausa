@@ -128,7 +128,8 @@ after each sync, is linux/arm64.
   a value built to match the format, never one that was ever issued).
 - **No internal hostnames, private IP addresses, the maintainer's usernames on their own systems,
   the names of their clusters or personal data** in any file: the repository will be public. The
-  only maintainer identity allowed is "FedeAM" and the GitHub handle `fedeam`.
+  only maintainer identity allowed is "FedeAM", the GitHub handle `fedeam`, and the public site
+  `fedeam.com` (with its addresses meant to be public, such as `conduct@fedeam.com`).
 - **Pin by digest or SHA:** container images by `@sha256:` digest, Actions by full commit SHA,
   crates through `Cargo.lock` and `--locked`. Take digests and SHAs from the registry or the forge
   API and verify them; never type them from memory.
