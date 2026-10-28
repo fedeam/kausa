@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Each release also attaches `kausa-X.Y.Z.intoto.jsonl`, the SLSA build provenance of the chart and
   `SHA256SUMS`, which `gh attestation verify --bundle` checks.
 
+### Security
+
+- Warning events whose `regarding` object is in a different namespace from the event itself, or
+  that have no namespace, are ignored, so Events created in one namespace can no longer make kausa
+  group incidents, look up owners, read logs or write its Event in another.
+
 ## [0.1.0] - 2026-10-28
 
 The first release: detection, grouping, redaction, explanations, cost controls, Events, the image
