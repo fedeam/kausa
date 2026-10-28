@@ -277,8 +277,24 @@ pub struct EventRecord {
 
 impl EventRecord {
     /// Reduces an event to its record. `None` when it lacks a UID, a reason or a namespaced
-    /// `regarding` object.
+    /// `regarding` object, or when the event's own namespace is missing or differs from the
+    /// namespace of its `regarding` object.
+    ///
+    /// The `events.k8s.io/v1` API accepts an Event whose `regarding` object is in another
+    /// namespace. kausa keys incidents, owner lookups, log reads and its own Event on
+    /// `regarding.namespace`, so such an Event would let whoever may create Events in one namespace
+    /// make kausa act on another. Events about cluster-scoped objects (a Node) have no
+    /// `regarding.namespace` and are skipped too; an empty one matches no event namespace.
     pub fn from_event(event: &Event) -> Option<Self> {
+        let namespace = event
+            .metadata
+            .namespace
+            .as_deref()
+            .filter(|namespace| !namespace.is_empty())?;
+        let regarding = Regarding::from_object_reference(event.regarding.as_ref()?)?;
+        if regarding.namespace != namespace {
+            return None;
+        }
         let last_seen = event
             .series
             .as_ref()
@@ -302,7 +318,7 @@ impl EventRecord {
             uid: event.metadata.uid.clone()?,
             reason: event.reason.clone()?,
             note: event.note.as_deref().map(bounded),
-            regarding: Regarding::from_object_reference(event.regarding.as_ref()?)?,
+            regarding,
             reporting_controller: event.reporting_controller.clone(),
             first_seen,
             last_seen,
@@ -558,9 +574,8 @@ mod tests {
         assert_eq!(PodRecord::from_pod(&pod), None);
     }
 
-    #[test]
-    fn a_core_event_takes_its_deprecated_timestamp_and_count() {
-        let event: Event = serde_json::from_value(json!({
+    fn backoff_event() -> Event {
+        serde_json::from_value(json!({
             "apiVersion": "events.k8s.io/v1",
             "kind": "Event",
             "metadata": {"name": "api.1", "namespace": "shop",
@@ -577,7 +592,50 @@ mod tests {
             "deprecatedLastTimestamp": "2026-10-26T10:05:00Z",
             "deprecatedCount": 7
         }))
-        .expect("the fixture is a valid Event");
+        .expect("the fixture is a valid Event")
+    }
+
+    #[test]
+    fn an_event_in_the_namespace_of_its_object_is_kept() {
+        let record = EventRecord::from_event(&backoff_event()).expect("a complete Event");
+        assert_eq!(record.regarding.namespace, "shop");
+    }
+
+    #[test]
+    fn an_event_about_an_object_in_another_namespace_is_skipped() {
+        let mut event = backoff_event();
+        event.metadata.namespace = Some("tenant".into());
+        assert_eq!(EventRecord::from_event(&event), None);
+    }
+
+    #[test]
+    fn an_event_without_a_namespace_is_skipped() {
+        let mut event = backoff_event();
+        event.metadata.namespace = None;
+        assert_eq!(EventRecord::from_event(&event), None);
+        event.metadata.namespace = Some(String::new());
+        assert_eq!(EventRecord::from_event(&event), None);
+    }
+
+    #[test]
+    fn an_event_about_a_cluster_scoped_object_is_skipped() {
+        let mut event = backoff_event();
+        event.metadata.namespace = Some("default".into());
+        let regarding = event.regarding.as_mut().expect("a regarding object");
+        regarding.kind = Some("Node".into());
+        regarding.namespace = None;
+        assert_eq!(EventRecord::from_event(&event), None);
+        event
+            .regarding
+            .as_mut()
+            .expect("a regarding object")
+            .namespace = Some(String::new());
+        assert_eq!(EventRecord::from_event(&event), None);
+    }
+
+    #[test]
+    fn a_core_event_takes_its_deprecated_timestamp_and_count() {
+        let event = backoff_event();
         let record = EventRecord::from_event(&event).expect("a complete Event");
         assert_eq!(record.reason, "BackOff");
         assert_eq!(record.regarding.kind, "Pod");
