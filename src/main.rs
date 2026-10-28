@@ -359,3 +359,18 @@ fn write_stdout(text: &str) -> ExitCode {
         }
     }
 }
+
+// The cap of 32 namespaces lives in `MAX_NAMESPACES` (docs/adr/0013-namespaced-install-mode.md);
+// the help line spells it out, so the two must change together.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_help_line_names_the_namespace_cap() {
+        assert!(
+            HELP.contains(&format!("repeat for more (up to {MAX_NAMESPACES})\n")),
+            "{HELP}"
+        );
+    }
+}

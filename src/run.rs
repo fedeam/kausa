@@ -596,3 +596,445 @@ impl OwnerLookup for KubeLookup {
         answer
     }
 }
+
+// Acceptance tests for the namespaced mode (docs/adr/0013-namespaced-install-mode.md), written
+// before the code. They use this API, which run.rs does not have yet:
+//
+// - `type WatchKey = Option<String>`: `None` is the cluster-wide watch, `Some(n)` the watch of
+//   namespace `n`;
+// - `enum Kind { Pods, Events }`, `Copy` and `Debug`;
+// - `State::on_pod(&mut self, watch: &WatchKey, event, lookup)` and
+//   `State::on_event(&mut self, watch: &WatchKey, event, lookup)`;
+// - `State::on_watch_error(&mut self, kind: Kind, watch: &WatchKey, error: &watcher::Error)`,
+//   which drops that kind's records inside the watch (and its relist) when `forbidden(error)`;
+// - `fn forbidden(error: &watcher::Error) -> bool`;
+// - `Readiness::new(namespaces: &[String])` and
+//   `Readiness::listed(&mut self, kind: Kind, watch: &WatchKey) -> bool`, true once every watch
+//   (2, or 2 x N) has listed;
+// - `fn ended(kind: Kind, watch: &WatchKey) -> RunError`, the error of a watch that ended.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+    use kube::core::Status;
+
+    /// Every Pod in these tests has no owner, so no lookup is made; a lookup is an error.
+    struct NoLookup;
+
+    impl OwnerLookup for NoLookup {
+        async fn controller_of(
+            &self,
+            _hop: Hop,
+            namespace: &str,
+            name: &str,
+        ) -> Result<Option<OwnerRef>, String> {
+            Err(format!("unexpected owner lookup of {namespace}/{name}"))
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime")
+            .block_on(future)
+    }
+
+    fn ns(name: &str) -> WatchKey {
+        Some(name.to_owned())
+    }
+
+    const CLUSTER: WatchKey = None;
+
+    fn pod_uid(namespace: &str, name: &str) -> String {
+        format!("pod-{namespace}-{name}")
+    }
+
+    fn event_uid(namespace: &str, name: &str) -> String {
+        format!("event-{namespace}-{name}")
+    }
+
+    // Invented values only: no real cluster output (AGENTS.md, Security rules).
+    fn pod(namespace: &str, name: &str) -> Pod {
+        serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": namespace, "uid": pod_uid(namespace, name)},
+            "spec": {"containers": [{"name": "app", "image": "registry.example.com/app:1"}]},
+            "status": {"phase": "Running"}
+        }))
+        .expect("the fixture is a valid Pod")
+    }
+
+    /// A fresh Warning Event that a detection matches (`D004`, a failing probe), so `State` keeps
+    /// it.
+    fn event(namespace: &str, name: &str) -> Event {
+        let mut event: Event = serde_json::from_value(json!({
+            "apiVersion": "events.k8s.io/v1",
+            "kind": "Event",
+            "metadata": {"name": format!("{name}.1"), "namespace": namespace,
+                         "uid": event_uid(namespace, name)},
+            "reason": "Unhealthy",
+            "note": "Readiness probe failed: HTTP probe failed with statuscode: 503",
+            "type": "Warning",
+            "action": "Probe",
+            "reportingController": "kubelet",
+            "reportingInstance": "node-1",
+            "regarding": {"apiVersion": "v1", "kind": "Pod", "namespace": namespace,
+                          "name": name, "uid": pod_uid(namespace, name)}
+        }))
+        .expect("the fixture is a valid Event");
+        event.event_time = Some(MicroTime(Timestamp::now()));
+        event
+    }
+
+    fn on_pod(state: &mut State, watch: &WatchKey, event: watcher::Event<Pod>) {
+        block_on(state.on_pod(watch, event, &NoLookup)).expect("the log is written");
+    }
+
+    fn on_event(state: &mut State, watch: &WatchKey, event: watcher::Event<Event>) {
+        block_on(state.on_event(watch, event, &NoLookup)).expect("the log is written");
+    }
+
+    fn has_pod(state: &State, namespace: &str, name: &str) -> bool {
+        state.pods.contains_key(&pod_uid(namespace, name))
+    }
+
+    fn has_event(state: &State, namespace: &str, name: &str) -> bool {
+        state.events.contains_key(&event_uid(namespace, name))
+    }
+
+    /// A state with Pods `p1` and `p2` and Events about them in namespaces `a` and `b`, each
+    /// applied by the watch of its namespace.
+    fn two_namespaces() -> State {
+        let mut state = State::default();
+        for namespace in ["a", "b"] {
+            for name in ["p1", "p2"] {
+                on_pod(
+                    &mut state,
+                    &ns(namespace),
+                    watcher::Event::Apply(pod(namespace, name)),
+                );
+                on_event(
+                    &mut state,
+                    &ns(namespace),
+                    watcher::Event::Apply(event(namespace, name)),
+                );
+            }
+        }
+        assert_eq!((state.pods.len(), state.events.len()), (4, 4));
+        state
+    }
+
+    /// The same records, applied by the cluster-wide watch.
+    fn whole_cluster() -> State {
+        let mut state = State::default();
+        for namespace in ["a", "b"] {
+            for name in ["p1", "p2"] {
+                on_pod(
+                    &mut state,
+                    &CLUSTER,
+                    watcher::Event::Apply(pod(namespace, name)),
+                );
+                on_event(
+                    &mut state,
+                    &CLUSTER,
+                    watcher::Event::Apply(event(namespace, name)),
+                );
+            }
+        }
+        assert_eq!((state.pods.len(), state.events.len()), (4, 4));
+        state
+    }
+
+    fn api_error(code: u16) -> kube::Error {
+        kube::Error::Api(Box::new(
+            Status::failure("an invented message", "an invented reason").with_code(code),
+        ))
+    }
+
+    fn status(code: u16, reason: &str) -> Box<Status> {
+        Box::new(Status::failure("an invented message", reason).with_code(code))
+    }
+
+    /// The three shapes in which kube reports a refused list or watch.
+    fn forbidden_errors() -> Vec<watcher::Error> {
+        vec![
+            watcher::Error::InitialListFailed(api_error(403)),
+            watcher::Error::WatchStartFailed(api_error(403)),
+            watcher::Error::WatchError(status(403, "Forbidden")),
+        ]
+    }
+
+    #[test]
+    fn a_relist_of_one_namespace_drops_only_its_unseen_records() {
+        let mut state = two_namespaces();
+        on_pod(&mut state, &ns("a"), watcher::Event::Init);
+        on_pod(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(pod("a", "p1")),
+        );
+        on_pod(&mut state, &ns("a"), watcher::Event::InitDone);
+        assert!(has_pod(&state, "a", "p1"));
+        assert!(!has_pod(&state, "a", "p2"), "unseen by a's relist");
+        assert!(has_pod(&state, "b", "p1") && has_pod(&state, "b", "p2"));
+        assert_eq!(state.events.len(), 4, "a Pod relist leaves the Events");
+
+        on_event(&mut state, &ns("b"), watcher::Event::Init);
+        on_event(
+            &mut state,
+            &ns("b"),
+            watcher::Event::InitApply(event("b", "p2")),
+        );
+        on_event(&mut state, &ns("b"), watcher::Event::InitDone);
+        assert!(!has_event(&state, "b", "p1"), "unseen by b's relist");
+        assert!(has_event(&state, "b", "p2"));
+        assert!(has_event(&state, "a", "p1") && has_event(&state, "a", "p2"));
+        assert_eq!(state.pods.len(), 3, "an Event relist leaves the Pods");
+    }
+
+    #[test]
+    fn relists_of_two_namespaces_at_once_do_not_mix() {
+        let mut state = two_namespaces();
+        // Both watches restart; b finishes first, while a's relist is still open.
+        on_pod(&mut state, &ns("a"), watcher::Event::Init);
+        on_pod(&mut state, &ns("b"), watcher::Event::Init);
+        on_pod(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(pod("a", "p1")),
+        );
+        on_pod(
+            &mut state,
+            &ns("b"),
+            watcher::Event::InitApply(pod("b", "p2")),
+        );
+        on_pod(&mut state, &ns("b"), watcher::Event::InitDone);
+        assert!(has_pod(&state, "a", "p1") && has_pod(&state, "a", "p2"));
+        assert!(!has_pod(&state, "b", "p1") && has_pod(&state, "b", "p2"));
+        on_pod(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(pod("a", "p2")),
+        );
+        on_pod(&mut state, &ns("a"), watcher::Event::InitDone);
+        assert!(has_pod(&state, "a", "p1") && has_pod(&state, "a", "p2"));
+        assert_eq!(state.pods.len(), 3);
+
+        on_event(&mut state, &ns("a"), watcher::Event::Init);
+        on_event(&mut state, &ns("b"), watcher::Event::Init);
+        on_event(
+            &mut state,
+            &ns("b"),
+            watcher::Event::InitApply(event("b", "p1")),
+        );
+        on_event(&mut state, &ns("a"), watcher::Event::InitDone);
+        assert!(!has_event(&state, "a", "p1") && !has_event(&state, "a", "p2"));
+        assert!(has_event(&state, "b", "p1") && has_event(&state, "b", "p2"));
+        on_event(&mut state, &ns("b"), watcher::Event::InitDone);
+        assert!(has_event(&state, "b", "p1") && !has_event(&state, "b", "p2"));
+    }
+
+    #[test]
+    fn a_forbidden_pod_watch_drops_only_the_pods_of_its_namespace() {
+        for error in forbidden_errors() {
+            assert!(forbidden(&error), "{error}");
+            let mut state = two_namespaces();
+            state.on_watch_error(Kind::Pods, &ns("a"), &error);
+            assert!(
+                !has_pod(&state, "a", "p1") && !has_pod(&state, "a", "p2"),
+                "{error}"
+            );
+            assert!(
+                has_pod(&state, "b", "p1") && has_pod(&state, "b", "p2"),
+                "{error}"
+            );
+            assert_eq!(state.events.len(), 4, "{error}: the Events stay");
+        }
+    }
+
+    #[test]
+    fn a_forbidden_event_watch_drops_only_the_events_of_its_namespace() {
+        for error in forbidden_errors() {
+            let mut state = two_namespaces();
+            state.on_watch_error(Kind::Events, &ns("b"), &error);
+            assert!(
+                !has_event(&state, "b", "p1") && !has_event(&state, "b", "p2"),
+                "{error}"
+            );
+            assert!(
+                has_event(&state, "a", "p1") && has_event(&state, "a", "p2"),
+                "{error}"
+            );
+            assert_eq!(state.pods.len(), 4, "{error}: the Pods stay");
+        }
+    }
+
+    #[test]
+    fn a_forbidden_watch_during_its_relist_drops_its_records_and_the_relist() {
+        let mut state = two_namespaces();
+        on_pod(&mut state, &ns("a"), watcher::Event::Init);
+        on_pod(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(pod("a", "p1")),
+        );
+        state.on_watch_error(
+            Kind::Pods,
+            &ns("a"),
+            &watcher::Error::WatchStartFailed(api_error(403)),
+        );
+        assert!(!has_pod(&state, "a", "p1") && !has_pod(&state, "a", "p2"));
+        // The watcher restarts with a new relist once access is back.
+        on_pod(&mut state, &ns("a"), watcher::Event::Init);
+        on_pod(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(pod("a", "p2")),
+        );
+        on_pod(&mut state, &ns("a"), watcher::Event::InitDone);
+        assert!(!has_pod(&state, "a", "p1") && has_pod(&state, "a", "p2"));
+        assert!(has_pod(&state, "b", "p1") && has_pod(&state, "b", "p2"));
+    }
+
+    #[test]
+    fn other_watch_errors_keep_the_records() {
+        let errors = vec![
+            watcher::Error::InitialListFailed(api_error(500)),
+            watcher::Error::WatchStartFailed(api_error(401)),
+            watcher::Error::WatchStartFailed(api_error(404)),
+            watcher::Error::WatchError(status(410, "Expired")),
+            watcher::Error::WatchError(status(500, "InternalError")),
+            // The code decides, not the reason (Status::is_forbidden would match this one).
+            watcher::Error::WatchError(status(0, "Forbidden")),
+            watcher::Error::WatchFailed(kube::Error::LinesCodecMaxLineLengthExceeded),
+            watcher::Error::NoResourceVersion,
+        ];
+        for error in errors {
+            assert!(!forbidden(&error), "{error}");
+            for kind in [Kind::Pods, Kind::Events] {
+                for watch in [ns("a"), CLUSTER] {
+                    let mut state = two_namespaces();
+                    state.on_watch_error(kind, &watch, &error);
+                    assert_eq!(
+                        (state.pods.len(), state.events.len()),
+                        (4, 4),
+                        "{error} on {kind:?} {watch:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cluster_wide_watch_relists_as_in_v0_1() {
+        let mut state = whole_cluster();
+        on_pod(&mut state, &CLUSTER, watcher::Event::Init);
+        on_pod(
+            &mut state,
+            &CLUSTER,
+            watcher::Event::InitApply(pod("a", "p1")),
+        );
+        on_pod(&mut state, &CLUSTER, watcher::Event::InitDone);
+        assert!(has_pod(&state, "a", "p1"));
+        assert_eq!(state.pods.len(), 1, "every unseen Pod is dropped");
+        assert_eq!(state.events.len(), 4);
+
+        on_event(&mut state, &CLUSTER, watcher::Event::Init);
+        on_event(
+            &mut state,
+            &CLUSTER,
+            watcher::Event::InitApply(event("b", "p2")),
+        );
+        on_event(&mut state, &CLUSTER, watcher::Event::InitDone);
+        assert!(has_event(&state, "b", "p2"));
+        assert_eq!(state.events.len(), 1, "every unseen Event is dropped");
+        assert_eq!(state.pods.len(), 1);
+    }
+
+    #[test]
+    fn a_forbidden_cluster_wide_watch_drops_every_record_of_its_kind() {
+        for error in forbidden_errors() {
+            let mut state = whole_cluster();
+            state.on_watch_error(Kind::Pods, &CLUSTER, &error);
+            assert_eq!(state.pods.len(), 0, "{error}");
+            assert_eq!(state.events.len(), 4, "{error}");
+            state.on_watch_error(Kind::Events, &CLUSTER, &error);
+            assert_eq!(state.events.len(), 0, "{error}");
+        }
+    }
+
+    #[test]
+    fn deletes_still_remove_a_record_whatever_the_watch() {
+        let mut state = two_namespaces();
+        on_pod(&mut state, &ns("a"), watcher::Event::Delete(pod("a", "p1")));
+        on_event(
+            &mut state,
+            &ns("b"),
+            watcher::Event::Delete(event("b", "p1")),
+        );
+        assert!(!has_pod(&state, "a", "p1") && !has_event(&state, "b", "p1"));
+        assert_eq!((state.pods.len(), state.events.len()), (3, 3));
+    }
+
+    #[test]
+    fn readiness_waits_for_every_watch_of_every_namespace() {
+        let namespaces = vec!["a".to_owned(), "b".to_owned()];
+        let mut readiness = Readiness::new(&namespaces);
+        assert!(!readiness.listed(Kind::Pods, &ns("a")));
+        assert!(
+            !readiness.listed(Kind::Pods, &ns("a")),
+            "a repeated InitDone of one watch counts once"
+        );
+        assert!(!readiness.listed(Kind::Events, &ns("a")));
+        assert!(!readiness.listed(Kind::Pods, &ns("b")));
+        assert!(!readiness.listed(Kind::Pods, &ns("b")));
+        assert!(
+            readiness.listed(Kind::Events, &ns("b")),
+            "ready once all 2 x 2 watches have listed"
+        );
+        // A later 403 drops records but not readiness: it never goes back.
+        let mut state = two_namespaces();
+        state.on_watch_error(
+            Kind::Pods,
+            &ns("a"),
+            &watcher::Error::InitialListFailed(api_error(403)),
+        );
+        assert!(readiness.listed(Kind::Pods, &ns("a")));
+        assert!(readiness.listed(Kind::Events, &ns("b")));
+    }
+
+    #[test]
+    fn readiness_in_cluster_mode_waits_for_both_watches() {
+        let mut readiness = Readiness::new(&[]);
+        assert!(!readiness.listed(Kind::Events, &CLUSTER));
+        assert!(!readiness.listed(Kind::Events, &CLUSTER));
+        assert!(readiness.listed(Kind::Pods, &CLUSTER));
+        assert!(readiness.listed(Kind::Pods, &CLUSTER));
+    }
+
+    #[test]
+    fn readiness_with_one_namespace_needs_its_two_watches() {
+        let mut readiness = Readiness::new(&["shop".to_owned()]);
+        assert!(!readiness.listed(Kind::Pods, &ns("shop")));
+        assert!(readiness.listed(Kind::Events, &ns("shop")));
+    }
+
+    #[test]
+    fn an_ended_watch_is_a_failure_that_names_it() {
+        let failure = |kind, watch: &WatchKey| match ended(kind, watch) {
+            RunError::Failure(message) => message,
+            RunError::Output(error) => panic!("not an output error: {error}"),
+        };
+        assert_eq!(
+            failure(Kind::Pods, &ns("shop")),
+            "the pod watch of namespace shop ended"
+        );
+        assert_eq!(
+            failure(Kind::Events, &ns("shop")),
+            "the event watch of namespace shop ended"
+        );
+        assert_eq!(failure(Kind::Pods, &CLUSTER), "the pod watch ended");
+        assert_eq!(failure(Kind::Events, &CLUSTER), "the event watch ended");
+    }
+}
