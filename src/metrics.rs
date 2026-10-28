@@ -88,7 +88,7 @@ impl Metrics {
         self.add(name, labels, 1);
     }
 
-    /// Marks kausa ready: both watches have listed once.
+    /// Marks kausa ready: every watch has listed once.
     pub fn set_ready(&self) {
         self.ready.set(true);
     }

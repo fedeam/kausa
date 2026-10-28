@@ -1,10 +1,11 @@
 //! `kausa run`: the controller loop. It watches Pods and Warning events, keeps small records,
 //! correlates owners and logs each incident when it settles.
 //!
-//! Status as of 2026-10-26 (code of the third implementation weekend): incidents are written to
+//! Status as of 2026-10-28 (v0.1 and the namespaced mode of v0.2): incidents are written to
 //! kausa's log and, with `--endpoint` or `--dry-run`, explained by the model or their request
 //! logged (`explain.rs`); with `--endpoint` and without `--no-events`, the explanation is also an
-//! Event (`events.rs`). The API calls are the two watches, the metadata reads of ReplicaSets and
+//! Event (`events.rs`). The API calls are the watches (one of Pods and one of Warning events on
+//! the whole cluster, or one of each per watched namespace), the metadata reads of ReplicaSets and
 //! Jobs, `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`, and the Event writes
 //! (docs/reference/permissions.md). `--metrics-address` serves the counters (`metrics.rs`).
 
@@ -201,6 +202,17 @@ async fn client() -> Result<Client, String> {
     Client::try_from(config).map_err(|e| e.to_string())
 }
 
+/// The `namespaces` field of the `started` line: the watched namespaces sorted, so that an
+/// operator can check the list, or `null` for the whole cluster.
+fn watched(namespaces: &[String]) -> serde_json::Value {
+    if namespaces.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let mut sorted = namespaces.to_vec();
+    sorted.sort();
+    json!(sorted)
+}
+
 /// Runs until `SIGTERM` or `SIGINT`.
 pub async fn run(options: Options) -> Result<(), RunError> {
     let client = client()
@@ -216,6 +228,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             "version": env!("CARGO_PKG_VERSION"),
             "server": version.git_version,
             "settle_seconds": options.settle.as_secs(),
+            "namespaces": watched(&options.namespaces),
         }),
     )?;
 
@@ -301,7 +314,10 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "pods")]);
-                    log::warn("pod watch error", json!({"error": e.to_string()}))?;
+                    log::warn(
+                        "pod watch error",
+                        json!({"namespace": watch, "error": e.to_string()}),
+                    )?;
                     state.on_watch_error(Kind::Pods, &watch, &e);
                 }
                 Some((watch, None)) => return Err(ended(Kind::Pods, &watch)),
@@ -317,7 +333,10 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "events")]);
-                    log::warn("event watch error", json!({"error": e.to_string()}))?;
+                    log::warn(
+                        "event watch error",
+                        json!({"namespace": watch, "error": e.to_string()}),
+                    )?;
                     state.on_watch_error(Kind::Events, &watch, &e);
                 }
                 Some((watch, None)) => return Err(ended(Kind::Events, &watch)),
@@ -1177,5 +1196,20 @@ mod tests {
         );
         assert_eq!(failure(Kind::Pods, &CLUSTER), "the pod watch ended");
         assert_eq!(failure(Kind::Events, &CLUSTER), "the event watch ended");
+    }
+
+    #[test]
+    fn started_names_the_watched_namespaces_sorted_or_null() {
+        assert_eq!(watched(&[]), serde_json::Value::Null);
+        let given = ["web".to_owned(), "api".to_owned(), "shop".to_owned()];
+        assert_eq!(watched(&given), json!(["api", "shop", "web"]));
+        assert_eq!(given, ["web", "api", "shop"]);
+    }
+
+    #[test]
+    fn watch_error_lines_name_the_namespace_or_null() {
+        let field = |watch: &WatchKey| json!({"namespace": watch})["namespace"].clone();
+        assert_eq!(field(&ns("shop")), json!("shop"));
+        assert_eq!(field(&CLUSTER), serde_json::Value::Null);
     }
 }
