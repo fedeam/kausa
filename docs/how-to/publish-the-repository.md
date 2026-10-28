@@ -234,9 +234,9 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    the `ci` check of the `CI` workflow (the check run name of the first run, on 2026-10-26, which
    GitHub took from the job id in `.github/workflows/ci.yml`), a linear history, and blocks force
    pushes and deletion. Once the `image` jobs and the `kind` job of `e2e` have passed on GitHub,
-   add their check names too, read from that run (the image jobs are probably
-   `image (ubuntu-24.04)` and `image (ubuntu-24.04-arm)`), so that a change that breaks the image,
-   the chart or the end-to-end test cannot merge:
+   add their check names too, read from that run (they are `image (ubuntu-24.04)` and
+   `image (ubuntu-24.04-arm)`; on 2026-10-28 `ci-arm64` joined them), so that a change that breaks
+   the image, the chart, the end-to-end test or the arm64 build cannot merge:
 
    ```sh
    gh api -X POST repos/fedeam/kausa/rulesets --input - <<'EOF'

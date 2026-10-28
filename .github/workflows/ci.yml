@@ -33,6 +33,22 @@ jobs:
       - name: Build the ci target
         run: docker build --target ci .
 
+  # The same checks on linux/arm64 (ubuntu-24.04-arm, free for public repositories), so that a
+  # pull request that breaks only on arm64 fails here instead of on the private Gitea runner after
+  # the merge. A job of its own rather than a matrix, so that the `ci` check keeps its name.
+  ci-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build the ci target
+        run: docker build --target ci .
+
   # The controller image, built natively on each architecture (no emulation, no cross compiler;
   # docs/adr/0010-packaging.md). Nothing is tagged for a registry or pushed. The arm64 runner
   # (ubuntu-24.04-arm) is free for public repositories.

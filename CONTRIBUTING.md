@@ -117,13 +117,13 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
   the cluster changes. A bug fix adds a test that fails without it. A pull request without tests
   says why (documentation, for example).
 - **CI.** For every pull request, GitHub Actions run the checks of `docker build --target ci .`
-  on linux/amd64, build the image on linux/amd64 and linux/arm64, and run the end-to-end test in
-  kind; the `ci`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and `kind` checks have to pass before merging. For a
-  first contribution, the workflows wait until the maintainer has read the pull request and
+  on linux/amd64 and linux/arm64, build the image on both, and run the end-to-end test in kind;
+  the `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and `kind` checks have
+  to pass before merging. For a first contribution, the workflows wait until the maintainer has read the pull request and
   approved the run. Run the checks yourself first ([Build and test](#build-and-test)).
 - **After the merge** the maintainer copies `main` to a private Git server where the same build
-  runs on linux/arm64. If it fails there, the maintainer opens an issue on GitHub that links your
-  pull request, and the fix is a new pull request.
+  runs again on linux/arm64, as a backstop. If it fails there, the maintainer opens an issue on
+  GitHub that links your pull request, and the fix is a new pull request.
 - **Changelog.** If users will notice your change, add a line under `Unreleased` in the
   [Changelog](CHANGELOG.md).
 - Do not add AI attribution trailers or footers. You are responsible for what you submit.

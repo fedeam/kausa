@@ -117,7 +117,8 @@ release notes (`.github/release.yml`).
    gh pr edit <number> --repo fedeam/kausa --add-label <label>
    ```
 
-4. **Check CI.** The `ci`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and `kind` checks must be green (the ruleset on `main`
+4. **Check CI.** The `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and
+   `kind` checks must be green (the ruleset on `main`
    requires them):
 
    ```sh
