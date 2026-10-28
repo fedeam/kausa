@@ -8,7 +8,8 @@ so we agree on the approach before you spend time on it.
 
 ## Ground rules
 
-- Read [the documentation front page](docs/index.md) and the decisions in
+- Read [the documentation front page](docs/index.md), [ARCHITECTURE.md](ARCHITECTURE.md) (where
+  each part lives and the invariants no change may break) and the decisions in
   [`docs/adr/`](docs/adr/). A new feature needs an accepted ADR before the code.
 - Everything is written in English: code, comments, docs, commits, issues and pull requests.
 - Everyone taking part follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
