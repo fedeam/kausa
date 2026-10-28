@@ -116,5 +116,8 @@ All with Kubernetes v1.36.4 and Helm 3.16.1, on 2026-10-28:
 - **For the maintainer:** if branch protection on GitHub requires a check named `kind`, replace
   it with `kind (cluster)` and `kind (namespaced)`, or no pull request can merge (hypothesis: the
   required check is named after the job). Both matrix jobs still have to pass on GitHub Actions.
+  `CONTRIBUTING.md` and [Maintain the repository](../how-to/maintain.md) now name both checks,
+  and the latter's "Change the required checks" has the commands; until the ruleset is changed,
+  `e2e.yml` says that both checks gating pull requests is pending.
 - The release notes of the next release must say that `rbac.scope` is required, as the
   changelog's `Changed` line does.

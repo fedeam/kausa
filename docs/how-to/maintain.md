@@ -1,7 +1,8 @@
 # Maintain the repository
 
 The maintainer's recipes: triage issues, review and merge pull requests on GitHub, open their own
-pull requests, sync `main` to Gitea, check the arm64 CI run there, bump the tools pinned in the CI
+pull requests, sync `main` to Gitea, check the arm64 CI run there, change the checks the ruleset
+on `main` requires, bump the tools pinned in the CI
 image and, later, cut a release. Why contributions and merges happen on GitHub, and why nobody
 pushes new commits to `main`: [0007. Take contributions and merge pull requests on
 GitHub](../adr/0007-contributions-and-merges-on-github.md).
@@ -117,9 +118,10 @@ release notes (`.github/release.yml`).
    gh pr edit <number> --repo fedeam/kausa --add-label <label>
    ```
 
-4. **Check CI.** The `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and
-   `kind` checks must be green (the ruleset on `main`
-   requires them):
+4. **Check CI.** The `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)`,
+   `kind (cluster)` and `kind (namespaced)` checks must be green (the ruleset on `main` requires
+   them, once [Change the required checks](#change-the-required-checks) has replaced `kind` with
+   the last two):
 
    ```sh
    gh pr checks <number> --repo fedeam/kausa
@@ -224,6 +226,51 @@ git rev-parse origin/main github/main   # two identical SHAs
    limit belongs to the runner's configuration, not to this repository.
 5. Red for a real reason (something that fails only on linux/arm64): `main` already has the
    change, so open an issue on GitHub and fix it in a new pull request.
+
+## Change the required checks
+
+The ruleset `main` on GitHub names each check a pull request needs, by its check run name. A job
+renamed or split into a matrix reports under new names, and a required name that never reports
+blocks every merge. Status as of 2026-10-28: the end-to-end job became the matrix
+`kind (${{ matrix.scope }})` ([0013. Offer a namespaced install
+mode](../adr/0013-namespaced-install-mode.md)), so `kind` must give way to `kind (cluster)` and
+`kind (namespaced)`. Do it on the pull request that brings the change, before merging it:
+
+1. **Read the new names** from that pull request's run, once both jobs have reported:
+
+   ```sh
+   gh pr checks <number> --repo fedeam/kausa
+   ```
+
+2. **Replace the old name** in the ruleset's `required_status_checks`, keeping its other rules.
+   The update sends the whole `rules` list; that GitHub accepts it in the shape it returns it is
+   a hypothesis, which step 3 checks:
+
+   ```sh
+   id=$(gh api repos/fedeam/kausa/rulesets --jq '.[] | select(.name == "main") | .id')
+   gh api "repos/fedeam/kausa/rulesets/$id" --jq '{rules: [.rules[]
+       | if .type == "required_status_checks" then
+           .parameters.required_status_checks |=
+             ([.[] | select(.context != "kind")]
+              + [{context: "kind (cluster)"}, {context: "kind (namespaced)"}])
+         else . end]}' |
+     gh api -X PUT "repos/fedeam/kausa/rulesets/$id" --input - >/dev/null
+   ```
+
+3. **Check the result**, in the same shell (it reuses `id`): the six names, and the other rules as before (compare with step 8 of
+   [Publish the repository on GitHub](publish-the-repository.md)):
+
+   ```sh
+   gh api "repos/fedeam/kausa/rulesets/$id" --jq '.rules[] | select(.type == "required_status_checks")
+       | .parameters.required_status_checks[].context'
+   gh api "repos/fedeam/kausa/rulesets/$id" --jq '[.rules[].type]'
+   ```
+
+   Expected: `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)`,
+   `kind (cluster)` and `kind (namespaced)`; and `deletion`, `non_fast_forward`,
+   `required_linear_history`, `pull_request` and `required_status_checks`. A pull request whose
+   last run came before the change reports `kind` only: the update-branch button, which the
+   ruleset's strict policy asks for anyway, starts a new run.
 
 ## Review Dependabot pull requests
 

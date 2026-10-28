@@ -118,8 +118,8 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
   says why (documentation, for example).
 - **CI.** For every pull request, GitHub Actions run the checks of `docker build --target ci .`
   on linux/amd64 and linux/arm64, build the image on both, and run the end-to-end test in kind;
-  the `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and `kind` checks have
-  to pass before merging. For a first contribution, the workflows wait until the maintainer has read the pull request and
+  the `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)`, `kind (cluster)` and
+  `kind (namespaced)` checks have to pass before merging. For a first contribution, the workflows wait until the maintainer has read the pull request and
   approved the run. Run the checks yourself first ([Build and test](#build-and-test)).
 - **After the merge** the maintainer copies `main` to a private Git server where the same build
   runs again on linux/arm64, as a backstop. If it fails there, the maintainer opens an issue on

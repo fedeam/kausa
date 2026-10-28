@@ -3,7 +3,8 @@ name: e2e
 # The end-to-end test (tests/e2e/run.sh): kausa's image and Helm chart in a kind cluster, against a
 # fake model endpoint, with seeded failures. It runs once per chart rbac.scope
 # (docs/adr/0013-namespaced-install-mode.md), as the checks "kind (cluster)" and
-# "kind (namespaced)"; both gate pull requests, like ci.yml's.
+# "kind (namespaced)". Both are to gate pull requests, like ci.yml's: pending until the ruleset on
+# main requires them in place of "kind" (docs/how-to/maintain.md, "Change the required checks").
 on:
   push:
     branches: [main]
