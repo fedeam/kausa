@@ -69,7 +69,8 @@ to `conduct@fedeam.com`, and it arrived: the conduct address forwards.
 
 ## Pending
 - **Step 9:** the social preview image (none exists yet); the homepage stays empty.
-- **Step 12:** OpenSSF Best Practices registration, at bestpractices.dev, with the maintainer's
-  GitHub login.
+- **Step 12:** registered on 2026-10-28 as project 16024 at bestpractices.dev, with the
+  maintainer's GitHub login; the answers for the "passing" level were being filled in, and its badge
+  is in the README.
 - **Step 13:** the crates.io name, with the first real release.
 - `fedeam/kausa-old`, the private backup of the history before the rewrite, can be deleted.
