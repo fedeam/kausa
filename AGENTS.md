@@ -1,8 +1,9 @@
 # AGENTS.md — kausa
 
 Instructions for coding agents and humans working in this repository; `CLAUDE.md` imports this
-file. Start with [the documentation front page](docs/index.md), then the decisions in
-[`docs/adr/`](docs/adr/).
+file. Start with [the documentation front page](docs/index.md), then
+[ARCHITECTURE.md](ARCHITECTURE.md) (the map of the code, its invariants and the path of each
+kind of change) and the decisions in [`docs/adr/`](docs/adr/).
 
 These rules are the maintainer's repository standard, translated to English and made
 self-contained because this is a public project. They hold for everyone; where a rule speaks of

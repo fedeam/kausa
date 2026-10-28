@@ -196,7 +196,7 @@ kausa with Helm](docs/how-to/install-with-helm.md).
 ## Documentation
 
 - [Documentation front page](docs/index.md)
-- [Architecture](docs/explanation/architecture.md)
+- [Architecture](docs/explanation/architecture.md) and the [map of the code](ARCHITECTURE.md)
 - [Detection and redaction rules](docs/reference/rules.md)
 - [Data sent to the provider](docs/reference/data-sent-to-the-provider.md)
 - [Permissions](docs/reference/permissions.md)
