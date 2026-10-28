@@ -341,10 +341,21 @@ mod tests {
     #[test]
     fn the_record_drops_environment_and_command_lines() {
         let record = PodRecord::from_pod(&crashing_pod()).expect("a complete Pod");
+        // The failure messages name what leaked, not the record: printing a record that holds a
+        // secret would log it (CodeQL's rust/cleartext-logging).
         let debug = format!("{record:?}");
-        assert!(!debug.contains("not-a-real-password"), "{debug}");
-        assert!(!debug.contains("not-a-real-token"), "{debug}");
-        assert!(!debug.contains("/ready"), "{debug}");
+        assert!(
+            !debug.contains("not-a-real-password"),
+            "the password reached the record"
+        );
+        assert!(
+            !debug.contains("not-a-real-token"),
+            "the token reached the record"
+        );
+        assert!(
+            !debug.contains("/ready"),
+            "the probe path reached the record"
+        );
     }
 
     #[test]
