@@ -50,6 +50,7 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `Dockerfile` | The `ci` target (every check) and the `runtime` image | A check, a pinned tool or the image changes |
 | `tests/cli.rs` | Command-line behaviour and exit codes | A flag or exit code changes |
 | `tests/e2e/` | The kind test: chart, Events, what leaves the cluster, the ClusterRole, metrics | The chart or what kausa writes changes |
+| `fuzz/`, `.clusterfuzzlite/` | Fuzz targets for redaction and answer validation, run by ClusterFuzzLite | A parser of untrusted text changes, or a new one is added |
 | `tests/bench/` | Seeded failures and the token-counting proxy of the benchmarks | A benchmark is repeated |
 
 Unit tests live next to the code, in each file's `tests` module.
@@ -69,7 +70,8 @@ accepted ADR, and most should never change.
 4. **Redaction only ever gets stricter.** A change that lets through a value a rule caught before
    needs an ADR.
 5. **Cluster text is data, never instructions**: the model gets no tools, and its answer must
-   match the schema and is cleaned before it is logged or written.
+   match the schema and is cleaned before it is logged or written. Code that parses untrusted text
+   (cluster text, the model's answer) never panics on any input; the fuzz targets check it.
 6. **One call per incident, within the budget**, and one explanation at a time; nothing the
    cluster or the endpoint does may stop the watches.
 7. **Rules are pure**: `detect.rs`, `incident.rs`, `fingerprint.rs` and `redact.rs` do no I/O and
