@@ -37,7 +37,8 @@ produces the same incident, the same fingerprint and the same request bytes.
   Both through kube-rs watchers, with restarts and backoff handled by the library.
 - **No full-object cache.** A reflector that stores every Pod cluster-wide is the usual way to
   grow a controller's memory with the cluster. kausa reduces each watch event to a small record per
-  Pod (namespace, name, owner reference, phase, and per container its waiting reason, last
+  Pod (namespace, name, owner reference, phase, the status reason and message and, for a failed
+  Pod, when it failed, and per container its waiting reason, last
   termination reason, exit code and restart count, and its image, probe types and timings, and
   memory and CPU limits) and drops the rest. Memory still grows with the number of Pods and
   Warning events, by one small record each; with 96 Pods it was about 2 MiB on a Raspberry Pi 4
@@ -57,12 +58,12 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 - **Detection** is a fixed set of rules over the Pod records and events, listed in [Detection and
   redaction rules](../reference/rules.md): crash loops, image pull failures, out-of-memory kills,
-  container creation errors, scheduling failures, probe failures, volume failures and failed Jobs.
-  A container matches at most one detection, the most specific one (`D003` before `D001`), before
-  grouping.
+  container creation errors, scheduling failures, probe failures, volume failures, failed Jobs,
+  evicted Pods and Pod sandboxes that cannot be created. A container matches at most one
+  detection, the most specific one (`D003` before `D001`), before grouping.
 - **Settle window.** A failure has to persist for a while (60 seconds by default) before it
   becomes an incident. Every five seconds kausa turns its records into signals: states (a failing
-  container, a Pod that cannot be scheduled) and recent Warning events. A state settles when it
+  container, a Pod that cannot be scheduled, a Pod evicted in the last 10 minutes) and recent Warning events. A state settles when it
   has been present over the window, and is forgotten only after 330 seconds without it, so a
   crash loop that runs between back-offs stays one incident. An event settles when the same event
   happens again a window after it was first seen; events of different Pods never add up. A failed

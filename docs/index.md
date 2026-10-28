@@ -91,7 +91,14 @@ checks](how-to/develop.md).
   chart](reference/helm-chart.md) values; [0010. Ship a static binary on distroless, with a Helm
   chart, built in CI and not published yet](adr/0010-packaging.md); [0011. Scan the code with
   CodeQL's default setup](adr/0011-code-scanning-with-codeql.md); [0012. Release from a tag: a
-  signed image on GHCR and the chart on the GitHub release](adr/0012-releases.md).
+  signed image on GHCR and the chart on the GitHub release](adr/0012-releases.md). Accepted for
+  v0.2: [0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace,
+  and nothing cluster-wide](adr/0013-namespaced-install-mode.md), [0014. Keep each incident's full
+  explanations in a namespaced Explanation resource, off by
+  default](adr/0014-explanation-history.md) and [0015. Post each new explanation to one optional
+  webhook, as JSON, Slack or Telegram](adr/0015-notifications.md).
+  [0016. Send each Pod's status reason and message to the model, redacted and
+  bounded](adr/0016-send-the-pod-status-reason-and-message.md) comes with the v0.2 detection rules.
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

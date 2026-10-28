@@ -4,9 +4,10 @@ The deterministic rules kausa applies before any language model call: detection 
 is an incident and how failures are grouped, and redaction rules decide what never leaves the
 cluster.
 
-Status as of 2026-10-26: the **detection rules, grouping and fingerprint are implemented** (first
+Status as of 2026-10-28: the **detection rules, grouping and fingerprint are implemented** (first
 implementation weekend, `src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`), and so are the
-redaction rules and the log reading of the "Logs read" column (second weekend). Ids, triggers and
+redaction rules and the log reading of the "Logs read" column (second weekend); `D009` and `D010`
+and the changes to `D001` and `D005` came on 2026-10-28, from failures reproduced in kind. Ids, triggers and
 defaults may change until v0.1 is released; after that an id is never reused. How the rules fit in
 the pipeline: [Architecture](../explanation/architecture.md). Why redaction works this way: [0008.
 Send only allowlisted, redacted data to one OpenAI-compatible
@@ -14,8 +15,8 @@ endpoint](../adr/0008-data-leaving-the-cluster.md).
 
 ## Detection rules
 
-A detection matches a signal: a **state** read from a Pod at every check (a container state, or
-the Pod's scheduling condition), or a Warning **event** about a Pod or a Job. The failure must
+A detection matches a signal: a **state** read from a Pod at every check (a container state, the
+Pod's scheduling condition, or its eviction), or a Warning **event** about a Pod or a Job. The failure must
 persist through the **settle window** (60 seconds by default, `--settle-seconds`) before it becomes
 an incident, so a container that restarts once and recovers is not explained:
 
@@ -37,18 +38,25 @@ it was pending, so replicas whose crash loops are out of step all count.
 
 | Id | Failure | Signal | Logs read |
 |---|---|---|---|
-| `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff`, or terminated with any reason but `Completed` after at least one restart (between restarts the kubelet reports it as terminated for much of each back-off) | Yes: the previous instance while the container runs or waits again, otherwise the terminated one |
+| `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff`, or terminated with any reason but `Completed` after at least one restart (between restarts the kubelet reports it as terminated for much of each back-off), in a Pod that is not in phase `Failed` | Yes: the previous instance while the container runs or waits again, otherwise the terminated one |
 | `D002` | Image cannot be pulled | Container waiting with `ErrImagePull`, `ImagePullBackOff` or `InvalidImageName` | No |
 | `D003` | Out of memory | Container waiting in `CrashLoopBackOff` whose last termination is `OOMKilled`, or terminated with `OOMKilled` and not restarted | Yes, previous container if it restarted, otherwise the terminated one |
 | `D004` | Container cannot be created | Container waiting with `CreateContainerConfigError` or `CreateContainerError` | No |
-| `D005` | Pod cannot be scheduled | The Pod still `Pending`, with its `PodScheduled` condition `False` for reason `Unschedulable` | No |
+| `D005` | Pod cannot be scheduled | The Pod still `Pending`, with its `PodScheduled` condition `False` for reason `Unschedulable`, or `SchedulerError` when a scheduler plugin failed for it (a volume that cannot be bound); never `SchedulingGated` | No |
 | `D006` | Probe failures | Warning event `Unhealthy` for a readiness, liveness or startup probe, happening again a settle window after it was first seen | No |
 | `D007` | Volume cannot be attached or mounted | Warning event `FailedMount` or `FailedAttachVolume` | No |
 | `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of one failed Pod of the Job (the first by name) |
+| `D009` | Pod evicted | The Pod in phase `Failed` with `status.reason` `Evicted` (its containers' `ephemeral-storage` limits, an `emptyDir` `sizeLimit`, or node pressure; the status message says which), failed in the last 10 minutes, unless the message starts with `Pod was rejected:` | No |
+| `D010` | Pod sandbox cannot be created | Warning event `FailedCreatePodSandBox` about a Pod | No |
 
 `D005` reads the Pod's condition rather than the scheduler's `FailedScheduling` events, which may
 stop being updated for a Pod that keeps failing (hypothesis about client-go's `events.k8s.io`
-broadcaster, to verify on a live cluster); the condition holds as long as the failure. `D008` needs no watch on Jobs: the Job controller emits a Warning event on the Job, with the reason
+broadcaster, to verify on a live cluster); the condition holds as long as the failure. A Pod
+whose claim the `VolumeBinding` plugin could not bind in `PreBind` (a `ReadWriteMany` claim on a
+`WaitForFirstConsumer` class that does not support it) stayed `Pending` for more than 25 minutes
+with reason `SchedulerError`, while its `FailedScheduling` event repeated twice in 16 minutes (seen
+on kind, Kubernetes 1.37, on 2026-10-28). A transient `SchedulerError` is absorbed by the settle
+window (hypothesis, not reproduced). `D008` needs no watch on Jobs: the Job controller emits a Warning event on the Job, with the reason
 of its `Failed` condition, when it marks the Job failed (`pkg/controller/job/job_controller.go` in
 Kubernetes, checked on 2026-10-26). A container recovering after one out-of-memory kill, and the
 kubelet's own `BackOff` events (the container state already says it), match nothing. Hypothesis
@@ -62,7 +70,55 @@ reference only through kinds it may `get` (ReplicaSet, Job). When the next owner
 kind, including a custom resource, that owner reference is the top-level owner. It is named in the
 incident key and in `regarding` from the reference alone (apiVersion, kind, name, uid), without
 reading the object. A container matches at most one detection, the most specific one: `D003`
-takes precedence over `D001` when the last termination is `OOMKilled`, before grouping.
+takes precedence over `D001` when the last termination is `OOMKilled`, before grouping. No
+container of a Pod in phase `Failed` is a crash loop: such a Pod runs no container again, and a
+container that had restarted before the kubelet evicted the Pod or ended it at its
+`activeDeadlineSeconds` stays terminated (`Error`, exit code 137) after a restart (seen on kind,
+Kubernetes 1.37, on 2026-10-28).
+
+`D009` reads the Pod's status rather than the kubelet's `Evicted` event, which is written once per
+Pod (count 1) and so would never settle; the ReplicaSet's replacement Pods, evicted again every 15
+to 20 seconds when the workload's own limit is the cause, are one incident. Evicted Pods are not
+deleted, so an eviction is a signal only while its failure time (the later of the `Ready`
+condition's last transition and the containers' finish times) is at most 10 minutes old, like an
+event; a Pod with neither is no signal. Without that bound, every old eviction would become an
+incident again each time kausa starts. The kubelet also writes `Evicted` when it refuses a new Pod
+on a node under pressure (`Pod was rejected: The node had condition: [DiskPressure]`): a
+consequence of the node's state, not of the workload, and no signal. `D009` reads no logs: the
+evicted container's log is gone, and node pressure is not the application's fault. A node-pressure
+eviction can hit many workloads at once, one incident each, which the call budget bounds. All of
+this was seen on kind (Kubernetes 1.37) on 2026-10-28. In the kubelet, the eviction manager sets
+phase `Failed`, reason `Evicted` and the message on the Pod it evicts (`evictPod` in
+`pkg/kubelet/eviction/eviction_manager.go`; the reason and the message formats, among them the
+`emptyDir` one that names the volume, in `pkg/kubelet/eviction/helpers.go`), and a Pod refused at
+admission gets the same reason with its message prefixed `Pod was rejected: ` (`rejectPod` in
+`pkg/kubelet/kubelet.go`); checked in Kubernetes v1.37.0 and on `master` on 2026-10-28. The
+request carries each Pod's status reason and message, redacted, because only the message tells the
+three causes apart ([0016. Send each Pod's status reason and message to the model, redacted and
+bounded](../adr/0016-send-the-pod-status-reason-and-message.md)).
+
+`D010` covers a Pod whose sandbox the container runtime cannot create: a `RuntimeClass` whose
+handler the nodes do not have, or (hypothesis, not reproduced) a network plugin that cannot set up
+the Pod's network. The Pod waits in `ContainerCreating`, which matches no state. The kubelet
+retries about every 12 seconds and writes each failure as its own event (count 1, a new sandbox id
+in each message), until its event aggregation folds them into one event with the prefix `(combined
+from similar events): ` that it keeps updating; that event settles like `D006` and `D007`, grouped
+by the Pod's owner, so the first incident comes about three minutes after the Pod was created.
+The kubelet emits the event, with the note `Failed to create pod sandbox: <error>`, when creating
+the sandbox fails in `SyncPod` (`pkg/kubelet/kuberuntime/kuberuntime_manager.go`; the reason is
+defined in `pkg/kubelet/events/event.go`), and the prefix is the one client-go's event aggregator
+adds (`staging/src/k8s.io/client-go/tools/record/events_cache.go`); checked in Kubernetes v1.37.0
+and on `master` on 2026-10-28.
+`D010` reads no logs: no container ran. The note names the runtime handler, and the 64-character
+sandbox id in it is redacted (`R012`). Transient sandbox failures while a node starts should be
+absorbed by the settle window (hypothesis, not reproduced), and a network plugin broken on a whole
+node gives one incident per workload on it, which the call budget bounds. Seen on kind (Kubernetes
+1.37) on 2026-10-28.
+
+**Which Events count.** A Warning Event counts only when its own `metadata.namespace` is non-empty
+and equal to `regarding.namespace`, compared exactly (case-sensitive, no trimming). Events about
+cluster-scoped objects (a Node, whose `regarding` has no namespace) and Events about an object in
+another namespace are ignored: they match no detection and join no incident.
 
 **Which Events count.** A Warning Event counts only when its own `metadata.namespace` is non-empty
 and equal to `regarding.namespace`, compared exactly (case-sensitive, no trimming). Events about
@@ -70,7 +126,9 @@ cluster-scoped objects (a Node, whose `regarding` has no namespace) and Events a
 another namespace are ignored: they match no detection and join no incident.
 
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
-that stays the same for the same failure: the example's message with the names of the incident's
+that stays the same for the same failure: the example's message without the prefix
+`(combined from similar events): ` of an aggregated event (so that the kubelet's first `D010`
+events and the event that folds them have one fingerprint), with the names of the incident's
 Pods, UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
 and other numbers normalized; for `D002`, whose message alternates between `ErrImagePull` and
 `ImagePullBackOff`, the image reference instead. It is computed before redaction and never sent;
@@ -80,8 +138,8 @@ it appears in kausa's log and keys the deduplication cache and the Event's name.
 
 Implemented in `src/redact.rs` (second implementation weekend). `R001` works on structure: only
 the fields of [Data sent to the provider](data-sent-to-the-provider.md) are ever serialized. The
-others work on every name and free text that goes into a request (event messages, the waiting and
-scheduling messages, log lines). First, text from the cluster that already looks like one of
+others work on every name and free text that goes into a request (event messages, the waiting,
+scheduling and Pod status messages, the Pod status reason, log lines). First, text from the cluster that already looks like one of
 kausa's placeholders (`pod-1`, `deployment-2`) has its hyphen turned into an underscore, unless it
 is a real name kausa registered, so that the answer cannot map it to a real name. Then the rules
 run in this order: the secrets first (`R009`, `R007`, `R008`, `R006`, `R010`, `R011`), so that a

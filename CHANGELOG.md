@@ -11,6 +11,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Each release also attaches `kausa-X.Y.Z.intoto.jsonl`, the SLSA build provenance of the chart and
   `SHA256SUMS`, which `gh attestation verify --bundle` checks.
+- `D009`, pod evicted: a Pod the kubelet evicted in the last 10 minutes (its `ephemeral-storage`
+  limits, an `emptyDir` `sizeLimit`, or node pressure) is an incident of its workload, without
+  reading logs; the kubelet refusing a new Pod on a node under pressure is not. The request to the
+  model now carries each Pod's `status.reason` and `status.message`, both redacted ([0016. Send
+  each Pod's status reason and message to the model, redacted and
+  bounded](docs/adr/0016-send-the-pod-status-reason-and-message.md)).
+- `D010`, pod sandbox cannot be created: the kubelet's Warning event `FailedCreatePodSandBox` about
+  a Pod (a `RuntimeClass` handler the nodes do not have, for example), settled like `D006` and
+  `D007` and grouped by the Pod's owner, without reading logs. Such a Pod waits in
+  `ContainerCreating` and was no incident before.
+
+### Changed
+
+- `D005`, pod cannot be scheduled, also matches a Pending Pod whose `PodScheduled` condition is
+  `False` with reason `SchedulerError` (for example a volume the scheduler cannot bind), which
+  was no incident before; the incident's reason is the condition's own.
+
+### Fixed
+
+- A Pod in phase `Failed` (evicted, or past its `activeDeadlineSeconds`) whose container had
+  restarted at least once is no longer reported as a crash loop (`D001`). Such incidents, which
+  grew with every evicted replacement Pod and never cleared, stop after the update; an
+  out-of-memory kill in a failed Pod is still `D003`.
+
+### Security
+
+- Warning events whose `regarding` object is in a different namespace from the event itself, or
+  that have no namespace, are ignored, so Events created in one namespace can no longer make kausa
+  group incidents, look up owners, read logs or write its Event in another.
 
 ### Security
 

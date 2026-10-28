@@ -53,7 +53,9 @@ tested yet: a hosted provider over HTTPS (the distroless CA bundle with rustls),
 than about a hundred Pods, and long runs ([Architecture](docs/explanation/architecture.md)).
 
 **Who controls kausa's inputs.** Anyone who can create or change a workload in a watched namespace
-controls event messages, log lines, container names, image references and exit codes. In a shared
+controls event messages, log lines, container and volume names, image references and exit codes,
+and through them the Pod status messages the kubelet writes (an eviction names the container or the
+`emptyDir` volume). In a shared
 cluster that includes tenants who are not cluster administrators. The language model endpoint
 controls the answers. kausa treats both as untrusted.
 
