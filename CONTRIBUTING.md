@@ -110,6 +110,11 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
   title before merging.
 - **The description** says why the change is needed: it becomes the body of the commit.
 - **One logical change per pull request.**
+- **Tests come with the change.** New functionality and bug fixes add automated tests in the
+  same pull request: unit tests next to the code they test, a case in `tests/cli.rs` for a new
+  flag or exit code, and a change to `tests/e2e/run.sh` when the chart or what kausa writes to
+  the cluster changes. A bug fix adds a test that fails without it. A pull request without tests
+  says why (documentation, for example).
 - **CI.** For every pull request, GitHub Actions run the checks of `docker build --target ci .`
   on linux/amd64, build the image on linux/amd64 and linux/arm64, and run the end-to-end test in
   kind; the `ci`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and `kind` checks have to pass before merging. For a
