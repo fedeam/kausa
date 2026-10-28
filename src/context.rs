@@ -129,6 +129,8 @@ fn pod_context(pod: &PodRecord, r: &mut Redactor) -> Value {
         "name": r.name(NameKind::Pod, &pod.name),
         "phase": pod.phase,
         "unschedulable": pod.unschedulable.as_deref().map(|m| r.text(m)),
+        "reason": pod.reason.as_deref().map(|m| r.text(m)),
+        "message": pod.message.as_deref().map(|m| r.text(m)),
         "containers": containers,
     })
 }
@@ -184,6 +186,10 @@ mod tests {
                 controller: None,
                 phase: Some("Running".into()),
                 unschedulable: None,
+                unschedulable_reason: None,
+                reason: None,
+                message: None,
+                failed_at: None,
                 node_name: Some("worker-7".into()),
                 service_account: Some("api-runner".into()),
                 containers: vec![ContainerRecord {
@@ -279,5 +285,76 @@ mod tests {
         let tail = context["log_tail"].as_str().expect("a log tail");
         assert!(tail.len() <= MAX_LOG_BYTES);
         assert!(tail.ends_with("last line"));
+    }
+
+    #[test]
+    fn an_eviction_message_reaches_the_model_only_redacted() {
+        // The kubelet's status message is what tells a Pod's own ephemeral-storage limit from
+        // node pressure; it is sent like the other messages, through redaction.
+        let evicted = |message: &str| -> PodRecord {
+            let pod = serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": "api-7d9c8b6f4d-2xkqp", "namespace": "shop",
+                             "uid": "11111111-1111-4111-8111-111111111111"},
+                "spec": {"nodeName": "worker-7",
+                         "containers": [{"name": "filler", "image": "busybox:1.37"}]},
+                "status": {
+                    "phase": "Failed",
+                    "reason": "Evicted",
+                    "message": message,
+                    "containerStatuses": [{
+                        "name": "filler", "image": "busybox:1.37", "imageID": "",
+                        "ready": false, "restartCount": 0,
+                        "state": {"terminated": {"reason": "Error", "exitCode": 137}}
+                    }]
+                }
+            }))
+            .expect("the fixture is a valid Pod");
+            PodRecord::from_pod(&pod).expect("a complete Pod")
+        };
+        for (message, kept) in [
+            (
+                "Pod ephemeral local storage usage exceeds the total limit of containers 50Mi. ",
+                "exceeds the total limit of containers 50Mi",
+            ),
+            (
+                "The node was low on resource: ephemeral-storage. Threshold quantity: 14711Mi, \
+                 available: 14523Mi. Container filler was using 48Ki, request is 0, has larger \
+                 consumption of ephemeral-storage. ",
+                "The node was low on resource: ephemeral-storage",
+            ),
+        ] {
+            let mut g = gathered();
+            g.pods = vec![evicted(message)];
+            g.log_tail = None;
+            let (context, _) = build(&g);
+            let sent = context.to_string();
+            assert!(sent.contains(kept), "{sent}");
+            assert!(sent.contains("\"Evicted\""), "{sent}");
+            for leaked in ["shop", "api-7d9c8b6f4d", "filler", "worker-7"] {
+                assert!(!sent.contains(leaked), "{leaked} in {sent}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_pod_status_reason_is_redacted_like_the_message() {
+        // Kubernetes sets one-word reasons such as `Evicted`, but any writer of pods/status can
+        // set any text there.
+        let mut g = gathered();
+        g.log_tail = None;
+        g.pods[0].reason = Some("Evicted".into());
+        let (context, _) = build(&g);
+        assert_eq!(context["pods"][0]["reason"], "Evicted");
+
+        g.pods[0].reason =
+            Some("Drained api-7d9c8b6f4d-2xkqp from 192.0.2.7 password=hunter2-example".into());
+        let (context, _) = build(&g);
+        let reason = context["pods"][0]["reason"].as_str().expect("a reason");
+        assert!(reason.starts_with("Drained "), "{reason}");
+        for leaked in ["api-7d9c8b6f4d", "192.0.2.7", "hunter2"] {
+            assert!(!reason.contains(leaked), "{leaked} in {reason}");
+        }
     }
 }
