@@ -97,6 +97,8 @@ checks](how-to/develop.md).
   explanations in a namespaced Explanation resource, off by
   default](adr/0014-explanation-history.md) and [0015. Post each new explanation to one optional
   webhook, as JSON, Slack or Telegram](adr/0015-notifications.md).
+  [0016. Send each Pod's status reason and message to the model, redacted and
+  bounded](adr/0016-send-the-pod-status-reason-and-message.md) comes with the v0.2 detection rules.
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

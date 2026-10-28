@@ -4,9 +4,10 @@ The deterministic rules kausa applies before any language model call: detection 
 is an incident and how failures are grouped, and redaction rules decide what never leaves the
 cluster.
 
-Status as of 2026-10-26: the **detection rules, grouping and fingerprint are implemented** (first
+Status as of 2026-10-28: the **detection rules, grouping and fingerprint are implemented** (first
 implementation weekend, `src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`), and so are the
-redaction rules and the log reading of the "Logs read" column (second weekend). Ids, triggers and
+redaction rules and the log reading of the "Logs read" column (second weekend); `D009` and `D010`
+and the changes to `D001` and `D005` came on 2026-10-28, from failures reproduced in kind. Ids, triggers and
 defaults may change until v0.1 is released; after that an id is never reused. How the rules fit in
 the pipeline: [Architecture](../explanation/architecture.md). Why redaction works this way: [0008.
 Send only allowlisted, redacted data to one OpenAI-compatible
