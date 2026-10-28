@@ -55,7 +55,7 @@ pub fn controller_of(owners: Option<&Vec<OwnerReference>>) -> Option<OwnerRef> {
 }
 
 /// What kausa keeps of a Pod.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PodRecord {
     pub namespace: String,
     pub name: String,

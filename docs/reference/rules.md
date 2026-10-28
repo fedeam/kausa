@@ -37,7 +37,7 @@ it was pending, so replicas whose crash loops are out of step all count.
 
 | Id | Failure | Signal | Logs read |
 |---|---|---|---|
-| `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff`, or terminated with any reason but `Completed` after at least one restart (between restarts the kubelet reports it as terminated for much of each back-off) | Yes: the previous instance while the container runs or waits again, otherwise the terminated one |
+| `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff`, or terminated with any reason but `Completed` after at least one restart (between restarts the kubelet reports it as terminated for much of each back-off), in a Pod that is not in phase `Failed` | Yes: the previous instance while the container runs or waits again, otherwise the terminated one |
 | `D002` | Image cannot be pulled | Container waiting with `ErrImagePull`, `ImagePullBackOff` or `InvalidImageName` | No |
 | `D003` | Out of memory | Container waiting in `CrashLoopBackOff` whose last termination is `OOMKilled`, or terminated with `OOMKilled` and not restarted | Yes, previous container if it restarted, otherwise the terminated one |
 | `D004` | Container cannot be created | Container waiting with `CreateContainerConfigError` or `CreateContainerError` | No |
@@ -62,7 +62,11 @@ reference only through kinds it may `get` (ReplicaSet, Job). When the next owner
 kind, including a custom resource, that owner reference is the top-level owner. It is named in the
 incident key and in `regarding` from the reference alone (apiVersion, kind, name, uid), without
 reading the object. A container matches at most one detection, the most specific one: `D003`
-takes precedence over `D001` when the last termination is `OOMKilled`, before grouping.
+takes precedence over `D001` when the last termination is `OOMKilled`, before grouping. No
+container of a Pod in phase `Failed` is a crash loop: such a Pod runs no container again, and a
+container that had restarted before the kubelet evicted the Pod or ended it at its
+`activeDeadlineSeconds` stays terminated (`Error`, exit code 137) after a restart (seen on kind,
+Kubernetes 1.37, on 2026-10-28).
 
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
 that stays the same for the same failure: the example's message with the names of the incident's

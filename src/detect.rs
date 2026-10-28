@@ -115,6 +115,19 @@ pub fn detect_container(container: &ContainerRecord) -> Option<Detection> {
     }
 }
 
+/// The detection that a container of `pod` matches, if any: `detect_container`, except that no
+/// container of a Pod in phase `Failed` is a crash loop. Such a Pod runs none of its containers
+/// again; a container that had restarted before the kubelet evicted the Pod or ended it at its
+/// `activeDeadlineSeconds` is left terminated (`Error`, exit code 137) after a restart, which is
+/// not a crash loop (seen on kind, Kubernetes 1.37, on 2026-10-28). An out-of-memory kill stays
+/// `D003`.
+pub fn detect_pod_container(pod: &PodRecord, container: &ContainerRecord) -> Option<Detection> {
+    match detect_container(container) {
+        Some(Detection::CrashLoop) if pod.phase.as_deref() == Some("Failed") => None,
+        detection => detection,
+    }
+}
+
 /// The detection that a Warning event matches, if any. Events about Pods and Jobs only; scheduling
 /// failures come from the Pod's condition instead (`detect_unschedulable`).
 pub fn detect_event(event: &EventRecord) -> Option<Detection> {
@@ -261,6 +274,42 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(detect_container(&completed), None);
+    }
+
+    #[test]
+    fn no_container_of_a_failed_pod_is_a_crash_loop() {
+        let restarted = ContainerRecord {
+            terminated_reason: Some("Error".into()),
+            terminated_exit_code: Some(137),
+            restart_count: 1,
+            ..Default::default()
+        };
+        let pod = |phase: &str, containers: Vec<ContainerRecord>| PodRecord {
+            phase: Some(phase.into()),
+            containers,
+            ..Default::default()
+        };
+        let failed = pod(
+            "Failed",
+            vec![restarted.clone(), waiting("CrashLoopBackOff")],
+        );
+        for container in &failed.containers {
+            assert_eq!(detect_pod_container(&failed, container), None);
+        }
+        // The same states in a Pod that still runs, and an out-of-memory kill in a failed Pod.
+        let running = pod("Running", vec![restarted.clone()]);
+        assert_eq!(
+            detect_pod_container(&running, &running.containers[0]),
+            Some(Detection::CrashLoop)
+        );
+        let oom = ContainerRecord {
+            terminated_reason: Some("OOMKilled".into()),
+            ..restarted
+        };
+        assert_eq!(
+            detect_pod_container(&failed, &oom),
+            Some(Detection::OutOfMemory)
+        );
     }
 
     #[test]

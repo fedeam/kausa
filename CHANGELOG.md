@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Each release also attaches `kausa-X.Y.Z.intoto.jsonl`, the SLSA build provenance of the chart and
   `SHA256SUMS`, which `gh attestation verify --bundle` checks.
 
+### Fixed
+
+- A Pod in phase `Failed` (evicted, or past its `activeDeadlineSeconds`) whose container had
+  restarted at least once is no longer reported as a crash loop (`D001`). Such incidents, which
+  grew with every evicted replacement Pod and never cleared, stop after the update; an
+  out-of-memory kill in a failed Pod is still `D003`.
+
 ## [0.1.0] - 2026-10-28
 
 The first release: detection, grouping, redaction, explanations, cost controls, Events, the image

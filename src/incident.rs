@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
 
-use crate::detect::{Detection, detect_container, detect_event, detect_unschedulable};
+use crate::detect::{Detection, detect_event, detect_pod_container, detect_unschedulable};
 use crate::fingerprint::{fingerprint, normalize};
 use crate::record::{EventRecord, OwnerRef, PodRecord};
 
@@ -95,7 +95,7 @@ pub fn collect_signals(
             ));
         }
         for container in &record.containers {
-            let Some(detection) = detect_container(container) else {
+            let Some(detection) = detect_pod_container(record, container) else {
                 continue;
             };
             let (reason, exit_code) = if detection == Detection::OutOfMemory {
