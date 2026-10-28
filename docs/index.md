@@ -76,7 +76,8 @@ checks](how-to/develop.md).
   kagent and the others, and the gap that is left; [Tokens per incident compared with
   k8sgpt](research/2026-10-26-tokens-compared-with-k8sgpt.md): the same five failures, the same
   model, calls and tokens counted; [Memory and CPU on a Raspberry Pi
-  4](research/2026-10-26-resource-use-on-a-raspberry-pi.md).
+  4](research/2026-10-26-resource-use-on-a-raspberry-pi.md); [Thousands of
+  Pods](research/2026-10-28-thousands-of-pods.md).
 - [ARCHITECTURE.md](../ARCHITECTURE.md): the map of the code, its invariants and the path of each
   kind of change.
 - [Architecture](explanation/architecture.md): the planned pipeline, the model call, cost
