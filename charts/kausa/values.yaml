@@ -2,8 +2,8 @@
 # docs/reference/helm-chart.md.
 
 image:
-  # No image is published yet: build it with `docker build --target runtime` and push it to a
-  # registry your cluster can pull from (docs/how-to/install-with-helm.md).
+  # The image published with each release, signed with cosign (docs/adr/0012-releases.md); to run
+  # your own build, set the repository and the tag (docs/how-to/install-with-helm.md).
   repository: ghcr.io/fedeam/kausa
   # Defaults to the chart's appVersion.
   tag: ""
