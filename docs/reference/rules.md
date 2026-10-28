@@ -115,6 +115,11 @@ absorbed by the settle window (hypothesis, not reproduced), and a network plugin
 node gives one incident per workload on it, which the call budget bounds. Seen on kind (Kubernetes
 1.37) on 2026-10-28.
 
+**Which Events count.** A Warning Event counts only when its own `metadata.namespace` is non-empty
+and equal to `regarding.namespace`, compared exactly (case-sensitive, no trimming). Events about
+cluster-scoped objects (a Node, whose `regarding` has no namespace) and Events about an object in
+another namespace are ignored: they match no detection and join no incident.
+
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
 that stays the same for the same failure: the example's message without the prefix
 `(combined from similar events): ` of an aggregated event (so that the kubelet's first `D010`

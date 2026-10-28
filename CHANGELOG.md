@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grew with every evicted replacement Pod and never cleared, stop after the update; an
   out-of-memory kill in a failed Pod is still `D003`.
 
+### Security
+
+- Warning events whose `regarding` object is in a different namespace from the event itself, or
+  that have no namespace, are ignored, so Events created in one namespace can no longer make kausa
+  group incidents, look up owners, read logs or write its Event in another.
+
 ## [0.1.0] - 2026-10-28
 
 The first release: detection, grouping, redaction, explanations, cost controls, Events, the image

@@ -100,6 +100,11 @@ kausa must:
   never crashes kausa.
 - **Never explain itself.** Events with kausa's own reporting controller are ignored, so its
   output cannot feed back into its input.
+- **Act only within the namespace an Event is in.** A Warning Event counts only when its
+  `metadata.namespace` is non-empty and equal to the namespace of its `regarding` object. Events
+  about cluster-scoped objects and Events about objects in another namespace are ignored, so
+  creating Events in one namespace does not make kausa group incidents, look up owners, read logs
+  or write its Event in another.
 - **Keep the API key to itself.** The key reaches the container through a Secret that the kubelet
   mounts or injects; kausa sends it only to the configured endpoint, in the `Authorization`
   header, and never logs it or writes it into an Event.
