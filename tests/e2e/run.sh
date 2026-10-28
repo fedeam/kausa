@@ -65,7 +65,7 @@ k label namespace "$NAMESPACE" pod-security.kubernetes.io/enforce=restricted
 helm --kube-context "$CONTEXT" install kausa charts/kausa -n "$NAMESPACE" --wait --timeout 120s \
   --set image.repository=kausa --set image.tag=e2e --set image.pullPolicy=Never \
   --set model.endpoint="http://$gateway:$PORT/v1" --set model.name=fake \
-  --set model.allowHttp=true --set settleSeconds=10
+  --set model.allowHttp=true --set settleSeconds=10 --set rbac.scope=cluster
 
 k apply -f tests/e2e/failures.yaml
 

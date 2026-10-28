@@ -172,7 +172,7 @@ jobs:
             echo
             echo '```sh'
             echo "helm install kausa https://github.com/fedeam/kausa/releases/download/$GITHUB_REF_NAME/kausa-$version.tgz \\"
-            echo "  -n kausa --create-namespace --set dryRun=true"
+            echo "  -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true"
             echo '```'
             echo
             echo "Image: \`$IMAGE:$version\` (\`$IMAGE@$DIGEST\`), linux/amd64 and linux/arm64."
