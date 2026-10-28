@@ -80,9 +80,12 @@ impl Detection {
 }
 
 /// Whether the Pod cannot be scheduled: still `Pending`, with its `PodScheduled` condition `False`
-/// for reason `Unschedulable`. The scheduler's `FailedScheduling` events say the same, but they
-/// may stop being updated for a Pod that keeps failing, while the condition holds as long as the
-/// failure: the condition is the signal.
+/// for reason `Unschedulable`, or `SchedulerError` when a scheduler plugin failed for the Pod (a
+/// volume the `VolumeBinding` plugin cannot bind in `PreBind`, seen on kind, Kubernetes 1.37, on
+/// 2026-10-28). A Pod held by its scheduling gates (`SchedulingGated`) waits on purpose. The
+/// scheduler's `FailedScheduling` events say the same, but they may stop being updated for a Pod
+/// that keeps failing, while the condition holds as long as the failure: the condition is the
+/// signal.
 pub fn detect_unschedulable(pod: &PodRecord) -> bool {
     pod.phase.as_deref() == Some("Pending") && pod.unschedulable.is_some()
 }

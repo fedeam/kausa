@@ -41,7 +41,8 @@ pub struct Signal {
     pub pod: Option<String>,
     pub container: Option<String>,
     pub image: Option<String>,
-    /// The waiting or termination reason, `Unschedulable`, `Evicted`, or the event reason.
+    /// The waiting or termination reason, the `PodScheduled` condition's reason (`Unschedulable`
+    /// or `SchedulerError`), `Evicted`, or the event reason.
     pub reason: String,
     pub message: String,
     pub exit_code: Option<i32>,
@@ -95,7 +96,10 @@ pub fn collect_signals(
                 Detection::Unschedulable,
                 None,
                 None,
-                "Unschedulable".to_owned(),
+                record
+                    .unschedulable_reason
+                    .clone()
+                    .unwrap_or_else(|| "Unschedulable".to_owned()),
                 record.unschedulable.clone().unwrap_or_default(),
                 None,
             ));
@@ -398,6 +402,7 @@ mod tests {
             controller: None,
             phase: Some(phase.into()),
             unschedulable: None,
+            unschedulable_reason: None,
             reason: None,
             message: None,
             failed_at: None,

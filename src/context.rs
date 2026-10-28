@@ -186,6 +186,7 @@ mod tests {
                 controller: None,
                 phase: Some("Running".into()),
                 unschedulable: None,
+                unschedulable_reason: None,
                 reason: None,
                 message: None,
                 failed_at: None,

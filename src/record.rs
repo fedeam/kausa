@@ -66,8 +66,10 @@ pub struct PodRecord {
     pub controller: Option<OwnerRef>,
     pub phase: Option<String>,
     /// The message of the `PodScheduled` condition when the scheduler cannot place the Pod
-    /// (status `False`, reason `Unschedulable`).
+    /// (status `False`, reason `Unschedulable`, or `SchedulerError` when a plugin such as volume
+    /// binding failed), and that reason. A Pod held by its scheduling gates is not recorded.
     pub unschedulable: Option<String>,
+    pub unschedulable_reason: Option<String>,
     /// The Pod's `status.reason` and bounded `status.message`, set by the kubelet when it fails the
     /// whole Pod (`Evicted`, `DeadlineExceeded`) or refuses it.
     pub reason: Option<String>,
@@ -129,16 +131,19 @@ impl PodRecord {
                 containers.push(ContainerRecord::new(container, false, statuses));
             }
         }
-        let unschedulable = status
-            .and_then(|s| s.conditions.as_ref())
-            .and_then(|conditions| {
-                conditions.iter().find(|c| {
-                    c.type_ == "PodScheduled"
-                        && c.status == "False"
-                        && c.reason.as_deref() == Some("Unschedulable")
-                })
+        let scheduling_failure = status.and_then(|s| {
+            s.conditions.iter().flatten().find(|c| {
+                c.type_ == "PodScheduled"
+                    && c.status == "False"
+                    && matches!(
+                        c.reason.as_deref(),
+                        Some("Unschedulable" | "SchedulerError")
+                    )
             })
-            .map(|c| bounded(c.message.as_deref().unwrap_or_default()));
+        });
+        let unschedulable =
+            scheduling_failure.map(|c| bounded(c.message.as_deref().unwrap_or_default()));
+        let unschedulable_reason = scheduling_failure.and_then(|c| c.reason.clone());
         let phase = status.and_then(|s| s.phase.clone());
         let failed_at = status
             .filter(|_| phase.as_deref() == Some("Failed"))
@@ -150,6 +155,7 @@ impl PodRecord {
             controller: controller_of(metadata.owner_references.as_ref()),
             phase,
             unschedulable,
+            unschedulable_reason,
             reason: status.and_then(|s| s.reason.as_deref().map(bounded)),
             message: status.and_then(|s| s.message.as_deref().map(bounded)),
             failed_at,
@@ -422,6 +428,10 @@ mod tests {
             record.unschedulable.as_deref(),
             Some("0/3 nodes are available: 3 Insufficient memory.")
         );
+        assert_eq!(
+            record.unschedulable_reason.as_deref(),
+            Some("Unschedulable")
+        );
     }
 
     #[test]
@@ -442,6 +452,10 @@ mod tests {
         ]);
         let record = PodRecord::from_pod(&pod).expect("a complete Pod");
         assert_eq!(record.unschedulable.as_deref(), Some(message));
+        assert_eq!(
+            record.unschedulable_reason.as_deref(),
+            Some("SchedulerError")
+        );
         // A Pod held by its scheduling gates waits on purpose.
         let status = pod.status.as_mut().expect("a status");
         status.conditions = Some(vec![
@@ -453,6 +467,7 @@ mod tests {
         ]);
         let record = PodRecord::from_pod(&pod).expect("a complete Pod");
         assert_eq!(record.unschedulable, None);
+        assert_eq!(record.unschedulable_reason, None);
     }
 
     #[test]

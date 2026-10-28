@@ -41,7 +41,7 @@ it was pending, so replicas whose crash loops are out of step all count.
 | `D002` | Image cannot be pulled | Container waiting with `ErrImagePull`, `ImagePullBackOff` or `InvalidImageName` | No |
 | `D003` | Out of memory | Container waiting in `CrashLoopBackOff` whose last termination is `OOMKilled`, or terminated with `OOMKilled` and not restarted | Yes, previous container if it restarted, otherwise the terminated one |
 | `D004` | Container cannot be created | Container waiting with `CreateContainerConfigError` or `CreateContainerError` | No |
-| `D005` | Pod cannot be scheduled | The Pod still `Pending`, with its `PodScheduled` condition `False` for reason `Unschedulable` | No |
+| `D005` | Pod cannot be scheduled | The Pod still `Pending`, with its `PodScheduled` condition `False` for reason `Unschedulable`, or `SchedulerError` when a scheduler plugin failed for it (a volume that cannot be bound); never `SchedulingGated` | No |
 | `D006` | Probe failures | Warning event `Unhealthy` for a readiness, liveness or startup probe, happening again a settle window after it was first seen | No |
 | `D007` | Volume cannot be attached or mounted | Warning event `FailedMount` or `FailedAttachVolume` | No |
 | `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of one failed Pod of the Job (the first by name) |
@@ -49,7 +49,12 @@ it was pending, so replicas whose crash loops are out of step all count.
 
 `D005` reads the Pod's condition rather than the scheduler's `FailedScheduling` events, which may
 stop being updated for a Pod that keeps failing (hypothesis about client-go's `events.k8s.io`
-broadcaster, to verify on a live cluster); the condition holds as long as the failure. `D008` needs no watch on Jobs: the Job controller emits a Warning event on the Job, with the reason
+broadcaster, to verify on a live cluster); the condition holds as long as the failure. A Pod
+whose claim the `VolumeBinding` plugin could not bind in `PreBind` (a `ReadWriteMany` claim on a
+`WaitForFirstConsumer` class that does not support it) stayed `Pending` for more than 25 minutes
+with reason `SchedulerError`, while its `FailedScheduling` event repeated twice in 16 minutes (seen
+on kind, Kubernetes 1.37, on 2026-10-28). A transient `SchedulerError` is absorbed by the settle
+window (hypothesis, not reproduced). `D008` needs no watch on Jobs: the Job controller emits a Warning event on the Job, with the reason
 of its `Failed` condition, when it marks the Job failed (`pkg/controller/job/job_controller.go` in
 Kubernetes, checked on 2026-10-26). A container recovering after one out-of-memory kill, and the
 kubelet's own `BackOff` events (the container state already says it), match nothing. Hypothesis

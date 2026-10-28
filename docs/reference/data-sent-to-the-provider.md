@@ -25,7 +25,7 @@ rules](rules.md):
 | `detection` | `{"id": "D001", "name": "crash loop"}` | The rule id and its name |
 | `workload` | `{"kind": "Deployment", "name": "deployment-1", "namespace": "namespace-1"}` | The top-level owner's kind (`Object` for a custom resource) and pseudonyms (`R002`) |
 | `pods_affected`, `pods_total` | `2`, `2` | |
-| `pods` | up to three Pods, the example first | Each with its pseudonym, `phase` and, for `D005`, the scheduler's redacted `unschedulable` message |
+| `pods` | up to three Pods, the example first | Each with its pseudonym, `phase` and, for `D005`, the scheduler's redacted `unschedulable` message (of the `PodScheduled` condition, for reason `Unschedulable` or `SchedulerError`; the reason itself is not sent) |
 | | `reason` `Evicted`, `message` `Pod ephemeral local storage usage exceeds the total limit of containers 50Mi.` | The Pod's `status.reason` and redacted `status.message`, when Kubernetes sets them (an eviction, `D009`, or a Pod past its deadline); `null` otherwise. The message names quantities and, for node pressure, a container (pseudonymized, `R002`); for an `emptyDir` limit it names the volume, which kausa does not know and sends as written unless a pattern matches it |
 | `pods[].containers` | `name` `container-1`, `init` `false`, `image` `busybox:1.37` or `registry-1/image-1:tag` | Whether it is an init container; public registries kept, others pseudonymized (`R002`) |
 | | waiting reason and redacted message; terminated and last termination reasons and exit codes; restart count | As Kubernetes reports them |

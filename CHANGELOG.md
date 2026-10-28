@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reading logs; the kubelet refusing a new Pod on a node under pressure is not. The request to the
   model now carries each Pod's `status.reason` and redacted `status.message`.
 
+### Changed
+
+- `D005`, pod cannot be scheduled, also matches a Pending Pod whose `PodScheduled` condition is
+  `False` with reason `SchedulerError` (for example a volume the scheduler cannot bind), which
+  was no incident before; the incident's reason is the condition's own.
+
 ### Fixed
 
 - A Pod in phase `Failed` (evicted, or past its `activeDeadlineSeconds`) whose container had
