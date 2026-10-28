@@ -33,7 +33,7 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `src/main.rs` | Flags, usage errors, the settings passed to `run` | A flag is added or changed |
 | `src/run.rs` | The controller loop: the two watches, the tick, the explanation queue, the metrics listener, owner lookups with a cache | The loop's scheduling or what it watches changes |
 | `src/record.rs` | Reduces a Pod or an Event to the few fields kausa keeps; the object is dropped at once | A rule needs a field that is not recorded |
-| `src/detect.rs` | The detection rules `D001`–`D008`: pure functions of a record | A detection rule is added or changed |
+| `src/detect.rs` | The detection rules `D001`–`D009`: pure functions of a record | A detection rule is added or changed |
 | `src/incident.rs` | Signals, grouping by top-level owner, the settle window | Grouping or settling changes |
 | `src/fingerprint.rs` | The incident fingerprint (dedup key, Event name), never sent | What makes two incidents "the same" changes |
 | `src/owner.rs` | ReplicaSet → Deployment and Job → CronJob, metadata only | A new owner hop (needs an ADR: a new permission) |

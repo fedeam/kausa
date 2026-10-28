@@ -24,6 +24,9 @@ pub enum Detection {
     VolumeFailure,
     /// `D008`: a Job failed.
     JobFailed,
+    /// `D009`: the kubelet evicted the Pod (its ephemeral-storage limit, an `emptyDir` size limit,
+    /// or node pressure).
+    PodEvicted,
 }
 
 impl Detection {
@@ -37,6 +40,7 @@ impl Detection {
             Detection::ProbeFailure => "D006",
             Detection::VolumeFailure => "D007",
             Detection::JobFailed => "D008",
+            Detection::PodEvicted => "D009",
         }
     }
 
@@ -50,6 +54,7 @@ impl Detection {
             Detection::ProbeFailure => "probe failures",
             Detection::VolumeFailure => "volume cannot be attached or mounted",
             Detection::JobFailed => "job failed",
+            Detection::PodEvicted => "pod evicted",
         }
     }
 
@@ -60,7 +65,7 @@ impl Detection {
     }
 
     /// Whether the signal is a state that kausa reads from the Pod at every check (container
-    /// states, the Pod's scheduling condition), rather than an event.
+    /// states, the Pod's scheduling condition, its eviction), rather than an event.
     pub fn is_state(self) -> bool {
         matches!(
             self,
@@ -69,6 +74,7 @@ impl Detection {
                 | Detection::OutOfMemory
                 | Detection::ContainerCreate
                 | Detection::Unschedulable
+                | Detection::PodEvicted
         )
     }
 }
@@ -79,6 +85,20 @@ impl Detection {
 /// failure: the condition is the signal.
 pub fn detect_unschedulable(pod: &PodRecord) -> bool {
     pod.phase.as_deref() == Some("Pending") && pod.unschedulable.is_some()
+}
+
+/// Whether the kubelet evicted the Pod: phase `Failed` with `status.reason` `Evicted`. The kubelet
+/// writes the same reason when it refuses a new Pod on a node under pressure (a message starting
+/// with `Pod was rejected:`); that is a consequence of the node's state, not of the workload, and
+/// is not an eviction (seen on kind, Kubernetes 1.37, on 2026-10-28). How recent the eviction is,
+/// is checked against the clock in `collect_signals`.
+pub fn detect_evicted(pod: &PodRecord) -> bool {
+    pod.phase.as_deref() == Some("Failed")
+        && pod.reason.as_deref() == Some("Evicted")
+        && !pod
+            .message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Pod was rejected:"))
 }
 
 /// The detection that a container's state matches, if any. A container matches at most one: an
@@ -185,12 +205,13 @@ mod tests {
             Detection::ProbeFailure,
             Detection::VolumeFailure,
             Detection::JobFailed,
+            Detection::PodEvicted,
         ];
         let ids: Vec<_> = all.iter().map(|d| d.id()).collect();
         assert_eq!(
             ids,
             [
-                "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008"
+                "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008", "D009"
             ]
         );
     }
@@ -310,6 +331,44 @@ mod tests {
             detect_pod_container(&failed, &oom),
             Some(Detection::OutOfMemory)
         );
+    }
+
+    #[test]
+    fn an_evicted_pod_is_d009() {
+        let pod = |phase: &str, reason: &str, message: &str| PodRecord {
+            phase: Some(phase.into()),
+            reason: Some(reason.into()),
+            message: Some(message.into()),
+            ..Default::default()
+        };
+        for message in [
+            "Pod ephemeral local storage usage exceeds the total limit of containers 50Mi. ",
+            "Usage of EmptyDir volume \"scratch\" exceeds the limit \"20Mi\". ",
+            "The node was low on resource: ephemeral-storage. ",
+        ] {
+            assert!(
+                detect_evicted(&pod("Failed", "Evicted", message)),
+                "{message}"
+            );
+        }
+        // The kubelet refusing a new Pod on a node under pressure, a Pod past its deadline, and
+        // a Pod that has not failed (yet).
+        let rejected = "Pod was rejected: The node had condition: [DiskPressure]. ";
+        assert!(!detect_evicted(&pod("Failed", "Evicted", rejected)));
+        let deadline = "Pod was active on the node longer than the specified deadline";
+        assert!(!detect_evicted(&pod(
+            "Failed",
+            "DeadlineExceeded",
+            deadline
+        )));
+        assert!(!detect_evicted(&pod("Running", "Evicted", "")));
+        assert!(!detect_evicted(&PodRecord {
+            phase: Some("Failed".into()),
+            ..Default::default()
+        }));
+        assert!(Detection::PodEvicted.is_state());
+        assert!(Detection::PodEvicted.settles());
+        assert!(!reads_logs(Detection::PodEvicted));
     }
 
     #[test]

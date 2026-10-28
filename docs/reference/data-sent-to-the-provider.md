@@ -3,7 +3,7 @@
 Exactly what a kausa request to the language model endpoint contains, and what it never
 contains.
 
-Status as of 2026-10-26: **implemented** (second implementation weekend, `src/context.rs`,
+Status as of 2026-10-28: **implemented** (second implementation weekend, `src/context.rs`,
 `src/redact.rs`, `src/prompt.rs`). Why it works this way: [0008. Send only allowlisted, redacted
 data to one OpenAI-compatible endpoint](../adr/0008-data-leaving-the-cluster.md). Run kausa with
 `--dry-run` to see the requests it would send ([Try kausa against a cluster with a local
@@ -26,6 +26,7 @@ rules](rules.md):
 | `workload` | `{"kind": "Deployment", "name": "deployment-1", "namespace": "namespace-1"}` | The top-level owner's kind (`Object` for a custom resource) and pseudonyms (`R002`) |
 | `pods_affected`, `pods_total` | `2`, `2` | |
 | `pods` | up to three Pods, the example first | Each with its pseudonym, `phase` and, for `D005`, the scheduler's redacted `unschedulable` message |
+| | `reason` `Evicted`, `message` `Pod ephemeral local storage usage exceeds the total limit of containers 50Mi.` | The Pod's `status.reason` and redacted `status.message`, when Kubernetes sets them (an eviction, `D009`, or a Pod past its deadline); `null` otherwise. The message names quantities and, for node pressure, a container (pseudonymized, `R002`); for an `emptyDir` limit it names the volume, which kausa does not know and sends as written unless a pattern matches it |
 | `pods[].containers` | `name` `container-1`, `init` `false`, `image` `busybox:1.37` or `registry-1/image-1:tag` | Whether it is an init container; public registries kept, others pseudonymized (`R002`) |
 | | waiting reason and redacted message; terminated and last termination reasons and exit codes; restart count | As Kubernetes reports them |
 | | `memory_limit` `32Mi`, `cpu_limit` `50m`; each probe's kind and timings | Numbers only; never a probe's command, path or headers |

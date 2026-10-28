@@ -5,7 +5,9 @@
 //! to the model need; the object itself is dropped and never logged
 //! (docs/explanation/architecture.md, "Watching without a large cache").
 
-use k8s_openapi::api::core::v1::{Container, ContainerStatus, ObjectReference, Pod, Probe};
+use k8s_openapi::api::core::v1::{
+    Container, ContainerStatus, ObjectReference, Pod, PodStatus, Probe,
+};
 use k8s_openapi::api::events::v1::Event;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::jiff::Timestamp;
@@ -66,6 +68,14 @@ pub struct PodRecord {
     /// The message of the `PodScheduled` condition when the scheduler cannot place the Pod
     /// (status `False`, reason `Unschedulable`).
     pub unschedulable: Option<String>,
+    /// The Pod's `status.reason` and bounded `status.message`, set by the kubelet when it fails the
+    /// whole Pod (`Evicted`, `DeadlineExceeded`) or refuses it.
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    /// For a Pod in phase `Failed`, when it failed: the later of its `Ready` condition's last
+    /// transition and its containers' finish times. Evicted Pods are not deleted, so this is what
+    /// tells a new eviction from one days old.
+    pub failed_at: Option<Timestamp>,
     /// The node and service account names, kept only so that redaction can replace them.
     pub node_name: Option<String>,
     pub service_account: Option<String>,
@@ -129,18 +139,46 @@ impl PodRecord {
                 })
             })
             .map(|c| bounded(c.message.as_deref().unwrap_or_default()));
+        let phase = status.and_then(|s| s.phase.clone());
+        let failed_at = status
+            .filter(|_| phase.as_deref() == Some("Failed"))
+            .and_then(failed_at);
         Some(Self {
             namespace: metadata.namespace.clone()?,
             name: metadata.name.clone()?,
             uid: metadata.uid.clone()?,
             controller: controller_of(metadata.owner_references.as_ref()),
-            phase: status.and_then(|s| s.phase.clone()),
+            phase,
             unschedulable,
+            reason: status.and_then(|s| s.reason.as_deref().map(bounded)),
+            message: status.and_then(|s| s.message.as_deref().map(bounded)),
+            failed_at,
             node_name: spec.and_then(|s| s.node_name.clone()),
             service_account: spec.and_then(|s| s.service_account_name.clone()),
             containers,
         })
     }
+}
+
+/// The later of the `Ready` condition's last transition and the containers' finish times, if any
+/// is set.
+fn failed_at(status: &PodStatus) -> Option<Timestamp> {
+    let ready = status
+        .conditions
+        .iter()
+        .flatten()
+        .filter(|c| c.type_ == "Ready")
+        .filter_map(|c| c.last_transition_time.as_ref().map(|t| t.0));
+    let finished = [
+        status.init_container_statuses.as_ref(),
+        status.container_statuses.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .flatten()
+    .filter_map(|c| c.state.as_ref()?.terminated.as_ref()?.finished_at.as_ref())
+    .map(|t| t.0);
+    ready.chain(finished).max()
 }
 
 impl ContainerRecord {
@@ -415,6 +453,48 @@ mod tests {
         ]);
         let record = PodRecord::from_pod(&pod).expect("a complete Pod");
         assert_eq!(record.unschedulable, None);
+    }
+
+    #[test]
+    fn a_failed_pod_keeps_its_reason_message_and_failure_time() {
+        let mut pod = crashing_pod();
+        // While it runs, a Pod has no failure time.
+        let record = PodRecord::from_pod(&pod).expect("a complete Pod");
+        assert_eq!(
+            (record.reason, record.message, record.failed_at),
+            (None, None, None)
+        );
+        let status = pod.status.as_mut().expect("a status");
+        status.phase = Some("Failed".into());
+        status.reason = Some("Evicted".into());
+        status.message = Some("The node was low on resource: memory. ".into());
+        status.conditions = Some(vec![
+            serde_json::from_value(json!({
+                "type": "Ready", "status": "False", "reason": "PodFailed",
+                "lastTransitionTime": "2026-10-28T10:00:00Z"
+            }))
+            .expect("a condition"),
+        ]);
+        status.container_statuses = Some(vec![
+            serde_json::from_value(json!({
+                "name": "api", "image": "registry.example.com/shop/api:1.4.2", "imageID": "",
+                "ready": false, "restartCount": 0,
+                "state": {"terminated": {"reason": "Error", "exitCode": 137,
+                                         "finishedAt": "2026-10-28T10:00:05Z"}}
+            }))
+            .expect("a container status"),
+        ]);
+        let record = PodRecord::from_pod(&pod).expect("a complete Pod");
+        assert_eq!(record.reason.as_deref(), Some("Evicted"));
+        assert_eq!(
+            record.message.as_deref(),
+            Some("The node was low on resource: memory. ")
+        );
+        // The later of the two times.
+        assert_eq!(
+            record.failed_at,
+            Some("2026-10-28T10:00:05Z".parse().expect("a timestamp"))
+        );
     }
 
     #[test]

@@ -95,3 +95,12 @@ Update 2026-10-26: as implemented on the second weekend, the output mode is chos
 `request` and `explanation` log lines until the metrics arrive (third weekend); and the
 configuration is a set of command-line flags, not a file ([Command line and log
 format](../reference/command-line.md)).
+
+Update 2026-10-28: for the eviction rule `D009`, each Pod in a request also carries its
+`status.reason` and its `status.message`, cut at 1024 bytes in the cluster and pattern-redacted
+like the other status messages (step 3), because the message is what tells a workload's own
+`ephemeral-storage` or `emptyDir` limit from node pressure. It is sent for any Pod that has one, not
+only for `D009`. The message names quantities and container names (pseudonymized) and, for an
+`emptyDir` limit, the volume's name, which kausa does not know and does not pseudonymize. No log is
+read for `D009`. [Data sent to the provider](../reference/data-sent-to-the-provider.md) lists the
+fields.

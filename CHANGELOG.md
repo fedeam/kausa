@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Each release also attaches `kausa-X.Y.Z.intoto.jsonl`, the SLSA build provenance of the chart and
   `SHA256SUMS`, which `gh attestation verify --bundle` checks.
+- `D009`, pod evicted: a Pod the kubelet evicted in the last 10 minutes (its `ephemeral-storage`
+  limits, an `emptyDir` `sizeLimit`, or node pressure) is an incident of its workload, without
+  reading logs; the kubelet refusing a new Pod on a node under pressure is not. The request to the
+  model now carries each Pod's `status.reason` and redacted `status.message`.
 
 ### Fixed
 

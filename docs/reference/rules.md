@@ -14,8 +14,8 @@ endpoint](../adr/0008-data-leaving-the-cluster.md).
 
 ## Detection rules
 
-A detection matches a signal: a **state** read from a Pod at every check (a container state, or
-the Pod's scheduling condition), or a Warning **event** about a Pod or a Job. The failure must
+A detection matches a signal: a **state** read from a Pod at every check (a container state, the
+Pod's scheduling condition, or its eviction), or a Warning **event** about a Pod or a Job. The failure must
 persist through the **settle window** (60 seconds by default, `--settle-seconds`) before it becomes
 an incident, so a container that restarts once and recovers is not explained:
 
@@ -45,6 +45,7 @@ it was pending, so replicas whose crash loops are out of step all count.
 | `D006` | Probe failures | Warning event `Unhealthy` for a readiness, liveness or startup probe, happening again a settle window after it was first seen | No |
 | `D007` | Volume cannot be attached or mounted | Warning event `FailedMount` or `FailedAttachVolume` | No |
 | `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of one failed Pod of the Job (the first by name) |
+| `D009` | Pod evicted | The Pod in phase `Failed` with `status.reason` `Evicted` (its containers' `ephemeral-storage` limits, an `emptyDir` `sizeLimit`, or node pressure; the status message says which), failed in the last 10 minutes, unless the message starts with `Pod was rejected:` | No |
 
 `D005` reads the Pod's condition rather than the scheduler's `FailedScheduling` events, which may
 stop being updated for a Pod that keeps failing (hypothesis about client-go's `events.k8s.io`
@@ -68,6 +69,19 @@ container that had restarted before the kubelet evicted the Pod or ended it at i
 `activeDeadlineSeconds` stays terminated (`Error`, exit code 137) after a restart (seen on kind,
 Kubernetes 1.37, on 2026-10-28).
 
+`D009` reads the Pod's status rather than the kubelet's `Evicted` event, which is written once per
+Pod (count 1) and so would never settle; the ReplicaSet's replacement Pods, evicted again every 15
+to 20 seconds when the workload's own limit is the cause, are one incident. Evicted Pods are not
+deleted, so an eviction is a signal only while its failure time (the later of the `Ready`
+condition's last transition and the containers' finish times) is at most 10 minutes old, like an
+event; a Pod with neither is no signal. Without that bound, every old eviction would become an
+incident again each time kausa starts. The kubelet also writes `Evicted` when it refuses a new Pod
+on a node under pressure (`Pod was rejected: The node had condition: [DiskPressure]`): a
+consequence of the node's state, not of the workload, and no signal. `D009` reads no logs: the
+evicted container's log is gone, and node pressure is not the application's fault. A node-pressure
+eviction can hit many workloads at once, one incident each, which the call budget bounds. All of
+this was seen on kind (Kubernetes 1.37) on 2026-10-28.
+
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
 that stays the same for the same failure: the example's message with the names of the incident's
 Pods, UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
@@ -79,8 +93,8 @@ it appears in kausa's log and keys the deduplication cache and the Event's name.
 
 Implemented in `src/redact.rs` (second implementation weekend). `R001` works on structure: only
 the fields of [Data sent to the provider](data-sent-to-the-provider.md) are ever serialized. The
-others work on every name and free text that goes into a request (event messages, the waiting and
-scheduling messages, log lines). First, text from the cluster that already looks like one of
+others work on every name and free text that goes into a request (event messages, the waiting,
+scheduling and Pod status messages, log lines). First, text from the cluster that already looks like one of
 kausa's placeholders (`pod-1`, `deployment-2`) has its hyphen turned into an underscore, unless it
 is a real name kausa registered, so that the answer cannot map it to a real name. Then the rules
 run in this order: the secrets first (`R009`, `R007`, `R008`, `R006`, `R010`, `R011`), so that a

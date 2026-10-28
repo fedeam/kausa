@@ -129,6 +129,8 @@ fn pod_context(pod: &PodRecord, r: &mut Redactor) -> Value {
         "name": r.name(NameKind::Pod, &pod.name),
         "phase": pod.phase,
         "unschedulable": pod.unschedulable.as_deref().map(|m| r.text(m)),
+        "reason": pod.reason,
+        "message": pod.message.as_deref().map(|m| r.text(m)),
         "containers": containers,
     })
 }
@@ -184,6 +186,9 @@ mod tests {
                 controller: None,
                 phase: Some("Running".into()),
                 unschedulable: None,
+                reason: None,
+                message: None,
+                failed_at: None,
                 node_name: Some("worker-7".into()),
                 service_account: Some("api-runner".into()),
                 containers: vec![ContainerRecord {

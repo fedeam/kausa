@@ -7,11 +7,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
 
-use crate::detect::{Detection, detect_event, detect_pod_container, detect_unschedulable};
+use crate::detect::{
+    Detection, detect_event, detect_evicted, detect_pod_container, detect_unschedulable,
+};
 use crate::fingerprint::{fingerprint, normalize};
 use crate::record::{EventRecord, OwnerRef, PodRecord};
 
-/// How long a state signal (a container state, a Pod that cannot be scheduled) may be missing
+/// How long a state signal (a container state, a Pod that cannot be scheduled or was evicted) may
+/// be missing
 /// before its failure is forgotten. Between two back-offs a crash-looping container runs for a
 /// while, and the kubelet's back-off grows to five minutes, so the gap has to be longer than that.
 pub const STATE_GRACE: SignedDuration = SignedDuration::from_secs(330);
@@ -38,7 +41,7 @@ pub struct Signal {
     pub pod: Option<String>,
     pub container: Option<String>,
     pub image: Option<String>,
-    /// The waiting or termination reason, `Unschedulable`, or the event reason.
+    /// The waiting or termination reason, `Unschedulable`, `Evicted`, or the event reason.
     pub reason: String,
     pub message: String,
     pub exit_code: Option<i32>,
@@ -57,9 +60,12 @@ pub struct EventView<'a> {
     pub job_owner: Option<&'a OwnerRef>,
 }
 
-/// All the signals in the current state: one per failing container and per Pod that cannot be
-/// scheduled, and one per recent Warning event that a detection matches. Events whose last
-/// occurrence is older than `freshness` are ignored; a timestamp in the future counts as now.
+/// All the signals in the current state: one per failing container, per Pod that cannot be
+/// scheduled and per recently evicted Pod, and one per recent Warning event that a detection
+/// matches. Events whose last occurrence, and evictions whose failure time, is older than
+/// `freshness` are ignored, and so is an eviction with no failure time: evicted Pods are not
+/// deleted, and an old one must not become an incident again each time kausa starts. A timestamp
+/// in the future counts as now.
 pub fn collect_signals(
     pods: &[PodView<'_>],
     events: &[EventView<'_>],
@@ -91,6 +97,19 @@ pub fn collect_signals(
                 None,
                 "Unschedulable".to_owned(),
                 record.unschedulable.clone().unwrap_or_default(),
+                None,
+            ));
+        }
+        let recent = |at: Option<Timestamp>| {
+            at.is_some_and(|at| now.duration_since(at.min(now)) <= freshness)
+        };
+        if detect_evicted(record) && recent(record.failed_at) {
+            signals.push(state(
+                Detection::PodEvicted,
+                None,
+                None,
+                "Evicted".to_owned(),
+                record.message.clone().unwrap_or_default(),
                 None,
             ));
         }
@@ -379,6 +398,9 @@ mod tests {
             controller: None,
             phase: Some(phase.into()),
             unschedulable: None,
+            reason: None,
+            message: None,
+            failed_at: None,
             node_name: None,
             service_account: None,
             containers: vec![ContainerRecord {
