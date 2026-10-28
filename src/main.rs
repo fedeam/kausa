@@ -221,6 +221,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
         settle: SignedDuration::from_secs(i64::from(settle_seconds)),
         explain,
         metrics_address,
+        namespaces: Vec::new(),
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,

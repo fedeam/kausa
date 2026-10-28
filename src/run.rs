@@ -10,21 +10,24 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Debug;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use futures::stream::FuturesUnordered;
+use futures::stream::{self, BoxStream, FuturesUnordered, SelectAll};
 use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::events::v1::Event;
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
+use k8s_openapi::serde::de::DeserializeOwned;
 use kube::config::KubeConfigOptions;
+use kube::core::NamespaceResourceScope;
 use kube::runtime::{WatchStreamExt, watcher};
-use kube::{Api, Client, Config};
+use kube::{Api, Client, Config, Resource};
 use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -65,6 +68,44 @@ pub struct Options {
     pub explain: Option<Settings>,
     /// Where to serve `/metrics`, `/healthz` and `/readyz`, if anywhere.
     pub metrics_address: Option<String>,
+    /// The namespaces to watch, in the order given; empty watches the whole cluster.
+    pub namespaces: Vec<String>,
+}
+
+/// Which watch an item comes from: `None` is the cluster-wide watch, `Some(n)` the watch of
+/// namespace `n` (docs/adr/0013-namespaced-install-mode.md).
+pub type WatchKey = Option<String>;
+
+/// An item of one watch, tagged with its watch; `None` once that watch has ended.
+type Tagged<K> = (WatchKey, Option<Result<watcher::Event<K>, watcher::Error>>);
+
+/// The watches of one kind, merged: one on the whole cluster, or one per namespace.
+type Watches<K> = SelectAll<BoxStream<'static, Tagged<K>>>;
+
+/// Starts one watch of `K` per namespace, or one on the whole cluster when `namespaces` is empty,
+/// each with `config` and the default backoff. Each watch ends with a `(watch, None)` item, so
+/// the loop knows which one ended.
+fn watches<K>(client: &Client, namespaces: &[String], config: &watcher::Config) -> Watches<K>
+where
+    K: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Debug + Send + 'static,
+    K::DynamicType: Default,
+{
+    let apis: Vec<(WatchKey, Api<K>)> = if namespaces.is_empty() {
+        vec![(None, Api::all(client.clone()))]
+    } else {
+        namespaces
+            .iter()
+            .map(|n| (Some(n.clone()), Api::namespaced(client.clone(), n)))
+            .collect()
+    };
+    stream::select_all(apis.into_iter().map(|(watch, api)| {
+        let end = watch.clone();
+        watcher(api, config.clone())
+            .default_backoff()
+            .map(move |item| (watch.clone(), Some(item)))
+            .chain(stream::once(async move { (end, None) }))
+            .boxed()
+    }))
 }
 
 /// How many explanations the deduplication cache keeps at most.
@@ -143,16 +184,13 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         metrics: &metrics,
     });
     let (mut pods_listed, mut events_listed) = (false, false);
-    let mut pods = watcher(Api::<Pod>::all(client.clone()), watcher::Config::default())
-        .default_backoff()
-        .boxed();
+    let mut pods = watches::<Pod>(&client, &options.namespaces, &watcher::Config::default());
     let selector = format!("type=Warning,reportingController!={REPORTING_CONTROLLER}");
-    let mut events = watcher(
-        Api::<Event>::all(client),
-        watcher::Config::default().fields(&selector),
-    )
-    .default_backoff()
-    .boxed();
+    let mut events = watches::<Event>(
+        &client,
+        &options.namespaces,
+        &watcher::Config::default().fields(&selector),
+    );
     let mut state = State::default();
     let mut tracker = Tracker::new(options.settle);
     let mut ticker = tokio::time::interval(TICK);
@@ -192,32 +230,36 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             },
             Some(()) = connections.next(), if !connections.is_empty() => {}
             item = pods.next() => match item {
-                Some(Ok(event)) => {
+                Some((_, Some(Ok(event)))) => {
                     pods_listed |= matches!(event, watcher::Event::InitDone);
                     state.on_pod(event, &lookup).await?;
                     if pods_listed && events_listed {
                         metrics.set_ready();
                     }
                 }
-                Some(Err(e)) => {
+                Some((_, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "pods")]);
                     log::warn("pod watch error", json!({"error": e.to_string()}))?;
                 }
-                None => return Err(RunError::Failure("the pod watch ended".into())),
+                Some((_, None)) | None => {
+                    return Err(RunError::Failure("the pod watch ended".into()));
+                }
             },
             item = events.next() => match item {
-                Some(Ok(event)) => {
+                Some((_, Some(Ok(event)))) => {
                     events_listed |= matches!(event, watcher::Event::InitDone);
                     state.on_event(event, &lookup).await?;
                     if pods_listed && events_listed {
                         metrics.set_ready();
                     }
                 }
-                Some(Err(e)) => {
+                Some((_, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "events")]);
                     log::warn("event watch error", json!({"error": e.to_string()}))?;
                 }
-                None => return Err(RunError::Failure("the event watch ended".into())),
+                Some((_, None)) | None => {
+                    return Err(RunError::Failure("the event watch ended".into()));
+                }
             },
             _ = ticker.tick() => {
                 let now = Timestamp::now();
