@@ -7,25 +7,25 @@ budget, and writes the explanation as an Event on the failing object. It never r
 ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
 `--no-events`).
 
-Status as of 2026-10-27: **in development** (pre-alpha). The four implementation weekends of v0.1
+Status as of 2026-10-28: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
-failing workload. The image and the Helm chart exist, the kind test passes on the maintainer's
-machine (2026-10-27), and nothing is released yet. The
+failing workload. The image and the Helm chart exist, the kind test passes, and the first
+release, [v0.1.0](https://github.com/fedeam/kausa/releases/tag/v0.1.0), came out on 2026-10-28
+([2026-10-28 — First release](journal/2026-10-28-first-release.md)). The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
 ([2026-10-26 — GitHub repository and first CI
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). GitHub Actions run since the repository became
-public, on 2026-10-27: the checks, both images and the kind test passed on their first run. The
-first release is pending.
+public, on 2026-10-27: the checks, both images and the kind test passed on their first run.
 
 ## Key facts
 
 - **What it is:** a Rust controller on kube-rs, one static binary for linux/amd64 and
-  linux/arm64, in a distroless non-root image (built in CI, not published) with a Helm chart in
-  `charts/kausa`.
+  linux/arm64, in a distroless non-root image published at `ghcr.io/fedeam/kausa` with a Helm
+  chart in `charts/kausa`, attached to each GitHub release.
 - **URL:** none: kausa runs in its users' clusters.
 - **Repository:** [`fedeam/kausa`](https://github.com/fedeam/kausa) on GitHub, public since
   2026-10-27. A private copy on the maintainer's Gitea instance, synced by
@@ -98,4 +98,5 @@ checks](how-to/develop.md).
   and what is pending; [2026-10-26 — GitHub repository and first CI
   runs](journal/2026-10-26-github-repository-and-first-ci.md): the first push and CI runs;
   [2026-10-27 — First run of the kind test](journal/2026-10-27-first-kind-run.md);
-  [2026-10-27 — Publication](journal/2026-10-27-publication.md).
+  [2026-10-27 — Publication](journal/2026-10-27-publication.md);
+  [2026-10-28 — First release](journal/2026-10-28-first-release.md).
