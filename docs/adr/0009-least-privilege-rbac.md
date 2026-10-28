@@ -68,3 +68,10 @@ OpenAI-compatible endpoint](0008-data-leaving-the-cluster.md) decides.
 Update 2026-10-26: "crash-type detections" above means crash loops and out-of-memory kills, and
 the logs of failed Jobs are read too (`D008`), as [0008. Send only allowlisted, redacted data to one
 OpenAI-compatible endpoint](0008-data-leaving-the-cluster.md) decided when it was accepted.
+
+Update 2026-10-28: the namespaced mode planned here is decided in [0013. Offer a namespaced
+install mode: one watch pair and one Role per listed namespace, and nothing
+cluster-wide](0013-namespaced-install-mode.md): the chart's required `rbac.scope` grants this
+ADR's rules in every namespace (`cluster`, a ClusterRole as above) or in the listed namespaces only
+(`namespaced`, a Role and a RoleBinding per namespace and nothing cluster-scoped). The rules
+themselves do not change, and the caveat on Event writes narrows to the listed namespaces.
