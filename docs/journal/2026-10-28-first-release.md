@@ -35,3 +35,20 @@ was published.
   first push to GHCR.
 - OpenSSF Scorecard's checks `Signed-Releases` and `Packaging` had no release or packaging run to
   look at; both count from the next scan.
+
+## Later the same day: provenance as a release asset
+
+- OpenSSF Scorecard scored 7.6. Its scan ran before the release, so Signed-Releases and Packaging
+  had nothing to look at yet. In Scorecard v5.6.0, Packaging needs a successful run of a workflow
+  that pushes an image, which `release.yml` now has. Signed-Releases gives 8 to a release with a
+  signature asset (`.sigstore.json` counts) and 10 to one with a provenance asset, which it
+  recognises by the `.intoto.jsonl` extension only.
+- `release.yml` now attests the chart and `SHA256SUMS` too, and attaches the bundle as
+  `kausa-X.Y.Z.intoto.jsonl`.
+- For v0.1.0, the image's provenance, made by the release run, was downloaded with
+  `gh attestation download`, checked offline with `gh attestation verify --bundle`, and attached
+  to the release as `kausa-0.1.0-image.intoto.jsonl`. The release's other assets are unchanged.
+- **What Scorecard can't get from one maintainer:** Code-Review and Contributors need other
+  people. Branch-Protection stays at 8: to go higher it needs two required approvals, which one
+  maintainer can't give. Maintained counts from 90 days after the repository was created. SAST and
+  CI-Tests rise as the commits made before CodeQL and CI leave the window they look at.
