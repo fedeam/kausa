@@ -100,6 +100,44 @@ fn forbidden(error: &watcher::Error) -> bool {
     }
 }
 
+/// Which watches have sent `InitDone` at least once. kausa is ready once every watch has: 2 on
+/// the whole cluster, or 2 per namespace (docs/adr/0013-namespaced-install-mode.md).
+struct Readiness {
+    total: usize,
+    listed: HashSet<(Kind, WatchKey)>,
+}
+
+impl Readiness {
+    /// The watches `run` starts for `namespaces`: one Pod and one event watch per namespace, or
+    /// one of each on the whole cluster when the list is empty.
+    fn new(namespaces: &[String]) -> Self {
+        Readiness {
+            total: 2 * namespaces.len().max(1),
+            listed: HashSet::new(),
+        }
+    }
+
+    /// Records that `watch` of `kind` has listed, and says whether every watch now has. A repeated
+    /// `InitDone` of one watch counts once, and readiness never goes back.
+    fn listed(&mut self, kind: Kind, watch: &WatchKey) -> bool {
+        self.listed.insert((kind, watch.clone()));
+        self.listed.len() >= self.total
+    }
+}
+
+/// The error of a watch that ended: kausa stops, since a watcher with a backoff only ends when
+/// its stream does.
+fn ended(kind: Kind, watch: &WatchKey) -> RunError {
+    let kind = match kind {
+        Kind::Pods => "pod",
+        Kind::Events => "event",
+    };
+    RunError::Failure(match watch {
+        None => format!("the {kind} watch ended"),
+        Some(namespace) => format!("the {kind} watch of namespace {namespace} ended"),
+    })
+}
+
 /// An item of one watch, tagged with its watch; `None` once that watch has ended.
 type Tagged<K> = (WatchKey, Option<Result<watcher::Event<K>, watcher::Error>>);
 
@@ -207,7 +245,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             .then(|| Writer::new(client.clone(), settings.instance.clone())),
         metrics: &metrics,
     });
-    let (mut pods_listed, mut events_listed) = (false, false);
+    let mut readiness = Readiness::new(&options.namespaces);
     let mut pods = watches::<Pod>(&client, &options.namespaces, &watcher::Config::default());
     let selector = format!("type=Warning,reportingController!={REPORTING_CONTROLLER}");
     let mut events = watches::<Event>(
@@ -255,9 +293,9 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             Some(()) = connections.next(), if !connections.is_empty() => {}
             item = pods.next() => match item {
                 Some((watch, Some(Ok(event)))) => {
-                    pods_listed |= matches!(event, watcher::Event::InitDone);
+                    let listed = matches!(event, watcher::Event::InitDone);
                     state.on_pod(&watch, event, &lookup).await?;
-                    if pods_listed && events_listed {
+                    if listed && readiness.listed(Kind::Pods, &watch) {
                         metrics.set_ready();
                     }
                 }
@@ -266,15 +304,14 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                     log::warn("pod watch error", json!({"error": e.to_string()}))?;
                     state.on_watch_error(Kind::Pods, &watch, &e);
                 }
-                Some((_, None)) | None => {
-                    return Err(RunError::Failure("the pod watch ended".into()));
-                }
+                Some((watch, None)) => return Err(ended(Kind::Pods, &watch)),
+                None => return Err(ended(Kind::Pods, &None)),
             },
             item = events.next() => match item {
                 Some((watch, Some(Ok(event)))) => {
-                    events_listed |= matches!(event, watcher::Event::InitDone);
+                    let listed = matches!(event, watcher::Event::InitDone);
                     state.on_event(&watch, event, &lookup).await?;
-                    if pods_listed && events_listed {
+                    if listed && readiness.listed(Kind::Events, &watch) {
                         metrics.set_ready();
                     }
                 }
@@ -283,9 +320,8 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                     log::warn("event watch error", json!({"error": e.to_string()}))?;
                     state.on_watch_error(Kind::Events, &watch, &e);
                 }
-                Some((_, None)) | None => {
-                    return Err(RunError::Failure("the event watch ended".into()));
-                }
+                Some((watch, None)) => return Err(ended(Kind::Events, &watch)),
+                None => return Err(ended(Kind::Events, &None)),
             },
             _ = ticker.tick() => {
                 let now = Timestamp::now();
