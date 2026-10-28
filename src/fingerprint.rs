@@ -4,12 +4,21 @@
 //! It is computed in memory before redaction and is never sent or written anywhere but kausa's
 //! own log (docs/reference/rules.md, "Grouping and fingerprint").
 
-/// Normalizes a message so that the same failure gives the same text: the names of the Pods
-/// involved become `<pod>`, UUIDs `<uuid>`, Go durations such as `40s` or `2m40s` (the kubelet's
-/// growing back-off) `<duration>`, hexadecimal runs of eight or more characters `<hex>` and every
-/// other run of digits `#`.
+/// The prefix client-go's event recorder puts before the note of an event that aggregates similar
+/// ones (`EventAggregatorByReasonMessageFunc` in `tools/record/events_cache.go`, checked on
+/// 2026-10-28).
+const COMBINED_PREFIX: &str = "(combined from similar events): ";
+
+/// Normalizes a message so that the same failure gives the same text: the prefix of an aggregated
+/// event, `(combined from similar events): `, is dropped, the names of the Pods involved become
+/// `<pod>`, UUIDs `<uuid>`, Go durations such as `40s` or `2m40s` (the kubelet's growing back-off)
+/// `<duration>`, hexadecimal runs of eight or more characters `<hex>` and every other run of
+/// digits `#`.
 pub fn normalize(message: &str, pod_names: &[&str]) -> String {
-    let mut text = message.to_owned();
+    let mut text = message
+        .strip_prefix(COMBINED_PREFIX)
+        .unwrap_or(message)
+        .to_owned();
     // Longest names first, so that a name that contains another is replaced whole.
     let mut names: Vec<&str> = pod_names
         .iter()
@@ -193,6 +202,36 @@ mod tests {
         assert_eq!(
             normalize("job-a and job-a-2", &["job-a", "job-a-2"]),
             "<pod> and <pod>"
+        );
+    }
+
+    #[test]
+    fn a_combined_event_has_the_fingerprint_of_a_single_one() {
+        // The kubelet writes each failure to create a sandbox as its own event, then folds them
+        // into one aggregated event; both are the same incident.
+        let note = |sandbox: &str| {
+            format!(
+                "Failed to create pod sandbox: rpc error: code = Unknown desc = unable to get OCI \
+                 runtime for sandbox \"{sandbox}\": no runtime for \"gvisor\" is configured"
+            )
+        };
+        let single = note(&"a1".repeat(32));
+        let combined = format!("(combined from similar events): {}", note(&"9f".repeat(32)));
+        let print = |message: &str| {
+            fingerprint(
+                "D010",
+                "shop",
+                "Deployment",
+                "api",
+                &normalize(message, &[]),
+            )
+        };
+        assert_eq!(normalize(&single, &[]), normalize(&combined, &[]));
+        assert_eq!(print(&single), print(&combined));
+        // Only a leading prefix is dropped.
+        assert_eq!(
+            normalize("x (combined from similar events): y", &[]),
+            "x (combined from similar events): y"
         );
     }
 

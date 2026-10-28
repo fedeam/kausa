@@ -24,6 +24,12 @@ pub enum Detection {
     VolumeFailure,
     /// `D008`: a Job failed.
     JobFailed,
+    /// `D009`: the kubelet evicted the Pod (its ephemeral-storage limit, an `emptyDir` size limit,
+    /// or node pressure).
+    PodEvicted,
+    /// `D010`: the runtime cannot create the Pod's sandbox (a missing `RuntimeClass` handler, or a
+    /// network plugin that fails to set up the Pod's network).
+    SandboxCreate,
 }
 
 impl Detection {
@@ -37,6 +43,8 @@ impl Detection {
             Detection::ProbeFailure => "D006",
             Detection::VolumeFailure => "D007",
             Detection::JobFailed => "D008",
+            Detection::PodEvicted => "D009",
+            Detection::SandboxCreate => "D010",
         }
     }
 
@@ -50,6 +58,8 @@ impl Detection {
             Detection::ProbeFailure => "probe failures",
             Detection::VolumeFailure => "volume cannot be attached or mounted",
             Detection::JobFailed => "job failed",
+            Detection::PodEvicted => "pod evicted",
+            Detection::SandboxCreate => "pod sandbox cannot be created",
         }
     }
 
@@ -60,7 +70,7 @@ impl Detection {
     }
 
     /// Whether the signal is a state that kausa reads from the Pod at every check (container
-    /// states, the Pod's scheduling condition), rather than an event.
+    /// states, the Pod's scheduling condition, its eviction), rather than an event.
     pub fn is_state(self) -> bool {
         matches!(
             self,
@@ -69,16 +79,34 @@ impl Detection {
                 | Detection::OutOfMemory
                 | Detection::ContainerCreate
                 | Detection::Unschedulable
+                | Detection::PodEvicted
         )
     }
 }
 
 /// Whether the Pod cannot be scheduled: still `Pending`, with its `PodScheduled` condition `False`
-/// for reason `Unschedulable`. The scheduler's `FailedScheduling` events say the same, but they
-/// may stop being updated for a Pod that keeps failing, while the condition holds as long as the
-/// failure: the condition is the signal.
+/// for reason `Unschedulable`, or `SchedulerError` when a scheduler plugin failed for the Pod (a
+/// volume the `VolumeBinding` plugin cannot bind in `PreBind`, seen on kind, Kubernetes 1.37, on
+/// 2026-10-28). A Pod held by its scheduling gates (`SchedulingGated`) waits on purpose. The
+/// scheduler's `FailedScheduling` events say the same, but they may stop being updated for a Pod
+/// that keeps failing, while the condition holds as long as the failure: the condition is the
+/// signal.
 pub fn detect_unschedulable(pod: &PodRecord) -> bool {
     pod.phase.as_deref() == Some("Pending") && pod.unschedulable.is_some()
+}
+
+/// Whether the kubelet evicted the Pod: phase `Failed` with `status.reason` `Evicted`. The kubelet
+/// writes the same reason when it refuses a new Pod on a node under pressure (a message starting
+/// with `Pod was rejected:`); that is a consequence of the node's state, not of the workload, and
+/// is not an eviction (seen on kind, Kubernetes 1.37, on 2026-10-28). How recent the eviction is,
+/// is checked against the clock in `collect_signals`.
+pub fn detect_evicted(pod: &PodRecord) -> bool {
+    pod.phase.as_deref() == Some("Failed")
+        && pod.reason.as_deref() == Some("Evicted")
+        && !pod
+            .message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Pod was rejected:"))
 }
 
 /// The detection that a container's state matches, if any. A container matches at most one: an
@@ -115,12 +143,29 @@ pub fn detect_container(container: &ContainerRecord) -> Option<Detection> {
     }
 }
 
+/// The detection that a container of `pod` matches, if any: `detect_container`, except that no
+/// container of a Pod in phase `Failed` is a crash loop. Such a Pod runs none of its containers
+/// again; a container that had restarted before the kubelet evicted the Pod or ended it at its
+/// `activeDeadlineSeconds` is left terminated (`Error`, exit code 137) after a restart, which is
+/// not a crash loop (seen on kind, Kubernetes 1.37, on 2026-10-28). An out-of-memory kill stays
+/// `D003`.
+pub fn detect_pod_container(pod: &PodRecord, container: &ContainerRecord) -> Option<Detection> {
+    match detect_container(container) {
+        Some(Detection::CrashLoop) if pod.phase.as_deref() == Some("Failed") => None,
+        detection => detection,
+    }
+}
+
 /// The detection that a Warning event matches, if any. Events about Pods and Jobs only; scheduling
 /// failures come from the Pod's condition instead (`detect_unschedulable`).
 pub fn detect_event(event: &EventRecord) -> Option<Detection> {
     match (event.regarding.kind.as_str(), event.reason.as_str()) {
         ("Pod", "Unhealthy") => Some(Detection::ProbeFailure),
         ("Pod", "FailedMount" | "FailedAttachVolume") => Some(Detection::VolumeFailure),
+        // The kubelet's event when the runtime cannot create the Pod's sandbox; the Pod waits in
+        // `ContainerCreating`, which is no failure state (seen on kind, Kubernetes 1.37, with a
+        // `RuntimeClass` whose handler the nodes lack, on 2026-10-28).
+        ("Pod", "FailedCreatePodSandBox") => Some(Detection::SandboxCreate),
         // The Job controller emits these as Warning events on the Job when it marks it failed
         // (pkg/controller/job/job_controller.go, checked on 2026-10-26).
         ("Job", "BackoffLimitExceeded" | "DeadlineExceeded") => Some(Detection::JobFailed),
@@ -131,6 +176,7 @@ pub fn detect_event(event: &EventRecord) -> Option<Detection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explain::reads_logs;
     use crate::record::Regarding;
 
     fn waiting(reason: &str) -> ContainerRecord {
@@ -171,12 +217,14 @@ mod tests {
             Detection::ProbeFailure,
             Detection::VolumeFailure,
             Detection::JobFailed,
+            Detection::PodEvicted,
+            Detection::SandboxCreate,
         ];
         let ids: Vec<_> = all.iter().map(|d| d.id()).collect();
         assert_eq!(
             ids,
             [
-                "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008"
+                "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008", "D009", "D010"
             ]
         );
     }
@@ -263,6 +311,80 @@ mod tests {
     }
 
     #[test]
+    fn no_container_of_a_failed_pod_is_a_crash_loop() {
+        let restarted = ContainerRecord {
+            terminated_reason: Some("Error".into()),
+            terminated_exit_code: Some(137),
+            restart_count: 1,
+            ..Default::default()
+        };
+        let pod = |phase: &str, containers: Vec<ContainerRecord>| PodRecord {
+            phase: Some(phase.into()),
+            containers,
+            ..Default::default()
+        };
+        let failed = pod(
+            "Failed",
+            vec![restarted.clone(), waiting("CrashLoopBackOff")],
+        );
+        for container in &failed.containers {
+            assert_eq!(detect_pod_container(&failed, container), None);
+        }
+        // The same states in a Pod that still runs, and an out-of-memory kill in a failed Pod.
+        let running = pod("Running", vec![restarted.clone()]);
+        assert_eq!(
+            detect_pod_container(&running, &running.containers[0]),
+            Some(Detection::CrashLoop)
+        );
+        let oom = ContainerRecord {
+            terminated_reason: Some("OOMKilled".into()),
+            ..restarted
+        };
+        assert_eq!(
+            detect_pod_container(&failed, &oom),
+            Some(Detection::OutOfMemory)
+        );
+    }
+
+    #[test]
+    fn an_evicted_pod_is_d009() {
+        let pod = |phase: &str, reason: &str, message: &str| PodRecord {
+            phase: Some(phase.into()),
+            reason: Some(reason.into()),
+            message: Some(message.into()),
+            ..Default::default()
+        };
+        for message in [
+            "Pod ephemeral local storage usage exceeds the total limit of containers 50Mi. ",
+            "Usage of EmptyDir volume \"scratch\" exceeds the limit \"20Mi\". ",
+            "The node was low on resource: ephemeral-storage. ",
+        ] {
+            assert!(
+                detect_evicted(&pod("Failed", "Evicted", message)),
+                "{message}"
+            );
+        }
+        // The kubelet refusing a new Pod on a node under pressure, a Pod past its deadline, and
+        // a Pod that has not failed (yet).
+        let rejected = "Pod was rejected: The node had condition: [DiskPressure]. ";
+        assert!(!detect_evicted(&pod("Failed", "Evicted", rejected)));
+        let deadline = "Pod was active on the node longer than the specified deadline";
+        assert!(!detect_evicted(&pod(
+            "Failed",
+            "DeadlineExceeded",
+            deadline
+        )));
+        assert!(!detect_evicted(&pod("Running", "Evicted", "")));
+        assert!(!detect_evicted(&PodRecord {
+            phase: Some("Failed".into()),
+            ..Default::default()
+        }));
+        assert!(Detection::PodEvicted.is_state());
+        assert!(Detection::PodEvicted.settles());
+        assert!(!reads_logs(Detection::PodEvicted));
+    }
+
+    #[test]
     fn events() {
         assert_eq!(
             detect_event(&event("Pod", "Unhealthy")),
@@ -290,5 +412,24 @@ mod tests {
         assert_eq!(detect_event(&event("Pod", "FailedScheduling")), None);
         assert_eq!(detect_event(&event("Node", "FailedMount")), None);
         assert_eq!(detect_event(&event("Deployment", "FailedCreate")), None);
+    }
+
+    #[test]
+    fn a_sandbox_that_cannot_be_created_is_d010() {
+        // The kubelet's Warning event when the runtime cannot create the Pod's sandbox (a missing
+        // RuntimeClass handler on kind; CNI failures give the same reason).
+        let detection = detect_event(&event("Pod", "FailedCreatePodSandBox"));
+        assert_eq!(detection.map(Detection::id), Some("D010"));
+        let detection = detection.expect("a detection");
+        // An event, settled like D006 and D007, and no log to read: no container ran.
+        assert!(detection.settles());
+        assert!(!detection.is_state());
+        assert!(!reads_logs(detection));
+        // Only about a Pod.
+        assert_eq!(detect_event(&event("Node", "FailedCreatePodSandBox")), None);
+        assert_eq!(
+            detect_event(&event("Deployment", "FailedCreatePodSandBox")),
+            None
+        );
     }
 }
