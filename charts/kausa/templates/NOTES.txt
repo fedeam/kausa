@@ -1,10 +1,31 @@
+{{- $rbac := .Values.rbac | default dict }}
+{{- $scope := $rbac.scope | default "" | toString }}
+{{- $namespaces := $rbac.namespaces | default list }}
+{{- $readsLogs := and .Values.logs (include "kausa.explains" .) }}
+{{- if eq $scope "namespaced" -}}
+Scope: namespaced (rbac.scope=namespaced). kausa watches only these namespaces, and can read
+Pods{{ if $readsLogs }}, Events and container logs{{ else }} and Events{{ end }} in them and nowhere else:
+{{ range $namespaces }}
+  {{ . }}
+{{- end }}
+{{- else -}}
+Scope: cluster (rbac.scope=cluster). kausa can read Pods and Events in every namespace of the
+cluster{{ if $readsLogs }}, and container logs too{{ end }}.
+{{- end }}
+
 kausa is running in {{ .Release.Namespace }}.
 {{- if include "kausa.writesEvents" . }}
 
 Its explanations are Events on the failing workloads, for example:
 
   kubectl describe deployment -n <namespace> <name>
+{{- if eq $scope "namespaced" }}
+{{- range $namespaces }}
+  kubectl get events.events.k8s.io -n {{ . }} --field-selector reportingController=kausa
+{{- end }}
+{{- else }}
   kubectl get events.events.k8s.io -A --field-selector reportingController=kausa
+{{- end }}
 {{- else if .Values.dryRun }}
 
 Dry-run: kausa logs the redacted request of each incident and sends nothing:
@@ -16,3 +37,6 @@ kausa logs incidents (no endpoint is configured, or events is false):
 
   kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "kausa.fullname" . }}
 {{- end }}
+
+rbac.scope must be set on every helm upgrade: keep it in a values file, or upgrade with
+--reuse-values. An upgrade without it fails.
