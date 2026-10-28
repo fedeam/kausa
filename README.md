@@ -63,7 +63,7 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 ```sh
 kind create cluster --name kausa-try
 helm install kausa https://github.com/fedeam/kausa/releases/download/v0.1.0/kausa-0.1.0.tgz \
-  -n kausa --create-namespace --set dryRun=true
+  -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
 kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.1.0 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
@@ -181,7 +181,8 @@ model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front 
 To run it in a cluster, install the released chart, which uses the published image: [Install
 kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build the image
 (`docker build --target runtime -t <registry>/kausa:<tag> .`), push it, and install the chart with
-`--set image.repository=<registry>/kausa --set image.tag=<tag>`.
+`--set rbac.scope=cluster --set image.repository=<registry>/kausa --set image.tag=<tag>`
+(`rbac.scope` is required; `namespaced` with `rbac.namespaces` limits kausa to those namespaces).
 
 ## Roadmap
 
@@ -191,8 +192,11 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   Events; the image, the Helm chart and the kind test; a measurement on a Raspberry Pi 4 and a
   token comparison with k8sgpt.
 - **Next:** a test against a hosted provider.
-- **v0.2:** longer explanations and history in a custom resource, and a namespaced install mode
-  (v0.1 installs cluster-wide only).
+- **v0.2:** a namespaced install mode, in the code and the chart, not released yet: `kausa run
+  --namespace` and the chart's `rbac.scope=namespaced`, with a Role per listed namespace and
+  nothing cluster-wide ([0013. Offer a namespaced install mode: one watch pair and one Role per
+  listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)); then
+  longer explanations and history in a custom resource, and notifications.
 
 ## Documentation
 
