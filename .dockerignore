@@ -9,6 +9,10 @@
 !charts/
 !src/
 !tests/
+# The license texts, which tests/licenses.rs compares.
+!LICENSE-MIT
+!LICENSE-APACHE
+!LICENSES/
 # The fuzz targets and the image ClusterFuzzLite builds them in (.clusterfuzzlite/Dockerfile
 # uses this same context).
 !fuzz/
