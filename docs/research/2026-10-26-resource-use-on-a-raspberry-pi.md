@@ -44,12 +44,17 @@ Measured on 2026-10-26, once, on one cluster: a first data point, not a benchmar
   resourceVersion for the provided watch is too old` (expected; the watcher lists again) and 15
   times with `Internal error occurred: etcd event received with PrevKv=nil`, about Events of other
   namespaces. kausa logs each one as `event watch error` and the watcher retries with backoff; no
-  incident was missed. Why the API server sends that error for kausa's field-selected watch on
-  this k3s cluster is not known yet (a hypothesis: Events that expire or are deleted while a
-  watch with a field selector is open). Whether each restart also costs a new list of the
-  Warning events or only a new watch from the last resource version was not checked; an audit on
-  2026-10-27 judged the second more likely, on the reading that kube-rs re-lists after `Expired`
-  and not after other errors (not verified). Since 2026-10-27 the restarts are counted in `kausa_watch_errors_total`.
+  incident was missed. Since 2026-10-27 the restarts are counted in `kausa_watch_errors_total`.
+- **The cause, found on 2026-10-28** (the issue "Event watch restarts with PrevKv=nil on k3s"):
+  the API server raises that error when a watch receives a non-create event, such as a deletion,
+  without its previous value, which happens once that value has been compacted. Events are the one
+  resource whose watch cache kube-apiserver disables by default, so their watch is served straight
+  from the storage, here kine on SQLite, and passes the error on. That kine's compaction of the
+  Events the one-hour TTL deletes is what triggers it is a hypothesis, not reproduced with real
+  etcd. It costs kausa a log line only: kube-runtime 4.2.0's watcher keeps its resource version on
+  an error other than `410` and does not re-list (only the two `Expired` errors re-listed), and
+  the lost deletion only leaves a stale Event record until kausa prunes it, 10 minutes after it
+  last happened.
 
 ## Limits
 
