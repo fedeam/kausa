@@ -20,6 +20,9 @@ GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes
 ([2026-10-26 — GitHub repository and first CI
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). GitHub Actions run since the repository became
 public, on 2026-10-27: the checks, both images and the kind test passed on their first run.
+The namespaced install mode of v0.2 (`kausa run --namespace`, the chart's required `rbac.scope`)
+is in the code, not in a release yet; the kind test passed in both scopes on 2026-10-28
+([2026-10-28 — Namespaced install mode](journal/2026-10-28-namespaced-install-mode.md)).
 
 ## Key facts
 
@@ -77,7 +80,8 @@ checks](how-to/develop.md).
   k8sgpt](research/2026-10-26-tokens-compared-with-k8sgpt.md): the same five failures, the same
   model, calls and tokens counted; [Memory and CPU on a Raspberry Pi
   4](research/2026-10-26-resource-use-on-a-raspberry-pi.md); [Thousands of
-  Pods](research/2026-10-28-thousands-of-pods.md).
+  Pods](research/2026-10-28-thousands-of-pods.md); [Thirty-two
+  namespaces](research/2026-10-28-32-namespaces.md).
 - [ARCHITECTURE.md](../ARCHITECTURE.md): the map of the code, its invariants and the path of each
   kind of change.
 - [Architecture](explanation/architecture.md): the planned pipeline, the model call, cost
@@ -106,4 +110,5 @@ checks](how-to/develop.md).
   runs](journal/2026-10-26-github-repository-and-first-ci.md): the first push and CI runs;
   [2026-10-27 — First run of the kind test](journal/2026-10-27-first-kind-run.md);
   [2026-10-27 — Publication](journal/2026-10-27-publication.md);
-  [2026-10-28 — First release](journal/2026-10-28-first-release.md).
+  [2026-10-28 — First release](journal/2026-10-28-first-release.md);
+  [2026-10-28 — Namespaced install mode](journal/2026-10-28-namespaced-install-mode.md).
