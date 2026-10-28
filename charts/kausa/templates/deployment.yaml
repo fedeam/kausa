@@ -1,3 +1,7 @@
+{{- /* rbac is read nil-safe, as in kausa.validate: rbac.yaml refuses a missing scope first. */}}
+{{- $rbac := .Values.rbac | default dict }}
+{{- $scope := $rbac.scope | default "" | toString }}
+{{- $namespaces := $rbac.namespaces | default list }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -48,6 +52,12 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - run
+            {{- if eq $scope "namespaced" }}
+            {{- range $namespaces }}
+            - --namespace
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
             - --settle-seconds
             - {{ int .Values.settleSeconds | quote }}
             {{- with .Values.model.endpoint }}

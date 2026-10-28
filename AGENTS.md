@@ -101,7 +101,7 @@ gitleaks git --redact .
 cargo fmt --all -- --check
 cargo deny --locked check
 cargo audit
-helm lint --strict charts/kausa
+helm lint --strict charts/kausa --set rbac.scope=cluster
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 docker build --target ci .

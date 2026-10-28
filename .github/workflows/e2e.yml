@@ -1,7 +1,9 @@
 name: e2e
 
 # The end-to-end test (tests/e2e/run.sh): kausa's image and Helm chart in a kind cluster, against a
-# fake model endpoint, with seeded failures. Its kind check gates pull requests, like ci.yml's.
+# fake model endpoint, with seeded failures. It runs once per chart rbac.scope
+# (docs/adr/0013-namespaced-install-mode.md), as the checks "kind (cluster)" and
+# "kind (namespaced)"; both gate pull requests, like ci.yml's.
 on:
   push:
     branches: [main]
@@ -16,9 +18,17 @@ concurrency:
 
 jobs:
   kind:
+    name: kind (${{ matrix.scope }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      # Each scope reports on its own: a failure in one does not cancel the other.
+      fail-fast: false
+      matrix:
+        scope: [cluster, namespaced]
     env:
+      # tests/e2e/run.sh installs the chart with this rbac.scope.
+      KAUSA_E2E_SCOPE: ${{ matrix.scope }}
       # Pinned tools, each checked against a SHA-256 before it is installed; bumped by hand, like
       # the Dockerfile's (docs/how-to/maintain.md). kind: the checksums published next to each
       # binary in https://github.com/kubernetes-sigs/kind/releases. helm: the same version and

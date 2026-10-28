@@ -44,7 +44,76 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- if and .Values.model.endpoint .Values.events (not .Values.dryRun) }}true{{ end }}
 {{- end }}
 
+{{/*
+The rules of the ClusterRole (rbac.scope=cluster) and of every Role (rbac.scope=namespaced): the
+permissions in docs/reference/permissions.md, and nothing else. A later feature adds its rules
+only here, so that both scopes grant the same.
+*/}}
+{{- define "kausa.rules" -}}
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+{{- if and .Values.logs (include "kausa.explains" .) }}
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+{{- end }}
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["list", "watch"]
+{{- if include "kausa.writesEvents" . }}
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+{{- end }}
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["get"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get"]
+{{- end }}
+
+{{/*
+Refuses to render with a reason. The rbac checks come first, in this order: the scope, the list
+against the scope, every name, the first repeat, and the count. rbac is read nil-safe: a v0.1
+release's stored values and --set rbac=null have no rbac map, and must reach the "not set"
+message, not a nil-pointer error.
+*/}}
 {{- define "kausa.validate" -}}
+{{- $rbac := .Values.rbac | default dict }}
+{{- $scope := $rbac.scope | default "" | toString }}
+{{- $namespaces := $rbac.namespaces | default list }}
+{{- $max := 32 }}
+{{- if not $scope }}
+{{- fail "rbac.scope is not set: set rbac.scope=cluster to let kausa read every namespace, or rbac.scope=namespaced with rbac.namespaces" }}
+{{- end }}
+{{- if not (has $scope (list "cluster" "namespaced")) }}
+{{- fail (printf "rbac.scope must be cluster or namespaced, not '%s'" $scope) }}
+{{- end }}
+{{- if and (eq $scope "namespaced") (not $namespaces) }}
+{{- fail "rbac.scope=namespaced needs rbac.namespaces: the namespaces kausa may read" }}
+{{- end }}
+{{- if and (eq $scope "cluster") $namespaces }}
+{{- fail "rbac.namespaces is set but rbac.scope is cluster, which grants every namespace: set rbac.scope=namespaced" }}
+{{- end }}
+{{- range $namespaces }}
+{{- $name := toString . }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $name) }}
+{{- fail (printf "rbac.namespaces: '%s' is not a namespace name (lowercase letters, digits and '-', at most 63 characters)" $name) }}
+{{- end }}
+{{- end }}
+{{- $seen := dict }}
+{{- range $namespaces }}
+{{- $name := toString . }}
+{{- if hasKey $seen $name }}
+{{- fail (printf "rbac.namespaces: '%s' is listed twice" $name) }}
+{{- end }}
+{{- $_ := set $seen $name true }}
+{{- end }}
+{{- if gt (len $namespaces) $max }}
+{{- fail (printf "rbac.namespaces lists %d namespaces; kausa watches at most %d (use rbac.scope=cluster instead)" (len $namespaces) $max) }}
+{{- end }}
 {{- if and .Values.model.endpoint (not .Values.model.name) }}
 {{- fail "model.name is required with model.endpoint" }}
 {{- end }}

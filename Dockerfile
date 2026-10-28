@@ -160,17 +160,74 @@ RUN cargo fmt --all -- --check
 RUN cargo deny --locked check
 RUN cargo audit
 # The chart: lint, then render it with the values that change which templates and rules appear
-# (docs/reference/helm-chart.md). Rendering runs no code from the chart's values.
-RUN helm lint --strict charts/kausa
+# (docs/reference/helm-chart.md). Rendering runs no code from the chart's values. rbac.scope has no
+# default (docs/adr/0013-namespaced-install-mode.md), so every lint and render sets it.
+RUN helm lint --strict charts/kausa --set rbac.scope=cluster
+# Cluster scope: v0.1's value sets. The default render keeps the ClusterRole and its binding and
+# passes no --namespace.
 RUN set -eu; \
     for values in \
-      "" \
-      "--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k" \
-      "--set dryRun=true --set logs=false --set metrics.enabled=false" \
-      "--set model.endpoint=http://m.example.svc:11434/v1 --set model.name=m --set model.allowHttp=true --set events=false --set networkPolicy.enabled=true --set networkPolicy.apiServer.cidrs[0]=192.0.2.1/32 --set networkPolicy.endpoint.to[0].ipBlock.cidr=192.0.2.2/32"; \
+      "--set rbac.scope=cluster" \
+      "--set rbac.scope=cluster --set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k" \
+      "--set rbac.scope=cluster --set dryRun=true --set logs=false --set metrics.enabled=false" \
+      "--set rbac.scope=cluster --set model.endpoint=http://m.example.svc:11434/v1 --set model.name=m --set model.allowHttp=true --set events=false --set networkPolicy.enabled=true --set networkPolicy.apiServer.cidrs[0]=192.0.2.1/32 --set networkPolicy.endpoint.to[0].ipBlock.cidr=192.0.2.2/32"; \
     do \
       helm template kausa charts/kausa --kube-version 1.36.0 $values > /dev/null; \
+    done; \
+    out=$(helm template kausa charts/kausa --kube-version 1.36.0 --set rbac.scope=cluster); \
+    for kind in ClusterRole ClusterRoleBinding; do \
+      [ "$(printf '%s\n' "$out" | grep -cx "kind: $kind")" -eq 1 ] \
+        || { echo "rbac.scope=cluster: not exactly one $kind" >&2; exit 1; }; \
+    done; \
+    if printf '%s\n' "$out" | grep -qx ' *- --namespace'; then \
+      echo "rbac.scope=cluster: passes --namespace" >&2; exit 1; \
+    fi
+# Namespaced scope, two namespaces: nothing cluster-scoped, one Role and one RoleBinding in each,
+# and one --namespace per namespace.
+RUN set -eu; \
+    for values in \
+      "--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k" \
+      "--set dryRun=true --set logs=false"; \
+    do \
+      out=$(helm template kausa charts/kausa --kube-version 1.36.0 --set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a,e2e-b}' $values); \
+      if printf '%s\n' "$out" | grep -q '^kind: Cluster'; then \
+        echo "rbac.scope=namespaced $values: renders a cluster-scoped kind" >&2; exit 1; \
+      fi; \
+      for kind in Role RoleBinding; do \
+        [ "$(printf '%s\n' "$out" | grep -cx "kind: $kind")" -eq 2 ] \
+          || { echo "rbac.scope=namespaced $values: not exactly 2 ${kind}s" >&2; exit 1; }; \
+      done; \
+      [ "$(printf '%s\n' "$out" | grep -cx ' *- --namespace')" -eq 2 ] \
+        || { echo "rbac.scope=namespaced $values: not exactly 2 --namespace args" >&2; exit 1; }; \
     done
+# The refusals of kausa.validate: helm template fails with the exact message. The default values
+# and rbac=null (a v0.1 release's stored values have no rbac map) must reach the rbac.scope message,
+# never a nil-pointer error.
+RUN set -eu; \
+    long=$(printf '%064d' 0 | tr 0 a); \
+    names33=$(seq -f 'n%g' 1 33 | paste -sd, -); \
+    not_set='rbac.scope is not set: set rbac.scope=cluster to let kausa read every namespace, or rbac.scope=namespaced with rbac.namespaces'; \
+    not_a_name="is not a namespace name (lowercase letters, digits and '-', at most 63 characters)"; \
+    refuse() { \
+      message=$1; shift; \
+      if helm template kausa charts/kausa --kube-version 1.36.0 "$@" > /dev/null 2> /tmp/refusal; then \
+        echo "renders with $*; expected: $message" >&2; exit 1; \
+      fi; \
+      if grep -qi 'nil pointer' /tmp/refusal || ! grep -qF -- "$message" /tmp/refusal; then \
+        echo "with $*: expected '$message', got:" >&2; cat /tmp/refusal >&2; exit 1; \
+      fi; \
+    }; \
+    refuse "$not_set"; \
+    refuse "$not_set" --set rbac=null; \
+    refuse "rbac.scope must be cluster or namespaced, not 'all'" --set rbac.scope=all; \
+    refuse "rbac.scope=namespaced needs rbac.namespaces: the namespaces kausa may read" --set rbac.scope=namespaced; \
+    refuse "rbac.namespaces is set but rbac.scope is cluster, which grants every namespace: set rbac.scope=namespaced" --set rbac.scope=cluster --set 'rbac.namespaces={a}'; \
+    refuse "rbac.namespaces: 'Shop' $not_a_name" --set rbac.scope=namespaced --set 'rbac.namespaces={Shop}'; \
+    refuse "rbac.namespaces: '$long' $not_a_name" --set rbac.scope=namespaced --set "rbac.namespaces={$long}"; \
+    refuse "rbac.namespaces: '-a' $not_a_name" --set rbac.scope=namespaced --set 'rbac.namespaces={-a}'; \
+    refuse "rbac.namespaces: 'a' is listed twice" --set rbac.scope=namespaced --set 'rbac.namespaces={a,a}'; \
+    refuse "rbac.namespaces lists 33 namespaces; kausa watches at most 32 (use rbac.scope=cluster instead)" --set rbac.scope=namespaced --set "rbac.namespaces={$names33}"; \
+    rm -f /tmp/refusal
 RUN cargo clippy --locked --all-targets --all-features -- -D warnings
 RUN cargo test --locked --all-features
 

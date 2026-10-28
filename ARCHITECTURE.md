@@ -99,9 +99,9 @@ feature that is not a rule starts with an issue and an ADR.
 - **Anything sent to the model** → an ADR first; then `context.rs`, [Data sent to the
   provider](docs/reference/data-sent-to-the-provider.md) and [SECURITY.md](SECURITY.md) in the
   same change.
-- **A new permission** → an ADR first; then `charts/kausa/templates/clusterrole.yaml`,
-  [Permissions](docs/reference/permissions.md), the `kubectl auth can-i` lists in
-  `tests/e2e/run.sh` and [SECURITY.md](SECURITY.md).
+- **A new permission** → an ADR first; then `kausa.rules` in
+  `charts/kausa/templates/_helpers.tpl` (both scopes), [Permissions](docs/reference/permissions.md),
+  the `kubectl auth can-i` lists in `tests/e2e/run.sh` and [SECURITY.md](SECURITY.md).
 - **The chart** → [Helm chart](docs/reference/helm-chart.md), and `tests/e2e/run.sh` if what it
   installs changes.
 - **A dependency** → its reason in the pull request, and `cargo deny --locked check` green.
