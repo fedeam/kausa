@@ -1,0 +1,67 @@
+{{- include "kausa.validate" . }}
+{{- /*
+The permissions in docs/reference/permissions.md, and nothing else: no Secrets, no ConfigMaps, no
+wildcards, and no write but create and patch on Events (only when kausa writes them). rbac.scope
+picks where they are granted (docs/adr/0013-namespaced-install-mode.md): cluster, a ClusterRole
+and a ClusterRoleBinding; namespaced, a Role and a RoleBinding in each listed namespace, nothing
+cluster-scoped, and no Namespace (each must exist before helm install).
+*/}}
+{{- $rbac := .Values.rbac | default dict }}
+{{- $scope := $rbac.scope | default "" | toString }}
+{{- $namespaces := $rbac.namespaces | default list }}
+{{- if eq $scope "cluster" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kausa.fullname" . }}
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+rules:
+  {{- include "kausa.rules" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kausa.fullname" . }}
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kausa.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kausa.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- else if eq $scope "namespaced" }}
+{{- range $i, $namespace := $namespaces }}
+{{- if $i }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kausa.fullname" $ }}
+  namespace: {{ $namespace | toString | quote }}
+  labels:
+    {{- include "kausa.labels" $ | nindent 4 }}
+rules:
+  {{- include "kausa.rules" $ | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kausa.fullname" $ }}
+  namespace: {{ $namespace | toString | quote }}
+  labels:
+    {{- include "kausa.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kausa.fullname" $ }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kausa.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
