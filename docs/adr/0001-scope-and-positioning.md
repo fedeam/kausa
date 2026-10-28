@@ -114,3 +114,9 @@ Telegram](0015-notifications.md) brings one-way notifications into scope: kausa 
 explanation to one optional webhook, the only network call besides the Kubernetes API and the LLM
 endpoint. A user interface and interactive chat (a bot that reads replies or commands) stay out of
 scope.
+
+Update 2026-10-28: v0.2.0 shipped a security fix and new detection rules, so the custom resource
+and the namespaced install mode of the v0.2 row move to v0.3, together with the notifications:
+[0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace, and
+nothing cluster-wide](0013-namespaced-install-mode.md) and [0014. Keep each incident's full
+explanations in a namespaced Explanation resource, off by default](0014-explanation-history.md).

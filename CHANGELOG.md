@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A namespaced install mode ([0013. Offer a namespaced install mode: one watch pair and one Role
+  per listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)):
+  `kausa run --namespace <NAME>`, repeatable up to 32 times, watches only those namespaces, with
+  one Pod watch and one event watch each; the chart's `rbac.scope=namespaced` with
+  `rbac.namespaces` grants a Role and a RoleBinding in each listed namespace, passes the same list
+  as `--namespace`, and creates nothing cluster-scoped. The `started` log line names the watched
+  namespaces (`namespaces`, or `null` for the whole cluster), and `pod watch error` and
+  `event watch error` name the namespace of the failing watch (`namespace`).
+
+### Changed
+
+- **The chart's `rbac.scope` is required** (`cluster` or `namespaced`, no default): every
+  `helm install` sets it, and so does the first `helm upgrade` of a release installed with an
+  earlier chart (v0.2.0 or v0.1.0), `--reuse-values` included, since its stored values have
+  none. `--set rbac.scope=cluster` keeps the ClusterRole and the whole-cluster watch. Without it,
+  or with an invalid list, the chart refuses to render and Helm changes nothing, so a values
+  reset can no longer widen a namespaced install to the whole cluster.
+- `/readyz` answers `200` once every watch has listed: the two of the whole cluster, or the two of
+  each watched namespace. A watch refused with `403` drops the records it had brought in, and its
+  namespace's records only.
+- The chart's `templates/clusterrole.yaml` became `templates/rbac.yaml`, and its rules moved to the
+  `kausa.rules` helper, which the ClusterRole and every Role render.
+
+## [0.2.0] - 2026-10-28
+
+A security fix for Events about objects in another namespace, two new detection rules (`D009`,
+`D010`), fixes to `D001` and `D005`, and the build provenance of the chart as a release asset.
+
+### Added
+
 - Each release also attaches `kausa-X.Y.Z.intoto.jsonl`, the SLSA build provenance of the chart and
   `SHA256SUMS`, which `gh attestation verify --bundle` checks.
 - `D009`, pod evicted: a Pod the kubelet evicted in the last 10 minutes (its `ephemeral-storage`
@@ -21,31 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a Pod (a `RuntimeClass` handler the nodes do not have, for example), settled like `D006` and
   `D007` and grouped by the Pod's owner, without reading logs. Such a Pod waits in
   `ContainerCreating` and was no incident before.
-- A namespaced install mode ([0013. Offer a namespaced install mode: one watch pair and one Role
-  per listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)):
-  `kausa run --namespace <NAME>`, repeatable up to 32 times, watches only those namespaces, with
-  one Pod watch and one event watch each; the chart's `rbac.scope=namespaced` with
-  `rbac.namespaces` grants a Role and a RoleBinding in each listed namespace, passes the same list
-  as `--namespace`, and creates nothing cluster-scoped. The `started` log line names the watched
-  namespaces (`namespaces`, or `null` for the whole cluster), and `pod watch error` and
-  `event watch error` name the namespace of the failing watch (`namespace`).
 
 ### Changed
 
 - `D005`, pod cannot be scheduled, also matches a Pending Pod whose `PodScheduled` condition is
   `False` with reason `SchedulerError` (for example a volume the scheduler cannot bind), which
   was no incident before; the incident's reason is the condition's own.
-- **The chart's `rbac.scope` is required** (`cluster` or `namespaced`, no default): every
-  `helm install` sets it, and so does the first `helm upgrade` from v0.1, `--reuse-values`
-  included, since v0.1's stored values have none. `--set rbac.scope=cluster` keeps v0.1's
-  ClusterRole and whole-cluster watch. Without it, or with an invalid list, the chart refuses to
-  render and Helm changes nothing, so a values reset can no longer widen a namespaced install to
-  the whole cluster.
-- `/readyz` answers `200` once every watch has listed: the two of the whole cluster, or the two of
-  each watched namespace. A watch refused with `403` drops the records it had brought in, and its
-  namespace's records only.
-- The chart's `templates/clusterrole.yaml` became `templates/rbac.yaml`, and its rules moved to the
-  `kausa.rules` helper, which the ClusterRole and every Role render.
 
 ### Fixed
 
@@ -100,5 +111,6 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/fedeam/kausa/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fedeam/kausa/releases/tag/v0.1.0

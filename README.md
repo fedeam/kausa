@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The first release, [v0.1.0](https://github.com/fedeam/kausa/releases/tag/v0.1.0),
+> Event on the failing workload. The latest release, [v0.2.0](https://github.com/fedeam/kausa/releases/tag/v0.2.0),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,9 +62,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa https://github.com/fedeam/kausa/releases/download/v0.1.0/kausa-0.1.0.tgz \
+helm install kausa https://github.com/fedeam/kausa/releases/download/v0.2.0/kausa-0.2.0.tgz \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.1.0 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.2.0 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -137,7 +137,7 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.1.0 is released (2026-10-28): `kausa run` watches Pods and Warning
+Pre-alpha. v0.2.0 is released (2026-10-28): `kausa run` watches Pods and Warning
 events, groups failures by workload, builds a redacted context with the failed container's log,
 asks the model within a call budget (or logs the request with `--dry-run`), reuses explanations
 of repeated incidents, writes each explanation as an Event on the failing workload, and serves
@@ -191,12 +191,16 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   prompt, the OpenAI-compatible client and dry-run; the budget, deduplication, metrics and
   Events; the image, the Helm chart and the kind test; a measurement on a Raspberry Pi 4 and a
   token comparison with k8sgpt.
+- **v0.2** (released as v0.2.0 on 2026-10-28): a security fix for Events about objects in
+  another namespace, the detection rules `D009` (pod evicted) and `D010` (pod sandbox), and fixes
+  to `D001` and `D005`.
 - **Next:** a test against a hosted provider.
-- **v0.2:** a namespaced install mode, in the code and the chart, not released yet: `kausa run
+- **v0.3:** a namespaced install mode, in the code and the chart, not released yet: `kausa run
   --namespace` and the chart's `rbac.scope=namespaced`, with a Role per listed namespace and
   nothing cluster-wide ([0013. Offer a namespaced install mode: one watch pair and one Role per
   listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)); then
-  longer explanations and history in a custom resource, and notifications.
+  the history of explanations in a custom resource, and notifications to one webhook ([ADRs 0013
+  to 0015](docs/adr/)).
 
 ## Documentation
 

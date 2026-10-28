@@ -30,7 +30,7 @@ cluster-wide](../adr/0013-namespaced-install-mode.md)).
    image's signature and provenance and the chart's checksum with cosign and the GitHub CLI.
 
    ```sh
-   CHART=https://github.com/fedeam/kausa/releases/download/v0.1.0/kausa-0.1.0.tgz
+   CHART=https://github.com/fedeam/kausa/releases/download/v0.2.0/kausa-0.2.0.tgz
    ```
 
 2. **Create the namespace and, for a hosted endpoint, the API key's Secret.** kausa never reads it
