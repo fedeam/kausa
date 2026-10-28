@@ -64,6 +64,11 @@ incident key and in `regarding` from the reference alone (apiVersion, kind, name
 reading the object. A container matches at most one detection, the most specific one: `D003`
 takes precedence over `D001` when the last termination is `OOMKilled`, before grouping.
 
+**Which Events count.** A Warning Event counts only when its own `metadata.namespace` is non-empty
+and equal to `regarding.namespace`, compared exactly (case-sensitive, no trimming). Events about
+cluster-scoped objects (a Node, whose `regarding` has no namespace) and Events about an object in
+another namespace are ignored: they match no detection and join no incident.
+
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
 that stays the same for the same failure: the example's message with the names of the incident's
 Pods, UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
