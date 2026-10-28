@@ -102,7 +102,9 @@ node gives one incident per workload on it, which the call budget bounds. Seen o
 1.37) on 2026-10-28.
 
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
-that stays the same for the same failure: the example's message with the names of the incident's
+that stays the same for the same failure: the example's message without the prefix
+`(combined from similar events): ` of an aggregated event (so that the kubelet's first `D010`
+events and the event that folds them have one fingerprint), with the names of the incident's
 Pods, UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
 and other numbers normalized; for `D002`, whose message alternates between `ErrImagePull` and
 `ImagePullBackOff`, the image reference instead. It is computed before redaction and never sent;
