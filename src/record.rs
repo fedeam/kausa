@@ -618,19 +618,54 @@ mod tests {
     }
 
     #[test]
+    fn the_namespaces_are_compared_exactly() {
+        for namespace in ["Shop", "SHOP", " shop", "shop ", " shop ", "shop\n"] {
+            let mut event = backoff_event();
+            event.metadata.namespace = Some(namespace.into());
+            assert_eq!(
+                EventRecord::from_event(&event),
+                None,
+                "event in {namespace:?}"
+            );
+
+            let mut event = backoff_event();
+            event
+                .regarding
+                .as_mut()
+                .expect("a regarding object")
+                .namespace = Some(namespace.into());
+            assert_eq!(
+                EventRecord::from_event(&event),
+                None,
+                "object in {namespace:?}"
+            );
+        }
+    }
+
+    #[test]
     fn an_event_about_a_cluster_scoped_object_is_skipped() {
-        let mut event = backoff_event();
-        event.metadata.namespace = Some("default".into());
-        let regarding = event.regarding.as_mut().expect("a regarding object");
-        regarding.kind = Some("Node".into());
-        regarding.namespace = None;
-        assert_eq!(EventRecord::from_event(&event), None);
-        event
-            .regarding
-            .as_mut()
-            .expect("a regarding object")
-            .namespace = Some(String::new());
-        assert_eq!(EventRecord::from_event(&event), None);
+        fn node_event(event_namespace: &str, object_namespace: Option<&str>) -> Event {
+            let mut event = backoff_event();
+            event.metadata.namespace = Some(event_namespace.into());
+            let regarding = event.regarding.as_mut().expect("a regarding object");
+            regarding.kind = Some("Node".into());
+            regarding.namespace = object_namespace.map(Into::into);
+            event
+        }
+
+        // No namespace on the object: dropped by the parsing of `regarding` too.
+        assert_eq!(EventRecord::from_event(&node_event("default", None)), None);
+        // An empty one parses; only the comparison with the event's namespace drops it.
+        assert_eq!(
+            EventRecord::from_event(&node_event("default", Some(""))),
+            None
+        );
+        // Both empty compare equal; only the check for a non-empty namespace drops it.
+        assert_eq!(EventRecord::from_event(&node_event("", Some(""))), None);
+        // The kind plays no part: the same event about an object in its namespace is kept.
+        let record = EventRecord::from_event(&node_event("default", Some("default")))
+            .expect("an event in the namespace of its object");
+        assert_eq!(record.regarding.kind, "Node");
     }
 
     #[test]
