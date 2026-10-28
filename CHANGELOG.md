@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
+A security fix for Events about objects in another namespace, two new detection rules (`D009`,
+`D010`), fixes to `D001` and `D005`, and the build provenance of the chart as a release asset.
+
 ### Added
 
 - Each release also attaches `kausa-X.Y.Z.intoto.jsonl`, the SLSA build provenance of the chart and
@@ -81,5 +86,6 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/fedeam/kausa/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fedeam/kausa/releases/tag/v0.1.0

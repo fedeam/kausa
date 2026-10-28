@@ -52,3 +52,16 @@ was published.
   people. Branch-Protection stays at 8: to go higher it needs two required approvals, which one
   maintainer can't give. Maintained counts from 90 days after the repository was created. SAST and
   CI-Tests rise as the commits made before CodeQL and CI leave the window they look at.
+
+## Later the same day: v0.2.0
+
+- The v0.2 design ran as teams of agents (designers, judges, a lead, QA, security and a standards
+  guardian per feature). The ADRs 0013 to 0016 were accepted, and the detection changes merged in
+  pull request #37.
+- Designing the namespaced mode found that the API server accepts an `events.k8s.io/v1` Event
+  whose `regarding` object is in another namespace (checked in kind, Kubernetes v1.37; the core
+  v1 API refuses it). kausa now ignores such Events (pull request #38).
+- main already carried new detection rules, so the fix goes out as v0.2.0 rather than a patch
+  release, as Semantic Versioning asks; the namespaced mode, the history and the notifications
+  move to v0.3.
+
