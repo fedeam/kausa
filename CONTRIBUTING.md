@@ -110,14 +110,11 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
   title before merging.
 - **The description** says why the change is needed: it becomes the body of the commit.
 - **One logical change per pull request.**
-- **CI.** For every pull request, the `CI` workflow on GitHub Actions runs
-  `docker build --target ci .` on linux/amd64, and its `ci` check has to pass before merging.
-  Status as of 2026-10-23: GitHub Actions do not start jobs for this repository yet, so run the
-  checks yourself ([Build and test](#build-and-test)). The maintainer also builds your pull
-  request before merging, after reading it and in a clean clone ([Maintain the
-  repository](docs/how-to/maintain.md#review-and-merge-a-pull-request)); a pull request that
-  changes the `Dockerfile`, `.dockerignore`, `rust-toolchain.toml`, a build script (`build.rs` or
-  the `build` key in `Cargo.toml`) or a workflow waits for GitHub Actions instead.
+- **CI.** For every pull request, GitHub Actions run the checks of `docker build --target ci .`
+  on linux/amd64, build the image on linux/amd64 and linux/arm64, and run the end-to-end test in
+  kind; the `ci`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)` and `kind` checks have to pass before merging. For a
+  first contribution, the workflows wait until the maintainer has read the pull request and
+  approved the run. Run the checks yourself first ([Build and test](#build-and-test)).
 - **After the merge** the maintainer copies `main` to a private Git server where the same build
   runs on linux/arm64. If it fails there, the maintainer opens an issue on GitHub that links your
   pull request, and the fix is a new pull request.

@@ -8,8 +8,8 @@ Actions](../adr/0003-ci-in-one-pinned-container-build.md).
 Status as of 2026-10-27: the four implementation weekends of v0.1 are done. The unit tests cover the rules, grouping, fingerprints, owner correlation, redaction,
 the context, the prompt, the validation of answers, the budget, the Events, the metrics and the
 HTTP client (against a local test server) without a cluster. The end-to-end test in kind
-(`tests/e2e/run.sh`) passed on the maintainer's machine (Docker Desktop, arm64) on 2026-10-27;
-GitHub Actions did not start jobs before the repository was public.
+(`tests/e2e/run.sh`) passed on the maintainer's machine (Docker Desktop, arm64) and on GitHub's
+Linux runners on 2026-10-27.
 
 ## Before you start
 
