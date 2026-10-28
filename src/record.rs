@@ -513,6 +513,45 @@ mod tests {
     }
 
     #[test]
+    fn a_pod_failed_during_its_init_containers_takes_their_finish_time() {
+        // Evicted before its main container started: only the init container has terminated, and
+        // the Ready condition has been False since the Pod was created.
+        let mut pod = crashing_pod();
+        let status = pod.status.as_mut().expect("a status");
+        status.phase = Some("Failed".into());
+        status.reason = Some("Evicted".into());
+        status.conditions = Some(vec![
+            serde_json::from_value(json!({
+                "type": "Ready", "status": "False", "reason": "PodFailed",
+                "lastTransitionTime": "2026-10-28T09:00:00Z"
+            }))
+            .expect("a condition"),
+        ]);
+        status.init_container_statuses = Some(vec![
+            serde_json::from_value(json!({
+                "name": "migrate", "image": "busybox:1.37", "imageID": "",
+                "ready": false, "restartCount": 0,
+                "state": {"terminated": {"reason": "Error", "exitCode": 137,
+                                         "finishedAt": "2026-10-28T10:00:05Z"}}
+            }))
+            .expect("an init container status"),
+        ]);
+        status.container_statuses = Some(vec![
+            serde_json::from_value(json!({
+                "name": "api", "image": "registry.example.com/shop/api:1.4.2", "imageID": "",
+                "ready": false, "restartCount": 0,
+                "state": {"waiting": {"reason": "PodInitializing"}}
+            }))
+            .expect("a container status"),
+        ]);
+        let record = PodRecord::from_pod(&pod).expect("a complete Pod");
+        assert_eq!(
+            record.failed_at,
+            Some("2026-10-28T10:00:05Z".parse().expect("a timestamp"))
+        );
+    }
+
+    #[test]
     fn a_pod_without_a_uid_is_skipped() {
         let mut pod = crashing_pod();
         pod.metadata.uid = None;

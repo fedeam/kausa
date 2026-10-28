@@ -1035,4 +1035,86 @@ mod tests {
         assert_eq!(incidents[0].key.owner_name, "api");
         assert_eq!(incidents[0].pods.iter().collect::<Vec<_>>(), ["api-a"]);
     }
+
+    #[test]
+    fn the_age_bound_of_an_eviction_is_the_event_freshness() {
+        // A failure time exactly at the freshness is still recent, one second older is not, and a
+        // failure time ahead of kausa's clock counts as now.
+        let at = |seconds: i64| record_of(failed_pod("cache-a", "Evicted", LIMIT, 0, seconds));
+        let fresh = FRESH.as_secs();
+        assert_eq!(ids(&state_signals(&[at(-fresh)], t(0))), ["D009"]);
+        assert!(state_signals(&[at(-fresh - 1)], t(0)).is_empty());
+        assert_eq!(ids(&state_signals(&[at(120)], t(0))), ["D009"]);
+    }
+
+    #[test]
+    fn an_eviction_with_no_failure_time_is_no_signal() {
+        // The failure time comes from the Ready condition's last transition or a container's
+        // finish time. With neither, kausa cannot tell a new eviction from one days old.
+        let mut timeless = failed_pod("cache-a", "Evicted", LIMIT, 0, -30);
+        let status = timeless["status"].as_object_mut().expect("a status");
+        status.remove("conditions");
+        status.remove("containerStatuses");
+        assert!(state_signals(&[record_of(timeless)], t(0)).is_empty());
+        // A container the kubelet could no longer find has no finish time; the Ready condition's
+        // last transition is enough.
+        let mut unknown = failed_pod("cache-a", "Evicted", PRESSURE, 0, -30);
+        let terminated = &mut unknown["status"]["containerStatuses"][0]["state"]["terminated"];
+        terminated["reason"] = json!("ContainerStatusUnknown");
+        terminated
+            .as_object_mut()
+            .expect("a terminated state")
+            .remove("finishedAt");
+        assert_eq!(ids(&state_signals(&[record_of(unknown)], t(0))), ["D009"]);
+    }
+
+    #[test]
+    fn rejected_pods_do_not_join_the_eviction_incident() {
+        // On a node under pressure the kubelet evicts one Pod and then refuses its replacements
+        // (also reason Evicted); the incident counts only the eviction.
+        let mut pods = vec![record_of(failed_pod("cache-a", "Evicted", PRESSURE, 0, 0))];
+        for name in ["cache-b", "cache-c", "cache-d"] {
+            let mut rejected = failed_pod(name, "Evicted", REJECTED, 0, 5);
+            let status = rejected["status"].as_object_mut().expect("a status");
+            status.remove("containerStatuses");
+            pods.push(record_of(rejected));
+        }
+        let mut tracker = Tracker::new(SETTLE);
+        let mut found = Vec::new();
+        for at in [5, 40, 70] {
+            found.extend(tracker.tick(t(at), state_signals(&pods, t(at))));
+        }
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key.detection.id(), "D009");
+        assert_eq!(found[0].pods.iter().collect::<Vec<_>>(), ["cache-a"]);
+    }
+
+    #[test]
+    fn an_eviction_is_explained_once_and_not_again_after_a_restart() {
+        // One eviction: it settles once while it is recent, and a fresh process (a new tracker)
+        // that starts after the freshness raises nothing for the same Pod.
+        let evicted = record_of(failed_pod("cache-a", "Evicted", LIMIT, 0, 0));
+        let deploy = owner("Deployment", "cache");
+        let mut tracker = Tracker::new(SETTLE);
+        let timeline: Vec<_> = [0, 65, 300, 600, 700, 1000]
+            .into_iter()
+            .map(|at| (at, vec![evicted.clone()]))
+            .collect();
+        assert_eq!(checks(&mut tracker, &timeline, &deploy), [0, 1, 0, 0, 0, 0]);
+        let mut restarted = Tracker::new(SETTLE);
+        let later: Vec<_> = [601, 700]
+            .into_iter()
+            .map(|at| (at, vec![evicted.clone()]))
+            .collect();
+        assert_eq!(checks(&mut restarted, &later, &deploy), [0, 0]);
+    }
+
+    #[test]
+    fn a_scheduler_error_counts_only_while_the_pod_is_pending() {
+        let message =
+            "running PreBind plugin \"VolumeBinding\": binding volumes: context deadline exceeded";
+        let mut stale = unscheduled_pod("db-a", "SchedulerError", message);
+        stale["status"]["phase"] = json!("Running");
+        assert!(state_signals(&[record_of(stale)], t(0)).is_empty());
+    }
 }
