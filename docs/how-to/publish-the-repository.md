@@ -302,9 +302,9 @@ and first CI runs](../journal/2026-10-26-github-repository-and-first-ci.md)).
    gh repo view fedeam/kausa --json description,repositoryTopics,homepageUrl
    ```
 
-   - **Homepage:** set it with `gh repo edit fedeam/kausa --homepage <url>` to the
-     documentation URL once one exists; until then leave it empty rather than pointing at the
-     repository itself.
+   - **Homepage:** set on 2026-10-28 to the maintainer's projects page,
+     `https://fedeam.com/proyectos/`, which describes kausa; move it to a documentation site if
+     one is ever made (`gh repo edit fedeam/kausa --homepage <url>`).
    - **Social preview:** in **Settings → General → Social preview → Edit → Upload an image…**.
      GitHub asks for a PNG, JPG or GIF under 1 MB, at least 640 × 320 pixels (1280 × 640 for
      best display), and shows it only for public repositories. The image has to be made first;

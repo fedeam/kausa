@@ -222,6 +222,11 @@ it, becomes the commit header on `main` and follows Conventional Commits with a 
 [Changelog](CHANGELOG.md). Everyone taking part follows the [Contributor Covenant Code of
 Conduct](CODE_OF_CONDUCT.md).
 
+## Maintainer
+
+kausa is made by [FedeAM](https://fedeam.com), who writes about it and other projects at
+[fedeam.com/proyectos](https://fedeam.com/proyectos/) (in Spanish).
+
 ## License
 
 Licensed under either of
