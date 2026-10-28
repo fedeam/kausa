@@ -757,21 +757,10 @@ impl OwnerLookup for KubeLookup {
     }
 }
 
-// Acceptance tests for the namespaced mode (docs/adr/0013-namespaced-install-mode.md), written
-// before the code. They use this API, which run.rs does not have yet:
-//
-// - `type WatchKey = Option<String>`: `None` is the cluster-wide watch, `Some(n)` the watch of
-//   namespace `n`;
-// - `enum Kind { Pods, Events }`, `Copy` and `Debug`;
-// - `State::on_pod(&mut self, watch: &WatchKey, event, lookup)` and
-//   `State::on_event(&mut self, watch: &WatchKey, event, lookup)`;
-// - `State::on_watch_error(&mut self, kind: Kind, watch: &WatchKey, error: &watcher::Error)`,
-//   which drops that kind's records inside the watch (and its relist) when `forbidden(error)`;
-// - `fn forbidden(error: &watcher::Error) -> bool`;
-// - `Readiness::new(namespaces: &[String])` and
-//   `Readiness::listed(&mut self, kind: Kind, watch: &WatchKey) -> bool`, true once every watch
-//   (2, or 2 x N) has listed;
-// - `fn ended(kind: Kind, watch: &WatchKey) -> RunError`, the error of a watch that ended.
+// Tests of the namespaced mode (docs/adr/0013-namespaced-install-mode.md), without a cluster: the
+// relists and refusals of each watch (`State::on_pod`, `State::on_event`,
+// `State::on_watch_error`, `forbidden`), readiness (`Readiness`) and the error of an ended watch
+// (`ended`).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,6 +1072,96 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_forbidden_watch_leaves_the_open_relist_of_another_namespace() {
+        let mut state = two_namespaces();
+        on_pod(&mut state, &ns("a"), watcher::Event::Init);
+        on_pod(&mut state, &ns("b"), watcher::Event::Init);
+        on_pod(
+            &mut state,
+            &ns("b"),
+            watcher::Event::InitApply(pod("b", "p1")),
+        );
+        state.on_watch_error(
+            Kind::Pods,
+            &ns("a"),
+            &watcher::Error::InitialListFailed(api_error(403)),
+        );
+        on_pod(&mut state, &ns("b"), watcher::Event::InitDone);
+        assert!(!has_pod(&state, "a", "p1") && !has_pod(&state, "a", "p2"));
+        assert!(has_pod(&state, "b", "p1") && !has_pod(&state, "b", "p2"));
+
+        on_event(&mut state, &ns("a"), watcher::Event::Init);
+        on_event(&mut state, &ns("b"), watcher::Event::Init);
+        on_event(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(event("a", "p2")),
+        );
+        state.on_watch_error(
+            Kind::Events,
+            &ns("b"),
+            &watcher::Error::WatchError(status(403, "Forbidden")),
+        );
+        on_event(&mut state, &ns("a"), watcher::Event::InitDone);
+        assert!(!has_event(&state, "b", "p1") && !has_event(&state, "b", "p2"));
+        assert!(!has_event(&state, "a", "p1") && has_event(&state, "a", "p2"));
+    }
+
+    #[test]
+    fn other_watch_errors_keep_the_open_relist() {
+        let mut state = two_namespaces();
+        on_pod(&mut state, &ns("a"), watcher::Event::Init);
+        on_pod(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(pod("a", "p1")),
+        );
+        state.on_watch_error(
+            Kind::Pods,
+            &ns("a"),
+            &watcher::Error::InitialListFailed(api_error(500)),
+        );
+        assert_eq!(state.pods.len(), 4, "the error keeps the records");
+        on_pod(&mut state, &ns("a"), watcher::Event::InitDone);
+        assert!(has_pod(&state, "a", "p1") && !has_pod(&state, "a", "p2"));
+
+        on_event(&mut state, &ns("b"), watcher::Event::Init);
+        on_event(
+            &mut state,
+            &ns("b"),
+            watcher::Event::InitApply(event("b", "p1")),
+        );
+        state.on_watch_error(Kind::Events, &ns("b"), &watcher::Error::NoResourceVersion);
+        assert_eq!(state.events.len(), 4, "the error keeps the records");
+        on_event(&mut state, &ns("b"), watcher::Event::InitDone);
+        assert!(has_event(&state, "b", "p1") && !has_event(&state, "b", "p2"));
+    }
+
+    #[test]
+    fn no_watch_keeps_an_event_about_an_object_in_another_namespace() {
+        // An Event in a about an object in elsewhere (docs/adr/0013-namespaced-install-mode.md):
+        // EventRecord::from_event drops it, so no watch keeps it and no relist or refusal of
+        // elsewhere could reach into a.
+        let mut crossed = event("a", "p3");
+        crossed
+            .regarding
+            .as_mut()
+            .expect("the fixture has a regarding object")
+            .namespace = Some("elsewhere".to_owned());
+        for watch in [ns("a"), ns("elsewhere"), CLUSTER] {
+            let mut state = two_namespaces();
+            on_event(&mut state, &watch, watcher::Event::Apply(crossed.clone()));
+            on_event(
+                &mut state,
+                &watch,
+                watcher::Event::InitApply(crossed.clone()),
+            );
+            assert!(!has_event(&state, "a", "p3"), "{watch:?}");
+            assert_eq!(state.events.len(), 4, "{watch:?}");
         }
     }
 
