@@ -644,6 +644,19 @@ wait_holder() {
     sleep 0.5
   done
 }
+# Waits up to $2 seconds for a holder other than Pod $1, sets it in new_holder.
+wait_other_holder() {
+  since=$SECONDS
+  while :; do
+    new_holder=$(holder)
+    if [ -n "$new_holder" ] && [ "$new_holder" != "$1" ]; then
+      took=$((SECONDS - since))
+      return 0
+    fi
+    [ $((SECONDS - since)) -lt "$2" ] || return 1
+    sleep 0.5
+  done
+}
 # The sum of kausa_leader over kausa's Pods; "missing" when there is no Pod or a Pod's metrics
 # have no kausa_leader (a failed read must not pass for 0).
 leader_sum() {
@@ -1589,11 +1602,12 @@ fi
 
 if [ "$REPLICAS" = 2 ]; then
   # A graceful handover. The leader's log is streamed, since its Pod goes with it, and the Pod is
-  # deleted: kausa releases the Lease on SIGTERM, once, and the standby, which reads it every 5 s,
-  # takes it within 10 s; leaseTransitions goes up by 1 and the new leader counts one change to
-  # leader. A new failure is then explained by the new leader.
+  # deleted: kausa releases the Lease on SIGTERM, once, and another Pod takes it within 10 s: the
+  # standby, which reads it every 5 s, or the ReplicaSet's replacement, which can start and find it
+  # free first. leaseTransitions goes up by 1 and the new leader counts one change to leader. A new
+  # failure is then explained by the new leader.
   wait_pair 60 "no two Ready kausa Pods with one of them holding the Lease before the handover"
-  old_leader=$leader next_leader=$standby
+  old_leader=$leader
   transitions=$(lease_transitions)
   k -n "$NAMESPACE" logs -f "pod/$old_leader" > "$WORK/graceful.log" 2>&1 &
   LOGS_PID=$!
@@ -1603,9 +1617,9 @@ if [ "$REPLICAS" = 2 ]; then
   done
   [ "$(log_count started < "$WORK/graceful.log")" = 1 ] || fail "the leader's log is not streamed"
   k -n "$NAMESPACE" delete pod "$old_leader" --wait=false >/dev/null
-  wait_holder "$next_leader" 10 ||
-    fail "the standby did not hold the Lease within 10 s of the leader's graceful delete"
-  graceful_took=$took
+  wait_other_holder "$old_leader" 10 ||
+    fail "no other Pod held the Lease within 10 s of the leader's graceful delete"
+  next_leader=$new_holder graceful_took=$took
   for _ in $(seq 1 60); do
     kill -0 "$LOGS_PID" 2>/dev/null || break
     sleep 1
@@ -1625,7 +1639,7 @@ if [ "$REPLICAS" = 2 ]; then
   wait_explained Job e2e-graceful
   [ "$(others_reported "$leader" Job e2e-graceful)" = 0 ] ||
     fail "e2e-graceful's Event was reported by another Pod than the new leader"
-  echo "graceful handover: lease released, the standby held the Lease after ${graceful_took} s," \
+  echo "graceful handover: lease released, another Pod held the Lease after ${graceful_took} s," \
     "leaseTransitions + 1, and the new leader explains"
 
   # A frozen leader. Its process, found on the kind node by its POD_NAME, gets SIGSTOP: it neither
