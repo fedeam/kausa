@@ -324,8 +324,8 @@ pub async fn run(
 }
 
 /// Builds the request, cutting the context until it fits `max_input_tokens`: first the log tail
-/// (halved each time), then all but the first Pod and three events. `None` when it still does not
-/// fit.
+/// (halved each time), then all but the first Pod and three events, then every Pod's scheduling
+/// keys and every probe's path (sent as `null`). `None` when it still does not fit.
 fn fit(gathered: &mut Gathered, settings: &Settings) -> Option<(Value, crate::redact::Redactor)> {
     loop {
         let (context, redactor) = context::build(gathered);
@@ -351,9 +351,31 @@ fn fit(gathered: &mut Gathered, settings: &Settings) -> Option<(Value, crate::re
                 gathered.pods.truncate(1);
                 gathered.events.truncate(3);
             }
+            None if has_scheduling_or_path(&gathered.pods) => {
+                for pod in &mut gathered.pods {
+                    pod.scheduling = None;
+                    for container in &mut pod.containers {
+                        for probe in &mut container.probes {
+                            probe.path = None;
+                        }
+                    }
+                }
+            }
             None => return None,
         }
     }
+}
+
+/// Whether some Pod still has scheduling keys or some probe still has a path: what the
+/// last step of `fit` can drop.
+fn has_scheduling_or_path(pods: &[crate::record::PodRecord]) -> bool {
+    pods.iter().any(|pod| {
+        pod.scheduling.is_some()
+            || pod
+                .containers
+                .iter()
+                .any(|container| container.probes.iter().any(|probe| probe.path.is_some()))
+    })
 }
 
 /// A rough count of the input tokens of a request: a quarter of its bytes, the usual rule of thumb
@@ -675,6 +697,8 @@ mod tests {
                     failed_at: None,
                     node_name: Some("worker-7".into()),
                     service_account: Some("web-runner".into()),
+                    image_pull_secrets: 0,
+                    scheduling: None,
                     containers: vec![ContainerRecord {
                         name: "server".into(),
                         image: Some("busybox:1.37".into()),
@@ -885,5 +909,309 @@ mod tests {
         assert!(!explain(work(), &settings, &shared));
         assert!(shared.notifications.borrow().is_empty());
         assert!(metrics.render().contains("kausa_requests_logged_total 1\n"));
+    }
+
+    // Acceptance tests for fitting the richer context of
+    // docs/adr/0017-richer-context-for-the-model.md, written before the code. They use
+    // `PodRecord::scheduling`, `ProbeRecord::path`, `SchedulingRecord::node_affinity` with its
+    // `values: ClosedValues` and `value_count: u16`, and `record::MAX_KEY_BYTES`. Values are
+    // invented.
+
+    use crate::record::{ClosedValues, EventRecord, MAX_KEY_BYTES, Regarding};
+
+    /// A key of exactly `MAX_KEY_BYTES` bytes under `example.com`, of few distinct characters, so
+    /// that no redaction rule shortens it; `i` keeps the keys apart.
+    fn longest_key(i: usize) -> String {
+        let key = format!("k{i:02}{}.example.com/{}", "a".repeat(49), "b".repeat(63));
+        assert_eq!(key.len(), MAX_KEY_BYTES);
+        key
+    }
+
+    /// The record of an unschedulable Pod `name` in `shop` with `extra` in its spec and one
+    /// container `server` with requests, limits and two HTTP probes whose paths are `path`.
+    fn pending_pod(name: &str, path: &str, extra: Value) -> PodRecord {
+        let probe = |kind_path: &str| {
+            json!({"httpGet": {"path": kind_path, "port": "http"}, "periodSeconds": 10,
+                   "timeoutSeconds": 1, "successThreshold": 1, "failureThreshold": 3})
+        };
+        let mut spec = json!({"containers": [{
+            "name": "server",
+            "image": "busybox:1.37",
+            "ports": [{"name": "http", "containerPort": 8080}],
+            "resources": {"requests": {"memory": "128Mi", "cpu": "250m"},
+                          "limits": {"memory": "256Mi", "cpu": "500m"}},
+            "livenessProbe": probe(path),
+            "readinessProbe": probe(path)
+        }]});
+        let object = spec.as_object_mut().expect("an object");
+        for (field, value) in extra.as_object().expect("the extra fields are an object") {
+            object.insert(field.clone(), value.clone());
+        }
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": "shop",
+                         "uid": format!("uid-{name}")},
+            "spec": spec,
+            "status": {"phase": "Pending",
+                       "conditions": [{"type": "PodScheduled", "status": "False",
+                                       "reason": "Unschedulable",
+                                       "message": "0/3 nodes are available: 3 node(s) didn't \
+                                                   match Pod's node affinity/selector. \
+                                                   preemption: 0/3 nodes are available: 3 \
+                                                   Preemption is not helpful for scheduling."}]}
+        }))
+        .expect("the fixture is a valid Pod");
+        PodRecord::from_pod(&pod).expect("a complete Pod")
+    }
+
+    /// Every `kubernetes.io/arch` value, as a record keeps them.
+    fn every_arch() -> ClosedValues {
+        let pod = pending_pod(
+            "web-5c6d7e8f9a-arch1",
+            "/ready",
+            json!({"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [{"matchExpressions": [{
+                    "key": "kubernetes.io/arch", "operator": "In",
+                    "values": ["amd64", "arm64", "arm", "386", "ppc64le", "s390x", "riscv64"]
+                }]}]
+            }}}}),
+        );
+        let values = pod.scheduling.expect("a scheduling record").node_affinity[0].values;
+        assert_eq!(values.iter().count(), 7);
+        values
+    }
+
+    /// An unschedulable Pod at the worst scheduling record: every list at its cap, every key at
+    /// 128 bytes, and every affinity entry with every `arch` value and a saturated count (more
+    /// than a real Pod can reach, since only the key `kubernetes.io/arch` keeps those values).
+    fn worst_pod(name: &str) -> PodRecord {
+        let selector: serde_json::Map<String, Value> =
+            (0..8).map(|i| (longest_key(i), json!("v"))).collect();
+        let expressions: Vec<Value> = (8..16)
+            .map(|i| json!({"key": longest_key(i), "operator": "In", "values": ["v"]}))
+            .collect();
+        let terms = |from: usize| -> Vec<Value> {
+            (from..from + 4)
+                .map(|i| json!({"topologyKey": longest_key(i)}))
+                .collect()
+        };
+        let tolerations: Vec<Value> = (24..32)
+            .map(|i| json!({"key": longest_key(i), "operator": "Exists", "effect": "PreferNoSchedule"}))
+            .collect();
+        let mut pod = pending_pod(
+            name,
+            "/ready",
+            json!({
+                "nodeSelector": selector,
+                "affinity": {
+                    "nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+                        "nodeSelectorTerms": [{"matchExpressions": expressions}]
+                    }},
+                    "podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": terms(16)},
+                    "podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution":
+                                        terms(20)}
+                },
+                "tolerations": tolerations
+            }),
+        );
+        let arch = every_arch();
+        let scheduling = pod.scheduling.as_mut().expect("a scheduling record");
+        assert_eq!(
+            (
+                scheduling.node_selector.len(),
+                scheduling.node_affinity.len(),
+                scheduling.pod_affinity.len(),
+                scheduling.pod_anti_affinity.len(),
+                scheduling.tolerations.len(),
+                scheduling.omitted
+            ),
+            (8, 8, 4, 4, 8, 0)
+        );
+        for entry in &mut scheduling.node_affinity {
+            entry.values = arch;
+            entry.value_count = u16::MAX;
+        }
+        pod
+    }
+
+    /// A Warning event about Pod `pod` in `shop`.
+    fn scheduling_event(i: usize, pod: &str) -> EventRecord {
+        EventRecord {
+            uid: format!("e{i}"),
+            reason: "FailedScheduling".into(),
+            note: Some(
+                "0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector. \
+                 preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling."
+                    .into(),
+            ),
+            regarding: Regarding {
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                namespace: "shop".into(),
+                name: pod.into(),
+                uid: None,
+            },
+            reporting_controller: Some("default-scheduler".into()),
+            first_seen: None,
+            last_seen: None,
+            count: 12,
+        }
+    }
+
+    /// The incident of `work()` with `detection`, `pods` and three events, without a log tail.
+    fn incident_of(detection: Detection, pods: Vec<PodRecord>) -> Gathered {
+        let mut g = work().gathered;
+        g.incident.key.detection = detection;
+        g.incident.sample.key.detection = detection;
+        g.incident.pods = pods.iter().map(|p| p.name.clone()).collect();
+        g.events = (0..3).map(|i| scheduling_event(i, &pods[0].name)).collect();
+        g.pods_total = pods.len();
+        g.pods = pods;
+        g.log_tail = None;
+        g
+    }
+
+    /// The context inside a request body.
+    fn sent_context(body: &Value) -> Value {
+        let user = body["messages"][1]["content"]
+            .as_str()
+            .expect("the user message");
+        let data: Value = serde_json::from_str(user).expect("the user message is JSON");
+        data["untrusted_cluster_data"].clone()
+    }
+
+    /// The estimated tokens of the request built from `gathered` as it is.
+    fn estimate(gathered: &Gathered, settings: &Settings) -> usize {
+        let (context, _) = context::build(gathered);
+        estimate_tokens(&prompt::request(
+            &settings.model_name,
+            &context,
+            settings.mode,
+            settings.max_tokens,
+        ))
+    }
+
+    #[test]
+    fn the_worst_scheduling_fits_the_default_cap() {
+        let settings = settings(None, false, 30);
+        assert_eq!(settings.max_input_tokens, 6000, "the default cap");
+        let mut gathered = incident_of(
+            Detection::Unschedulable,
+            vec![
+                worst_pod("web-5c6d7e8f9a-aaaaa"),
+                worst_pod("web-5c6d7e8f9a-bbbbb"),
+                worst_pod("web-5c6d7e8f9a-ccccc"),
+            ],
+        );
+        let (body, _) = fit(&mut gathered, &settings).expect("the worst D005 fits");
+        let context = sent_context(&body);
+        let scheduling = &context["scheduling"];
+        assert!(scheduling.is_object(), "the scheduling was dropped");
+        for (list, cap) in [
+            ("node_selector", 8),
+            ("node_affinity", 8),
+            ("pod_affinity", 4),
+            ("pod_anti_affinity", 4),
+            ("tolerations", 8),
+        ] {
+            assert_eq!(
+                scheduling[list].as_array().map(Vec::len),
+                Some(cap),
+                "{list}"
+            );
+        }
+        // No key was shortened, and the affinity entries keep every value.
+        assert_eq!(
+            scheduling["node_selector"][0]["key"].as_str().map(str::len),
+            Some(MAX_KEY_BYTES)
+        );
+        assert_eq!(
+            scheduling["node_affinity"][0]["values"]
+                .as_array()
+                .map(Vec::len),
+            Some(7)
+        );
+        assert_eq!(scheduling["node_affinity"][0]["value_count"], u16::MAX);
+    }
+
+    #[test]
+    fn fit_drops_scheduling_and_paths_before_skipping() {
+        let mut settings = settings(None, false, 30);
+        // Every gathered Pod loses its scheduling record and every probe its path.
+        let stripped = |gathered: &Gathered| {
+            let mut gathered = gathered.clone();
+            for pod in &mut gathered.pods {
+                pod.scheduling = None;
+                for container in &mut pod.containers {
+                    for probe in &mut container.probes {
+                        probe.path = None;
+                    }
+                }
+            }
+            gathered
+        };
+        // One Pod and three events, no log tail: the earlier steps have nothing to cut.
+        let long_path = format!("/{}", "health/".repeat(18));
+        let cases = [
+            (
+                Detection::Unschedulable,
+                incident_of(
+                    Detection::Unschedulable,
+                    vec![worst_pod("web-5c6d7e8f9a-aaaaa")],
+                ),
+            ),
+            (
+                Detection::ProbeFailure,
+                incident_of(
+                    Detection::ProbeFailure,
+                    vec![pending_pod("web-5c6d7e8f9a-aaaaa", &long_path, json!({}))],
+                ),
+            ),
+            (
+                Detection::CrashLoop,
+                incident_of(
+                    Detection::CrashLoop,
+                    vec![pending_pod("web-5c6d7e8f9a-aaaaa", &long_path, json!({}))],
+                ),
+            ),
+        ];
+        for (detection, gathered) in cases {
+            let id = detection.id();
+            let full = estimate(&gathered, &settings);
+            let bare = estimate(&stripped(&gathered), &settings);
+            assert!(bare < full, "{id}: nothing to drop");
+
+            // A cap between the two: the request goes, without them.
+            settings.max_input_tokens = (bare + full) / 2;
+            let (body, _) = fit(&mut gathered.clone(), &settings)
+                .unwrap_or_else(|| panic!("{id}: skipped instead of dropping"));
+            let context = sent_context(&body);
+            if detection == Detection::Unschedulable {
+                let top = context.as_object().expect("a context");
+                assert_eq!(top.get("scheduling"), Some(&Value::Null), "{id}");
+            } else {
+                for probe in context["pods"][0]["containers"][0]["probes"]
+                    .as_array()
+                    .expect("the probes")
+                {
+                    let probe = probe.as_object().expect("a probe");
+                    assert_eq!(probe.get("path"), Some(&Value::Null), "{id}");
+                    assert_eq!(probe.get("handler"), Some(&json!("http")), "{id}");
+                }
+            }
+            // Requests stay.
+            assert_eq!(
+                context["pods"][0]["containers"][0]["memory_request"], "128Mi",
+                "{id}"
+            );
+
+            // A cap below even that: skipped, as before.
+            settings.max_input_tokens = bare - 1;
+            assert!(
+                fit(&mut gathered.clone(), &settings).is_none(),
+                "{id}: sent over the cap"
+            );
+        }
     }
 }

@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Requests to the model carry each container's resource requests, each probe's handler, port and
+  success threshold, the probe path without its query and fragment for `D001` and `D006`, the image
+  pull policy and the number of pull secrets for `D002`, and an unschedulable Pod's node selector,
+  affinity and toleration keys (no values but `kubernetes.io/os` and `kubernetes.io/arch`) for
+  `D005`; `--dry-run` shows them. Resource quantities are checked against the Kubernetes quantity
+  grammar. The prompt version is `2`, so Explanations store `promptVersion` `"2"`. No permission,
+  flag or chart value changes. A tight `--max-input-tokens` loses log bytes earlier on `D001`,
+  `D003` and `D008` ([0017. Send the model resource requests, probe handlers, image pull settings
+  and an unschedulable Pod's scheduling keys, reduced and
+  redacted](docs/adr/0017-richer-context-for-the-model.md)).
 - `R003` redacts more names in event messages: the quoted name after `pod`, `container` and
   `StorageClass` (every name of a list), after a resource qualified by its API group
   (`deployments.apps "<name>"`), and the quota's name in `exceeded quota: <name>`. These run as a

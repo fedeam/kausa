@@ -55,6 +55,16 @@ it was pending, so replicas whose crash loops are out of step all count.
 | `D012` | Volume claim cannot be provisioned | Warning event `ProvisioningFailed` about a PersistentVolumeClaim | No |
 | `D013` | Autoscaler cannot get metrics | Warning event `FailedGetResourceMetric`, `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` about a HorizontalPodAutoscaler | No |
 
+For `D005`, the request carries the unschedulable Pod's node selector, required affinity and
+toleration keys, with no values but the fixed `kubernetes.io/os` and `kubernetes.io/arch` ones: on
+Kubernetes 1.36.4 (kind, 2026-10-29) the scheduler's message names no key, value, taint or node
+(`1 node(s) didn't match Pod's node affinity/selector`, `had untolerated taint(s)`). For `D006`,
+and for `D001` since a failing liveness probe ends in `CrashLoopBackOff`, it carries each HTTP
+probe's path without its query and fragment ([0017. Send the model resource requests, probe
+handlers, image pull settings and an unschedulable Pod's scheduling keys, reduced and
+redacted](../adr/0017-richer-context-for-the-model.md); the fields in [Data sent to the
+provider](data-sent-to-the-provider.md)).
+
 `D005` reads the Pod's condition rather than the scheduler's `FailedScheduling` events, which may
 stop being updated for a Pod that keeps failing (hypothesis about client-go's `events.k8s.io`
 broadcaster, to verify on a live cluster); the condition holds as long as the failure. A Pod
@@ -201,11 +211,6 @@ and equal to `regarding.namespace`, compared exactly (case-sensitive, no trimmin
 cluster-scoped objects (a Node, whose `regarding` has no namespace) and Events about an object in
 another namespace are ignored: they match no detection and join no incident.
 
-**Which Events count.** A Warning Event counts only when its own `metadata.namespace` is non-empty
-and equal to `regarding.namespace`, compared exactly (case-sensitive, no trimming). Events about
-cluster-scoped objects (a Node, whose `regarding` has no namespace) and Events about an object in
-another namespace are ignored: they match no detection and join no incident.
-
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
 that stays the same for the same failure: the example's message without the prefix
 `(combined from similar events): ` of an aggregated event (so that the kubelet's first `D010`
@@ -224,7 +229,8 @@ cache.
 Implemented in `src/redact.rs` (second implementation weekend). `R001` works on structure: only
 the fields of [Data sent to the provider](data-sent-to-the-provider.md) are ever serialized. The
 others work on every name and free text that goes into a request (event messages, the waiting,
-scheduling and Pod status messages, the Pod status reason, log lines). First, text from the cluster that already looks like one of
+scheduling and Pod status messages, the Pod status reason, log lines, probe paths, and node
+selector, affinity and toleration keys). First, text from the cluster that already looks like one of
 kausa's placeholders (`pod-1`, `deployment-2`) has its hyphen turned into an underscore, unless it
 is a real name kausa registered, so that the answer cannot map it to a real name. Then the rules
 run in this order: the secrets first (`R009`, `R007`, `R008`, `R006`, `R010`, `R011`), so that a
@@ -235,7 +241,7 @@ log format](command-line.md)).
 
 | Id | What | How |
 |---|---|---|
-| `R001` | Fields outside the allowlist | Never serialized |
+| `R001` | Fields outside the allowlist | Never serialized. A resource quantity (a request or a limit) is kept only if it is at most 32 bytes and in the Kubernetes quantity grammar, otherwise sent as `null`; pull policies, probe handlers, scheduling operators and effects are mapped to closed sets |
 | `R002` | Known names | The namespace, the owner, the incident's Pods, their containers, nodes and service accounts, and the registry host and path of images outside the public registries (`docker.io`, `ghcr.io`, `quay.io`, `registry.k8s.io`, `gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`; an image with no registry is from Docker Hub), replaced by stable placeholders (`namespace-1`, `deployment-1`, `pod-1`, `container-1`, `node-1`, `serviceaccount-1`, `registry-1`, `image-1`; `object-1` for a custom resource's kind) wherever they appear as words, in any ASCII case: a hyphen, dot, slash, underscore or percent escape is a word boundary, so a Deployment's name is replaced inside its ReplicaSet's name and in `PAYMENTS_SERVICE_HOST` too. Mapped back in the answer in one pass, also when the model capitalizes them |
 | `R003` | Names in Kubernetes messages | The quoted name after `secret`, `configmap`, `persistentvolumeclaim`, `pvc`, `serviceaccount`, `service`, `pod`, `container` or `StorageClass` (singular or plural, single or double quotes, every name of a list such as `containers "a", "b"`): `secret "<redacted:name>" not found`, `pods "<redacted:name>" is forbidden`; the quoted name after a resource qualified by its API group: `deployments.apps "<redacted:name>" not found`, `storageclass.storage.k8s.io "<redacted:name>" not found`; the quota's name in `exceeded quota: <name>`; the name in `Secret <namespace>/<name>` and `ConfigMap <namespace>/<name>`; the name in `system:serviceaccount:<namespace>:<name>`. The names after `pod`, `container`, `StorageClass`, a qualified resource and in a list are a second pass over the output of the first (the six kinds before them, one quoted name each), and contain no whitespace, so a quote left open cannot hide a name the first pass catches |
 | `R004` | IP addresses | IPv4 addresses, and IPv6 addresses that parse as such once the colons around them are dropped (so `10:05:00` and `Foo::Bar` stay); the port after them is kept |
@@ -264,5 +270,16 @@ format, never ones that were issued.
   above; the name of another workload, Pod or node that appears only inside a log line or an event
   message is caught by `R013` if it looks like a hostname, and otherwise is sent. So is an
   uppercase hostname, or a bare `service.namespace` without a port or a scheme.
+- Probe paths and node selector, affinity and toleration keys are written by the workload's
+  author, like a volume name. A customer name in a path, in a key without a prefix, under a public
+  host's or registry's domain (`example.com`, `github.com`, `gcr.io`), under a suffix `R013` does
+  not list (`karpenter.sh`) or under a subdomain of `kubernetes.io` or `k8s.io` is sent. A cloud
+  provider's key (`cloud.google.com/…`, `eks.amazonaws.com/…`) becomes `host-N/…` (`R013`), never
+  mapped back in the answer.
+- A kubelet `Unhealthy` note for a probe's connection error quotes the probe URL with its query
+  and fragment, redacted by patterns only, and a note may name a port by its name (hypothesis, not
+  reproduced), which the request's `port` never does; both are sent as event text ([0017. Send the model resource requests, probe handlers, image pull settings and
+  an unschedulable Pod's scheduling keys, reduced and
+  redacted](../adr/0017-richer-context-for-the-model.md)).
 - Detection covers common workload failures, not every problem: a misbehaving application whose
   Pods stay `Running` and `Ready` produces no incident.

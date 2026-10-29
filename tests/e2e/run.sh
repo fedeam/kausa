@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test: kausa installed with its Helm chart in a kind cluster, against a fake model
-# endpoint, with two seeded failures. It checks the Events, what left the cluster, the RBAC
+# endpoint, with three seeded failures. It checks the Events, what left the cluster, the RBAC
 # objects and what they grant, and the metrics. Needs docker, kind, kubectl, helm and python3;
 # KIND_NODE_IMAGE names the node image (pinned in .github/workflows/e2e.yml). It creates the
 # cluster kausa-e2e and deletes it at the end. See docs/how-to/develop.md.
@@ -393,13 +393,16 @@ has_roles() {
 for _ in $(seq 1 60); do
   deployment_note=$(explained Deployment crasher)
   job_note=$(explained Job failing-job)
-  [ -n "$deployment_note" ] && [ -n "$job_note" ] && break
+  stranded_note=$(explained Deployment stranded)
+  [ -n "$deployment_note" ] && [ -n "$job_note" ] && [ -n "$stranded_note" ] && break
   sleep 5
 done
 [ -n "$deployment_note" ] || fail "no Explained Event about Deployment crasher"
 [ -n "$job_note" ] || fail "no Explained Event about Job failing-job"
+[ -n "$stranded_note" ] || fail "no Explained Event about Deployment stranded"
 echo "Deployment crasher: $deployment_note"
 echo "Job failing-job: $job_note"
+echo "Deployment stranded: $stranded_note"
 
 # The model named namespace-1; the Event names the real namespace.
 case "$deployment_note" in *"$TARGET"*) ;; *) fail "the placeholder was not mapped back" ;; esac
@@ -442,9 +445,84 @@ done
 
 # What left the cluster: requests were sent, and none holds a real name.
 [ -s "$WORK/requests.jsonl" ] || fail "the fake endpoint received no request"
-for name in "$TARGET" "$OTHER" crasher failing-job; do
+for name in "$TARGET" "$OTHER" crasher failing-job stranded; do
   if grep -q -- "$name" "$WORK/requests.jsonl"; then fail "a request contains '$name'"; fi
 done
+# The richer context (docs/adr/0017-richer-context-for-the-model.md): crasher's probe path without
+# its query, and stranded's node selector and toleration keys without their values.
+for word in /e2e-ready example.com/e2e-pool example.com/e2e-taint; do
+  grep -qF -- "$word" "$WORK/requests.jsonl" || fail "no request contains '$word'"
+done
+for word in e2e-query-value e2e-pool-value e2e-toleration-value; do
+  if grep -qF -- "$word" "$WORK/requests.jsonl"; then fail "a request contains '$word'"; fi
+done
+# Each rule gets only its own fields: the D001 request (crasher) has the probe's handler, port and
+# path and none of D002's or D005's; the D005 request (stranded) has the scheduling keys, no pull
+# secrets and no probe path. Failure messages name the field, never what the request holds.
+python3 -c '
+import json, sys
+
+def fail(message):
+    sys.exit("FAIL: " + message)
+
+def keys(value):
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            yield key
+            yield from keys(inner)
+    elif isinstance(value, list):
+        for inner in value:
+            yield from keys(inner)
+
+contexts = {}
+for line in open(sys.argv[1]):
+    try:
+        request = json.loads(line)
+    except ValueError:
+        fail("requests.jsonl holds a line that is not JSON")
+    for message in (request.get("messages") or []) if isinstance(request, dict) else []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        try:
+            context = json.loads(message["content"])["untrusted_cluster_data"]
+            rule = context["detection"]["id"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        contexts.setdefault(rule, []).append(context)
+
+probe = {"kind": "readiness", "handler": "http", "port": 8080, "path": "/e2e-ready",
+         "initial_delay_seconds": 3600}
+if not contexts.get("D001"):
+    fail("no D001 request")
+for context in contexts["D001"]:
+    found = set(keys(context))
+    for key in ("scheduling", "image_pull_policy", "image_pull_secrets"):
+        if key in found:
+            fail("a D001 request has the key " + key)
+    probes = [p for pod in context.get("pods") or [] for c in pod.get("containers") or []
+              for p in c.get("probes") or []]
+    if not any(all(p.get(k) == v for k, v in probe.items()) for p in probes):
+        fail("a D001 request has no readiness probe with handler http, port 8080 and its path")
+
+selector = {"key": "example.com/e2e-pool", "value": None}
+toleration = {"key": "example.com/e2e-taint", "operator": "Equal", "effect": "NoSchedule"}
+if not contexts.get("D005"):
+    fail("no D005 request")
+for context in contexts["D005"]:
+    found = set(keys(context))
+    for key in ("image_pull_secrets", "path"):
+        if key in found:
+            fail("a D005 request has the key " + key)
+    scheduling = context.get("scheduling")
+    if not isinstance(scheduling, dict):
+        fail("a D005 request has no scheduling object")
+    if selector not in (scheduling.get("node_selector") or []):
+        fail("a D005 request lacks the node selector key example.com/e2e-pool")
+    if toleration not in (scheduling.get("tolerations") or []):
+        fail("a D005 request lacks the toleration example.com/e2e-taint")
+print("requests: %d D001 and %d D005 with their own fields"
+      % (len(contexts["D001"]), len(contexts["D005"])))
+' "$WORK/requests.jsonl"
 
 # The notifications (docs/adr/0015-notifications.md). The fake receiver answered the first one 503,
 # which kausa sends again 30 seconds later, and one per failing workload is due.
@@ -463,10 +541,10 @@ print(count)
 answered=0
 for _ in $(seq 1 60); do
   answered=$(hooks_answered)
-  [ "$answered" -ge 2 ] && break
+  [ "$answered" -ge 3 ] && break
   sleep 2
 done
-[ "$answered" -ge 2 ] || fail "the webhook answered $answered notifications 200 in 120 seconds"
+[ "$answered" -ge 3 ] || fail "the webhook answered $answered of 3 notifications 200 in 120 seconds"
 k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
 kausa_log
 # What reached the webhook: the first POST got 503, every one carried the bearer token and went to
@@ -590,7 +668,8 @@ for body in bodies:
     if body["object"]["namespace"] != target:
         fail("a notification about namespace " + body["object"]["namespace"])
 for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1"),
-                                      ("Job", "failing-job", "D008", "batch/v1")):
+                                      ("Job", "failing-job", "D008", "batch/v1"),
+                                      ("Deployment", "stranded", "D005", "apps/v1")):
     mine = [b for b in bodies if (b["object"]["kind"], b["object"]["name"]) == (kind, name)]
     if len(mine) != 1:
         fail("%d notifications answered 200 about %s %s" % (len(mine), kind, name))
@@ -616,23 +695,23 @@ for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1
         fail("%s %s: no Explained Event with fingerprint %s" % (kind, name, body["fingerprint"]))
     if body["explanation"] != explanation:
         fail("%s %s: explanation %s" % (kind, name, json.dumps(body["explanation"])))
-print("notifications: %d POSTs, the first answered 503; one v1 body for crasher and one for "
-      "failing-job" % len(hooks))
+print("notifications: %d POSTs, the first answered 503; one v1 body each for crasher, "
+      "failing-job and stranded" % len(hooks))
 ' "$TARGET" "$OTHER" "$WORK" "$gateway" "$HOOK_PATH" "$FAKE_BEARER" "$FAKE_BOT"
 # The counters, once kausa has handled the answers the receiver logged.
 counted=""
 for _ in $(seq 1 10); do
   metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
-  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 2' |
+  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 3' |
     grep -q . && echo "$metrics" | grep -E '^kausa_notifications_retried_total [1-9]' >/dev/null
   then
     counted=yes && break
   fi
   sleep 2
 done
-[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 2, or" \
+[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 3, or" \
   "kausa_notifications_retried_total under 1"
-echo "notifications: at least 2 sent and 1 retried"
+echo "notifications: at least 3 sent and 1 retried"
 
 # The grant is the table in docs/reference/permissions.md.
 sa="system:serviceaccount:$NAMESPACE:kausa"
