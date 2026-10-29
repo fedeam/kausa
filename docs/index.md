@@ -15,21 +15,23 @@ budget (or logs the request with `--dry-run`) and writes each explanation as an 
 failing workload. The image and the Helm chart exist, the kind test passes, and the first
 release, [v0.1.0](https://github.com/fedeam/kausa/releases/tag/v0.1.0), came out on 2026-10-28
 ([2026-10-28 — First release](journal/2026-10-28-first-release.md)), followed the same day by
-[v0.2.0](https://github.com/fedeam/kausa/releases/tag/v0.2.0). The
+[v0.2.0](https://github.com/fedeam/kausa/releases/tag/v0.2.0), and on 2026-10-29 by
+[v0.3.0](https://github.com/fedeam/kausa/releases/tag/v0.3.0) ([2026-10-29 —
+Notifications](journal/2026-10-29-notifications.md), "v0.3.0"). The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
 ([2026-10-26 — GitHub repository and first CI
 runs](journal/2026-10-26-github-repository-and-first-ci.md)). GitHub Actions run since the repository became
 public, on 2026-10-27: the checks, both images and the kind test passed on their first run.
-The namespaced install mode planned for v0.3 (`kausa run --namespace`, the chart's required
-`rbac.scope`) is in the code, not in a release yet; the kind test passed in both scopes on 2026-10-28
+The namespaced install mode of 0013 (`kausa run --namespace`, the chart's required
+`rbac.scope`) is in v0.3.0; the kind test passed in both scopes on 2026-10-28
 ([2026-10-28 — First release](journal/2026-10-28-first-release.md), "the namespaced install
 mode"). The explanation history of 0014 (`kausa run --history`, the chart's `history` values and
-the Explanation resource) is in the code too, off by default and not in a release yet; the kind
+the Explanation resource) is in v0.3.0 too, off by default; the kind
 test passed in both scopes with it on 2026-10-28 (same journal, "explanation history"). The
 notifications of 0015 (`kausa run --notify-url-file`, the chart's `notifications` values) are in
-the code too, off by default and not in a release yet; the kind test passed in both scopes with
+v0.3.0 too, off by default; the kind test passed in both scopes with
 the `json` format against a fake receiver on 2026-10-29, and the `slack` and `telegram` formats
 have not been posted to a real Slack workspace or Telegram chat yet ([2026-10-29 —
 Notifications](journal/2026-10-29-notifications.md)).
@@ -113,8 +115,8 @@ checks](how-to/develop.md).
   chart](reference/helm-chart.md) values; [0010. Ship a static binary on distroless, with a Helm
   chart, built in CI and not published yet](adr/0010-packaging.md); [0011. Scan the code with
   CodeQL's default setup](adr/0011-code-scanning-with-codeql.md); [0012. Release from a tag: a
-  signed image on GHCR and the chart on the GitHub release](adr/0012-releases.md). Accepted for
-  v0.3: [0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace,
+  signed image on GHCR and the chart on the GitHub release](adr/0012-releases.md). Shipped in
+  v0.3.0: [0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace,
   and nothing cluster-wide](adr/0013-namespaced-install-mode.md), [0014. Keep each incident's full
   explanations in a namespaced Explanation resource, off by
   default](adr/0014-explanation-history.md) and [0015. Post each new explanation to one optional
@@ -128,4 +130,5 @@ checks](how-to/develop.md).
   runs](journal/2026-10-26-github-repository-and-first-ci.md): the first push and CI runs;
   [2026-10-27 — First run of the kind test](journal/2026-10-27-first-kind-run.md);
   [2026-10-27 — Publication](journal/2026-10-27-publication.md);
-  [2026-10-28 — First release](journal/2026-10-28-first-release.md).
+  [2026-10-28 — First release](journal/2026-10-28-first-release.md);
+  [2026-10-29 — Notifications](journal/2026-10-29-notifications.md).

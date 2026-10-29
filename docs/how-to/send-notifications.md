@@ -3,7 +3,7 @@
 How to have kausa post each new explanation to one webhook (a receiver of your own, a Slack
 incoming webhook or a Telegram bot), check that it arrives, and turn it off.
 
-Status as of 2026-10-29: in the code and the chart, off by default, not in a release yet. The
+Status as of 2026-10-29: released in v0.3.0, off by default. The
 `json` format is checked by the kind test against a fake receiver; **the `slack` and `telegram`
 formats have not been posted to a real Slack workspace or Telegram chat yet**, only checked
 against their documentation ([Data sent in notifications](../reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
@@ -88,7 +88,9 @@ Telegram](../adr/0015-notifications.md).
    `urlKey` (default `url`) names the key of the URL if your Secret uses another. `allowHttp:
    true` allows a plain `http://` URL, only for a receiver inside the cluster or on the same
    private network. A release installed with an earlier chart has no `notifications` values;
-   upgraded with `--reuse-values`, it renders with notifications off until you set them. Quote the
+   upgraded with `--reuse-values`, it renders with notifications off until you set them. From the
+   v0.2.0 or v0.1.0 chart, the first upgrade also needs `--set rbac.scope=cluster` ([Upgrade from a
+   chart without rbac.scope](install-with-helm.md#upgrade-from-a-chart-without-rbacscope)). Quote the
    chat id: an unquoted number also works (the chart prints it as a whole number), but a quoted
    string says what it is.
 

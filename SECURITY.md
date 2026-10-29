@@ -7,8 +7,8 @@ and where secrets live.
 
 ## Supported versions
 
-No version has been released yet. Until 1.0, only the latest release will receive security
-fixes.
+Status as of 2026-10-29: the latest release is v0.3.0. Until 1.0, only the latest release will
+receive security fixes.
 
 ## Reporting a vulnerability
 
@@ -50,8 +50,8 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-28: v0.2.0 is released, and the namespaced install mode planned for v0.3 is
-in the code and the chart, not in a release yet. `kausa run` reads Pods,
+Status as of 2026-10-29: v0.3.0 is released, with the namespaced install mode, the explanation
+history and the notifications. `kausa run` reads Pods,
 their logs (crash loops, out-of-memory kills and failed Jobs only), Events and the metadata of ReplicaSets and Jobs; it
 redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
 logs it with `--dry-run`; it logs incidents and explanations with real names to its own stdout.
@@ -61,10 +61,9 @@ failing workload's namespace (`create` and `patch` on Events only), and serves m
 `--metrics-address`. With `--history` (off by default; the chart's `history.enabled`), it also
 keeps each explained incident's full explanations in an Explanation object in that namespace and
 deletes old ones ([0014. Keep each incident's full explanations in a namespaced Explanation
-resource, off by default](docs/adr/0014-explanation-history.md)); this is in the code and the
-chart, not in a release yet. With `--notify-url-file` (off by default; the chart's
-`notifications.enabled`; in the code and the chart, not in a release yet), it also posts each new
-explanation to one webhook, with the real names of the namespace and the top-level owner ([0015.
+resource, off by default](docs/adr/0014-explanation-history.md)), since v0.3.0. With
+`--notify-url-file` (off by default; the chart's `notifications.enabled`; since v0.3.0), it also
+posts each new explanation to one webhook, with the real names of the namespace and the top-level owner ([0015.
 Post each new explanation to one optional webhook, as JSON, Slack or
 Telegram](docs/adr/0015-notifications.md)). Each of these is implemented: the redaction, the prompt's validation, the
 budget, the Event writes and the metrics responder have unit tests, and the permissions are

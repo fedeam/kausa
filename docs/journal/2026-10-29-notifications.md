@@ -95,3 +95,88 @@ properly on the pull request.
   ship in the next release (the 0001 update of 2026-10-28 already moved them to v0.3). The wording
   is left for the maintainer.
 - Slack-compatible receivers (Mattermost, Discord's `/slack` path) remain untested.
+
+## Later the same day: v0.3.0
+
+### Request
+
+Merge the three v0.3 features into `main` and prepare the release change for v0.3.0, as [Maintain
+the repository](../how-to/maintain.md) ("Cut a release", step 1) describes.
+
+### What was done
+
+- **The three features merged on GitHub** on 2026-10-29, squash-merged in the order they were
+  stacked: #40, the namespaced install mode ([0013. Offer a namespaced install mode: one watch pair
+  and one Role per listed namespace, and nothing
+  cluster-wide](../adr/0013-namespaced-install-mode.md)), with the breaking change that the
+  chart's `rbac.scope` is required; #41, the explanation history ([0014. Keep each incident's full
+  explanations in a namespaced Explanation resource, off by
+  default](../adr/0014-explanation-history.md)); and #42, notifications ([0015. Post each new
+  explanation to one optional webhook, as JSON, Slack or Telegram](../adr/0015-notifications.md)).
+  Each was built by a team of agents, as the v0.2 design was (for #41: a lead, QA-first tests,
+  code and chart tracks, a review and a standards guardian); what was built and how it was checked
+  is in
+  [2026-10-28 — First release](2026-10-28-first-release.md) and [2026-10-29 —
+  Notifications](2026-10-29-notifications.md).
+- **The release change** (`chore(release): v0.3.0`): `version` 0.3.0 in `Cargo.toml` and
+  `Cargo.lock` (only kausa's entry changed) and `version` and `appVersion` 0.3.0 in
+  `charts/kausa/Chart.yaml`; the changelog's `Unreleased` entries moved to `[0.3.0] - 2026-10-29`,
+  with a two-line summary, an empty `Unreleased` and the compare links updated.
+- **The docs now say the features are in v0.3.0** instead of "in the code, not in a release yet"
+  or "planned for v0.3": the README (status, the notifications paragraph and the roadmap), the
+  front page, the [Security policy](../../SECURITY.md) (also its supported versions, which still
+  said that nothing had been released), [Permissions](../reference/permissions.md), [Helm
+  chart](../reference/helm-chart.md), [Command line and log format](../reference/command-line.md),
+  [Explanation resource](../reference/explanation-resource.md), [Data sent in
+  notifications](../reference/data-sent-in-notifications.md), [Send notifications to Slack,
+  Telegram or a webhook](../how-to/send-notifications.md), [Install kausa with
+  Helm](../how-to/install-with-helm.md), [Architecture](../explanation/architecture.md) and the
+  status comment of `src/run.rs`. The statements about the v0.2.0 and v0.1.0 charts, which have no
+  `rbac.scope`, stay as they were: the upgrade from them still needs `--set rbac.scope=cluster`
+  once.
+- **The install commands point at v0.3.0:** the README's quickstart installs
+  `kausa-0.3.0.tgz` with `--set rbac.scope=cluster` and runs the crasher from
+  `ghcr.io/fedeam/kausa:0.3.0`, and `CHART=` in [Install kausa with
+  Helm](../how-to/install-with-helm.md) is the v0.3.0 chart. Both work only once the tag is
+  pushed and the `Release` workflow has published them.
+
+### Decisions
+
+- **0.3.0, not 0.2.1:** the chart's required `rbac.scope` breaks every `helm upgrade` that does
+  not set it, and the release adds features, so it is a minor version, as Semantic Versioning
+  asks before 1.0.
+- No new ADR: the release follows [0012. Release from a tag: a signed image on GHCR and the chart
+  on the GitHub release](../adr/0012-releases.md).
+
+### Still hypotheses
+
+- **Slack and Telegram:** nothing has been posted to a real Slack workspace or Telegram chat.
+  The `slack` and `telegram` bodies are checked by unit tests against the services'
+  documentation only; that Slack honours `parse` and that the word joiners stop Telegram's
+  mentions and commands are unverified ([Data sent in
+  notifications](../reference/data-sent-in-notifications.md)).
+- **Fuzzing only in CI:** the `history` and `notification` fuzz targets were never run with
+  coverage instrumentation on a development machine (no nightly toolchain or `cargo-fuzz` there);
+  their only proper runs are ClusterFuzzLite's in GitHub Actions.
+- A hosted provider over HTTPS has still not been tried.
+
+### How it was checked
+
+`cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D
+warnings`, `cargo test --locked --all-features` (272 unit tests, 43 command-line tests on
+macOS), `helm lint --strict charts/kausa --set rbac.scope=cluster` and `tests/chart/render.sh`
+passed on the release branch, and the relative links of the changed files resolve.
+`tests/chart/render.sh` compared the renders with notifications off with those of a local branch
+by default, and the version bump changes the `app.kubernetes.io/version` and `helm.sh/chart`
+labels, so those comparisons failed on the version alone in the maintainer's clone (CI, without
+that branch, skipped them). `KAUSA_CHART_PREVIOUS` is now unset by default, and the comparison
+runs only when it names a ref.
+
+### Follow-ups
+
+- Merge the release pull request, sync Gitea, tag `v0.3.0` on `main`, and follow steps 3 to 5 of
+  "Cut a release": watch the `Release` workflow, check that the package stays public, and verify
+  the signature, the provenance and an anonymous pull of `ghcr.io/fedeam/kausa:0.3.0`.
+- Install the released v0.3.0 chart in a throwaway kind cluster, as was done for v0.1.0.
+- Post once to a real Slack incoming webhook and a real Telegram group, and record the result.
+- A test against a hosted provider.

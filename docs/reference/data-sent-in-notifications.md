@@ -3,7 +3,7 @@
 Exactly what kausa posts to the notification webhook for each new explanation, in each of its
 three formats, and what a notification never contains.
 
-Status as of 2026-10-29: **in the code and the chart, off by default, not in a release yet**
+Status as of 2026-10-29: **released in v0.3.0, off by default**
 (`src/notification.rs` renders the bodies, `src/notify.rs` sends them). Why it works this way:
 [0015. Post each new explanation to one optional webhook, as JSON, Slack or
 Telegram](../adr/0015-notifications.md). The `json` body is checked by unit tests and by the kind

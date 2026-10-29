@@ -1,7 +1,7 @@
 //! `kausa run`: the controller loop. It watches Pods and Warning events, keeps small records,
 //! correlates owners and logs each incident when it settles.
 //!
-//! Status as of 2026-10-28 (v0.2.0 and the namespaced mode planned for v0.3): incidents are
+//! Status as of 2026-10-29 (v0.3.0, with the namespaced mode): incidents are
 //! written to kausa's log and, with `--endpoint` or `--dry-run`, explained by the model or their
 //! request logged (`explain.rs`); with `--endpoint` and without `--no-events`, the explanation is also an
 //! Event (`events.rs`). The API calls are the watches (one of Pods and one of Warning events on

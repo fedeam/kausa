@@ -11,8 +11,9 @@
 #
 # KAUSA_CHART_BASE names a git ref with the v0.1 chart (default v0.1.0); when the ref is in the
 # clone, the ClusterRole rules are also compared with that chart's render. KAUSA_CHART_PREVIOUS
-# names the chart before notifications (default feat/v0.3-history); when it is in the clone,
-# renders with notifications off are compared with its renders byte for byte. HELM names the
+# names a git ref with the chart before notifications (for example 13cfd4d, the history's merge;
+# unset by default, because the chart's version labels differ after a release); when it is set and
+# in the clone, renders with notifications off are compared with its renders byte for byte. HELM names the
 # binary.
 # No pipefail: grep -q ends a pipe early, and its writer's SIGPIPE is not a failure.
 set -eu
@@ -21,7 +22,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CHART="$ROOT/charts/kausa"
 HELM=${HELM:-helm}
 BASE=${KAUSA_CHART_BASE:-v0.1.0}
-PREVIOUS=${KAUSA_CHART_PREVIOUS:-feat/v0.3-history}
+PREVIOUS=${KAUSA_CHART_PREVIOUS:-}
 KUBE_VERSION=1.36.0
 RELEASE=kausa
 NAMESPACE=kausa-system
@@ -1136,7 +1137,7 @@ for pair in \
 done
 
 # Byte for byte like the chart before notifications, when that chart is in the clone.
-if git -C "$ROOT" rev-parse --verify --quiet "$PREVIOUS^{commit}" >/dev/null 2>&1; then
+if [ -n "$PREVIOUS" ] && git -C "$ROOT" rev-parse --verify --quiet "$PREVIOUS^{commit}" >/dev/null 2>&1; then
   mkdir -p "$WORK/previous"
   git -C "$ROOT" archive "$PREVIOUS" charts/kausa | tar -x -C "$WORK/previous"
   for name in default endpoint dry-run-no-logs dry-run no-events history history-no-events; do
@@ -1172,7 +1173,7 @@ if git -C "$ROOT" rev-parse --verify --quiet "$PREVIOUS^{commit}" >/dev/null 2>&
     done
   done
 else
-  echo "skipped: $PREVIOUS is not in this clone; renders with notifications off are checked above"
+  echo "skipped: KAUSA_CHART_PREVIOUS is unset or not in this clone; renders with notifications off are checked above"
 fi
 
 # --- The webhook's egress rule ---

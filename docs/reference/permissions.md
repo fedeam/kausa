@@ -2,12 +2,12 @@
 
 The Kubernetes API permissions kausa's chart grants, and the ones it never asks for.
 
-Status as of 2026-10-28: the chart in `charts/kausa` grants this table, `pods/log` only when
+Status as of 2026-10-29: the chart in `charts/kausa` grants this table, `pods/log` only when
 kausa explains incidents (an endpoint or dry-run) with log collection on, and the Event writes
 only with an endpoint, outside dry-run, unless they are turned off, and the `explanations` row only
-while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; not in a release yet)
+while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; since v0.3.0)
 ([Helm chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
-namespaces only (`namespaced`, not in a release yet; see [Where the permissions
+namespaces only (`namespaced`, since v0.3.0; see [Where the permissions
 apply](#where-the-permissions-apply)). Why it is this list: [0009. Run with read-only permissions
 that never include Secrets](../adr/0009-least-privilege-rbac.md); why there are two scopes: [0013.
 Offer a namespaced install mode: one watch pair and one Role per listed namespace, and nothing
@@ -22,7 +22,7 @@ ran against a live cluster through a `kubectl proxy` that let only these reads t
 `POST` and `PATCH` on Events in one test namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a local
 model](../how-to/try-with-a-local-model.md)).
 
-Notifications (`--notify-url-file`, the chart's `notifications.enabled`; not in a release yet)
+Notifications (`--notify-url-file`, the chart's `notifications.enabled`; since v0.3.0)
 add no row and change no row, in either scope: a webhook `POST` is not a call to the Kubernetes
 API, and the kubelet, not kausa, reads the Secret that holds the webhook URL ([0015. Post each new
 explanation to one optional webhook, as JSON, Slack or Telegram](../adr/0015-notifications.md)).

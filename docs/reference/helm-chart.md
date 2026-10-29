@@ -2,18 +2,18 @@
 
 The values of the chart in `charts/kausa`, what each one turns into, and the objects it creates.
 
-Status as of 2026-10-28: the chart exists and is checked by `helm lint` and renders in CI, by a
+Status as of 2026-10-29: the chart exists and is checked by `helm lint` and renders in CI, by a
 server-side dry run against Kubernetes v1.36 (k3s), by one install in dry-run on that cluster
 (admitted under the restricted Pod Security Standard), and by the kind test, which installs it
 with an endpoint in each `rbac.scope` (both passed on 2026-10-28 on the maintainer's machine).
 Since v0.1.0 (2026-10-28) each release attaches the packaged chart to its GitHub release and
 publishes the image it uses by default, and the v0.1.0 chart was installed in dry-run in kind with
 that image ([Install kausa with Helm](../how-to/install-with-helm.md)). `rbac.scope` and
-`rbac.namespaces` are in the chart of the repository, not in a release yet: the v0.2.0 and v0.1.0
+`rbac.namespaces` are in the chart since v0.3.0 (2026-10-29): the v0.2.0 and v0.1.0
 charts have neither and always create the ClusterRole. The `history` values, the Explanation
-CustomResourceDefinition and its reader role are in the chart of the repository too, not in a
-release yet, and the kind test installs them in both scopes. So are the `notifications` values
-(as of 2026-10-29), which the kind test installs in the `json` format in both scopes. Why it is built this way: [0010. Ship a static binary
+CustomResourceDefinition and its reader role came with v0.3.0 too, and the kind test installs
+them in both scopes. So did the `notifications` values, which the kind test installs in the
+`json` format in both scopes. Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
 yet](../adr/0010-packaging.md), [0012. Release from a tag: a signed image on GHCR and the
 chart on the GitHub release](../adr/0012-releases.md) and [0013. Offer a namespaced install mode:

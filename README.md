@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.2.0](https://github.com/fedeam/kausa/releases/tag/v0.2.0),
+> Event on the failing workload. The latest release, [v0.3.0](https://github.com/fedeam/kausa/releases/tag/v0.3.0),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,9 +62,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa https://github.com/fedeam/kausa/releases/download/v0.2.0/kausa-0.2.0.tgz \
+helm install kausa https://github.com/fedeam/kausa/releases/download/v0.3.0/kausa-0.3.0.tgz \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.2.0 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.3.0 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -92,7 +92,7 @@ Point the endpoint at a model served in your cluster (Ollama, vLLM or any OpenAI
 server) and nothing leaves it. `--dry-run` shows the exact requests without sending them. The
 full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.md).
 
-Optionally, and off by default (in the code, not released yet), kausa also posts each new
+Optionally, and off by default (since v0.3.0), kausa also posts each new
 explanation to one webhook of yours, as JSON, to a Slack incoming webhook or to a Telegram chat:
 the explanation, the rule and the fingerprint, with the real names of the namespace and the
 workload only, never a log line or the request ([Data sent in
@@ -145,11 +145,13 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.2.0 is released (2026-10-28): `kausa run` watches Pods and Warning
-events, groups failures by workload, builds a redacted context with the failed container's log,
-asks the model within a call budget (or logs the request with `--dry-run`), reuses explanations
-of repeated incidents, writes each explanation as an Event on the failing workload, and serves
-Prometheus metrics with `--metrics-address`; its log lines are JSON ([Command line and log
+Pre-alpha. v0.3.0 is released (2026-10-29): `kausa run` watches Pods and Warning events, in the
+whole cluster or in a list of namespaces, groups failures by workload, builds a redacted context
+with the failed container's log, asks the model within a call budget (or logs the request with
+`--dry-run`), reuses explanations of repeated incidents, writes each explanation as an Event on
+the failing workload, and serves Prometheus metrics with `--metrics-address`; with `--history` it
+keeps each incident's explanations in an Explanation object, and with `--notify-url-file` it posts
+each new explanation to one webhook, both off by default; its log lines are JSON ([Command line and log
 format](docs/reference/command-line.md)). The image is published at `ghcr.io/fedeam/kausa`,
 signed with cosign and with SLSA build provenance, and the chart is attached to each [GitHub
 release](https://github.com/fedeam/kausa/releases), next to its signed checksums; how to verify
@@ -202,19 +204,20 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
 - **v0.2** (released as v0.2.0 on 2026-10-28): a security fix for Events about objects in
   another namespace, the detection rules `D009` (pod evicted) and `D010` (pod sandbox), and fixes
   to `D001` and `D005`.
-- **Next:** a test against a hosted provider.
-- **v0.3:** a namespaced install mode, in the code and the chart, not released yet: `kausa run
+- **v0.3** (released as v0.3.0 on 2026-10-29): a namespaced install mode: `kausa run
   --namespace` and the chart's `rbac.scope=namespaced`, with a Role per listed namespace and
   nothing cluster-wide ([0013. Offer a namespaced install mode: one watch pair and one Role per
-  listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)), and
-  the history of explanations, also in the code and the chart and off by default: `kausa run
+  listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)); the
+  chart's `rbac.scope` is now required. The history of explanations, off by default: `kausa run
   --history` and the chart's `history.enabled=true` keep each incident's whole explanations in an
   Explanation object in its namespace for up to 30 days ([Explanation
-  resource](docs/reference/explanation-resource.md)), and notifications to one webhook, also in
-  the code and the chart and off by default: `kausa run --notify-url-file` and the chart's
-  `notifications.enabled=true` post each new explanation as JSON, to Slack or to Telegram ([Send
-  notifications to Slack, Telegram or a webhook](docs/how-to/send-notifications.md); Slack and
-  Telegram not yet tested with real webhooks).
+  resource](docs/reference/explanation-resource.md)). Notifications to one webhook, off by
+  default: `kausa run --notify-url-file` and the chart's `notifications.enabled=true` post each
+  new explanation as JSON, to Slack or to Telegram ([Send notifications to Slack, Telegram or a
+  webhook](docs/how-to/send-notifications.md); Slack and Telegram not yet tested with real
+  webhooks).
+- **Next:** a test against a hosted provider, and a real post to a Slack workspace and a Telegram
+  chat (both formats are checked only against their documentation so far).
 
 ## Documentation
 
