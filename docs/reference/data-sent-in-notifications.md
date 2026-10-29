@@ -221,7 +221,7 @@ the Telegram joiners, the 3-second interval for `telegram`, and `"parse": "none"
 
 What follows for a reader, as of 2026-10-29, from the documentation only: in Slack, the text of a
 notification should mention nobody, and should show a URL as plain text if the webhook honours
-`parse`; in Telegram, the joiners should keep a `@username` from being a mention and a `/command`
-from being a command, and whether a URL whose slashes carry a joiner is still a link was not
-checked. Each of these stays listed under "What kausa cannot promise" in the [Security
-policy](../../SECURITY.md) until a post to a real workspace and a real chat shows it.
+`parse`; this stays listed under "What kausa cannot promise" in the [Security
+policy](../../SECURITY.md) until a post to a real workspace shows it. In Telegram, a real post on
+2026-10-29 showed it: with the joiners, Telegram found no mention and no bot command in the text,
+only the URL, which stays a link (without the joiners it found all three).

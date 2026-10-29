@@ -217,3 +217,11 @@ mentions inert but a plain URL still becomes a link, so the `slack` body adds `"
 Slack does not say that webhooks honour it, and one that ignores it is no worse off. The other
 results, and what stays a hypothesis, are in the note; nothing has been posted to a real Slack
 workspace or Telegram chat yet.
+
+Update 2026-10-29, later: On 2026-10-29 kausa v0.3.0, run from a release build against a kind
+cluster with a fake model, posted a `telegram` notification to a real Telegram chat through a real
+bot: the Bot API answered `200`. Two control messages sent straight to the same chat showed what
+Telegram detects: without the joiners, a mention, a bot command and a URL; with them, only the URL.
+The joiners do keep a `@username` from being a mention and a `/command@bot` from being a command; a
+URL whose slashes carry a joiner is still a link (previews stay off). Slack has still not been
+posted to.
