@@ -360,17 +360,22 @@ impl Tracker {
 
 /// The fingerprint of an incident. The text it hashes is the sample's normalized message, except
 /// for an image that cannot be pulled, whose message alternates between `ErrImagePull` and
-/// `ImagePullBackOff`: there it is the image reference. For a workload that cannot create Pods,
-/// the names of the Pods its controller tried to create count as the incident's Pods too.
+/// `ImagePullBackOff`: there it is the image reference. A crash loop or an out-of-memory kill
+/// alternates too, between waiting in `CrashLoopBackOff` (with the back-off message) and
+/// terminated (with none), so which one the sample is depends on when kausa looked: there the
+/// text is the container's name. For a workload that cannot create Pods, the names of the Pods
+/// its controller tried to create count as the incident's Pods too.
 fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<String>) -> String {
     let mut names: Vec<&str> = pods.iter().map(String::as_str).collect();
     if key.detection == Detection::PodCreate {
         names.extend(generated_names(&sample.message, &key.owner_name));
     }
-    let text = if key.detection == Detection::ImagePull {
-        sample.image.clone().unwrap_or_default()
-    } else {
-        normalize(&sample.message, &names)
+    let text = match key.detection {
+        Detection::ImagePull => sample.image.clone().unwrap_or_default(),
+        Detection::CrashLoop | Detection::OutOfMemory => {
+            sample.container.clone().unwrap_or_default()
+        }
+        _ => normalize(&sample.message, &names),
     };
     fingerprint(
         key.detection.id(),
@@ -772,6 +777,43 @@ mod tests {
         assert_eq!(
             run("api-1-a", "ErrImagePull", "rpc error: code = NotFound"),
             run("api-1-a", "ImagePullBackOff", "Back-off pulling image"),
+        );
+        // Between restarts the same crash loop is a terminated container with no message, and an
+        // out-of-memory kill is the same whether its container is waiting or terminated.
+        let terminated = |reason: &str, last: Option<&str>| {
+            let mut record = pod("api-1-a", "Running", None);
+            record.containers[0].restart_count = 3;
+            record.containers[0].terminated_reason = Some(reason.to_owned());
+            record.containers[0].last_termination_reason = last.map(str::to_owned);
+            let views = [PodView {
+                record: &record,
+                owner: &deploy,
+            }];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            let incident = &tracker.tick(t(0), collect_signals(&views, &[], t(0), FRESH))[0];
+            (incident.key.detection, incident.fingerprint.clone())
+        };
+        let waiting = run(
+            "api-1-a",
+            "CrashLoopBackOff",
+            "back-off 40s restarting failed container=api pod=api-1-a",
+        );
+        assert_eq!(
+            terminated("Error", None),
+            (Detection::CrashLoop, waiting.clone())
+        );
+        let mut oom = pod("api-1-a", "Running", Some("CrashLoopBackOff"));
+        oom.containers[0].last_termination_reason = Some("OOMKilled".into());
+        let views = [PodView {
+            record: &oom,
+            owner: &deploy,
+        }];
+        let mut tracker = Tracker::new(SignedDuration::ZERO);
+        let waiting_oom = &tracker.tick(t(0), collect_signals(&views, &[], t(0), FRESH))[0];
+        assert_eq!(waiting_oom.key.detection, Detection::OutOfMemory);
+        assert_eq!(
+            terminated("OOMKilled", None),
+            (Detection::OutOfMemory, waiting_oom.fingerprint.clone())
         );
     }
 

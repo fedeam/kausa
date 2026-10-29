@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The request names a PersistentVolumeClaim or a HorizontalPodAutoscaler that an incident is about
   by its kind (`persistentvolumeclaim-1`, `horizontalpodautoscaler-1`), not as `Object`.
 
+### Fixed
+
+- The fingerprint of a crash loop (`D001`) or an out-of-memory kill (`D003`) no longer depends on
+  whether kausa saw the container waiting in `CrashLoopBackOff` or terminated between restarts:
+  it hashes the container's name instead of the message. The same failure kept its Explanation and
+  Event names only some of the time, after a restart of kausa for example. These fingerprints
+  change once on upgrade, so a failure that was already explained gets one new Explanation.
+
 ## [0.3.0] - 2026-10-29
 
 A namespaced install mode, the explanation history and notifications to one webhook, the last two
