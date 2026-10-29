@@ -213,8 +213,10 @@ events and the event that folds them have one fingerprint), with the names of th
 Pods (and, for `D011`, of the Pods the controller tried to create, which start with the top-level
 owner's name), UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
 and other numbers normalized; for `D002`, whose message alternates between `ErrImagePull` and
-`ImagePullBackOff`, the image reference instead. It is computed before redaction and never sent
-to the model; it is in kausa's log, the names of its Events and Explanations and, with
+`ImagePullBackOff`, the image reference instead; for `D001` and `D003`, whose example is the
+container waiting in `CrashLoopBackOff` (with the back-off message) or terminated between restarts
+(with none) depending on when kausa looks, the container's name. It is computed before
+redaction and never sent to the model; it is in kausa's log, the names of its Events and Explanations and, with
 notifications on, every notification ([Data sent in
 notifications](data-sent-in-notifications.md#the-fingerprint)). It also keys the deduplication
 cache.
