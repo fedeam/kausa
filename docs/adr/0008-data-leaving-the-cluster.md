@@ -101,3 +101,11 @@ Telegram](0015-notifications.md) adds a second, optional destination: the webhoo
 configures, which receives the explanation with the real namespace and top-level owner names, the
 rule and the fingerprint, and never logs or the context sent to the model ([Data sent to the
 provider](../reference/data-sent-to-the-provider.md) lists it once implemented).
+
+Update 2026-10-29: as implemented with [0015. Post each new explanation to one optional webhook,
+as JSON, Slack or Telegram](0015-notifications.md), kausa sends data to two kinds of destination.
+The model endpoint stays the only destination of cluster data (the allowlisted, pseudonymous,
+redacted context), and its requests do not change. An optional second one, the webhook, receives
+only the fields of [Data sent in notifications](../reference/data-sent-in-notifications.md), with
+the real names of the namespace and the top-level owner; every other name stays a placeholder.
+Invariants 2, 3 and 4 of ARCHITECTURE.md do not change.

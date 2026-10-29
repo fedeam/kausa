@@ -72,6 +72,33 @@ false (another release or a cluster administrator installs it). */}}
 {{- end }}
 
 {{/*
+The notifications map and networkPolicy.notifications are read nil-safe, like the history map: a
+release made before them (helm upgrade --reuse-values) or --set notifications=null has none.
+*/}}
+
+{{/* kausa posts each new explanation to a webhook with notifications.enabled. */}}
+{{- define "kausa.notifies" -}}
+{{- $n := .Values.notifications | default dict }}
+{{- if $n.enabled }}true{{ end }}
+{{- end }}
+
+{{/* notifications.format as a string, json when missing; kausa.validate checks it. */}}
+{{- define "kausa.notifyFormat" -}}
+{{- $n := .Values.notifications | default dict }}
+{{- $n.format | default "json" | toString }}
+{{- end }}
+
+{{/* notifications.telegramChatId as a string, empty when missing. An unquoted number in a values
+file is a float64, which toString writes in scientific notation: it is written as a whole number. */}}
+{{- define "kausa.notifyChatId" -}}
+{{- $n := .Values.notifications | default dict }}
+{{- $id := $n.telegramChatId }}
+{{- if kindIs "float64" $id }}{{ printf "%.0f" $id }}
+{{- else if not (kindIs "invalid" $id) }}{{ toString $id }}
+{{- end }}
+{{- end }}
+
+{{/*
 The rules of the ClusterRole (rbac.scope=cluster) and of every Role (rbac.scope=namespaced): the
 permissions in docs/reference/permissions.md, and nothing else. A later feature adds its rules
 only here, so that both scopes grant the same.
@@ -110,7 +137,8 @@ only here, so that both scopes grant the same.
 Refuses to render with a reason. The rbac checks come first, in this order: the scope, the list
 against the scope, every name, the first repeat, and the count. rbac is read nil-safe: a v0.1
 release's stored values and --set rbac=null have no rbac map, and must reach the "not set"
-message, not a nil-pointer error. history.days comes last, with the history on or off.
+message, not a nil-pointer error. history.days comes next, with the history on or off, and the
+notification checks last, only with notifications.enabled.
 */}}
 {{- define "kausa.validate" -}}
 {{- $rbac := .Values.rbac | default dict }}
@@ -161,5 +189,35 @@ message, not a nil-pointer error. history.days comes last, with the history on o
 {{- $days := include "kausa.historyDays" . }}
 {{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $days) }}
 {{- fail (printf "history.days must be a whole number of days from 1 to 30, not '%s'" $days) }}
+{{- end }}
+{{- if include "kausa.notifies" . }}
+{{- $n := .Values.notifications | default dict }}
+{{- $format := include "kausa.notifyFormat" . }}
+{{- $chatId := include "kausa.notifyChatId" . }}
+{{- $npNotify := .Values.networkPolicy.notifications | default dict }}
+{{- if not $n.existingSecret }}
+{{- fail "notifications.existingSecret is required with notifications.enabled: the Secret that holds the webhook URL" }}
+{{- end }}
+{{- if not (has $format (list "json" "slack" "telegram")) }}
+{{- fail (printf "notifications.format must be json, slack or telegram, not '%s'" $format) }}
+{{- end }}
+{{- if and (eq $format "telegram") (not $chatId) }}
+{{- fail "notifications.telegramChatId is required with notifications.format=telegram" }}
+{{- end }}
+{{- if and (ne $format "telegram") $chatId }}
+{{- fail "notifications.telegramChatId is used only with notifications.format=telegram" }}
+{{- end }}
+{{- if and (ne $format "json") $n.tokenKey }}
+{{- fail "notifications.tokenKey is used only with notifications.format=json" }}
+{{- end }}
+{{- if not .Values.model.endpoint }}
+{{- fail "notifications.enabled needs model.endpoint" }}
+{{- end }}
+{{- if .Values.dryRun }}
+{{- fail "notifications.enabled is not used with dryRun: no explanation is written" }}
+{{- end }}
+{{- if and .Values.networkPolicy.enabled (not $npNotify.to) }}
+{{- fail "networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook" }}
+{{- end }}
 {{- end }}
 {{- end }}

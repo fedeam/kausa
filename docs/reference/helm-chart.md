@@ -12,13 +12,15 @@ that image ([Install kausa with Helm](../how-to/install-with-helm.md)). `rbac.sc
 `rbac.namespaces` are in the chart of the repository, not in a release yet: the v0.2.0 and v0.1.0
 charts have neither and always create the ClusterRole. The `history` values, the Explanation
 CustomResourceDefinition and its reader role are in the chart of the repository too, not in a
-release yet, and the kind test installs them in both scopes. Why it is built this way: [0010. Ship a static binary
+release yet, and the kind test installs them in both scopes. So are the `notifications` values
+(as of 2026-10-29), which the kind test installs in the `json` format in both scopes. Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
 yet](../adr/0010-packaging.md), [0012. Release from a tag: a signed image on GHCR and the
 chart on the GitHub release](../adr/0012-releases.md) and [0013. Offer a namespaced install mode:
 one watch pair and one Role per listed namespace, and nothing
 cluster-wide](../adr/0013-namespaced-install-mode.md) and [0014. Keep each incident's full
-explanations in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md).
+explanations in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md) and [0015. Post each new explanation to one optional webhook, as JSON, Slack or
+Telegram](../adr/0015-notifications.md).
 
 ## Objects
 
@@ -69,6 +71,13 @@ release writes history.
 | `history.days` | `7` | `--history-days`: Explanations older than this many days are deleted, 1 to 30 |
 | `history.installCRD` | `true` | Whether this release installs the CustomResourceDefinition and the reader role. `false` when another release or a cluster administrator installs them |
 | `history.readers.aggregate` | `true` | The reader role, which lets `view`, `edit` and `admin` read Explanations; `false` leaves it out |
+| `notifications.enabled` | `false` | Post each new explanation to one webhook ([Notifications](#notifications)): `--notify-url-file /var/run/secrets/kausa-notify/url --notify-format <format>`, and the Secret volume. Needs `model.endpoint`, and not with `dryRun` |
+| `notifications.format` | `json` | `--notify-format`: `json`, `slack` or `telegram` |
+| `notifications.existingSecret` | `""` | Required when enabled: a Secret of yours in the release namespace that holds the webhook URL, mounted read-only at `/var/run/secrets/kausa-notify/` (mode 0440, group 65532) |
+| `notifications.urlKey` | `url` | The key of that Secret that holds the whole URL, mounted as the file `url` |
+| `notifications.tokenKey` | `""` | `json` only, optional: the key that holds a bearer token, mounted as the file `token` and passed as `--notify-token-file` |
+| `notifications.telegramChatId` | `""` | Required with `telegram`, refused with the others: `--notify-telegram-chat-id`, an integer or `@` and a channel's username |
+| `notifications.allowHttp` | `false` | `--notify-allow-http`, for an `http://` webhook in the cluster or on the same private network |
 | `settleSeconds` | `60` | `--settle-seconds` |
 | `budget.callsPerHour` | `30` | `--max-calls-per-hour` |
 | `budget.callsPerDay` | `200` | `--max-calls-per-day` |
@@ -82,11 +91,13 @@ release writes history.
 | `serviceAccount.name` | `""` | |
 | `serviceAccount.annotations` | `{}` | |
 | `resources` | requests `10m` CPU and `32Mi`, limits `200m` and `128Mi` | Room above the 2 MiB and 1m measured on a Raspberry Pi 4 in dry-run ([Memory and CPU on a Raspberry Pi 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)) |
-| `networkPolicy.enabled` | `false` | A NetworkPolicy with egress to DNS (port 53), the API server and the model endpoint only, and ingress to the metrics port only |
+| `networkPolicy.enabled` | `false` | A NetworkPolicy with egress to DNS (port 53), the API server, the model endpoint and, with notifications, the webhook only, and ingress to the metrics port only |
 | `networkPolicy.apiServer.cidrs` | `[]` | The API server's addresses; required with the policy |
 | `networkPolicy.apiServer.port` | `6443` | |
 | `networkPolicy.endpoint.to` | `[]` | NetworkPolicy peers of the model endpoint; required with the policy and an endpoint |
 | `networkPolicy.endpoint.ports` | `[]` | Their ports |
+| `networkPolicy.notifications.to` | `[]` | NetworkPolicy peers of the webhook; required with the policy and notifications |
+| `networkPolicy.notifications.ports` | TCP `443` | Their ports; TCP 443 when missing or empty, never every port |
 | `networkPolicy.metricsFrom` | `[]` | Peers allowed to reach the metrics port; empty allows any |
 | `podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity` | empty | Passed to the Pod |
 
@@ -107,9 +118,56 @@ reason, and nothing is applied) in these cases, checked in this order, with thes
 | The NetworkPolicy without the API server's addresses | `networkPolicy.apiServer.cidrs is required with networkPolicy.enabled: without it kausa cannot reach the API server` |
 | The NetworkPolicy with an endpoint (outside `dryRun`) and without its peers | `networkPolicy.endpoint.to is required with networkPolicy.enabled and model.endpoint: without it kausa cannot reach the model` |
 | `history.days` is not a whole number from 1 to 30, whether the history is on or off (for example `0`, `31`, `abc` or `7.5`) | `history.days must be a whole number of days from 1 to 30, not '<value>'` |
+| Notifications without `existingSecret` | `notifications.existingSecret is required with notifications.enabled: the Secret that holds the webhook URL` |
+| Notifications with another format | `notifications.format must be json, slack or telegram, not '<value>'` |
+| `telegram` without a chat id | `notifications.telegramChatId is required with notifications.format=telegram` |
+| A chat id with `json` or `slack` | `notifications.telegramChatId is used only with notifications.format=telegram` |
+| `tokenKey` with `slack` or `telegram` | `notifications.tokenKey is used only with notifications.format=json` |
+| Notifications without `model.endpoint` | `notifications.enabled needs model.endpoint` |
+| Notifications with `dryRun` | `notifications.enabled is not used with dryRun: no explanation is written` |
+| Notifications and the NetworkPolicy without the webhook's peers | `networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook` |
 
 The checks are in `kausa.validate` (`templates/_helpers.tpl`). `rbac` is read with defaults, so a
 missing or null map reaches the first message and never a nil-pointer error.
+
+The notification checks run only with `notifications.enabled`.
+
+## Notifications
+
+With `notifications.enabled`, the helper `kausa.notifies` is `true`, and the chart renders:
+
+- **The arguments**, after the history's and before `--metrics-address`, in this order:
+  `--notify-url-file /var/run/secrets/kausa-notify/url`, `--notify-format "<format>"`, then
+  `--notify-telegram-chat-id "<id>"` with `telegram`, `--notify-token-file
+  /var/run/secrets/kausa-notify/token` with a `tokenKey`, and `--notify-allow-http` with
+  `allowHttp`. The URL itself is never in the Pod spec.
+- **The volume `notify`**: the Secret `existingSecret`, `defaultMode: 0440`, with the item
+  `urlKey` as `url` and, with a `tokenKey`, that item as `token`, mounted read-only at
+  `/var/run/secrets/kausa-notify` (readable through the Pod's `fsGroup`, 65532). It is never
+  optional: a missing Secret or key leaves the Pod in `ContainerCreating` with a `FailedMount`
+  event (`secret "<name>" not found`, or `references non-existent secret key: <key>`), not a
+  kausa that starts without notifications; once the Secret is fixed, the same Pod starts with no
+  restart (seen in kind on 2026-10-29). It shares the `volumes` and `volumeMounts` lists with the
+  API key's volume.
+- **A fourth egress rule** in the NetworkPolicy, after the model's, commented `# The notification
+  webhook.`: `to` from `networkPolicy.notifications.to`, and always `ports`, from
+  `networkPolicy.notifications.ports`, or TCP 443 when they are missing or empty. Unlike
+  `networkPolicy.endpoint.ports`, where an empty list leaves the rule without `ports` (every port
+  to those peers), an empty list here falls back to 443. A NetworkPolicy cannot select a
+  hostname: a hosted receiver needs an `ipBlock`, a CNI with FQDN policies or an egress proxy.
+- **A paragraph in `NOTES.txt`** that names the format, the Secret and its `urlKey` (and
+  `tokenKey`), and how to find failures: `kausa_notifications_total{outcome="failed"}` and the
+  `notification failed` log line, with a `kubectl logs` command.
+
+No RBAC rule changes, in either scope: `kausa.rules` is the same with notifications on or off,
+and the ClusterRole and every Role render the same.
+
+`notifications` and `networkPolicy.notifications` are read nil-safely (`default dict`): a release
+whose stored values have neither (one installed with an earlier chart and upgraded with
+`--reuse-values`) renders with notifications off, with no nil-pointer error, and `--reuse-values
+--set notifications.enabled=true ...` turns them on. An unquoted `telegramChatId` in a values file
+(`-1001234567890`) reaches the template as a floating-point number; the chart prints it as a whole
+number, `"-1001234567890"`, not in exponent notation. Quoting it is clearer.
 
 ## The history
 
@@ -179,8 +237,9 @@ helm template kausa charts/kausa --kube-version 1.36.0 \
   --set rbac.scope=namespaced --set 'rbac.namespaces={shop,web}'
 ```
 
-The Dockerfile's `ci` target renders both scopes, the history toggles and every `rbac` and
-`history.days` refusal, and
+The Dockerfile's `ci` target renders both scopes, the history toggles, each notification format
+with and without the NetworkPolicy, values without a `notifications` map, and every `rbac`,
+`history.days` and notification refusal, and
 `tests/chart/render.sh` runs a longer set of the same checks (helm only, no cluster), including a
 comparison of the cluster-scope rules with the v0.1.0 chart's.
 

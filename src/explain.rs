@@ -5,7 +5,7 @@
 //! endpoint nor a burst of incidents can stop the watches or grow kausa's memory.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::time::Duration;
 
@@ -24,6 +24,7 @@ use crate::history::History;
 use crate::log;
 use crate::metrics::Metrics;
 use crate::model::ModelClient;
+use crate::notify;
 use crate::prompt::{self, OutputMode, PROMPT_VERSION};
 
 /// How many incidents may wait for an explanation; the oldest is dropped when one more arrives.
@@ -57,10 +58,14 @@ pub struct Settings {
     pub dedup_ttl: Duration,
     /// The reporting instance of kausa's Events: its Pod's name, or `kausa`.
     pub instance: String,
+    /// With `--notify-url-file`, the webhook each new explanation is posted to
+    /// (docs/adr/0015-notifications.md).
+    pub notify: Option<notify::Notifier>,
 }
 
 /// What the explanations share across incidents: the budget, the deduplication cache, the Event
-/// writer, the history writer and the metrics. Borrowed only between awaits.
+/// writer, the history writer, the metrics and the queue of notifications. Borrowed only between
+/// awaits.
 pub struct Shared<'a> {
     pub budget: RefCell<Budget>,
     pub dedup: RefCell<Dedup>,
@@ -68,6 +73,8 @@ pub struct Shared<'a> {
     /// The history writer, with `--history` and an endpoint.
     pub history: Option<History>,
     pub metrics: &'a Metrics,
+    /// The notifications waiting for the webhook, at most `notify::QUEUE_LIMIT`.
+    pub notifications: RefCell<VecDeque<notify::Queued>>,
 }
 
 /// Which container's log to read for an incident.
@@ -104,7 +111,9 @@ pub fn reads_logs(detection: Detection) -> bool {
 /// was explained recently; otherwise reads the log tail, builds and fits the request, and logs it
 /// (dry-run) or sends it within the budget and validates the answer. Explanations and skipped
 /// explanations are written as Events when that is on, and explanations, fresh or cached, into
-/// the history with `--history`. A first call that fails with a transient error (a timeout, a
+/// the history with `--history`. With notifications on, an explanation is queued for the webhook
+/// once its Event and history are written: a new one always, a cached one while its notification
+/// was not sent; a skip never is. A first call that fails with a transient error (a timeout, a
 /// failed connection, `429` or a `5xx` status) returns the job, to be tried once more after
 /// `RETRY_DELAY`; a call that never reached the endpoint is given back to the budget.
 pub async fn run(
@@ -131,23 +140,29 @@ pub async fn run(
             .dedup
             .borrow_mut()
             .get(&fingerprint, std::time::Instant::now());
-        if let Some(explanation) = cached {
+        if let Some(cached) = cached {
             shared.metrics.inc("kausa_explanations_cached_total", &[]);
             log::info(
                 "explanation",
                 merge(
                     about,
-                    json!({"explanation": explanation.to_json(), "cached": true}),
+                    json!({"explanation": cached.explanation.to_json(), "cached": true}),
                 ),
             )?;
-            return emit(
+            emit(
                 settings,
                 shared,
                 &gathered,
-                Outcome::Explained(&explanation),
+                Outcome::Explained(&cached.explanation),
             )
-            .await
-            .map(|()| None);
+            .await?;
+            // The stored notification, again, until the webhook has acknowledged it.
+            if let Some(notice) = cached.notice.filter(|_| settings.notify.is_some())
+                && !cached.notified
+            {
+                notify::enqueue(shared, notify::queued(&gathered.incident, notice))?;
+            }
+            return Ok(None);
         }
     }
 
@@ -273,10 +288,21 @@ pub async fn run(
         .metrics
         .inc("kausa_model_calls_total", &[("outcome", "ok")]);
     let restored = explanation.map_clean(|text| redactor.restore(text));
-    shared
-        .dedup
-        .borrow_mut()
-        .put(&fingerprint, restored.clone(), std::time::Instant::now());
+    // The notification's text maps back only the namespace and the top-level owner.
+    let narrow = settings.notify.is_some().then(|| {
+        let incident = &gathered.incident;
+        let names = [
+            incident.key.namespace.as_str(),
+            incident.owner.name.as_str(),
+        ];
+        explanation.map_clean(|text| redactor.restore_only(text, &names))
+    });
+    shared.dedup.borrow_mut().put(
+        &fingerprint,
+        restored.clone(),
+        narrow.clone(),
+        std::time::Instant::now(),
+    );
     log::info(
         "explanation",
         merge(
@@ -290,9 +316,11 @@ pub async fn run(
             }),
         ),
     )?;
-    emit(settings, shared, &gathered, Outcome::Explained(&restored))
-        .await
-        .map(|()| None)
+    emit(settings, shared, &gathered, Outcome::Explained(&restored)).await?;
+    if let Some(narrow) = narrow {
+        notify::enqueue(shared, notify::queued(&gathered.incident, narrow))?;
+    }
+    Ok(None)
 }
 
 /// Builds the request, cutting the context until it fits `max_input_tokens`: first the log tail
@@ -478,5 +506,384 @@ mod tests {
         assert_eq!(tail_text(b"rt of a line\nlast line\n", true), "last line\n");
         assert_eq!(tail_text(b"whole\n", false), "whole\n");
         assert_eq!(tail_text(b"bad \xff byte\n", false), "bad \u{FFFD} byte\n");
+    }
+
+    // Acceptance tests for notifications (docs/adr/0015-notifications.md), written before the
+    // code. They use `Settings::notify: Option<notify::Notifier>`, `Shared::notifications:
+    // RefCell<VecDeque<notify::Queued>>` and the Dedup API of budget.rs (`put` with a notice,
+    // `peek`, `mark_notified`). They run `run` against a fake model on localhost, with no log
+    // read and no Event or history writer, so the Kubernetes client is never used.
+
+    use std::cell::RefCell;
+    use std::collections::{BTreeSet, VecDeque};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    use crate::incident::{Incident, IncidentKey, Signal};
+    use crate::model::ModelClient;
+    use crate::notify::{Format, Notifier};
+    use crate::prompt::Explanation;
+    use crate::record::{ContainerRecord, OwnerRef, PodRecord};
+
+    const FINGERPRINT: &str = "5d0c2b7e9a1f4c38";
+
+    /// A fake model on localhost that answers one request with `content` as the first choice,
+    /// or with `status` and an empty object when `content` is `None`. Returns its base URL.
+    fn model(status: &'static str, content: Option<String>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = vec![0; 65536];
+            loop {
+                let n = stream.read(&mut buffer).unwrap_or(0);
+                request.extend_from_slice(&buffer[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(str::to_owned)
+                        })
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            let body = match content {
+                Some(content) => json!({
+                    "choices": [{"message": {"content": content}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+                })
+                .to_string(),
+                None => "{}".to_owned(),
+            };
+            let answer = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(answer.as_bytes());
+        });
+        url
+    }
+
+    /// A base URL with nothing listening: a call to it would fail.
+    fn nowhere() -> String {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free port")
+            .port();
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    /// The model's answer: every name a placeholder.
+    fn answer() -> String {
+        json!({
+            "summary": "deployment-1 in namespace-1 crashes: pod-1 on node-1 exits.",
+            "cause": "container-1 runs as serviceaccount-1.",
+            "steps": ["Check Deployment-1's args."],
+            "confidence": "medium",
+        })
+        .to_string()
+    }
+
+    fn narrow() -> Explanation {
+        Explanation {
+            summary: "web in shop crashes: pod-1 on node-1 exits.".into(),
+            cause: "container-1 runs as serviceaccount-1.".into(),
+            steps: vec!["Check web's args.".into()],
+            confidence: "medium".into(),
+        }
+    }
+
+    fn full() -> Explanation {
+        Explanation {
+            summary: "web in shop crashes: web-7d9c8b6f4d-2xkqp on worker-7 exits.".into(),
+            cause: "server runs as web-runner.".into(),
+            steps: vec!["Check web's args.".into()],
+            confidence: "medium".into(),
+        }
+    }
+
+    fn stored(summary: &str) -> Explanation {
+        Explanation {
+            summary: summary.into(),
+            cause: "c".into(),
+            steps: vec![],
+            confidence: "low".into(),
+        }
+    }
+
+    fn work() -> Work {
+        let owner = OwnerRef {
+            api_version: "apps/v1".into(),
+            kind: "Deployment".into(),
+            name: "web".into(),
+            uid: "an-invented-uid".into(),
+        };
+        let key = IncidentKey {
+            namespace: "shop".into(),
+            owner_kind: "Deployment".into(),
+            owner_name: "web".into(),
+            detection: Detection::CrashLoop,
+        };
+        let first_seen: Timestamp = "2026-10-28T11:59:00Z".parse().expect("a timestamp");
+        let incident = Incident {
+            sample: Signal {
+                key: key.clone(),
+                owner: owner.clone(),
+                observed_at: first_seen,
+                event: None,
+                pod: Some("web-7d9c8b6f4d-2xkqp".into()),
+                container: Some("server".into()),
+                image: None,
+                reason: "CrashLoopBackOff".into(),
+                message: "SAMPLE-CANARY".into(),
+                exit_code: Some(1),
+            },
+            key,
+            owner,
+            fingerprint: FINGERPRINT.into(),
+            first_seen,
+            last_seen: first_seen,
+            pods: BTreeSet::from(["web-7d9c8b6f4d-2xkqp".to_owned()]),
+        };
+        Work {
+            gathered: Gathered {
+                incident,
+                pods: vec![PodRecord {
+                    namespace: "shop".into(),
+                    name: "web-7d9c8b6f4d-2xkqp".into(),
+                    uid: "uid-pod".into(),
+                    controller: None,
+                    phase: Some("Running".into()),
+                    unschedulable: None,
+                    unschedulable_reason: None,
+                    reason: None,
+                    message: None,
+                    failed_at: None,
+                    node_name: Some("worker-7".into()),
+                    service_account: Some("web-runner".into()),
+                    containers: vec![ContainerRecord {
+                        name: "server".into(),
+                        image: Some("busybox:1.37".into()),
+                        restart_count: 4,
+                        ..Default::default()
+                    }],
+                }],
+                events: vec![],
+                pods_total: 1,
+                log_tail: Some("LOG-CANARY panic\n".into()),
+            },
+            log: None,
+            attempt: 0,
+        }
+    }
+
+    fn settings(model: Option<String>, notify: bool, calls_per_hour: usize) -> Settings {
+        Settings {
+            model: model.map(|url| ModelClient::new(&url, None, true).expect("a model client")),
+            model_name: "m".into(),
+            logs: false,
+            mode: OutputMode::JsonSchema,
+            max_tokens: 800,
+            max_input_tokens: 6000,
+            events: false,
+            history_days: None,
+            calls_per_hour,
+            calls_per_day: 200,
+            dedup_ttl: Duration::from_secs(6 * 3600),
+            instance: "kausa".into(),
+            notify: notify.then(|| {
+                let url = reqwest::Url::parse(&format!("{}/hook", nowhere())).expect("a URL");
+                Notifier::new(url, Format::Json, None, true).expect("a notifier")
+            }),
+        }
+    }
+
+    fn shared<'a>(settings: &Settings, metrics: &'a Metrics) -> Shared<'a> {
+        Shared {
+            budget: RefCell::new(Budget::new(settings.calls_per_hour, settings.calls_per_day)),
+            dedup: RefCell::new(Dedup::new(settings.dedup_ttl, 1024)),
+            writer: None,
+            history: None,
+            metrics,
+            notifications: RefCell::new(VecDeque::new()),
+        }
+    }
+
+    /// Runs one explanation and returns what `run` returned (whether a retry was asked).
+    fn explain(job: Work, settings: &Settings, shared: &Shared<'_>) -> bool {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(async {
+                let config = kube::Config::new("http://127.0.0.1:9".parse().expect("a URL"));
+                let client = Client::try_from(config).expect("a client");
+                run(job, client, settings, shared).await
+            })
+            .expect("the log")
+            .is_some()
+    }
+
+    fn queued_summaries(shared: &Shared<'_>) -> Vec<String> {
+        shared
+            .notifications
+            .borrow()
+            .iter()
+            .map(|q| q.explanation.summary.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_new_explanation_queues_its_narrow_restore_and_keeps_the_full_one() {
+        let settings = settings(Some(model("200 OK", Some(answer()))), true, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        assert!(!explain(work(), &settings, &shared));
+        {
+            let queue = shared.notifications.borrow();
+            assert_eq!(queue.len(), 1);
+            let item = &queue[0];
+            assert_eq!(item.fingerprint, FINGERPRINT);
+            assert_eq!(item.explanation, narrow());
+            assert_eq!(item.notice.namespace, "shop");
+            assert_eq!(item.notice.name, "web");
+            assert_eq!(item.notice.summary, narrow().summary);
+            assert_eq!(item.notice.first_seen, "2026-10-28T11:59:00Z");
+        }
+        // The Event and the log keep the full restore; the entry stores the narrow one too.
+        let dedup = shared.dedup.borrow();
+        let entry = dedup.peek(FINGERPRINT).expect("an entry");
+        assert_eq!(entry.explanation, full());
+        assert_eq!(entry.notice, Some(narrow()));
+        assert!(!entry.notified);
+    }
+
+    #[test]
+    fn without_notifications_nothing_is_queued_and_no_notice_is_stored() {
+        let settings = settings(Some(model("200 OK", Some(answer()))), false, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        assert!(!explain(work(), &settings, &shared));
+        assert!(shared.notifications.borrow().is_empty());
+        let dedup = shared.dedup.borrow();
+        let entry = dedup.peek(FINGERPRINT).expect("an entry");
+        assert_eq!(entry.explanation, full());
+        assert_eq!(entry.notice, None);
+    }
+
+    #[test]
+    fn a_cached_repeat_queues_the_stored_text_only_while_it_is_not_notified() {
+        // The model is never called on the cached path.
+        let settings = settings(Some(nowhere()), true, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        shared.dedup.borrow_mut().put(
+            FINGERPRINT,
+            stored("full text"),
+            Some(stored("notification text")),
+            std::time::Instant::now(),
+        );
+        assert!(!explain(work(), &settings, &shared));
+        assert_eq!(queued_summaries(&shared), ["notification text"]);
+        // A failed or pending send: the next occurrence queues it again.
+        assert!(!explain(work(), &settings, &shared));
+        assert_eq!(
+            queued_summaries(&shared),
+            ["notification text", "notification text"]
+        );
+        // Once sent, a repeat queues nothing.
+        assert!(
+            shared
+                .dedup
+                .borrow_mut()
+                .mark_notified(FINGERPRINT, &stored("notification text"))
+        );
+        assert!(!explain(work(), &settings, &shared));
+        assert_eq!(queued_summaries(&shared).len(), 2);
+        assert!(
+            metrics
+                .render()
+                .contains("kausa_explanations_cached_total 3\n")
+        );
+    }
+
+    #[test]
+    fn a_cached_entry_without_a_notice_or_with_notifications_off_queues_nothing() {
+        for (notify, notice) in [(true, None), (false, Some(stored("notification text")))] {
+            let settings = settings(Some(nowhere()), notify, 30);
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            shared.dedup.borrow_mut().put(
+                FINGERPRINT,
+                stored("full text"),
+                notice,
+                std::time::Instant::now(),
+            );
+            assert!(!explain(work(), &settings, &shared));
+            assert!(shared.notifications.borrow().is_empty(), "notify {notify}");
+        }
+    }
+
+    #[test]
+    fn a_skipped_explanation_queues_nothing() {
+        // The budget is spent.
+        let settings_budget = settings(Some(nowhere()), true, 0);
+        // The answer is not an explanation.
+        let settings_invalid = settings(
+            Some(model("200 OK", Some("not an explanation".into()))),
+            true,
+            30,
+        );
+        // The endpoint refuses for good.
+        let settings_refused = settings(Some(model("400 Bad Request", None)), true, 30);
+        for (case, settings) in [
+            ("budget", settings_budget),
+            ("invalid", settings_invalid),
+            ("refused", settings_refused),
+        ] {
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            assert!(!explain(work(), &settings, &shared), "{case}");
+            assert!(shared.notifications.borrow().is_empty(), "{case}");
+            assert!(
+                metrics
+                    .render()
+                    .contains("kausa_explanations_skipped_total{reason="),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retried_call_queues_nothing() {
+        let settings = settings(Some(model("503 Service Unavailable", None)), true, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        assert!(explain(work(), &settings, &shared), "a retry is asked");
+        assert!(shared.notifications.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_dry_run_queues_nothing() {
+        let settings = settings(None, true, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        assert!(!explain(work(), &settings, &shared));
+        assert!(shared.notifications.borrow().is_empty());
+        assert!(metrics.render().contains("kausa_requests_logged_total 1\n"));
     }
 }

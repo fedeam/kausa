@@ -41,3 +41,10 @@ path = "fuzz_targets/history.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "notification"
+path = "fuzz_targets/notification.rs"
+test = false
+doc = false
+bench = false

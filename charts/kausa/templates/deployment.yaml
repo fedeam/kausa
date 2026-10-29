@@ -2,6 +2,10 @@
 {{- $rbac := .Values.rbac | default dict }}
 {{- $scope := $rbac.scope | default "" | toString }}
 {{- $namespaces := $rbac.namespaces | default list }}
+{{- /* The API key's volume and the notifications' share one volumes and one volumeMounts list. */}}
+{{- $apiKey := and (or .Values.model.endpoint .Values.dryRun) .Values.model.apiKey.existingSecret }}
+{{- $notifies := include "kausa.notifies" . }}
+{{- $notify := .Values.notifications | default dict }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -102,6 +106,24 @@ spec:
             - --history-days
             - {{ include "kausa.historyDays" . | quote }}
             {{- end }}
+            {{- if $notifies }}
+            {{- $format := include "kausa.notifyFormat" . }}
+            - --notify-url-file
+            - /var/run/secrets/kausa-notify/url
+            - --notify-format
+            - {{ $format | quote }}
+            {{- if eq $format "telegram" }}
+            - --notify-telegram-chat-id
+            - {{ include "kausa.notifyChatId" . | quote }}
+            {{- end }}
+            {{- if $notify.tokenKey }}
+            - --notify-token-file
+            - /var/run/secrets/kausa-notify/token
+            {{- end }}
+            {{- if $notify.allowHttp }}
+            - --notify-allow-http
+            {{- end }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-address
             - {{ printf "%s:%d" .Values.metrics.bindAddress (int .Values.metrics.port) | quote }}
@@ -137,14 +159,22 @@ spec:
               drop: ["ALL"]
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if and (or .Values.model.endpoint .Values.dryRun) .Values.model.apiKey.existingSecret }}
+          {{- if or $apiKey $notifies }}
           volumeMounts:
+            {{- if $apiKey }}
             - name: api-key
               mountPath: /var/run/secrets/kausa
               readOnly: true
+            {{- end }}
+            {{- if $notifies }}
+            - name: notify
+              mountPath: /var/run/secrets/kausa-notify
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if and (or .Values.model.endpoint .Values.dryRun) .Values.model.apiKey.existingSecret }}
+      {{- if or $apiKey $notifies }}
       volumes:
+        {{- if $apiKey }}
         - name: api-key
           secret:
             secretName: {{ .Values.model.apiKey.existingSecret }}
@@ -152,6 +182,21 @@ spec:
             items:
               - key: {{ .Values.model.apiKey.key }}
                 path: api-key
+        {{- end }}
+        {{- if $notifies }}
+        {{- /* The webhook URL and the bearer token; never optional (docs/adr/0015-notifications.md). */}}
+        - name: notify
+          secret:
+            secretName: {{ $notify.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ $notify.urlKey | default "url" | quote }}
+                path: url
+              {{- with $notify.tokenKey }}
+              - key: {{ . | quote }}
+                path: token
+              {{- end }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

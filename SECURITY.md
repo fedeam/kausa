@@ -23,7 +23,12 @@ provider or wrote it into an Event, rotate that secret first; do not include it 
 These are vulnerabilities, not ordinary bugs:
 
 - a value that a redaction rule should catch reaching a request, an Event or kausa's log in clear;
-- any request to a host other than the Kubernetes API server and the configured endpoint;
+- any request to a host other than the Kubernetes API server, the configured endpoint and, with
+  notifications on, the configured webhook;
+- a notification that carries a field outside [Data sent in
+  notifications](docs/reference/data-sent-in-notifications.md), a log line, an event message or
+  any part of the request to the model as a field, or a real name other than the namespace's and
+  the top-level owner's; or the webhook URL or token in a log line, an error, an Event or a metric;
 - kausa reading, or asking for permission to read, Secrets or ConfigMaps, or writing anything but
   Events and, with `--history`, its own Explanations;
 - kausa patching or deleting an Explanation that is not kausa-shaped (labelled
@@ -57,7 +62,11 @@ failing workload's namespace (`create` and `patch` on Events only), and serves m
 keeps each explained incident's full explanations in an Explanation object in that namespace and
 deletes old ones ([0014. Keep each incident's full explanations in a namespaced Explanation
 resource, off by default](docs/adr/0014-explanation-history.md)); this is in the code and the
-chart, not in a release yet. Each of these is implemented: the redaction, the prompt's validation, the
+chart, not in a release yet. With `--notify-url-file` (off by default; the chart's
+`notifications.enabled`; in the code and the chart, not in a release yet), it also posts each new
+explanation to one webhook, with the real names of the namespace and the top-level owner ([0015.
+Post each new explanation to one optional webhook, as JSON, Slack or
+Telegram](docs/adr/0015-notifications.md)). Each of these is implemented: the redaction, the prompt's validation, the
 budget, the Event writes and the metrics responder have unit tests, and the permissions are
 checked by the kind test (`kubectl auth can-i`, what is allowed and what must be refused) in both
 `rbac.scope`s: every namespace with `cluster`, or the listed namespaces only with `namespaced`
@@ -77,7 +86,9 @@ controls the answers. kausa treats both as untrusted.
 
 - **Data in the cluster.** Log lines, event messages, names and addresses, which may carry
   secrets, customer data and the shape of the infrastructure.
-- **The provider's API key**, which costs money and may give access to other data at the provider.
+- **The provider's API key**, which costs money and may give access to other data at the provider,
+  and, with notifications on, **the webhook URL and its bearer token**: either one is enough to
+  post to the channel as kausa (Telegram puts the bot token in the URL).
 - **The cluster itself**, against a controller that is tricked into acting.
 - **The operator's trust in the explanation**, against text crafted to mislead a person.
 
@@ -98,15 +109,19 @@ kausa must:
   server, inline environment values and arguments included; kausa reduces each to the small record
   in [Architecture](docs/explanation/architecture.md) at once, and never logs, formats or returns
   a raw object.
-- **Never send anything unredacted, and only to one place.** A request carries only the fields in
+- **Never send anything unredacted to the model, and only to the configured places.** A request carries only the fields in
   [Data sent to the provider](docs/reference/data-sent-to-the-provider.md), with names replaced by
   pseudonyms and free text passed through the redaction rules
   ([Detection and redaction rules](docs/reference/rules.md), [0008. Send only allowlisted,
   redacted data to one OpenAI-compatible endpoint](docs/adr/0008-data-leaving-the-cluster.md)).
-  The only destinations are the API server
-  and the configured endpoint: no telemetry, no update checks, no fallback provider, no redirects
-  to another host. HTTPS with certificate verification, unless plain HTTP is allowed explicitly
-  for an endpoint inside the cluster or the same private network.
+  Nothing unredacted reaches the model. The webhook, when notifications are on, receives only
+  the fields of [Data sent in notifications](docs/reference/data-sent-in-notifications.md), with
+  the real names of the namespace and the top-level owner; every other name stays a placeholder,
+  and no field holds a log line, an event message or the request. The only destinations are the
+  API server, the configured endpoint and the configured webhook: no telemetry, no update checks,
+  no fallback provider, no proxy, no redirects to another host. HTTPS with certificate
+  verification, unless plain HTTP is allowed explicitly (`--allow-http`, `--notify-allow-http`)
+  for a receiver inside the cluster or the same private network.
 - **Treat cluster text as data, never as instructions.** Untrusted values sit in one JSON document
   in the request, marked as untrusted; the system message says they may contain instructions to
   ignore. The model has no tools and no functions, and kausa never acts on an answer: it validates
@@ -126,13 +141,17 @@ kausa must:
   about cluster-scoped objects and Events about objects in another namespace are ignored, so
   creating Events in one namespace does not make kausa group incidents, look up owners, read logs
   or write its Event in another.
-- **Keep the API key to itself.** The key reaches the container through a Secret that the kubelet
-  mounts or injects; kausa sends it only to the configured endpoint, in the `Authorization`
-  header, and never logs it or writes it into an Event.
+- **Keep the API key to itself**, and the webhook URL and token. The key reaches the container
+  through a Secret that the kubelet mounts or injects; kausa sends it only to the configured
+  endpoint, in the `Authorization` header, and never logs it or writes it into an Event. The
+  webhook URL and token reach it only as files mounted from a Secret, never as a flag value or an
+  environment variable; kausa posts only to that URL, sends the token only to it, and never logs
+  either one (the `started` line shows the host alone) or puts it in an error, an Event or a
+  metric.
 - **Run with the least privilege in the pod too.** A minimal image with no shell, a numeric
   non-root user, a read-only root filesystem, no capabilities, no privilege escalation, the
   `RuntimeDefault` seccomp profile and declared resource limits. The chart offers a NetworkPolicy
-  that limits egress to the API server, DNS and the endpoint: by Pod and namespace selector for an
+  that limits egress to the API server, DNS, the endpoint and, with notifications, the webhook: by Pod and namespace selector for an
   endpoint in the cluster, and by IP block and port otherwise. Standard NetworkPolicy cannot
   select a hostname, so a hosted endpoint whose addresses change needs a CNI with FQDN policies or
   an egress proxy to be limited to that host.
@@ -148,6 +167,24 @@ kausa must:
   is advice for a person, who has to read it as such.
 - **The provider sees what is sent.** Its retention and training policies are the provider's.
   kausa documents what it sends; choosing the provider is the operator's decision.
+- **The webhook's operator learns what a notification says.** With notifications on, the real
+  names of the namespace and the top-level owner, the rule, the fingerprint and the explanation
+  leave the cluster for the webhook's operator (Slack, Telegram or your own receiver), under its
+  retention. Telegram's cloud chats, private and group, use server-client encryption, not end to
+  end (that a bot cannot take part in a secret chat is a hypothesis: Telegram does not say). "Fully local" then also means notifications off or a receiver in the cluster. A
+  wrong URL sends explanations to whoever owns it; a leaked one lets anyone post as kausa: rotate
+  it at the provider.
+- **A notification can repeat redacted log text.** No field holds a log line, but the explanation
+  is the model's text, which can quote the redacted log and event text it was given, up to the
+  explanation's caps. kausa cannot tell a quote from a summary.
+- **A notification can still mention someone or show a link.** The Slack text escapes `&`, `<`
+  and `>`, sends no `link_names` and asks for `"parse": "none"`; the Telegram text has no markup
+  and carries an invisible word joiner after every `@` and `/`. Both turn previews off. Slack's
+  and Telegram's documentation say this should stop mentions, commands and links, but nothing has
+  been posted to a real workspace or chat yet, Slack does not say that webhooks honour `parse`, and
+  whether Telegram still links a URL whose slashes carry a joiner was not checked ([Data sent in
+  notifications](docs/reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
+  Injected text can also make a notification misleading, as with an Event.
 - **The budget is shared.** The call budget and the queue are one per release, shared by every
   namespace it watches (the whole cluster, or the listed namespaces), so a tenant that makes
   many workloads fail can use up the budget and push other namespaces' incidents out of the queue:

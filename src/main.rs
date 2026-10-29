@@ -5,7 +5,7 @@
 //! Pre-alpha. `kausa run` watches the cluster and logs incidents and, with `--endpoint` or
 //! `--dry-run`, sends or logs a redacted request for each; with `--endpoint`, the explanation is
 //! also an Event on the failing object unless `--no-events`, and, with `--history`, kept in an
-//! Explanation object in its namespace.
+//! Explanation object in its namespace, and, with `--notify-url-file`, posted to a webhook.
 
 mod budget;
 mod context;
@@ -18,6 +18,8 @@ mod incident;
 mod log;
 mod metrics;
 mod model;
+mod notification;
+mod notify;
 mod owner;
 mod prompt;
 mod record;
@@ -76,6 +78,12 @@ const HELP: &str = concat!(
     "  --history              Keep each incident's explanations in an Explanation\n",
     "                         object in its namespace (needs the CRD)\n",
     "  --history-days <N>     Delete history older than N days (1-30, default 7)\n",
+    "  --notify-url-file <PATH>  Post each new explanation to the webhook whose URL is\n",
+    "                            in this file (needs --endpoint)\n",
+    "  --notify-format <FORMAT>  json (default), slack or telegram\n",
+    "  --notify-telegram-chat-id <ID>  telegram's chat: an integer or @channel\n",
+    "  --notify-token-file <PATH>  json only: a bearer token for the webhook\n",
+    "  --notify-allow-http       Allow a plain http:// webhook (local or in-cluster)\n",
     "  --max-calls-per-hour <N>  Model calls allowed per hour (default 30)\n",
     "  --max-calls-per-day <N>   Model calls allowed per day (default 200)\n",
     "  --max-input-tokens <N>    Cap on a request's estimated tokens (default 6000)\n",
@@ -90,8 +98,9 @@ const HELP: &str = concat!(
     "  stdout. It stops on SIGTERM or Ctrl-C.\n",
     "\n",
     "By design, kausa never reads Secrets or ConfigMaps, writes nothing but Events\n",
-    "and, with --history, its own Explanation objects, and sends nothing outside the\n",
-    "cluster that has not been redacted first.\n",
+    "and, with --history, its own Explanation objects, and sends nothing unredacted\n",
+    "to the model. With --notify-url-file, only the documented fields of each new\n",
+    "explanation go to the webhook.\n",
     "\n",
     "Exit status: 0 on success or a clean stop, 1 when it cannot start or a watch\n",
     "ends (watch errors are logged and retried), 2 on a usage error or when stdout\n",
@@ -139,6 +148,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let mut history_days: Option<u32> = None;
     let mut metrics_address: Option<String> = None;
     let mut namespaces: Vec<String> = Vec::new();
+    let mut notify_flags = NotifyFlags::default();
     let mut limits = Limits::default();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -216,6 +226,30 @@ fn run_command(args: &[OsString]) -> ExitCode {
                 },
                 Err(code) => return code,
             },
+            "--notify-url-file" => match args.next() {
+                Some(path) => notify_flags.url_file = Some(path.clone()),
+                None => return usage_error("--notify-url-file needs a value"),
+            },
+            "--notify-token-file" => match args.next() {
+                Some(path) => notify_flags.token_file = Some(path.clone()),
+                None => return usage_error("--notify-token-file needs a value"),
+            },
+            "--notify-format" => match value() {
+                Ok(v) => match NotifyFormat::parse(&v) {
+                    Some(format) => notify_flags.format = Some(format),
+                    None => {
+                        return usage_error(&format!(
+                            "--notify-format takes json, slack or telegram, not '{v}'"
+                        ));
+                    }
+                },
+                Err(code) => return code,
+            },
+            "--notify-telegram-chat-id" => match value() {
+                Ok(v) => notify_flags.chat_id = Some(v),
+                Err(code) => return code,
+            },
+            "--notify-allow-http" => notify_flags.allow_http = true,
             "--history" => history = true,
             "--no-events" => no_events = true,
             "--allow-http" => allow_http = true,
@@ -231,6 +265,10 @@ fn run_command(args: &[OsString]) -> ExitCode {
     if let Err(message) = check_history(history, history_days, dry_run, endpoint.is_some()) {
         return usage_error(message);
     }
+    let notifier = match check_notify(notify_flags, dry_run, endpoint.is_some()) {
+        Ok(notifier) => notifier,
+        Err(message) => return usage_error(&message),
+    };
     let explain = match explain_settings(
         endpoint,
         model,
@@ -242,6 +280,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
         no_events,
         history.then(|| history_days.unwrap_or(DEFAULT_HISTORY_DAYS)),
         &limits,
+        notifier,
     ) {
         Ok(settings) => settings,
         Err(message) => return usage_error(&message),
@@ -327,6 +366,119 @@ fn check_history(
     Ok(())
 }
 
+/// The `--notify-*` flags as given (docs/adr/0015-notifications.md). The two files are paths
+/// only: what they hold is read by [`check_notify`] and never echoed.
+#[derive(Default)]
+struct NotifyFlags {
+    url_file: Option<OsString>,
+    format: Option<NotifyFormat>,
+    chat_id: Option<String>,
+    token_file: Option<OsString>,
+    allow_http: bool,
+}
+
+/// The value of `--notify-format`; the Telegram chat comes from its own flag.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NotifyFormat {
+    Json,
+    Slack,
+    Telegram,
+}
+
+impl NotifyFormat {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "json" => Some(Self::Json),
+            "slack" => Some(Self::Slack),
+            "telegram" => Some(Self::Telegram),
+            _ => None,
+        }
+    }
+}
+
+/// Checks the `--notify-*` flags and builds the webhook's client, in this order: every other
+/// notify flag needs `--notify-url-file` (the first one named in the order format, chat id, token
+/// file, allow-http), which is not used with `--dry-run` and needs `--endpoint`; the chat id is
+/// for `telegram` only and the token file for `json` only; `telegram` needs a well-formed chat
+/// id; then the URL file is read and its URL checked, and then the token file is read. `None`
+/// when notifications are off. No message carries what either file holds.
+fn check_notify(
+    flags: NotifyFlags,
+    dry_run: bool,
+    endpoint: bool,
+) -> Result<Option<notify::Notifier>, String> {
+    let Some(url_file) = flags.url_file else {
+        let given = [
+            ("--notify-format", flags.format.is_some()),
+            ("--notify-telegram-chat-id", flags.chat_id.is_some()),
+            ("--notify-token-file", flags.token_file.is_some()),
+            ("--notify-allow-http", flags.allow_http),
+        ];
+        return match given.into_iter().find(|&(_, given)| given) {
+            Some((flag, _)) => Err(format!("{flag} needs --notify-url-file")),
+            None => Ok(None),
+        };
+    };
+    if dry_run {
+        return Err(
+            "--notify-url-file is not used with --dry-run: no explanation is written".into(),
+        );
+    }
+    if !endpoint {
+        return Err("--notify-url-file needs --endpoint".into());
+    }
+    let format = flags.format.unwrap_or(NotifyFormat::Json);
+    if flags.chat_id.is_some() && format != NotifyFormat::Telegram {
+        return Err("--notify-telegram-chat-id is used only with --notify-format telegram".into());
+    }
+    if flags.token_file.is_some() && format != NotifyFormat::Json {
+        return Err("--notify-token-file is used only with --notify-format json".into());
+    }
+    let format = match format {
+        NotifyFormat::Json => notify::Format::Json,
+        NotifyFormat::Slack => notify::Format::Slack,
+        NotifyFormat::Telegram => {
+            let Some(id) = flags.chat_id else {
+                return Err("--notify-format telegram needs --notify-telegram-chat-id".into());
+            };
+            match notification::parse_chat_id(&id) {
+                Some(chat) => notify::Format::Telegram(chat),
+                None => {
+                    return Err(format!(
+                        "--notify-telegram-chat-id takes an integer or @ and a channel's \
+                         username, not '{id}'"
+                    ));
+                }
+            }
+        }
+    };
+    let url_text = read_secret_file("--notify-url-file", &url_file)?;
+    let url = notify::check_url(&url_text, &format, flags.allow_http).map_err(|problem| {
+        format!(
+            "the URL in --notify-url-file '{}' {problem}",
+            url_file.to_string_lossy()
+        )
+    })?;
+    let token = match &flags.token_file {
+        Some(path) => Some(read_secret_file("--notify-token-file", path)?),
+        None => None,
+    };
+    notify::Notifier::new(url, format, token, flags.allow_http).map(Some)
+}
+
+/// The trimmed content of the file `path` given to `flag`. The error names the flag and the path,
+/// never the content.
+fn read_secret_file(flag: &str, path: &OsString) -> Result<String, String> {
+    let shown = path.to_string_lossy();
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("{flag} '{shown}' cannot be read: {e}"))?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{flag} '{shown}' is empty"));
+    }
+    Ok(trimmed.to_owned())
+}
+
 /// A DNS-1123 label, what Kubernetes takes as a namespace name: 1 to 63 characters out of
 /// `[a-z0-9-]`, starting and ending with a letter or digit.
 fn is_dns_label(name: &str) -> bool {
@@ -372,6 +524,7 @@ fn explain_settings(
     no_events: bool,
     history_days: Option<u32>,
     limits: &Limits,
+    notify: Option<notify::Notifier>,
 ) -> Result<Option<explain::Settings>, String> {
     if endpoint.is_none() && !dry_run {
         if model.is_some() || api_key_file.is_some() || allow_http || no_json_schema {
@@ -427,6 +580,7 @@ fn explain_settings(
             .ok()
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "kausa".to_owned()),
+        notify,
     }))
 }
 

@@ -30,7 +30,8 @@ Pod status ─────┘                                          │
           gather context ─▶ redact ─▶ budget ─▶ model ─▶ validate ─▶ map names back ─▶ Event
 ```
 
-Only the model call leaves the cluster. Every other stage is deterministic: the same cluster state
+Only the model call leaves the cluster, and, with notifications on, the post of each new
+explanation to one webhook (Output, below). Every other stage is deterministic: the same cluster state
 produces the same incident, the same fingerprint and the same request bytes.
 
 ## Watching without a large cache
@@ -108,8 +109,10 @@ produces the same incident, the same fingerprint and the same request bytes.
   Pods of the same owner with the same detection form one incident: three crashing replicas are
   one explanation, not three.
 - **Fingerprint.** A hash of the detection, the owner and the normalized message (the image, for
-  `D002`), computed before redaction and never sent. It is written in kausa's log and keys
-  deduplication and the Event's name.
+  `D002`), computed before redaction and never sent to the model; it is in kausa's log, the
+  names of its Events and Explanations and, with notifications on, every notification ([Data sent
+  in notifications](../reference/data-sent-in-notifications.md#the-fingerprint)). It also keys
+  deduplication.
 
 ## Context and redaction
 
@@ -217,6 +220,16 @@ produces the same incident, the same fingerprint and the same request bytes.
   reads its object back as untrusted input and never logs or sends what it read ([Explanation
   resource](../reference/explanation-resource.md), [0014. Keep each incident's full explanations
   in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md)).
+- **A notification**, with `--notify-url-file` (off by default; in the code and the chart, not in
+  a release yet): each explanation the model wrote is posted to one webhook, as a documented
+  `json` body, a Slack incoming webhook's plain text or a Telegram `sendMessage`, with the real
+  names of the namespace and the top-level owner only; every other name stays a placeholder
+  (`Redactor::restore_only`). It is queued after the Event, never for a skip, and sent by its own
+  task beside the watches, one at a time from a queue of 16, with one retry 30 seconds later
+  after a transient failure, so a slow or dead webhook never delays an explanation or an Event. A
+  cached repeat is posted again only until the webhook acknowledges it ([Data sent in
+  notifications](../reference/data-sent-in-notifications.md), [0015. Post each new explanation
+  to one optional webhook, as JSON, Slack or Telegram](../adr/0015-notifications.md)).
 
 ## Configuration and modes
 
@@ -230,7 +243,9 @@ produces the same incident, the same fingerprint and the same request bytes.
   permissions come from one list. The budget, the queue and the deduplication cache stay one per
   process, shared by every watched namespace.
 - The API key from a file (`--api-key-file`, a Secret mounted by the kubelet) or the environment
-  variable `KAUSA_API_KEY` (filled from a Secret), never from an argument.
+  variable `KAUSA_API_KEY` (filled from a Secret), never from an argument. The webhook URL and its
+  optional bearer token only from files (`--notify-url-file`, `--notify-token-file`), never from
+  an argument or the environment.
 - **Dry-run:** the whole pipeline up to the request, which is logged and not sent. No Event is
   written.
 
@@ -268,7 +283,9 @@ Summarised here, and in full in the [Security policy](../../SECURITY.md):
 - **Read-only, except Events.** No Secrets, no ConfigMaps, no write verbs but Events
   ([0009. Run with read-only permissions that never include
   Secrets](../adr/0009-least-privilege-rbac.md)).
-- **Nothing leaves unredacted**, and only to the one configured endpoint.
+- **Nothing unredacted reaches the model**, and nothing goes anywhere but the configured
+  endpoint and, with notifications on, the configured webhook, which gets only the fields of
+  [Data sent in notifications](../reference/data-sent-in-notifications.md).
 - **Cluster text is untrusted.** Event messages, log lines and names are data inside the prompt;
   the model has no tools, its answer is validated, and kausa never acts on it.
 - **Bounded everything.** Records instead of objects, capped log bytes, capped requests and

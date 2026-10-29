@@ -19,6 +19,13 @@
 # crasher's Explanation after it (a merge patch with fieldValidation=Strict). The cluster scope
 # then turns the history off through dryRun=true and history.enabled=false, and ends with a deleted
 # CustomResourceDefinition, which kausa must survive.
+#
+# Both also install with notifications in the json format (docs/adr/0015-notifications.md), from
+# a Secret whose URL points at the fake endpoint's /hook/ path with a fake Telegram-shaped bot
+# token in it, and a fake bearer token. The fake receiver answers the first notification 503 and
+# every later one 200; before the first restart the test checks one v1 body for each failing
+# workload, what no body may hold, the bearer token, the counters, the started line, and that
+# kausa's log holds neither token. The dryRun=true upgrade turns notifications off.
 set -euo pipefail
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -96,7 +103,8 @@ fi
 # A free port, and the endpoint answering on it before anything depends on it: a port already
 # in use would otherwise leave another program to answer kausa.
 PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
-python3 tests/e2e/fake_endpoint.py --port "$PORT" --log "$WORK/requests.jsonl" &
+python3 tests/e2e/fake_endpoint.py --port "$PORT" --log "$WORK/requests.jsonl" \
+  --hook-log "$WORK/hooks.jsonl" &
 ENDPOINT_PID=$!
 for _ in $(seq 1 20); do
   curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/v1/chat/completions" && break
@@ -106,15 +114,30 @@ done
 curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/v1/chat/completions" ||
   fail "the fake endpoint does not answer on port $PORT"
 : > "$WORK/requests.jsonl"
+: > "$WORK/hooks.jsonl"
+# The notifications' webhook: a fake Telegram-shaped bot token in the URL's path, and a fake bearer
+# token, both built here so that no file holds a token-shaped string. Telegram's path is checked
+# only with the telegram format: this one is for json.
+FAKE_BOT="1234567890:E2eFake$(printf '%028d' "$PORT")"
+FAKE_BEARER="e2e-fake-bearer-$PORT-not-a-real-one"
+HOOK_PATH="/hook/bot$FAKE_BOT/sendMessage"
+printf '%s' "http://$gateway:$PORT$HOOK_PATH" > "$WORK/notify-url"
+printf '%s' "$FAKE_BEARER" > "$WORK/notify-token"
 
 # The install's values other than rbac, reused by the upgrade that must fail.
 values=(--set image.repository=kausa --set image.tag=e2e --set image.pullPolicy=Never
   --set model.endpoint="http://$gateway:$PORT/v1" --set model.name=fake
-  --set model.allowHttp=true --set settleSeconds="$SETTLE" --set history.enabled=true)
+  --set model.allowHttp=true --set settleSeconds="$SETTLE" --set history.enabled=true
+  --set notifications.enabled=true --set notifications.format=json
+  --set notifications.existingSecret=kausa-notify --set notifications.tokenKey=token
+  --set notifications.allowHttp=true)
 
 # The restricted Pod Security Standard: the chart's Pod must be admitted under it.
 k create namespace "$NAMESPACE"
 k label namespace "$NAMESPACE" pod-security.kubernetes.io/enforce=restricted
+# The Secret the chart mounts for the notifications, from files: no token in a command line.
+k -n "$NAMESPACE" create secret generic kausa-notify --from-file=url="$WORK/notify-url" \
+  --from-file=token="$WORK/notify-token" >/dev/null
 if [ "$SCOPE" = namespaced ]; then
   # The chart creates no Namespace: each listed one must exist before helm install.
   for ns in "$TARGET" "$OTHER" "$DENIED"; do
@@ -422,6 +445,194 @@ done
 for name in "$TARGET" "$OTHER" crasher failing-job; do
   if grep -q -- "$name" "$WORK/requests.jsonl"; then fail "a request contains '$name'"; fi
 done
+
+# The notifications (docs/adr/0015-notifications.md). The fake receiver answered the first one 503,
+# which kausa sends again 30 seconds later, and one per failing workload is due.
+hooks_answered() {
+  python3 -c '
+import json, sys
+count = 0
+for line in open(sys.argv[1]):
+    try:
+        count += json.loads(line)["status"] == 200
+    except (ValueError, KeyError, TypeError):
+        pass
+print(count)
+' "$WORK/hooks.jsonl"
+}
+answered=0
+for _ in $(seq 1 60); do
+  answered=$(hooks_answered)
+  [ "$answered" -ge 2 ] && break
+  sleep 2
+done
+[ "$answered" -ge 2 ] || fail "the webhook answered $answered notifications 200 in 120 seconds"
+k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
+kausa_log
+# What reached the webhook: the first POST got 503, every one carried the bearer token and went to
+# the URL's path, and each body is a v1 notification with only the documented fields. Exactly one
+# answered 200 for each failing workload, with the real namespace, the rule, and the fingerprint
+# and first_seen of the incident kausa logged and explained. No body holds the context sent to the
+# model, a log-tail line the model requests carried, a placeholder or the unlisted namespace, and
+# requests.jsonl holds no notification. The started line names the format and the host, and
+# kausa's log holds neither token.
+python3 -c '
+import json, re, sys
+sys.path.insert(0, "tests/e2e")
+from fake_endpoint import ANSWER
+target, other, work, gateway, path, bearer, bot = sys.argv[1:8]
+
+def fail(message):
+    sys.exit("FAIL: notifications: " + message)
+
+def strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from strings(item)
+
+SCHEMA = "kausa.fedeam.com/notification/v1"
+FIELDS = ["detection", "explanation", "fingerprint", "first_seen", "kausa_version", "object",
+          "schema", "type"]
+PLACEHOLDER = re.compile(r"\b[a-z]+-[0-9]+\b", re.IGNORECASE)
+hooks = [json.loads(line) for line in open(work + "/hooks.jsonl")]
+if not hooks or hooks[0]["status"] != 503:
+    fail("the first POST to the webhook was not answered 503")
+if [h["status"] for h in hooks[1:] if h["status"] != 200]:
+    fail("the fake receiver answered a later POST with something other than 200")
+
+log = open(work + "/kausa.log").read()
+for name, token in (("bot", bot), ("bearer", bearer)):
+    if token in log:
+        fail("kausa logged the fake %s token" % name)
+entries = []
+for line in log.splitlines():
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict):
+        entries.append(entry)
+incidents = {e.get("fingerprint"): e for e in entries if e.get("msg") == "incident"}
+started = [e for e in entries if e.get("msg") == "started"]
+if len(started) != 1:
+    fail("%d started lines in the log" % len(started))
+if started[0].get("notifications") != {"format": "json", "host": gateway}:
+    fail("the started line has notifications %s" % json.dumps(started[0].get("notifications")))
+version = started[0].get("version")
+
+# The log-tail lines the model requests carried, which no notification may hold.
+tails = set()
+for line in open(work + "/requests.jsonl"):
+    request = json.loads(line)
+    if not isinstance(request, dict) or "messages" not in request or "schema" in request:
+        fail("requests.jsonl holds something other than a request to the model")
+    for message in request["messages"]:
+        if message.get("role") != "user":
+            continue
+        try:
+            context = json.loads(message["content"])["untrusted_cluster_data"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        for tail_line in (context.get("log_tail") or "").splitlines():
+            if len(tail_line.strip()) >= 12:
+                tails.add(tail_line.strip())
+if not tails:
+    fail("no request to the model carried a log-tail line to look for")
+
+events = json.load(open(work + "/events.json"))["items"]
+explained = {}
+for event in events:
+    if event.get("reportingController") != "kausa" or event.get("reason") != "Explained":
+        continue
+    match = re.match(r"kausa\.([0-9a-f]{16})\.", event["metadata"]["name"])
+    if match:
+        key = (event["regarding"]["kind"], event["regarding"]["name"])
+        explained.setdefault(key, set()).add(match.group(1))
+
+bodies = []
+for hook in hooks:
+    if hook["path"] != path:
+        fail("a notification went to another path than the URL'"'"'s")
+    if hook["authorization"] != "Bearer " + bearer:
+        fail("a notification without the bearer token in its Authorization header")
+    text = hook["body"]
+    try:
+        body = json.loads(text)
+    except ValueError:
+        fail("a notification body is not JSON")
+    if not isinstance(body, dict) or sorted(body) != FIELDS or body["schema"] != SCHEMA:
+        fail("a notification body is not a v1 notification with only its fields: %s" % text)
+    if (sorted(body["detection"]) != ["id", "name"]
+            or sorted(body["object"]) != ["apiVersion", "kind", "name", "namespace"]
+            or sorted(body["explanation"]) != ["cause", "confidence", "steps", "summary"]):
+        fail("a notification body has other fields: %s" % text)
+    every = [text] + list(strings(body))
+    for word in ["untrusted_cluster_data", "log_tail", other] + sorted(tails):
+        if any(word in s for s in every):
+            fail("a notification holds %s" % json.dumps(word))
+    for s in every:
+        placeholder = PLACEHOLDER.search(s)
+        if placeholder:
+            fail("a notification holds the placeholder " + placeholder.group())
+    if hook["status"] == 200:
+        bodies.append(body)
+
+explanation = {"summary": ANSWER["summary"].replace("namespace-1", target),
+               "cause": ANSWER["cause"], "steps": ANSWER["steps"],
+               "confidence": ANSWER["confidence"]}
+for body in bodies:
+    if body["object"]["namespace"] != target:
+        fail("a notification about namespace " + body["object"]["namespace"])
+for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1"),
+                                      ("Job", "failing-job", "D008", "batch/v1")):
+    mine = [b for b in bodies if (b["object"]["kind"], b["object"]["name"]) == (kind, name)]
+    if len(mine) != 1:
+        fail("%d notifications answered 200 about %s %s" % (len(mine), kind, name))
+    body = mine[0]
+    owner = {"apiVersion": api_version, "kind": kind, "name": name}
+    if body["type"] != "explained" or body["kausa_version"] != version:
+        fail("%s %s: type %s, kausa_version %s" % (kind, name, body["type"],
+                                                   body["kausa_version"]))
+    if body["object"] != dict(owner, namespace=target):
+        fail("%s %s: object %s" % (kind, name, json.dumps(body["object"])))
+    incident = incidents.get(body["fingerprint"])
+    if incident is None:
+        fail("%s %s: no incident with fingerprint %s" % (kind, name, body["fingerprint"]))
+    if (incident.get("detection"), incident.get("namespace"), incident.get("owner")) != (
+            rule, target, owner):
+        fail("%s %s: the log gives its fingerprint another incident" % (kind, name))
+    if body["detection"] != {"id": rule, "name": incident.get("detection_name")}:
+        fail("%s %s: detection %s" % (kind, name, json.dumps(body["detection"])))
+    if body["first_seen"] != incident.get("first_seen"):
+        fail("%s %s: first_seen %s, not the incident'"'"'s %s" % (
+            kind, name, body["first_seen"], incident.get("first_seen")))
+    if body["fingerprint"] not in explained.get((kind, name), set()):
+        fail("%s %s: no Explained Event with fingerprint %s" % (kind, name, body["fingerprint"]))
+    if body["explanation"] != explanation:
+        fail("%s %s: explanation %s" % (kind, name, json.dumps(body["explanation"])))
+print("notifications: %d POSTs, the first answered 503; one v1 body for crasher and one for "
+      "failing-job" % len(hooks))
+' "$TARGET" "$OTHER" "$WORK" "$gateway" "$HOOK_PATH" "$FAKE_BEARER" "$FAKE_BOT"
+# The counters, once kausa has handled the answers the receiver logged.
+counted=""
+for _ in $(seq 1 10); do
+  metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
+  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 2' |
+    grep -q . && echo "$metrics" | grep -E '^kausa_notifications_retried_total [1-9]' >/dev/null
+  then
+    counted=yes && break
+  fi
+  sleep 2
+done
+[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 2, or" \
+  "kausa_notifications_retried_total under 1"
+echo "notifications: at least 2 sent and 1 retried"
 
 # The grant is the table in docs/reference/permissions.md.
 sa="system:serviceaccount:$NAMESPACE:kausa"
@@ -739,10 +950,11 @@ EOF
   fi
 
   # dryRun=true turns the history off: the rule, the reader role and the CustomResourceDefinition
-  # go, and with it every Explanation, kausa's and the hand-made ones.
+  # go, and with it every Explanation, kausa's and the hand-made ones. The chart refuses
+  # notifications with dryRun, so they go too.
   [ -n "$(explanations -A)" ] || fail "no Explanation before the upgrade to dryRun=true"
   h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 120s --reuse-values \
-    --set dryRun=true
+    --set dryRun=true --set notifications.enabled=false
   HISTORY=off
   [ "$(history_rule clusterrole/"$RELEASE")" = no ] || fail "a history rule with dryRun=true"
   [ -z "$(k get clusterrole "$READER" --ignore-not-found -o name)" ] ||

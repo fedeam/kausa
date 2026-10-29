@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 15] = [
+pub const COUNTERS: [(&str, &str); 17] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -72,6 +72,14 @@ pub const COUNTERS: [(&str, &str); 15] = [
     (
         "kausa_history_sweep_errors_total",
         "Failed list or delete calls of the history sweep.",
+    ),
+    (
+        "kausa_notifications_total",
+        "Notifications by final outcome (sent, failed, dropped).",
+    ),
+    (
+        "kausa_notifications_retried_total",
+        "Notifications tried again after a transient error.",
     ),
 ];
 
@@ -210,7 +218,6 @@ mod tests {
     // written before the code: three more counters in `COUNTERS`.
     #[test]
     fn the_history_counters_are_exported_with_their_help() {
-        assert_eq!(COUNTERS.len(), 15);
         for counter in [
             (
                 "kausa_history_writes_total",
@@ -266,6 +273,57 @@ mod tests {
             text.contains("kausa_history_sweep_errors_total 1\n"),
             "{text}"
         );
+    }
+
+    // Acceptance tests for notifications (docs/adr/0015-notifications.md), written before the
+    // code: two more counters, appended to `COUNTERS`.
+    #[test]
+    fn the_notification_counters_come_last_with_their_help() {
+        assert_eq!(COUNTERS.len(), 17);
+        assert_eq!(
+            COUNTERS[15],
+            (
+                "kausa_notifications_total",
+                "Notifications by final outcome (sent, failed, dropped)."
+            )
+        );
+        assert_eq!(
+            COUNTERS[16],
+            (
+                "kausa_notifications_retried_total",
+                "Notifications tried again after a transient error."
+            )
+        );
+        let names: std::collections::BTreeSet<&str> = COUNTERS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), COUNTERS.len(), "a counter is listed twice");
+    }
+
+    #[test]
+    fn the_notification_counters_render_as_zero_when_unused() {
+        let m = Metrics::default();
+        let text = m.render();
+        for name in [
+            "kausa_notifications_total",
+            "kausa_notifications_retried_total",
+        ] {
+            assert!(
+                text.contains(&format!("# TYPE {name} counter\n{name} 0\n")),
+                "{name}: {text}"
+            );
+        }
+        m.inc("kausa_notifications_total", &[("outcome", "sent")]);
+        m.inc("kausa_notifications_total", &[("outcome", "failed")]);
+        m.inc("kausa_notifications_total", &[("outcome", "dropped")]);
+        m.inc("kausa_notifications_retried_total", &[]);
+        let text = respond("GET /metrics HTTP/1.1", &m).2;
+        for line in [
+            "kausa_notifications_total{outcome=\"sent\"} 1\n",
+            "kausa_notifications_total{outcome=\"failed\"} 1\n",
+            "kausa_notifications_total{outcome=\"dropped\"} 1\n",
+            "kausa_notifications_retried_total 1\n",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
     }
 
     #[test]

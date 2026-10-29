@@ -611,3 +611,811 @@ fn help_lists_the_history_flags_and_what_kausa_writes() {
     );
     assert!(help.lines().all(|l| l.len() <= 84), "{help}");
 }
+
+// `kausa run --notify-*` (docs/adr/0015-notifications.md): usage errors with the exact message,
+// in the order of the checks, before anything connects, and never with the content of the URL
+// or token file; the accepted setups get past the flags and fail only on the missing cluster.
+
+const NOTIFY_URL_NOT_IN_DRY_RUN: &str =
+    "--notify-url-file is not used with --dry-run: no explanation is written";
+const NOTIFY_URL_NEEDS_ENDPOINT: &str = "--notify-url-file needs --endpoint";
+const CHAT_ID_ONLY_TELEGRAM: &str =
+    "--notify-telegram-chat-id is used only with --notify-format telegram";
+const TOKEN_ONLY_JSON: &str = "--notify-token-file is used only with --notify-format json";
+const TELEGRAM_NEEDS_CHAT_ID: &str = "--notify-format telegram needs --notify-telegram-chat-id";
+const HOOK: &str = "https://hooks.example.com/services/T0/B0/fake";
+const TELEGRAM_HOOK: &str = "https://api.telegram.org/bot000000:fake-token-for-tests/sendMessage";
+
+fn needs_url_file(flag: &str) -> String {
+    format!("{flag} needs --notify-url-file")
+}
+
+fn bad_chat_id(value: &str) -> String {
+    format!(
+        "--notify-telegram-chat-id takes an integer or @ and a channel's username, not '{value}'"
+    )
+}
+
+fn bad_format(value: &str) -> String {
+    format!("--notify-format takes json, slack or telegram, not '{value}'")
+}
+
+fn url_problem(path: &str, problem: &str) -> String {
+    format!("the URL in --notify-url-file '{path}' {problem}")
+}
+
+const NOT_A_URL: &str = "is not a valid URL";
+const NOT_HTTPS: &str = "must be https:// (or http:// with --notify-allow-http)";
+const USER_INFO: &str = "must not carry a user name or password";
+const TELEGRAM_PATH: &str = "must end in /bot<token>/sendMessage with --notify-format telegram";
+
+/// A directory of the test's own under Cargo's temporary directory for integration tests.
+fn notify_dir(test: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("notify-{test}"));
+    std::fs::create_dir_all(&dir).expect("a temporary directory");
+    dir
+}
+
+/// Writes `content` to `name` in `dir` and returns the path as a string.
+fn file(dir: &std::path::Path, name: &str, content: &str) -> String {
+    let path = dir.join(name);
+    std::fs::write(&path, content).expect("a temporary file");
+    path.to_str().expect("a UTF-8 path").to_owned()
+}
+
+/// `run --endpoint ENDPOINT --model m` followed by `rest`.
+fn with_endpoint(rest: &[&str]) -> Vec<String> {
+    ["run", "--endpoint", ENDPOINT, "--model", "m"]
+        .iter()
+        .chain(rest)
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
+/// A usage error whose message starts with `prefix` and goes on with an error of the system on
+/// the same line (the text of an I/O error depends on the platform).
+fn assert_usage_error_starting(output: &Output, prefix: &str, case: &str) {
+    assert_eq!(output.status.code(), Some(2), "{case}: {}", stderr(output));
+    assert_eq!(stdout(output), "", "{case}");
+    let text = stderr(output);
+    let message = text
+        .strip_prefix("error: ")
+        .and_then(|t| t.strip_suffix("\n\nRun 'kausa --help' for usage.\n"))
+        .unwrap_or_else(|| panic!("{case}: not a usage error: {text}"));
+    let rest = message
+        .strip_prefix(prefix)
+        .unwrap_or_else(|| panic!("{case}: expected '{prefix}...', got: {message}"));
+    assert!(
+        !rest.is_empty() && !rest.contains('\n'),
+        "{case}: {message}"
+    );
+}
+
+#[test]
+fn notify_flags_need_the_url_file() {
+    let dir = notify_dir("needs-url");
+    let token = file(&dir, "token", "a-token\n");
+    let cases: [(&[&str], &str); 6] = [
+        (&["--notify-format", "slack"], "--notify-format"),
+        (&["--notify-format", "json"], "--notify-format"),
+        (&["--notify-format", "telegram"], "--notify-format"),
+        (
+            &["--notify-telegram-chat-id", "-1001234567890"],
+            "--notify-telegram-chat-id",
+        ),
+        (&["--notify-token-file", &token], "--notify-token-file"),
+        (&["--notify-allow-http"], "--notify-allow-http"),
+    ];
+    for (flags, flag) in cases {
+        let message = needs_url_file(flag);
+        let mut alone = vec!["run"];
+        alone.extend_from_slice(flags);
+        assert_usage_error(&kausa(&alone), &message, &format!("{alone:?}"));
+        let args = with_endpoint(flags);
+        assert_usage_error(&kausa_owned(&args), &message, &format!("{args:?}"));
+        // Before the dry-run check.
+        let mut dry = alone.clone();
+        dry.push("--dry-run");
+        assert_usage_error(&kausa(&dry), &message, &format!("{dry:?}"));
+    }
+}
+
+#[test]
+fn the_first_notify_flag_without_the_url_file_is_named_in_a_fixed_order() {
+    let dir = notify_dir("needs-url-order");
+    let token = file(&dir, "token", "a-token\n");
+    // format, chat id, token file, allow-http, whatever the order of the arguments.
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &[
+                "--notify-allow-http",
+                "--notify-token-file",
+                &token,
+                "--notify-telegram-chat-id",
+                "1",
+                "--notify-format",
+                "telegram",
+            ],
+            "--notify-format",
+        ),
+        (
+            &[
+                "--notify-allow-http",
+                "--notify-token-file",
+                &token,
+                "--notify-telegram-chat-id",
+                "1",
+            ],
+            "--notify-telegram-chat-id",
+        ),
+        (
+            &["--notify-allow-http", "--notify-token-file", &token],
+            "--notify-token-file",
+        ),
+        (&["--notify-allow-http", "--dry-run"], "--notify-allow-http"),
+    ];
+    for (flags, flag) in cases {
+        let mut args = vec!["run"];
+        args.extend_from_slice(flags);
+        assert_usage_error(&kausa(&args), &needs_url_file(flag), &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn the_url_file_is_not_used_with_dry_run() {
+    let dir = notify_dir("dry-run");
+    let url = file(&dir, "url", HOOK);
+    let missing = dir.join("missing").to_str().expect("UTF-8").to_owned();
+    for args in [
+        vec!["run", "--notify-url-file", &url, "--dry-run"],
+        vec!["run", "--dry-run", "--notify-url-file", &url],
+        // Before the endpoint check, and before the file is read.
+        vec!["run", "--notify-url-file", &missing, "--dry-run"],
+        vec![
+            "run",
+            "--notify-url-file",
+            &url,
+            "--notify-format",
+            "telegram",
+            "--dry-run",
+        ],
+        vec![
+            "run",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+            "--notify-url-file",
+            &url,
+            "--dry-run",
+        ],
+    ] {
+        assert_usage_error(
+            &kausa(&args),
+            NOTIFY_URL_NOT_IN_DRY_RUN,
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn the_url_file_needs_an_endpoint() {
+    let dir = notify_dir("endpoint");
+    let url = file(&dir, "url", HOOK);
+    let missing = dir.join("missing").to_str().expect("UTF-8").to_owned();
+    for args in [
+        vec!["run", "--notify-url-file", &url],
+        vec!["run", "--notify-url-file", &url, "--model", "m"],
+        // Before the file is read, and before the format checks.
+        vec!["run", "--notify-url-file", &missing],
+        vec![
+            "run",
+            "--notify-url-file",
+            &url,
+            "--notify-format",
+            "telegram",
+        ],
+        vec![
+            "run",
+            "--notify-url-file",
+            &url,
+            "--notify-telegram-chat-id",
+            "1",
+        ],
+    ] {
+        assert_usage_error(
+            &kausa(&args),
+            NOTIFY_URL_NEEDS_ENDPOINT,
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn the_chat_id_is_used_only_with_telegram() {
+    let dir = notify_dir("chat-id");
+    let url = file(&dir, "url", HOOK);
+    for rest in [
+        vec![
+            "--notify-url-file",
+            &url,
+            "--notify-telegram-chat-id",
+            "-100",
+        ],
+        vec![
+            "--notify-url-file",
+            &url,
+            "--notify-format",
+            "json",
+            "--notify-telegram-chat-id",
+            "@valid_name",
+        ],
+        vec![
+            "--notify-url-file",
+            &url,
+            "--notify-format",
+            "slack",
+            "--notify-telegram-chat-id",
+            "-100",
+        ],
+        // Before the chat id itself is checked.
+        vec![
+            "--notify-url-file",
+            &url,
+            "--notify-format",
+            "slack",
+            "--notify-telegram-chat-id",
+            "not-an-id",
+        ],
+    ] {
+        let args = with_endpoint(&rest);
+        assert_usage_error(
+            &kausa_owned(&args),
+            CHAT_ID_ONLY_TELEGRAM,
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn the_token_file_is_used_only_with_json() {
+    let dir = notify_dir("token-format");
+    let url = file(&dir, "url", HOOK);
+    let telegram = file(&dir, "telegram-url", TELEGRAM_HOOK);
+    let token = file(&dir, "token", "a-token\n");
+    let missing = dir.join("missing").to_str().expect("UTF-8").to_owned();
+    for rest in [
+        vec![
+            "--notify-url-file",
+            &url,
+            "--notify-format",
+            "slack",
+            "--notify-token-file",
+            &token,
+        ],
+        // Before the token file is read.
+        vec![
+            "--notify-url-file",
+            &url,
+            "--notify-format",
+            "slack",
+            "--notify-token-file",
+            &missing,
+        ],
+        vec![
+            "--notify-url-file",
+            &telegram,
+            "--notify-format",
+            "telegram",
+            "--notify-telegram-chat-id",
+            "-100",
+            "--notify-token-file",
+            &token,
+        ],
+        // Before the missing chat id.
+        vec![
+            "--notify-url-file",
+            &telegram,
+            "--notify-format",
+            "telegram",
+            "--notify-token-file",
+            &token,
+        ],
+    ] {
+        let args = with_endpoint(&rest);
+        assert_usage_error(&kausa_owned(&args), TOKEN_ONLY_JSON, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn telegram_needs_a_chat_id() {
+    let dir = notify_dir("telegram-chat-id");
+    let url = file(&dir, "url", TELEGRAM_HOOK);
+    let missing = dir.join("missing").to_str().expect("UTF-8").to_owned();
+    for rest in [
+        vec!["--notify-url-file", &url, "--notify-format", "telegram"],
+        // Before the file is read.
+        vec!["--notify-url-file", &missing, "--notify-format", "telegram"],
+    ] {
+        let args = with_endpoint(&rest);
+        assert_usage_error(
+            &kausa_owned(&args),
+            TELEGRAM_NEEDS_CHAT_ID,
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn a_malformed_chat_id_is_refused_and_named() {
+    let dir = notify_dir("bad-chat-id");
+    let url = file(&dir, "url", TELEGRAM_HOOK);
+    for value in [
+        "0",
+        "-0",
+        "+1",
+        "1.5",
+        "@ab",
+        "@abcd",
+        "@1abcd",
+        "@abc-de",
+        "valid_name",
+        "99999999999999999999",
+        " 1",
+        "@abcdefghijklmnopqrstuvwxyz0123456",
+    ] {
+        let args = with_endpoint(&[
+            "--notify-url-file",
+            &url,
+            "--notify-format",
+            "telegram",
+            "--notify-telegram-chat-id",
+            value,
+        ]);
+        assert_usage_error(&kausa_owned(&args), &bad_chat_id(value), value);
+    }
+}
+
+#[test]
+fn notify_flags_need_their_values() {
+    for (args, message) in [
+        (
+            &["run", "--notify-url-file"][..],
+            "--notify-url-file needs a value",
+        ),
+        (
+            &["run", "--notify-token-file"][..],
+            "--notify-token-file needs a value",
+        ),
+        (
+            &["run", "--notify-format"][..],
+            "--notify-format needs a value",
+        ),
+        (
+            &["run", "--notify-format", ""][..],
+            "--notify-format needs a value",
+        ),
+        (
+            &["run", "--notify-telegram-chat-id"][..],
+            "--notify-telegram-chat-id needs a value",
+        ),
+        (
+            &["run", "--notify-telegram-chat-id", ""][..],
+            "--notify-telegram-chat-id needs a value",
+        ),
+    ] {
+        assert_usage_error(&kausa(args), message, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn the_format_is_json_slack_or_telegram() {
+    let dir = notify_dir("format");
+    let url = file(&dir, "url", HOOK);
+    for value in ["xml", "JSON", "Slack", "telegram2", "json ", "discord"] {
+        let args = with_endpoint(&["--notify-url-file", &url, "--notify-format", value]);
+        assert_usage_error(&kausa_owned(&args), &bad_format(value), value);
+    }
+}
+
+#[test]
+fn an_unreadable_or_empty_url_file_is_named_by_its_path() {
+    let dir = notify_dir("url-file");
+    let missing = dir.join("missing").to_str().expect("UTF-8").to_owned();
+    let directory = dir.to_str().expect("UTF-8").to_owned();
+    for path in [&missing, &directory] {
+        let args = with_endpoint(&["--notify-url-file", path]);
+        assert_usage_error_starting(
+            &kausa_owned(&args),
+            &format!("--notify-url-file '{path}' cannot be read: "),
+            path,
+        );
+    }
+    for (name, content) in [("empty", ""), ("blank", "  \n\t\r\n")] {
+        let path = file(&dir, name, content);
+        let args = with_endpoint(&["--notify-url-file", &path]);
+        assert_usage_error(
+            &kausa_owned(&args),
+            &format!("--notify-url-file '{path}' is empty"),
+            name,
+        );
+    }
+}
+
+#[test]
+fn the_url_must_parse_be_https_and_carry_no_user_information() {
+    let dir = notify_dir("url");
+    let cases = [
+        ("not-a-url", "not a url", NOT_A_URL, false),
+        ("relative", "hooks.example.com/services/x", NOT_A_URL, false),
+        ("no-host", "https://", NOT_A_URL, false),
+        (
+            "plain-http",
+            "http://receiver.kausa.svc:8080/hook",
+            NOT_HTTPS,
+            false,
+        ),
+        ("ftp", "ftp://hooks.example.com/x", NOT_HTTPS, true),
+        ("file", "file:///etc/hostname", NOT_HTTPS, true),
+        (
+            "user-password",
+            "https://user:pass@hooks.example.com/x",
+            USER_INFO,
+            false,
+        ),
+        ("user", "https://user@hooks.example.com/x", USER_INFO, false),
+        (
+            "password",
+            "http://:pass@receiver.kausa.svc/x",
+            USER_INFO,
+            true,
+        ),
+    ];
+    for (name, content, problem, allow_http) in cases {
+        let path = file(&dir, name, &format!("{content}\n"));
+        let mut rest = vec!["--notify-url-file", path.as_str()];
+        if allow_http {
+            rest.push("--notify-allow-http");
+        }
+        let args = with_endpoint(&rest);
+        assert_usage_error(&kausa_owned(&args), &url_problem(&path, problem), name);
+    }
+}
+
+#[test]
+fn a_telegram_url_must_end_in_bot_token_send_message() {
+    let dir = notify_dir("telegram-url");
+    for (name, content) in [
+        ("no-token", "https://api.telegram.org/bot/sendMessage"),
+        (
+            "get-me",
+            "https://api.telegram.org/bot000000:fake-token-for-tests/getMe",
+        ),
+        (
+            "trailing-slash",
+            "https://api.telegram.org/bot000000:fake-token-for-tests/sendMessage/",
+        ),
+        ("no-path", "https://api.telegram.org"),
+        ("slack", HOOK),
+    ] {
+        let path = file(&dir, name, content);
+        let args = with_endpoint(&[
+            "--notify-url-file",
+            &path,
+            "--notify-format",
+            "telegram",
+            "--notify-telegram-chat-id",
+            "-1001234567890",
+        ]);
+        assert_usage_error(
+            &kausa_owned(&args),
+            &url_problem(&path, TELEGRAM_PATH),
+            name,
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_or_empty_token_file_is_named_by_its_path() {
+    let dir = notify_dir("token-file");
+    let url = file(&dir, "url", HOOK);
+    let missing = dir.join("missing").to_str().expect("UTF-8").to_owned();
+    let args = with_endpoint(&["--notify-url-file", &url, "--notify-token-file", &missing]);
+    assert_usage_error_starting(
+        &kausa_owned(&args),
+        &format!("--notify-token-file '{missing}' cannot be read: "),
+        "missing",
+    );
+    let empty = file(&dir, "empty", " \n");
+    let args = with_endpoint(&["--notify-url-file", &url, "--notify-token-file", &empty]);
+    assert_usage_error(
+        &kausa_owned(&args),
+        &format!("--notify-token-file '{empty}' is empty"),
+        "empty",
+    );
+}
+
+#[test]
+fn the_content_of_the_url_and_token_files_never_reaches_the_output() {
+    let dir = notify_dir("sentinels");
+    let sentinel = "kausa-sentinel-7Hq2Zp";
+    let token = file(&dir, "token", &format!("{sentinel}-token\n"));
+    let urls = [
+        (format!("gopher://{sentinel}.example.com/hook"), false),
+        (format!("{sentinel} not a url"), false),
+        (
+            format!("https://{sentinel}:pass@hooks.example.com/x"),
+            false,
+        ),
+        (format!("http://hooks.example.com/{sentinel}"), false),
+        (format!("https://hooks.example.com/{sentinel}"), true),
+    ];
+    for (i, (content, valid)) in urls.iter().enumerate() {
+        let url = file(&dir, &format!("url-{i}"), content);
+        let args = with_endpoint(&["--notify-url-file", &url, "--notify-token-file", &token]);
+        let output = kausa_owned(&args);
+        if *valid {
+            assert_gets_past_the_flags(&output, content);
+        } else {
+            assert_eq!(output.status.code(), Some(2), "{content}");
+        }
+        assert!(!stderr(&output).contains(sentinel), "{}", stderr(&output));
+        assert!(!stdout(&output).contains(sentinel), "{}", stdout(&output));
+    }
+    // A token read, then a later usage error.
+    let url = file(&dir, "url-ok", HOOK);
+    let output = kausa(&[
+        "run",
+        "--endpoint",
+        ENDPOINT,
+        "--notify-url-file",
+        &url,
+        "--notify-token-file",
+        &token,
+    ]);
+    assert_usage_error(&output, "--endpoint needs --model", "a token, no --model");
+    assert!(!stderr(&output).contains(sentinel));
+}
+
+#[test]
+fn the_notify_checks_come_after_the_namespaces_and_the_history_and_before_the_endpoint() {
+    let dir = notify_dir("order");
+    let url = file(&dir, "url", HOOK);
+    let plain = file(&dir, "plain-url", "http://receiver.kausa.svc:8080/hook");
+    let missing = dir.join("missing").to_str().expect("UTF-8").to_owned();
+    assert_usage_error(
+        &kausa(&["run", "--namespace", "Shop", "--notify-format", "slack"]),
+        &not_a_namespace_name("Shop"),
+        "a bad namespace first",
+    );
+    assert_usage_error(
+        &kausa(&["run", "--history-days", "7", "--notify-format", "slack"]),
+        DAYS_NEED_HISTORY,
+        "the history first",
+    );
+    assert_usage_error(
+        &kausa(&["run", "--history", "--notify-url-file", &url]),
+        HISTORY_NEEDS_ENDPOINT,
+        "the history's endpoint first",
+    );
+    // Then the notify checks: the flags (a needs-url before a dry-run before an endpoint),
+    assert_usage_error(
+        &kausa(&["run", "--notify-format", "slack", "--dry-run"]),
+        &needs_url_file("--notify-format"),
+        "needs-url before dry-run",
+    );
+    assert_usage_error(
+        &kausa(&["run", "--notify-url-file", &url, "--dry-run"]),
+        NOTIFY_URL_NOT_IN_DRY_RUN,
+        "dry-run before endpoint",
+    );
+    assert_usage_error(
+        &kausa(&["run", "--endpoint", ENDPOINT, "--notify-format", "slack"]),
+        &needs_url_file("--notify-format"),
+        "before --endpoint needs --model",
+    );
+    // then the files,
+    assert_usage_error_starting(
+        &kausa(&["run", "--endpoint", ENDPOINT, "--notify-url-file", &missing]),
+        &format!("--notify-url-file '{missing}' cannot be read: "),
+        "the file before --endpoint needs --model",
+    );
+    // and the explanation settings last.
+    assert_usage_error(
+        &kausa(&["run", "--endpoint", ENDPOINT, "--notify-url-file", &url]),
+        "--endpoint needs --model",
+        "a valid notify setup without --model",
+    );
+    // --notify-allow-http allows only the webhook, and --allow-http only the endpoint.
+    let output = kausa(&[
+        "run",
+        "--endpoint",
+        "http://127.0.0.1:11434/v1",
+        "--model",
+        "m",
+        "--notify-url-file",
+        &plain,
+        "--notify-allow-http",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("plain HTTP"),
+        "the endpoint check refuses it: {}",
+        stderr(&output)
+    );
+    let args = [
+        "run",
+        "--endpoint",
+        "http://127.0.0.1:11434/v1",
+        "--allow-http",
+        "--model",
+        "m",
+        "--notify-url-file",
+        &plain,
+    ];
+    assert_usage_error(
+        &kausa(&args),
+        &url_problem(&plain, NOT_HTTPS),
+        "--allow-http",
+    );
+}
+
+#[test]
+fn the_url_has_no_flag_or_other_form() {
+    for (args, message) in [
+        (
+            &["run", "--notify-url", HOOK][..],
+            "unexpected argument '--notify-url'",
+        ),
+        (
+            &["run", "--notify-url-file=/x"][..],
+            "unexpected argument '--notify-url-file=/x'",
+        ),
+        (
+            &["--notify-url-file", "/x"][..],
+            "unknown command or option '--notify-url-file'",
+        ),
+    ] {
+        assert_usage_error(&kausa(args), message, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn run_accepts_each_notification_format_and_fails_only_on_the_missing_cluster() {
+    let dir = notify_dir("valid");
+    let url = file(&dir, "url", &format!("  {HOOK}\n"));
+    let token = file(&dir, "token", "a-token\n");
+    let telegram = file(&dir, "telegram", &format!("{TELEGRAM_HOOK}\n"));
+    let self_hosted = file(
+        &dir,
+        "self-hosted",
+        "https://tg.example.com:8443/bot1:fake/sendMessage?x=1",
+    );
+    let plain = file(&dir, "plain", "http://receiver.kausa.svc:8080/hook");
+    let plain_telegram = file(
+        &dir,
+        "plain-telegram",
+        "http://127.0.0.1:8081/bot1:fake/sendMessage",
+    );
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["--notify-url-file", &url],
+        vec!["--notify-url-file", &url, "--notify-format", "json"],
+        vec!["--notify-url-file", &url, "--notify-token-file", &token],
+        vec!["--notify-url-file", &url, "--notify-format", "slack"],
+        vec!["--notify-url-file", &url, "--notify-allow-http"],
+        vec!["--notify-url-file", &plain, "--notify-allow-http"],
+        vec![
+            "--notify-url-file",
+            &plain,
+            "--notify-allow-http",
+            "--notify-format",
+            "slack",
+            "--no-events",
+        ],
+        vec![
+            "--notify-url-file",
+            &telegram,
+            "--notify-format",
+            "telegram",
+            "--notify-telegram-chat-id",
+            "-1001234567890",
+        ],
+        vec![
+            "--notify-telegram-chat-id",
+            "@valid_name",
+            "--notify-format",
+            "telegram",
+            "--notify-url-file",
+            &telegram,
+        ],
+        vec![
+            "--notify-url-file",
+            &self_hosted,
+            "--notify-format",
+            "telegram",
+            "--notify-telegram-chat-id",
+            "12345",
+        ],
+        vec![
+            "--notify-url-file",
+            &plain_telegram,
+            "--notify-allow-http",
+            "--notify-format",
+            "telegram",
+            "--notify-telegram-chat-id",
+            "-1",
+        ],
+        vec![
+            "--notify-url-file",
+            &url,
+            "--notify-token-file",
+            &token,
+            "--history",
+            "--namespace",
+            "shop",
+        ],
+    ];
+    for rest in cases {
+        let args = with_endpoint(&rest);
+        assert_gets_past_the_flags(&kausa_owned(&args), &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn help_lists_the_notify_flags_and_where_data_goes() {
+    let output = kausa(&["--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = stdout(&output);
+    let lines: Vec<&str> = help.lines().collect();
+    let url_lines = [
+        "  --notify-url-file <PATH>  Post each new explanation to the webhook whose URL is",
+        "                            in this file (needs --endpoint)",
+    ];
+    assert!(
+        lines.windows(2).any(|w| w == url_lines),
+        "the --notify-url-file lines are missing: {help}"
+    );
+    for line in [
+        "  --notify-format <FORMAT>  json (default), slack or telegram",
+        "  --notify-telegram-chat-id <ID>  telegram's chat: an integer or @channel",
+        "  --notify-token-file <PATH>  json only: a bearer token for the webhook",
+        "  --notify-allow-http       Allow a plain http:// webhook (local or in-cluster)",
+    ] {
+        assert!(lines.contains(&line), "missing '{line}': {help}");
+    }
+    let options: Vec<&str> = help
+        .lines()
+        .skip_while(|l| *l != "Options of kausa run:")
+        .take_while(|l| !l.is_empty())
+        .collect();
+    for flag in [
+        "--notify-url-file",
+        "--notify-format",
+        "--notify-telegram-chat-id",
+        "--notify-token-file",
+        "--notify-allow-http",
+    ] {
+        assert!(
+            options.iter().any(|l| l.starts_with(&format!("  {flag} "))),
+            "{flag} is not under 'Options of kausa run:': {help}"
+        );
+    }
+    assert!(help.lines().all(|l| l.len() <= 84), "{help}");
+    // The "By design" paragraph: nothing unredacted to the model, and only the documented fields
+    // of each new explanation to the webhook.
+    let by_design: String = help
+        .split("\n\n")
+        .find(|p| p.starts_with("By design"))
+        .expect("a 'By design' paragraph")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for words in [
+        "nothing unredacted",
+        "to the model",
+        "--notify-url-file",
+        "the webhook",
+    ] {
+        assert!(by_design.contains(words), "no '{words}' in: {by_design}");
+    }
+}

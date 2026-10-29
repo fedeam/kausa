@@ -74,7 +74,8 @@ Helm](docs/how-to/install-with-helm.md).
 
 ## What leaves the cluster
 
-Only to the one endpoint you configure, and only after three deterministic steps:
+The context of an incident goes only to the one endpoint you configure, and only after three
+deterministic steps:
 
 1. **An allowlist of fields:** detection, kinds, container states and exit codes, restart counts,
    Warning events of the incident and, for crash loops, out-of-memory kills and failed Jobs, a
@@ -90,6 +91,12 @@ Only to the one endpoint you configure, and only after three deterministic steps
 Point the endpoint at a model served in your cluster (Ollama, vLLM or any OpenAI-compatible
 server) and nothing leaves it. `--dry-run` shows the exact requests without sending them. The
 full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.md).
+
+Optionally, and off by default (in the code, not released yet), kausa also posts each new
+explanation to one webhook of yours, as JSON, to a Slack incoming webhook or to a Telegram chat:
+the explanation, the rule and the fingerprint, with the real names of the namespace and the
+workload only, never a log line or the request ([Data sent in
+notifications](docs/reference/data-sent-in-notifications.md)).
 
 ## Design principles
 
@@ -203,8 +210,11 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   the history of explanations, also in the code and the chart and off by default: `kausa run
   --history` and the chart's `history.enabled=true` keep each incident's whole explanations in an
   Explanation object in its namespace for up to 30 days ([Explanation
-  resource](docs/reference/explanation-resource.md)); then notifications to one webhook ([ADRs
-  0013 to 0015](docs/adr/)).
+  resource](docs/reference/explanation-resource.md)), and notifications to one webhook, also in
+  the code and the chart and off by default: `kausa run --notify-url-file` and the chart's
+  `notifications.enabled=true` post each new explanation as JSON, to Slack or to Telegram ([Send
+  notifications to Slack, Telegram or a webhook](docs/how-to/send-notifications.md); Slack and
+  Telegram not yet tested with real webhooks).
 
 ## Documentation
 
@@ -216,7 +226,9 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
 - [Command line and log format](docs/reference/command-line.md)
 - [Helm chart](docs/reference/helm-chart.md)
 - [Explanation resource](docs/reference/explanation-resource.md)
+- [Data sent in notifications](docs/reference/data-sent-in-notifications.md)
 - [Install kausa with Helm](docs/how-to/install-with-helm.md)
+- [Send notifications to Slack, Telegram or a webhook](docs/how-to/send-notifications.md)
 - [Try kausa against a cluster with a local model](docs/how-to/try-with-a-local-model.md)
 - [Set up a development environment and run the checks](docs/how-to/develop.md)
 - [Add a detection or redaction rule](docs/how-to/add-a-rule.md)

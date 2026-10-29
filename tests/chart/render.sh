@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Chart check: lints and renders charts/kausa in both RBAC scopes
-# (docs/adr/0013-namespaced-install-mode.md) and with the explanation history on and off
-# (docs/adr/0014-explanation-history.md), and checks the rendered objects, the rules, the
-# Deployment's arguments, NOTES.txt, and every refusal of kausa.validate with its exact message.
+# (docs/adr/0013-namespaced-install-mode.md), with the explanation history on and off
+# (docs/adr/0014-explanation-history.md) and with notifications on and off
+# (docs/adr/0015-notifications.md), and checks the rendered objects, the rules, the Deployment's
+# arguments and volumes, the NetworkPolicy, NOTES.txt, and every refusal of kausa.validate with its
+# exact message.
 # Needs helm, git and coreutils only, and never contacts a cluster (KUBECONFIG points nowhere).
 # Run it from anywhere: tests/chart/render.sh. It prints one line per check and exits 1 if any
 # failed.
 #
 # KAUSA_CHART_BASE names a git ref with the v0.1 chart (default v0.1.0); when the ref is in the
-# clone, the ClusterRole rules are also compared with that chart's render. HELM names the binary.
+# clone, the ClusterRole rules are also compared with that chart's render. KAUSA_CHART_PREVIOUS
+# names the chart before notifications (default feat/v0.3-history); when it is in the clone,
+# renders with notifications off are compared with its renders byte for byte. HELM names the
+# binary.
 # No pipefail: grep -q ends a pipe early, and its writer's SIGPIPE is not a failure.
 set -eu
 
@@ -16,6 +21,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CHART="$ROOT/charts/kausa"
 HELM=${HELM:-helm}
 BASE=${KAUSA_CHART_BASE:-v0.1.0}
+PREVIOUS=${KAUSA_CHART_PREVIOUS:-feat/v0.3-history}
 KUBE_VERSION=1.36.0
 RELEASE=kausa
 NAMESPACE=kausa-system
@@ -863,6 +869,592 @@ refuse days-string "$(not_days 7d)" --set rbac.scope=cluster --set-string histor
 refuse order-days-after-rbac "$NOT_SET" --set history.days=0
 refuse order-days-last "model.name is required with model.endpoint" --set rbac.scope=cluster \
   --set model.endpoint=https://api.example.com/v1 --set history.days=0
+
+# --- Notifications (docs/adr/0015-notifications.md) ---------------------------------------------
+
+NOTIFY_SECRET=team-webhook
+NOTIFY_ON=(--set notifications.enabled=true --set "notifications.existingSecret=$NOTIFY_SECRET")
+CHAT_ID=-1001234567890
+NP_ON=(--set networkPolicy.enabled=true --set 'networkPolicy.apiServer.cidrs[0]=192.0.2.1/32'
+  --set 'networkPolicy.endpoint.to[0].ipBlock.cidr=192.0.2.2/32')
+NP_NOTIFY_TO=(--set 'networkPolicy.notifications.to[0].ipBlock.cidr=198.51.100.0/24')
+ENDPOINT_NO_KEY=(--set model.endpoint=https://api.example.com/v1 --set model.name=m)
+NOTIFY_DIR=/var/run/secrets/kausa-notify
+
+# notify_args FORMAT [CHAT] [TOKEN] [HTTP]: the args the chart passes for notifications, in
+# order: the chat id CHAT when given, the token file when TOKEN is yes, --notify-allow-http when
+# HTTP is yes.
+notify_args() {
+  printf '%s\n' '- --notify-url-file' "- $NOTIFY_DIR/url" '- --notify-format' "- \"$1\""
+  if [ -n "${2-}" ]; then printf '%s\n' '- --notify-telegram-chat-id' "- \"$2\""; fi
+  if [ "${3-}" = yes ]; then printf '%s\n' '- --notify-token-file' "- $NOTIFY_DIR/token"; fi
+  if [ "${4-}" = yes ]; then echo '- --notify-allow-http'; fi
+}
+
+# list_item FILE KEY NAME: the item named NAME of the Deployment's list KEY (volumes or
+# volumeMounts), one row per line, with spaces and quotes removed.
+list_item() {
+  docs "$1" Deployment | awk -v key="$2" -v name="$3" '
+    !on && $0 ~ "^ *" key ":$" { on = 1; match($0, /^ */); ind = RLENGTH; next }
+    on {
+      if ($0 ~ /^ *$/) next
+      match($0, /^ */)
+      if (RLENGTH <= ind) exit
+      s = substr($0, RLENGTH + 1)
+      if (RLENGTH == ind + 2 && s ~ /^- /) {
+        item = s; sub(/^- name: */, "", item); gsub(/["'\'']/, "", item)
+        cur = (s ~ /^- name:/ && item == name)
+      }
+      if (cur) { gsub(/[ "'\'']/, "", s); print s }
+    }'
+}
+
+# rules_of FILE: the rules of kausa's ClusterRole and of every Role, in order, spaces removed.
+rules_of() {
+  docs "$1" ClusterRole "" "${2:-kausa}" | section rules
+  docs "$1" Role | section rules
+}
+
+# with_inserted BASE LINES: BASE's args with the lines of the file LINES inserted before
+# --metrics-address, or at the end without it.
+with_inserted() {
+  args "$1" | awk -v lines="$2" '
+    function insert() { while ((getline l < lines) > 0) print l; done = 1 }
+    !done && $0 == "- --metrics-address" { insert() }
+    { print }
+    END { if (!done) insert() }
+  '
+}
+
+# check_notify NAME OUT BASE URLKEY [TOKENKEY]: OUT renders like BASE (the same values without
+# notifications) with the notify args of $OUT.notify-args inserted before --metrics-address, the
+# notify volume of the Secret NOTIFY_SECRET with the items URLKEY (and TOKENKEY), its read-only
+# mount, the same objects and the same rules.
+check_notify() {
+  local name=$1 out=$2 base=$3 url_key=$4 token_key=${5-} since=$FAILURES
+  if [ ! -f "$out" ] || [ ! -f "$base" ]; then
+    fail "$name: no render to check (or no base render to compare with)"
+    return 0
+  fi
+  with_inserted "$base" "$out.notify-args" >"$out.args-expected"
+  args "$out" >"$out.args"
+  diff -u "$out.args-expected" "$out.args" >"$out.args-diff" ||
+    fail "$name: the notify args: $(cat "$out.args-diff")"
+  [ "$(docs "$out" Deployment | grep -cE '^ *volumes:$' || true)" = 1 ] ||
+    fail "$name: not exactly one volumes list in the Deployment"
+  [ "$(docs "$out" Deployment | grep -cE '^ *volumeMounts:$' || true)" = 1 ] ||
+    fail "$name: not exactly one volumeMounts list in the Deployment"
+  list_item "$out" volumes notify | sed 's/^defaultMode:288$/defaultMode:0440/' >"$out.volume"
+  {
+    printf '%s\n' '-name:notify' 'secret:' "secretName:$NOTIFY_SECRET" 'defaultMode:0440' 'items:'
+    printf '%s\n' "-key:$url_key" 'path:url'
+    if [ -n "$token_key" ]; then printf '%s\n' "-key:$token_key" 'path:token'; fi
+  } >"$out.volume-expected"
+  diff -u <(sort "$out.volume-expected") <(sort "$out.volume") >"$out.volume-diff" ||
+    fail "$name: the notify volume: $(cat "$out.volume-diff")"
+  awk 'on { print } $0 == "items:" { on = 1 }' "$out.volume" >"$out.items"
+  awk 'on { print } $0 == "items:" { on = 1 }' "$out.volume-expected" >"$out.items-expected"
+  diff -u "$out.items-expected" "$out.items" >"$out.items-diff" ||
+    fail "$name: the notify volume's items, in order: $(cat "$out.items-diff")"
+  grep -q '^optional:' "$out.volume" && fail "$name: the notify volume is optional"
+  list_item "$out" volumeMounts notify | sort >"$out.mount"
+  printf '%s\n' '-name:notify' "mountPath:$NOTIFY_DIR" 'readOnly:true' | sort >"$out.mount-expected"
+  diff -u "$out.mount-expected" "$out.mount" >"$out.mount-diff" ||
+    fail "$name: the notify mount: $(cat "$out.mount-diff")"
+  # The API key's volume and mount stay as they are, in the same lists.
+  for key in volumes volumeMounts; do
+    list_item "$base" "$key" api-key >"$out.base-$key-api-key"
+    list_item "$out" "$key" api-key >"$out.$key-api-key"
+    cmp -s "$out.base-$key-api-key" "$out.$key-api-key" ||
+      fail "$name: the api-key item of $key changed"
+  done
+  grep '^kind: ' "$base" | sort >"$out.kinds-expected"
+  grep '^kind: ' "$out" | sort >"$out.kinds"
+  cmp -s "$out.kinds-expected" "$out.kinds" ||
+    fail "$name: other objects than with notifications off: $(diff "$out.kinds-expected" "$out.kinds")"
+  rules_of "$base" >"$out.all-rules-expected"
+  rules_of "$out" >"$out.all-rules"
+  diff -u "$out.all-rules-expected" "$out.all-rules" >"$out.all-rules-diff" ||
+    fail "$name: the ClusterRole or Role rules differ from notifications off:" \
+      "$(cat "$out.all-rules-diff")"
+  passed "$since" "$name: the notify args, volume, mount and unchanged rules"
+}
+
+# Bases with notifications off that the checks below compare with (the others are above).
+check_cluster endpoint-no-key yes yes "${ENDPOINT_NO_KEY[@]}"
+check_cluster endpoint-no-metrics yes yes "${ENDPOINT[@]}" --set metrics.enabled=false
+
+# notify_case NAME BASE ARGS-FORMAT... -- VALUES...: a cluster-scope render of the notify values
+# on top of the base's (check_cluster with the rules of BASE), then check_notify. The words
+# before -- are notify_args' arguments; URLKEY and TOKENKEY name the items (url and none by
+# default), HISTORY, EXTRA, LOGS and WRITES pass through to check_cluster.
+notify_case() {
+  local name=$1 base=$2
+  shift 2
+  local spec=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    spec+=("$1")
+    shift
+  done
+  shift
+  HISTORY=${HISTORY:-no} EXTRA=${EXTRA-} check_cluster "$name" "${LOGS:-yes}" "${WRITES:-yes}" "$@"
+  notify_args "${spec[@]}" >"$WORK/cluster-$name.notify-args"
+  check_notify "cluster/$name" "$WORK/cluster-$name" "$WORK/cluster-$base" "${URLKEY:-url}" \
+    "${TOKENKEY-}"
+}
+
+notify_case notify-json endpoint json -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}"
+notify_case notify-json-explicit endpoint json -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=json
+TOKENKEY=token notify_case notify-json-token endpoint json "" yes -- "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.tokenKey=token
+TOKENKEY=bearer notify_case notify-json-token-key endpoint json "" yes -- "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.tokenKey=bearer
+notify_case notify-json-http endpoint json "" no yes -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.allowHttp=true
+URLKEY=hook-url notify_case notify-url-key endpoint json -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.urlKey=hook-url
+notify_case notify-slack endpoint slack -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=slack
+notify_case notify-slack-http endpoint slack "" no yes -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=slack --set notifications.allowHttp=true
+notify_case notify-telegram endpoint telegram "$CHAT_ID" -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=telegram --set-string "notifications.telegramChatId=$CHAT_ID"
+# --set reads the chat id as an integer, a values file as a float64: both render the whole number.
+notify_case notify-telegram-int endpoint telegram "$CHAT_ID" -- "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.format=telegram --set "notifications.telegramChatId=$CHAT_ID"
+cat >"$WORK/telegram-values.yaml" <<VALUES
+notifications:
+  enabled: true
+  format: telegram
+  existingSecret: $NOTIFY_SECRET
+  telegramChatId: $CHAT_ID
+VALUES
+notify_case notify-telegram-float endpoint telegram "$CHAT_ID" -- "${ENDPOINT[@]}" \
+  -f "$WORK/telegram-values.yaml"
+[ -f "$WORK/cluster-notify-telegram-float" ] && args "$WORK/cluster-notify-telegram-float" |
+  grep -q 'e+' && fail "cluster/notify-telegram-float: the chat id renders in scientific notation"
+notify_case notify-telegram-channel endpoint telegram @valid_name -- "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.format=telegram \
+  --set notifications.telegramChatId=@valid_name
+notify_case notify-telegram-http endpoint telegram "$CHAT_ID" no yes -- "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.format=telegram \
+  --set-string "notifications.telegramChatId=$CHAT_ID" --set notifications.allowHttp=true
+# Without the API key, the notify volume and mount are the only ones.
+notify_case notify-no-api-key endpoint-no-key json -- "${ENDPOINT_NO_KEY[@]}" "${NOTIFY_ON[@]}"
+if [ -f "$WORK/cluster-notify-no-api-key" ]; then
+  [ -z "$(list_item "$WORK/cluster-notify-no-api-key" volumes api-key)" ] ||
+    fail "cluster/notify-no-api-key: an api-key volume without model.apiKey.existingSecret"
+fi
+# Without metrics, the notify args come last.
+notify_case notify-no-metrics endpoint-no-metrics json -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set metrics.enabled=false
+# With the history: after the history args.
+HISTORY=yes EXTRA="$HISTORY_OBJECTS" notify_case notify-history history json -- \
+  "${ENDPOINT[@]}" "${HISTORY_ON[@]}" "${NOTIFY_ON[@]}"
+# events=false (and its NetworkPolicy, which then needs the webhook's peers).
+WRITES=no notify_case notify-no-events no-events json -- "${NO_EVENTS[@]}" "${NOTIFY_ON[@]}" \
+  "${NP_NOTIFY_TO[@]}"
+
+# The history args come before the notify args.
+if [ -f "$WORK/cluster-notify-history.args" ]; then
+  awk '$0 == "- --history" { h = NR } $0 == "- --notify-url-file" { n = NR }
+       END { exit !(h && n && h < n) }' "$WORK/cluster-notify-history.args" ||
+    fail "cluster/notify-history: the notify args do not follow the history args"
+fi
+
+# Namespaced scope: the same args, volume and mount, and every Role unchanged.
+# notify_namespaced NAME ARGS-FORMAT... -- VALUES...: like notify_case, on namespaced/endpoint.
+notify_namespaced() {
+  local name=$1
+  shift
+  local spec=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    spec+=("$1")
+    shift
+  done
+  shift
+  check_namespaced "$name" yes yes e2e-a,e2e-b "$@"
+  notify_args "${spec[@]}" >"$WORK/namespaced-$name.notify-args"
+  check_notify "namespaced/$name" "$WORK/namespaced-$name" "$WORK/namespaced-endpoint" \
+    "${URLKEY:-url}" "${TOKENKEY-}"
+}
+notify_namespaced notify-json json -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}"
+TOKENKEY=token notify_namespaced notify-json-token json "" yes -- "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.tokenKey=token
+notify_namespaced notify-slack slack -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=slack
+notify_namespaced notify-telegram telegram "$CHAT_ID" -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=telegram --set-string "notifications.telegramChatId=$CHAT_ID"
+
+# With notifications off, nothing of them renders: no --notify arg, no notify volume, no fourth
+# egress rule. Checked on every render of the sections above.
+since=$FAILURES
+for file in "$WORK"/cluster-* "$WORK"/namespaced-*; do
+  base_name=$(basename "$file")
+  case $base_name in *.* | *notify*) continue ;; esac
+  args "$file" | grep -q -- '^- --notify' && fail "$base_name: a --notify arg with notifications off"
+  grep -q 'kausa-notify' "$file" && fail "$base_name: the notify volume with notifications off"
+  grep -q 'notification webhook' "$file" &&
+    fail "$base_name: the webhook's egress rule with notifications off"
+done
+passed "$since" "notifications off: no --notify arg, notify volume or webhook rule"
+
+# Values of notifications that are set while it is off change nothing, and neither does
+# notifications=null.
+for pair in \
+  "endpoint|--set notifications.enabled=false --set notifications.format=xml --set notifications.telegramChatId=1 --set notifications.tokenKey=t --set notifications.allowHttp=true --set notifications.existingSecret=" \
+  "endpoint|--set notifications.format=telegram --set notifications.existingSecret=$NOTIFY_SECRET" \
+  "endpoint|--set notifications=null" \
+  "default|--set notifications=null" \
+  "no-events|--set notifications.enabled=false ${NP_NOTIFY_TO[*]}" \
+  "no-events|--set networkPolicy.notifications=null" \
+  "dry-run|--set notifications.enabled=false --set notifications.format=xml"; do
+  values=${pair%%|*} extra_sets=${pair#*|}
+  case $values in
+    default) set_values=() ;;
+    endpoint) set_values=("${ENDPOINT[@]}") ;;
+    no-events) set_values=("${NO_EVENTS[@]}") ;;
+    dry-run) set_values=("${DRY[@]}") ;;
+  esac
+  set -f
+  # shellcheck disable=SC2206 # split on spaces on purpose, without globbing the [0]
+  extra=($extra_sets)
+  set +f
+  out="$WORK/off-$values-$(printf '%s' "$extra_sets" | cksum | cut -d' ' -f1)"
+  if render "$out" "$RELEASE" "$CHART" --set rbac.scope=cluster ${set_values[@]+"${set_values[@]}"} \
+    "${extra[@]}"; then
+    if cmp -s "$WORK/cluster-$values" "$out"; then
+      ok "notifications off ($extra_sets) renders like $values"
+    else
+      fail "notifications off ($extra_sets) does not render like $values:" \
+        "$(diff "$WORK/cluster-$values" "$out" | head -20)"
+    fi
+  else
+    fail "notifications off ($extra_sets) does not render with $values: $(cat "$out.err")"
+  fi
+done
+
+# Byte for byte like the chart before notifications, when that chart is in the clone.
+if git -C "$ROOT" rev-parse --verify --quiet "$PREVIOUS^{commit}" >/dev/null 2>&1; then
+  mkdir -p "$WORK/previous"
+  git -C "$ROOT" archive "$PREVIOUS" charts/kausa | tar -x -C "$WORK/previous"
+  for name in default endpoint dry-run-no-logs dry-run no-events history history-no-events; do
+    case $name in
+      default) values=() ;;
+      endpoint) values=("${ENDPOINT[@]}") ;;
+      dry-run-no-logs) values=("${DRY_NO_LOGS[@]}") ;;
+      dry-run) values=("${DRY[@]}") ;;
+      no-events) values=("${NO_EVENTS[@]}") ;;
+      history) values=("${ENDPOINT[@]}" "${HISTORY_ON[@]}") ;;
+      history-no-events) values=("${NO_EVENTS[@]}" "${HISTORY_ON[@]}") ;;
+    esac
+    for scope in cluster namespaced; do
+      [ "$scope" = namespaced ] && [ "$name" != endpoint ] && [ "$name" != default ] && continue
+      if [ "$scope" = cluster ]; then
+        scope_args=(--set rbac.scope=cluster)
+      else
+        scope_args=(--set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a,e2e-b}')
+      fi
+      out="$WORK/previous-$scope-$name"
+      now="$WORK/now-$scope-$name"
+      if render "$out" "$RELEASE" "$WORK/previous/charts/kausa" "${scope_args[@]}" \
+        ${values[@]+"${values[@]}"} && render "$now" "$RELEASE" "$CHART" "${scope_args[@]}" \
+        ${values[@]+"${values[@]}"}; then
+        if cmp -s "$out" "$now"; then
+          ok "$scope/$name renders like $PREVIOUS"
+        else
+          fail "$scope/$name renders unlike $PREVIOUS: $(diff "$out" "$now" | head -20)"
+        fi
+      else
+        fail "$scope/$name does not render here or in $PREVIOUS: $(cat "$out.err" "$now.err")"
+      fi
+    done
+  done
+else
+  echo "skipped: $PREVIOUS is not in this clone; renders with notifications off are checked above"
+fi
+
+# --- The webhook's egress rule ---
+
+# egress FILE: the egress section of the NetworkPolicy, as rendered.
+egress() {
+  docs "$1" NetworkPolicy | awk '$0 == "  egress:" { on = 1; next } on && !/^    / { on = 0 } on'
+}
+# egress_rule FILE N: the Nth egress rule, spaces and quotes removed.
+egress_rule() {
+  egress "$1" | awk -v n="$2" '
+    /^    - / { r++; if (r > n) exit }
+    /^    #/ { if (r >= n) exit; next }
+    r == n { s = $0; gsub(/[ "'\'']/, "", s); if (s != "") print s }'
+}
+# egress_comment FILE N: the comment line before the Nth egress rule.
+egress_comment() {
+  egress "$1" | awk -v n="$2" '
+    /^    #/ { c = $0 }
+    /^    - / { r++; if (r == n) { sub(/^ +/, "", c); print c; exit }; c = "" }'
+}
+egress_count() { egress "$1" | grep -c '^    - ' || true; }
+
+# check_egress NAME FILE BASE EXPECTED: FILE's NetworkPolicy keeps BASE's three egress rules and
+# adds a fourth, '# The notification webhook.', whose rows (spaces removed) are in EXPECTED.
+check_egress() {
+  local name=$1 out=$2 base=$3 expected=$4 since=$FAILURES n
+  [ -f "$out" ] || return 0
+  [ "$(egress_count "$out")" = 4 ] || fail "$name: $(egress_count "$out") egress rules, not 4"
+  for n in 1 2 3; do
+    cmp -s <(egress_rule "$base" "$n") <(egress_rule "$out" "$n") ||
+      fail "$name: egress rule $n changed: $(diff <(egress_rule "$base" "$n") <(egress_rule "$out" "$n"))"
+  done
+  [ "$(egress_comment "$out" 4)" = '# The notification webhook.' ] ||
+    fail "$name: the fourth egress rule is not commented '# The notification webhook.'" \
+      "($(egress_comment "$out" 4))"
+  egress_rule "$out" 4 >"$out.rule4"
+  diff -u "$expected" "$out.rule4" >"$out.rule4-diff" ||
+    fail "$name: the webhook's egress rule: $(cat "$out.rule4-diff")"
+  passed "$since" "$name: the webhook's egress rule"
+}
+
+printf '%s\n' '-to:' '-ipBlock:' 'cidr:198.51.100.0/24' 'ports:' '-port:443' 'protocol:TCP' \
+  >"$WORK/rule4-443"
+printf '%s\n' '-to:' '-ipBlock:' 'cidr:198.51.100.0/24' 'ports:' '-port:8443' 'protocol:TCP' \
+  '-port:443' 'protocol:TCP' >"$WORK/rule4-explicit"
+printf '%s\n' '-to:' '-namespaceSelector:' 'matchLabels:' 'kubernetes.io/metadata.name:hooks' \
+  'podSelector:' 'matchLabels:' 'app:receiver' 'ports:' '-port:8080' 'protocol:TCP' \
+  >"$WORK/rule4-in-cluster"
+
+# np_render NAME ARGS...: a cluster-scope render into $WORK/np-NAME.
+np_render() {
+  local name=$1
+  shift
+  render "$WORK/np-$name" "$RELEASE" "$CHART" --set rbac.scope=cluster "$@" ||
+    fail "np/$name does not render: $(cat "$WORK/np-$name.err")"
+}
+
+np_render base "${ENDPOINT[@]}" "${NP_ON[@]}"
+if [ -f "$WORK/np-base" ]; then
+  [ "$(egress_count "$WORK/np-base")" = 3 ] || fail "np/base: not three egress rules"
+  # The webhook's peers alone add nothing while notifications are off.
+  np_render base-with-to "${ENDPOINT[@]}" "${NP_ON[@]}" "${NP_NOTIFY_TO[@]}"
+  cmp -s "$WORK/np-base" "$WORK/np-base-with-to" ||
+    fail "np/base-with-to: networkPolicy.notifications.to changes a render with notifications off"
+fi
+np_render default-ports "${ENDPOINT[@]}" "${NP_ON[@]}" "${NOTIFY_ON[@]}" "${NP_NOTIFY_TO[@]}"
+check_egress np/default-ports "$WORK/np-default-ports" "$WORK/np-base" "$WORK/rule4-443"
+np_render explicit-ports "${ENDPOINT[@]}" "${NP_ON[@]}" "${NOTIFY_ON[@]}" "${NP_NOTIFY_TO[@]}" \
+  --set-json 'networkPolicy.notifications.ports=[{"port":8443,"protocol":"TCP"},{"port":443,"protocol":"TCP"}]'
+check_egress np/explicit-ports "$WORK/np-explicit-ports" "$WORK/np-base" "$WORK/rule4-explicit"
+np_render empty-ports "${ENDPOINT[@]}" "${NP_ON[@]}" "${NOTIFY_ON[@]}" "${NP_NOTIFY_TO[@]}" \
+  --set-json 'networkPolicy.notifications.ports=[]'
+check_egress np/empty-ports "$WORK/np-empty-ports" "$WORK/np-base" "$WORK/rule4-443"
+np_render null-ports "${ENDPOINT[@]}" "${NP_ON[@]}" "${NOTIFY_ON[@]}" "${NP_NOTIFY_TO[@]}" \
+  --set networkPolicy.notifications.ports=null
+check_egress np/null-ports "$WORK/np-null-ports" "$WORK/np-base" "$WORK/rule4-443"
+np_render in-cluster "${ENDPOINT[@]}" "${NP_ON[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.allowHttp=true \
+  --set-json 'networkPolicy.notifications.to=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"hooks"}},"podSelector":{"matchLabels":{"app":"receiver"}}}]' \
+  --set-json 'networkPolicy.notifications.ports=[{"port":8080,"protocol":"TCP"}]'
+check_egress np/in-cluster "$WORK/np-in-cluster" "$WORK/np-base" "$WORK/rule4-in-cluster"
+np_render telegram "${ENDPOINT[@]}" "${NP_ON[@]}" "${NOTIFY_ON[@]}" "${NP_NOTIFY_TO[@]}" \
+  --set notifications.format=telegram --set-string "notifications.telegramChatId=$CHAT_ID"
+check_egress np/telegram "$WORK/np-telegram" "$WORK/np-base" "$WORK/rule4-443"
+# Notifications on without the NetworkPolicy: no NetworkPolicy at all.
+if [ -f "$WORK/cluster-notify-json" ]; then
+  [ "$(count_docs "$WORK/cluster-notify-json" NetworkPolicy)" = 0 ] ||
+    fail "cluster/notify-json: a NetworkPolicy with networkPolicy.enabled=false"
+fi
+# Namespaced scope: the same rule.
+render "$WORK/np-namespaced-base" "$RELEASE" "$CHART" --set rbac.scope=namespaced \
+  --set 'rbac.namespaces={e2e-a}' "${ENDPOINT[@]}" "${NP_ON[@]}" ||
+  fail "np/namespaced-base does not render: $(cat "$WORK/np-namespaced-base.err")"
+render "$WORK/np-namespaced" "$RELEASE" "$CHART" --set rbac.scope=namespaced \
+  --set 'rbac.namespaces={e2e-a}' "${ENDPOINT[@]}" "${NP_ON[@]}" "${NOTIFY_ON[@]}" \
+  "${NP_NOTIFY_TO[@]}" || fail "np/namespaced does not render: $(cat "$WORK/np-namespaced.err")"
+check_egress np/namespaced "$WORK/np-namespaced" "$WORK/np-namespaced-base" "$WORK/rule4-443"
+
+# --- Values without the notifications maps (helm upgrade --reuse-values from an earlier release)
+
+NONOTIFY_CHART="$WORK/nonotify/kausa"
+mkdir -p "$WORK/nonotify"
+cp -R "$CHART" "$NONOTIFY_CHART"
+awk '
+  { match($0, /^ */); ind = RLENGTH; blank = ($0 ~ /^ *$/) }
+  skip && !blank && ind <= skip_ind { skip = 0 }
+  /^[^ #]/ { top = $0 }
+  !skip && $0 ~ /^notifications:/ { skip = 1; skip_ind = 0; next }
+  !skip && top ~ /^networkPolicy:/ && $0 ~ /^  notifications:/ { skip = 1; skip_ind = 2; next }
+  !skip
+' "$CHART/values.yaml" >"$NONOTIFY_CHART/values.yaml"
+grep -q '^notifications:' "$NONOTIFY_CHART/values.yaml" &&
+  fail "the chart copy still has a notifications map"
+awk '/^networkPolicy:/ { on = 1; next } on && /^[^ ]/ { on = 0 } on && /^  notifications:/ { f = 1 }
+     END { exit !f }' "$NONOTIFY_CHART/values.yaml" &&
+  fail "the chart copy still has networkPolicy.notifications"
+# Notifications given in full by --set: the same render as the chart's.
+NOTIFY_FULL=("${NOTIFY_ON[@]}" --set notifications.format=json --set notifications.urlKey=url
+  --set notifications.allowHttp=false)
+for pair in default: endpoint:endpoint no-events:no-events history:endpoint,history \
+  notify-json:endpoint,notify np-default-ports:endpoint,np,notify,to; do
+  name=${pair%%:*} sets=${pair#*:}
+  set_values=()
+  case ",$sets," in *,endpoint,*) set_values+=("${ENDPOINT[@]}") ;; esac
+  case ",$sets," in *,no-events,*) set_values+=("${NO_EVENTS[@]}") ;; esac
+  case ",$sets," in *,history,*) set_values+=("${HISTORY_ON[@]}") ;; esac
+  case ",$sets," in *,np,*) set_values+=("${NP_ON[@]}") ;; esac
+  case ",$sets," in *,notify,*) set_values+=("${NOTIFY_FULL[@]}") ;; esac
+  case ",$sets," in *,to,*) set_values+=("${NP_NOTIFY_TO[@]}") ;; esac
+  out="$WORK/nonotify-$name"
+  case $name in
+    np-*) compare="$WORK/$name" ;;
+    *) compare="$WORK/cluster-$name" ;;
+  esac
+  if [ "$name" = notify-json ]; then
+    # The chart's render with the same values set explicitly.
+    compare="$WORK/notify-full"
+    render "$compare" "$RELEASE" "$CHART" --set rbac.scope=cluster "${set_values[@]}" ||
+      fail "notify-full does not render: $(cat "$compare.err")"
+  fi
+  if ! render "$out" "$RELEASE" "$NONOTIFY_CHART" --set rbac.scope=cluster \
+    ${set_values[@]+"${set_values[@]}"}; then
+    if grep -qi 'nil pointer' "$out.err"; then
+      fail "no notifications map, $name: a nil-pointer error: $(cat "$out.err")"
+    else
+      fail "no notifications map, $name: does not render: $(cat "$out.err")"
+    fi
+  elif [ ! -f "$compare" ]; then
+    fail "no notifications map, $name: no render of the chart to compare with"
+  elif cmp -s "$compare" "$out"; then
+    ok "no notifications map, $name: renders like the chart"
+  else
+    fail "no notifications map, $name: renders unlike the chart:" \
+      "$(diff "$compare" "$out" | head -20)"
+  fi
+done
+
+# --- helm lint and NOTES.txt with notifications ---
+
+for format in json slack telegram; do
+  format_args=(--set "notifications.format=$format")
+  [ "$format" = telegram ] && format_args+=(--set-string "notifications.telegramChatId=$CHAT_ID")
+  for scope in cluster namespaced; do
+    if [ "$scope" = cluster ]; then
+      scope_args=(--set rbac.scope=cluster)
+    else
+      scope_args=(--set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a}')
+    fi
+    if "$HELM" lint --strict "$CHART" "${scope_args[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+      "${format_args[@]}" >"$WORK/lint-notify" 2>&1; then
+      ok "helm lint --strict with notifications in $format, $scope"
+    else
+      fail "helm lint --strict with notifications in $format, $scope: $(cat "$WORK/lint-notify")"
+    fi
+    file="$WORK/notes-notify-$format-$scope"
+    notes "$file" "${scope_args[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" "${format_args[@]}" \
+      --set notifications.urlKey=hook-url
+    [ -s "$file" ] || { fail "NOTES.txt with notifications ($format, $scope) is empty"; continue; }
+    since=$FAILURES
+    for words in "$format" "$NOTIFY_SECRET" hook-url 'kausa_notifications_total{outcome="failed"}' \
+      'notification failed' "kubectl logs -n $NAMESPACE deploy/kausa"; do
+      collapsed "$file" | grep -qF -- "$words" ||
+        fail "NOTES.txt with notifications ($format, $scope) does not name '$words'"
+    done
+    passed "$since" "NOTES.txt with notifications ($format, $scope)"
+  done
+done
+for file in "$WORK/notes-cluster" "$WORK/notes-namespaced" "$WORK/notes-history-cluster"; do
+  [ -s "$file" ] || continue
+  grep -qE 'kausa_notifications_total|notification failed' "$file" &&
+    fail "NOTES.txt without notifications tells how to find their failures ($file)"
+done
+
+# --- Refusals of notifications, after every earlier check ---
+
+NOTIFY_NO_SECRET='notifications.existingSecret is required with notifications.enabled: the Secret that holds the webhook URL'
+notify_bad_format() { echo "notifications.format must be json, slack or telegram, not '$1'"; }
+NOTIFY_NEEDS_CHAT='notifications.telegramChatId is required with notifications.format=telegram'
+NOTIFY_CHAT_ONLY='notifications.telegramChatId is used only with notifications.format=telegram'
+NOTIFY_TOKEN_ONLY='notifications.tokenKey is used only with notifications.format=json'
+NOTIFY_NEEDS_ENDPOINT='notifications.enabled needs model.endpoint'
+NOTIFY_NOT_DRY='notifications.enabled is not used with dryRun: no explanation is written'
+NOTIFY_NEEDS_TO='networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook'
+CL=(--set rbac.scope=cluster)
+NS=(--set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a}')
+TELEGRAM=(--set notifications.format=telegram)
+
+refuse notify-no-secret "$NOTIFY_NO_SECRET" "${CL[@]}" "${ENDPOINT[@]}" \
+  --set notifications.enabled=true
+refuse notify-empty-secret "$NOTIFY_NO_SECRET" "${CL[@]}" "${ENDPOINT[@]}" \
+  --set notifications.enabled=true --set notifications.existingSecret=
+refuse notify-no-secret-namespaced "$NOTIFY_NO_SECRET" "${NS[@]}" "${ENDPOINT[@]}" \
+  --set notifications.enabled=true
+for format in xml Slack JSON telegram2; do
+  refuse "notify-format-$format" "$(notify_bad_format "$format")" "${CL[@]}" "${ENDPOINT[@]}" \
+    "${NOTIFY_ON[@]}" --set "notifications.format=$format"
+done
+refuse notify-telegram-no-chat "$NOTIFY_NEEDS_CHAT" "${CL[@]}" "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" "${TELEGRAM[@]}"
+refuse notify-telegram-empty-chat "$NOTIFY_NEEDS_CHAT" "${CL[@]}" "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" "${TELEGRAM[@]}" --set notifications.telegramChatId=
+refuse notify-chat-json "$NOTIFY_CHAT_ONLY" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set-string "notifications.telegramChatId=$CHAT_ID"
+refuse notify-chat-slack "$NOTIFY_CHAT_ONLY" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=slack --set notifications.telegramChatId=@valid_name
+refuse notify-token-slack "$NOTIFY_TOKEN_ONLY" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=slack --set notifications.tokenKey=token
+refuse notify-token-telegram "$NOTIFY_TOKEN_ONLY" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  "${TELEGRAM[@]}" --set-string "notifications.telegramChatId=$CHAT_ID" \
+  --set notifications.tokenKey=token
+refuse notify-no-endpoint "$NOTIFY_NEEDS_ENDPOINT" "${CL[@]}" "${NOTIFY_ON[@]}"
+refuse notify-no-endpoint-namespaced "$NOTIFY_NEEDS_ENDPOINT" "${NS[@]}" "${NOTIFY_ON[@]}"
+refuse notify-dry-run "$NOTIFY_NOT_DRY" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" "${DRY[@]}"
+refuse notify-np-no-to "$NOTIFY_NEEDS_TO" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  "${NP_ON[@]}"
+refuse notify-np-empty-to "$NOTIFY_NEEDS_TO" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  "${NP_ON[@]}" --set-json 'networkPolicy.notifications.to=[]'
+refuse notify-np-null "$NOTIFY_NEEDS_TO" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  "${NP_ON[@]}" --set networkPolicy.notifications=null
+refuse notify-np-namespaced "$NOTIFY_NEEDS_TO" "${NS[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
+  "${NP_ON[@]}"
+# The order: the earlier checks first, then the eight in the order of the contract.
+refuse notify-order-rbac-first "$NOT_SET" "${ENDPOINT[@]}" --set notifications.enabled=true
+refuse notify-order-v0.1-first "model.name is required with model.endpoint" "${CL[@]}" \
+  --set model.endpoint=https://api.example.com/v1 --set notifications.enabled=true
+refuse notify-order-endpoint-to-first \
+  "networkPolicy.endpoint.to is required with networkPolicy.enabled and model.endpoint: without it kausa cannot reach the model" \
+  "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" --set networkPolicy.enabled=true \
+  --set 'networkPolicy.apiServer.cidrs[0]=192.0.2.1/32'
+refuse notify-order-days-first "$(not_days 0)" "${CL[@]}" "${ENDPOINT[@]}" \
+  --set notifications.enabled=true --set history.days=0
+refuse notify-order-secret-before-format "$NOTIFY_NO_SECRET" "${CL[@]}" "${ENDPOINT[@]}" \
+  --set notifications.enabled=true --set notifications.format=xml
+refuse notify-order-format-before-chat "$(notify_bad_format xml)" "${CL[@]}" "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.format=xml --set notifications.telegramChatId=1
+refuse notify-order-format-before-token "$(notify_bad_format xml)" "${CL[@]}" "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.format=xml --set notifications.tokenKey=token
+refuse notify-order-chat-required-before-token "$NOTIFY_NEEDS_CHAT" "${CL[@]}" \
+  "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" "${TELEGRAM[@]}" --set notifications.tokenKey=token
+refuse notify-order-chat-before-token "$NOTIFY_CHAT_ONLY" "${CL[@]}" "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.format=slack --set notifications.telegramChatId=1 \
+  --set notifications.tokenKey=token
+refuse notify-order-token-before-endpoint "$NOTIFY_TOKEN_ONLY" "${CL[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=slack --set notifications.tokenKey=token
+refuse notify-order-endpoint-before-dry-run "$NOTIFY_NEEDS_ENDPOINT" "${CL[@]}" \
+  "${NOTIFY_ON[@]}" "${DRY[@]}"
+refuse notify-order-dry-run-before-np "$NOTIFY_NOT_DRY" "${CL[@]}" "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" "${DRY[@]}" "${NP_ON[@]}"
+# Values without the notifications maps reach the same refusals, never a nil-pointer error.
+# refuse_in CHART NAME MESSAGE ARGS...: refuse, with another chart.
+refuse_in() {
+  local saved=$CHART
+  CHART=$1
+  shift
+  refuse "$@"
+  CHART=$saved
+}
+refuse_in "$NONOTIFY_CHART" notify-nomap-no-secret "$NOTIFY_NO_SECRET" "${CL[@]}" \
+  "${ENDPOINT[@]}" --set notifications.enabled=true
+refuse_in "$NONOTIFY_CHART" notify-nomap-np "$NOTIFY_NEEDS_TO" "${CL[@]}" "${ENDPOINT[@]}" \
+  "${NOTIFY_FULL[@]}" "${NP_ON[@]}"
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "FAIL: $FAILURES chart checks failed" >&2

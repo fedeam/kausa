@@ -1,8 +1,10 @@
 //! The incident fingerprint: a hash of what an incident is, stable across restarts of the same
 //! failure, so that a repeated incident can reuse its explanation (deduplication, third weekend).
 //!
-//! It is computed in memory before redaction and is never sent or written anywhere but kausa's
-//! own log (docs/reference/rules.md, "Grouping and fingerprint").
+//! It is computed in memory before redaction and is never sent to the model. It is in kausa's own
+//! log, in the names of its Events and Explanations and, with notifications, in each one posted
+//! to the webhook (docs/reference/rules.md, "Grouping and fingerprint";
+//! docs/adr/0015-notifications.md).
 
 /// The prefix client-go's event recorder puts before the note of an event that aggregates similar
 /// ones (`EventAggregatorByReasonMessageFunc` in `tools/record/events_cache.go`, checked on
