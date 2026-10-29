@@ -18,7 +18,8 @@ pub struct Gathered {
     pub incident: Incident,
     /// The incident's Pods that kausa still knows, sample first.
     pub pods: Vec<PodRecord>,
-    /// The Warning events of those Pods (or of the Job), most recent first.
+    /// The Warning events of those Pods (or of the object the incident is about, when it is not a
+    /// Pod: a Job, a workload controller), most recent first.
     pub events: Vec<EventRecord>,
     pub pods_total: usize,
     /// The last lines of the failed container, as read (redacted here).

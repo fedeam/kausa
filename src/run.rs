@@ -40,7 +40,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::budget::{Budget, Dedup};
 use crate::context::Gathered;
-use crate::detect::{Detection, detect_event};
+use crate::detect::detect_event;
 use crate::events::Writer;
 use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Shared, Work};
 use crate::history::{self, History};
@@ -545,7 +545,8 @@ type PodEntry = (PodRecord, OwnerRef, bool);
 #[derive(Default)]
 struct State {
     pods: HashMap<String, PodEntry>,
-    /// Only Warning events that a detection matches, with the Job's top-level owner for `D008`.
+    /// Only Warning events that a detection matches, with the top-level owner of the object an
+    /// event is about when that is not a Pod (the Job's for `D008`, the controller's for `D011`).
     events: HashMap<String, (EventRecord, Option<OwnerRef>)>,
     /// The UIDs seen during the open relist of each watch, to drop the ones that disappeared
     /// from that watch.
@@ -660,24 +661,29 @@ impl State {
                     self.events.remove(&record.uid);
                     return Ok(());
                 }
-                let job_owner = if detection == Some(Detection::JobFailed) {
-                    let job = OwnerRef {
+                // An event about an object that is not a Pod is about that object's top-level
+                // owner: a Job's CronJob, a ReplicaSet's Deployment, through the hops kausa may
+                // follow (`owner.rs`); any other object is its own.
+                let job_owner = if record.regarding.kind == "Pod" {
+                    None
+                } else {
+                    let object = OwnerRef {
                         api_version: record.regarding.api_version.clone(),
                         kind: record.regarding.kind.clone(),
                         name: record.regarding.name.clone(),
                         uid: record.regarding.uid.clone().unwrap_or_default(),
                     };
                     let namespace = record.regarding.namespace.clone();
-                    let (owner, error) = top_owner(lookup, &namespace, Some(&job), &job).await;
+                    let (owner, error) =
+                        top_owner(lookup, &namespace, Some(&object), &object).await;
                     if let Some(error) = error {
+                        let field = object.kind.to_ascii_lowercase();
                         log::warn(
                             "owner lookup failed",
-                            json!({"namespace": namespace, "job": job.name, "error": error}),
+                            json!({"namespace": namespace, field: object.name, "error": error}),
                         )?;
                     }
                     Some(owner)
-                } else {
-                    None
                 };
                 self.events.insert(record.uid.clone(), (record, job_owner));
             }

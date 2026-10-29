@@ -30,6 +30,9 @@ pub enum Detection {
     /// `D010`: the runtime cannot create the Pod's sandbox (a missing `RuntimeClass` handler, or a
     /// network plugin that fails to set up the Pod's network).
     SandboxCreate,
+    /// `D011`: a workload controller cannot create its Pods, because the API server refuses them
+    /// (a quota, an admission webhook or Pod Security admission).
+    PodCreate,
 }
 
 impl Detection {
@@ -45,6 +48,7 @@ impl Detection {
             Detection::JobFailed => "D008",
             Detection::PodEvicted => "D009",
             Detection::SandboxCreate => "D010",
+            Detection::PodCreate => "D011",
         }
     }
 
@@ -60,6 +64,7 @@ impl Detection {
             Detection::JobFailed => "job failed",
             Detection::PodEvicted => "pod evicted",
             Detection::SandboxCreate => "pod sandbox cannot be created",
+            Detection::PodCreate => "workload cannot create pods",
         }
     }
 
@@ -156,8 +161,9 @@ pub fn detect_pod_container(pod: &PodRecord, container: &ContainerRecord) -> Opt
     }
 }
 
-/// The detection that a Warning event matches, if any. Events about Pods and Jobs only; scheduling
-/// failures come from the Pod's condition instead (`detect_unschedulable`).
+/// The detection that a Warning event matches, if any. Events about Pods, and about the controllers
+/// of their workloads; scheduling failures come from the Pod's condition instead
+/// (`detect_unschedulable`).
 pub fn detect_event(event: &EventRecord) -> Option<Detection> {
     match (event.regarding.kind.as_str(), event.reason.as_str()) {
         ("Pod", "Unhealthy") => Some(Detection::ProbeFailure),
@@ -169,6 +175,14 @@ pub fn detect_event(event: &EventRecord) -> Option<Detection> {
         // The Job controller emits these as Warning events on the Job when it marks it failed
         // (pkg/controller/job/job_controller.go, checked on 2026-10-26).
         ("Job", "BackoffLimitExceeded" | "DeadlineExceeded") => Some(Detection::JobFailed),
+        // The ReplicaSet, Job and DaemonSet controllers (through the shared Pod control,
+        // `FailedCreatePodReason` in pkg/controller/controller_utils.go) and the StatefulSet
+        // controller (pkg/controller/statefulset/stateful_pod_control.go) emit it on themselves
+        // when the API server refuses a Pod; no Pod exists to be about (seen on kind, Kubernetes
+        // 1.37, with a ResourceQuota and Pod Security admission, on 2026-10-28).
+        ("ReplicaSet" | "Job" | "StatefulSet" | "DaemonSet", "FailedCreate") => {
+            Some(Detection::PodCreate)
+        }
         _ => None,
     }
 }
@@ -219,12 +233,14 @@ mod tests {
             Detection::JobFailed,
             Detection::PodEvicted,
             Detection::SandboxCreate,
+            Detection::PodCreate,
         ];
         let ids: Vec<_> = all.iter().map(|d| d.id()).collect();
         assert_eq!(
             ids,
             [
-                "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008", "D009", "D010"
+                "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008", "D009", "D010",
+                "D011"
             ]
         );
     }

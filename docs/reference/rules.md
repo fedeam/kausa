@@ -133,7 +133,10 @@ so the Warning `FailedCreate` event is about the controller: the ReplicaSet, Job
 controllers write `Error creating: <error>` through the shared Pod control
 (`FailedCreatePodReason` and `RealPodControl` in `pkg/controller/controller_utils.go`), and the
 StatefulSet controller writes `Create Pod <pod> in StatefulSet <set> failed error: <error>`
-(`recordPodEvent` in `pkg/controller/statefulset/stateful_pod_control.go`); the quota's message is
+(`recordPodEvent` in `pkg/controller/statefulset/stateful_pod_control.go`), or, with the same
+reason, `Create Claim <claim> for Pod <pod> in StatefulSet <set> failed error: <error>` when it
+cannot create a claim of its `volumeClaimTemplates` (`recordClaimEvent`, same file; not reproduced,
+hypothesis that it shows the same way); the quota's message is
 in `staging/src/k8s.io/apiserver/pkg/admission/plugin/resourcequota/controller.go` and Pod
 Security's in `staging/src/k8s.io/pod-security-admission/admission/admission.go`; checked in
 Kubernetes v1.37.0 and on `master` on 2026-10-29. An event about a ReplicaSet is an incident about

@@ -54,8 +54,8 @@ pub struct PodView<'a> {
     pub owner: &'a OwnerRef,
 }
 
-/// An event record and, for events about a Job, the Job's top-level owner (events about Pods take
-/// their Pod's).
+/// An event record and, for an event about an object that is not a Pod (a Job, a ReplicaSet), that
+/// object's top-level owner when `run.rs` resolved it (events about Pods take their Pod's).
 pub struct EventView<'a> {
     pub record: &'a EventRecord,
     pub job_owner: Option<&'a OwnerRef>,
@@ -159,7 +159,9 @@ pub fn collect_signals(
             continue;
         }
         let regarding = &record.regarding;
-        let (owner, pod) = if regarding.kind == "Job" {
+        // An event about an object that is not a Pod (`D008`, `D011`) needs no Pod: it is about the
+        // object's top-level owner, or the object itself when there is none or it is not known.
+        let (owner, pod) = if regarding.kind != "Pod" {
             let fallback = OwnerRef {
                 api_version: regarding.api_version.clone(),
                 kind: regarding.kind.clone(),
@@ -357,9 +359,13 @@ impl Tracker {
 
 /// The fingerprint of an incident. The text it hashes is the sample's normalized message, except
 /// for an image that cannot be pulled, whose message alternates between `ErrImagePull` and
-/// `ImagePullBackOff`: there it is the image reference.
+/// `ImagePullBackOff`: there it is the image reference. For a workload that cannot create Pods,
+/// the names of the Pods its controller tried to create count as the incident's Pods too.
 fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<String>) -> String {
-    let names: Vec<&str> = pods.iter().map(String::as_str).collect();
+    let mut names: Vec<&str> = pods.iter().map(String::as_str).collect();
+    if key.detection == Detection::PodCreate {
+        names.extend(generated_names(&sample.message, &key.owner_name));
+    }
     let text = if key.detection == Detection::ImagePull {
         sample.image.clone().unwrap_or_default()
     } else {
@@ -372,6 +378,22 @@ fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<Stri
         &key.owner_name,
         &text,
     )
+}
+
+/// The names in `message` that start with `owner` and a hyphen: the Pods a controller tried to
+/// create and the API server refused (`D011`). Their suffix is generated (a ReplicaSet's or a
+/// Job's Pods) or an ordinal (a StatefulSet's), and the Pod never existed, so it is no part of
+/// what failed. A name is a run of the characters of a Kubernetes name, `[a-z0-9.-]`.
+fn generated_names<'a>(message: &'a str, owner: &str) -> Vec<&'a str> {
+    if owner.is_empty() {
+        return Vec::new();
+    }
+    let prefix = format!("{owner}-");
+    message
+        .split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'))
+        .map(|word| word.trim_end_matches(['.', '-']))
+        .filter(|word| word.len() > prefix.len() && word.starts_with(&prefix))
+        .collect()
 }
 
 #[cfg(test)]

@@ -328,11 +328,25 @@ impl Redactor {
         let mut n = 0;
         let mut out = KUBERNETES_NAME
             .replace_all(&text, |c: &Captures<'_>| {
+                // Every name of a list (`containers "a", "b"`), each on its own.
+                let names = QUOTED_NAME.replace_all(&c[2], |q: &Captures<'_>| {
+                    if ours(&q[1]) {
+                        q[0].to_owned()
+                    } else {
+                        n += 1;
+                        "\"<redacted:name>\"".to_owned()
+                    }
+                });
+                format!("{} {names}", &c[1])
+            })
+            .into_owned();
+        out = EXCEEDED_QUOTA
+            .replace_all(&out, |c: &Captures<'_>| {
                 if ours(&c[2]) {
                     c[0].to_owned()
                 } else {
                     n += 1;
-                    format!("{} \"<redacted:name>\"", &c[1])
+                    format!("{}<redacted:name>", &c[1])
                 }
             })
             .into_owned();
@@ -606,9 +620,15 @@ static IPV6_CANDIDATE: LazyLock<Regex> =
     LazyLock::new(|| regex(r"[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}"));
 static KUBERNETES_NAME: LazyLock<Regex> = LazyLock::new(|| {
     regex(
-        r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?) ["']([^"']+)["']"#,
+        r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?|pods?|containers?) (["'][^"']+["'](?:, ["'][^"']+["'])*)"#,
     )
 });
+/// One quoted name of a `KUBERNETES_NAME` list.
+static QUOTED_NAME: LazyLock<Regex> = LazyLock::new(|| regex(r#"["']([^"']+)["']"#));
+/// The quota in the API server's refusal of an object by a ResourceQuota: `exceeded quota: <name>,
+/// requested: …` (`staging/src/k8s.io/apiserver/pkg/admission/plugin/resourcequota/controller.go`).
+static EXCEEDED_QUOTA: LazyLock<Regex> =
+    LazyLock::new(|| regex(r"(?i)\b(exceeded quota: )([a-z0-9][a-z0-9.-]*)"));
 static KUBERNETES_NAMESPACED: LazyLock<Regex> =
     LazyLock::new(|| regex(r"(?i)\b(secret\s+|configmap\s+)([a-z0-9.-]+)/([a-z0-9.-]+)"));
 static SERVICE_ACCOUNT_USER: LazyLock<Regex> =

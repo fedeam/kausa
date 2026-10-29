@@ -136,7 +136,7 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `started` | info | `version`, `server` (the API server's version), `settle_seconds`, `namespaces` (the watched namespaces, sorted, or `null` for the whole cluster), `notifications` (`{"format", "host"}`, the webhook's host only, with no port, path or query, or `null` when they are off) |
 | `incident` | info | See below |
 | `pod watch error`, `event watch error` | warn | `namespace` (the namespace of the failing watch, or `null` for the cluster-wide one), `error` (kube-rs's text); the watch retries with backoff, from 0.8 up to 30 seconds. A refusal (`403`) drops the records that watch brought in, until it lists again |
-| `owner lookup failed` | warn | `namespace`, `pod` or `job`, `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's next update), the incident names the ReplicaSet or Job instead |
+| `owner lookup failed` | warn | `namespace`, `pod`, `job` or `replicaset` (the object a Pod or an event is about), `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's or the event's next update), the incident names the ReplicaSet or Job instead |
 | `stopped` | info | |
 | `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
 | `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them) and `redactions`; or, when it comes from the deduplication cache, `explanation` and `"cached": true` |
