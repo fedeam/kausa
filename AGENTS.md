@@ -12,8 +12,9 @@ clone and remotes are described apart, under [Remotes, merges and CI](#remotes-m
 
 ## What this repo is
 
-kausa: a small Kubernetes controller in Rust (kube-rs), read-only except for its own Events and,
-with `--history`, its own Explanations, that watches Warning events, Pod status and Deployments, groups the failures of one workload into one incident with deterministic rules, sends
+kausa: a small Kubernetes controller in Rust (kube-rs), read-only except for its own Events,
+with `--history` its own Explanations and, with `--leader-lease`, the `spec` of its one Lease,
+that watches Warning events, Pod status and Deployments, groups the failures of one workload into one incident with deterministic rules, sends
 a redacted context to one OpenAI-compatible model endpoint within a call and token budget, and
 writes the explanation as a Kubernetes Event on the failing object and, optionally, posts it to one
 webhook. Open source,
@@ -21,7 +22,9 @@ webhook. Open source,
 context, explains them with a model within a call budget (or logs the request with `--dry-run`),
 reuses explanations of repeated incidents, writes them as Events (and, with `--history`, keeps
 them in an Explanation object per incident, off by default), with `--notify-url-file` posts each new
-explanation to one webhook (JSON, Slack or Telegram, off by default) and serves metrics. The image and the Helm
+explanation to one webhook (JSON, Slack or Telegram, off by default) and serves metrics; with the
+chart's `replicaCount: 2` (off by default) a second replica waits as a standby and takes over
+through a Lease. The image and the Helm
 chart are in the repository (not published); the kind test passes locally and waits for GitHub
 Actions.
 Maintainer: FedeAM (GitHub: `fedeam`).
@@ -90,9 +93,10 @@ read-only proxy that keeps it to its own reads. Tests never reach a cluster: `te
 the binary with a nonexistent kubeconfig, and a new test that starts `kausa run` must do the same.
 The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`,
 `src/record.rs`, `src/redact.rs`, `src/context.rs`, `src/prompt.rs`, `src/history/pure.rs`,
-`src/notification.rs`) is pure and tested without a cluster, and so are `src/budget.rs`,
+`src/notification.rs`, `src/leader/pure.rs`) is pure and tested without a cluster, and so are `src/budget.rs`,
 `src/metrics.rs` (except its listener) and the building of Events in `src/events.rs`;
-`src/run.rs`, `src/explain.rs`, `src/events.rs` and `src/history.rs` talk to the API server,
+`src/run.rs`, `src/explain.rs`, `src/events.rs`, `src/history.rs` and `src/leader.rs` talk to the
+API server,
 `src/model.rs` to the model endpoint and `src/notify.rs` to the webhook.
 
 ## Verification (same as CI)
@@ -138,8 +142,9 @@ after each sync, is linux/arm64.
 - **Pin by digest or SHA:** container images by `@sha256:` digest, Actions by full commit SHA,
   crates through `Cargo.lock` and `--locked`. Take digests and SHAs from the registry or the forge
   API and verify them; never type them from memory.
-- **kausa never reads Secrets or ConfigMaps, never writes anything but Events and, with
-  `--history`, its own Explanations (invariant 2 of [ARCHITECTURE.md](ARCHITECTURE.md)), sends nothing
+- **kausa never reads Secrets or ConfigMaps, never writes anything but Events, with
+  `--history` its own Explanations and, with `--leader-lease`, the `spec` of its one Lease
+  (invariant 2 of [ARCHITECTURE.md](ARCHITECTURE.md)), sends nothing
   unredacted to the model, and nothing to any host but the API server, the configured endpoint
   and, when notifications are on, the configured webhook, which receives only the fields of [Data
   sent in notifications](docs/reference/data-sent-in-notifications.md), with real names; treats

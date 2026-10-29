@@ -1,6 +1,6 @@
 //! kausa: a tiny Kubernetes controller that explains failing workloads with an LLM. It reads the
 //! cluster and writes nothing but its own Events and, with `--history`, its own Explanation
-//! objects.
+//! objects, and, with `--leader-lease`, the spec of its one Lease.
 //!
 //! Pre-alpha. `kausa run` watches the cluster and logs incidents and, with `--endpoint` or
 //! `--dry-run`, sends or logs a redacted request for each; with `--endpoint`, the explanation is
@@ -15,6 +15,7 @@ mod explain;
 mod fingerprint;
 mod history;
 mod incident;
+mod leader;
 mod log;
 mod metrics;
 mod model;
@@ -91,6 +92,8 @@ const HELP: &str = concat!(
     "  --dedup-hours <N>         Reuse an explanation for N hours (default 6)\n",
     "  --metrics-address <ADDR>  Serve /metrics, /healthz and /readyz there\n",
     "                            (for example 0.0.0.0:9090)\n",
+    "  --leader-lease <NS>/<NAME>  Act only while holding this Lease; wait as a\n",
+    "                              standby otherwise (for two replicas)\n",
     "\n",
     "  kausa run uses the in-cluster service account when it runs in a Pod, and the\n",
     "  current context of the kubeconfig otherwise. It watches Pods, Warning events\n",
@@ -99,9 +102,10 @@ const HELP: &str = concat!(
     "  stdout. It stops on SIGTERM or Ctrl-C.\n",
     "\n",
     "By design, kausa never reads Secrets or ConfigMaps, writes nothing but Events\n",
-    "and, with --history, its own Explanation objects, and sends nothing unredacted\n",
-    "to the model. With --notify-url-file, only the documented fields of each new\n",
-    "explanation go to the webhook.\n",
+    "and, with --history, its own Explanation objects, and, with --leader-lease, the\n",
+    "spec of its one Lease, and sends nothing unredacted to the model. With\n",
+    "--notify-url-file, only the documented fields of each new explanation go to\n",
+    "the webhook.\n",
     "\n",
     "Exit status: 0 on success or a clean stop, 1 when it cannot start or a watch\n",
     "ends (watch errors are logged and retried), 2 on a usage error or when stdout\n",
@@ -150,6 +154,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let mut history_days: Option<u32> = None;
     let mut metrics_address: Option<String> = None;
     let mut namespaces: Vec<String> = Vec::new();
+    let mut leader_lease: Option<(String, String)> = None;
     let mut notify_flags = NotifyFlags::default();
     let mut limits = Limits::default();
     let mut args = args.iter();
@@ -208,6 +213,19 @@ fn run_command(args: &[OsString]) -> ExitCode {
                 Ok(v) => namespaces.push(v),
                 Err(code) => return code,
             },
+            "--leader-lease" => {
+                let value = match args.next().and_then(|v| v.to_str()) {
+                    Some(v) if !v.is_empty() => v,
+                    _ => return usage_error("--leader-lease needs <NAMESPACE>/<NAME>"),
+                };
+                if leader_lease.is_some() {
+                    return usage_error("--leader-lease is given twice");
+                }
+                match parse_leader_lease(value) {
+                    Ok(parts) => leader_lease = Some(parts),
+                    Err(message) => return usage_error(&message),
+                }
+            }
             "--metrics-address" => match value() {
                 Ok(v) if v.parse::<std::net::SocketAddr>().is_ok() => metrics_address = Some(v),
                 Ok(v) => {
@@ -262,6 +280,18 @@ fn run_command(args: &[OsString]) -> ExitCode {
             _ => return usage_error(&format!("unexpected argument '{flag}'")),
         }
     }
+    // POD_NAME is needed only with --leader-lease, and looked at only once the value is valid.
+    let leader_lease = match leader_lease {
+        None => None,
+        Some((namespace, name)) => match check_pod_name(std::env::var("POD_NAME").ok()) {
+            Ok(identity) => Some(run::LeaderLease {
+                namespace,
+                name,
+                identity,
+            }),
+            Err(message) => return usage_error(message),
+        },
+    };
     if let Err(message) = check_namespaces(&namespaces) {
         return usage_error(&message);
     }
@@ -307,6 +337,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
         metrics_address,
         namespaces,
         rollouts: !no_rollouts,
+        leader_lease,
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -348,6 +379,42 @@ fn check_namespaces(namespaces: &[String]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Splits the value of `--leader-lease` into its namespace and its Lease name
+/// (docs/adr/0019-high-availability.md): exactly one `/` between two non-empty parts, a namespace
+/// name and a DNS-1123 subdomain.
+fn parse_leader_lease(value: &str) -> Result<(String, String), String> {
+    let parts = value.split_once('/').filter(|(namespace, name)| {
+        !namespace.is_empty() && !name.is_empty() && !name.contains('/')
+    });
+    let Some((namespace, name)) = parts else {
+        return Err(format!(
+            "--leader-lease takes <NAMESPACE>/<NAME>, not '{value}'"
+        ));
+    };
+    if !is_dns_label(namespace) {
+        return Err(format!(
+            "--leader-lease: '{namespace}' is not a namespace name"
+        ));
+    }
+    if !is_dns_subdomain(name) {
+        return Err(format!("--leader-lease: '{name}' is not a Lease name"));
+    }
+    Ok((namespace.to_owned(), name.to_owned()))
+}
+
+/// The identity this replica holds the Lease with: `POD_NAME`, which `--leader-lease` needs,
+/// non-empty and at most 253 bytes. It is compared byte for byte, never checked as a name.
+fn check_pod_name(pod_name: Option<String>) -> Result<String, &'static str> {
+    match pod_name.filter(|name| !name.is_empty()) {
+        None => Err(
+            "--leader-lease needs POD_NAME, the name this replica holds the Lease with (the chart \
+             sets it from the Pod's name)",
+        ),
+        Some(name) if name.len() > 253 => Err("POD_NAME is longer than 253 bytes"),
+        Some(name) => Ok(name),
+    }
 }
 
 /// Checks `--history` and `--history-days` against the other flags, in this order: the days need
@@ -494,6 +561,19 @@ fn is_dns_label(name: &str) -> bool {
         && bytes.iter().all(|b| edge(b) || *b == b'-')
 }
 
+/// A DNS-1123 subdomain, what Kubernetes takes as the name of a Lease: 1 to 253 characters, dot
+/// separated parts out of `[a-z0-9-]`, each starting and ending with a letter or digit.
+fn is_dns_subdomain(name: &str) -> bool {
+    let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    name.len() <= 253
+        && name.split('.').all(|part| {
+            let bytes = part.as_bytes();
+            bytes.first().is_some_and(edge)
+                && bytes.last().is_some_and(edge)
+                && bytes.iter().all(|b| edge(b) || *b == b'-')
+        })
+}
+
 /// The explanation settings from the flags: `None` when neither `--endpoint` nor `--dry-run` is
 /// given (kausa then only logs incidents). The API key comes from `--api-key-file` or the
 /// environment variable `KAUSA_API_KEY`, never from an argument.
@@ -622,6 +702,27 @@ fn write_stdout(text: &str) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lease_name_is_a_dns_subdomain() {
+        let longest = format!("{}.{}", "a".repeat(126), "b".repeat(126));
+        for name in [
+            "a",
+            "0",
+            "kausa-leader",
+            "kausa.leader",
+            "a-b.c-d.e",
+            &longest,
+        ] {
+            assert!(is_dns_subdomain(name), "{name}");
+        }
+        let too_long = format!("{longest}c");
+        for name in [
+            "", ".", "a..b", "a-.b", "a.-b", "A", "a_b", "a/b", &too_long,
+        ] {
+            assert!(!is_dns_subdomain(name), "{name:?}");
+        }
+    }
 
     #[test]
     fn the_help_line_names_the_namespace_cap() {

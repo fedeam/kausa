@@ -19,8 +19,9 @@ use serde_json::{Value, json};
 use crate::budget::{Budget, Dedup};
 use crate::context::{self, Gathered};
 use crate::detect::Detection;
-use crate::events::{Outcome, Writer};
+use crate::events::{Emitted, Outcome, Writer};
 use crate::history::History;
+use crate::leader::Term;
 use crate::log;
 use crate::metrics::Metrics;
 use crate::model::ModelClient;
@@ -64,8 +65,8 @@ pub struct Settings {
 }
 
 /// What the explanations share across incidents: the budget, the deduplication cache, the Event
-/// writer, the history writer, the metrics and the queue of notifications. Borrowed only between
-/// awaits.
+/// writer, the history writer, the metrics, the queue of notifications and the lease term. Borrowed
+/// only between awaits.
 pub struct Shared<'a> {
     pub budget: RefCell<Budget>,
     pub dedup: RefCell<Dedup>,
@@ -75,6 +76,10 @@ pub struct Shared<'a> {
     pub metrics: &'a Metrics,
     /// The notifications waiting for the webhook, at most `notify::QUEUE_LIMIT`.
     pub notifications: RefCell<VecDeque<notify::Queued>>,
+    /// The lease term: kausa calls the model, writes and notifies only while it holds, and drops
+    /// the work silently once it has ended (docs/adr/0019-high-availability.md). Unbounded without
+    /// `--leader-lease`.
+    pub term: &'a Term,
 }
 
 /// Which container's log to read for an incident.
@@ -115,7 +120,9 @@ pub fn reads_logs(detection: Detection) -> bool {
 /// once its Event and history are written: a new one always, a cached one while its notification
 /// was not sent; a skip never is. A first call that fails with a transient error (a timeout, a
 /// failed connection, `429` or a `5xx` status) returns the job, to be tried once more after
-/// `RETRY_DELAY`; a call that never reached the endpoint is given back to the budget.
+/// `RETRY_DELAY`; a call that never reached the endpoint is given back to the budget. Once the
+/// lease term has ended, the work is dropped without a word: no call, no budget, no cache entry,
+/// no Event, history entry or notification.
 pub async fn run(
     job: Work,
     client: Client,
@@ -141,6 +148,9 @@ pub async fn run(
             .borrow_mut()
             .get(&fingerprint, std::time::Instant::now());
         if let Some(cached) = cached {
+            if !shared.term.holds() {
+                return Ok(None);
+            }
             shared.metrics.inc("kausa_explanations_cached_total", &[]);
             log::info(
                 "explanation",
@@ -209,6 +219,9 @@ pub async fn run(
         )
         .map(|()| None);
     };
+    if !shared.term.holds() {
+        return Ok(None);
+    }
     let taken = shared.budget.borrow_mut().take(std::time::Instant::now());
     if let Err(why) = taken {
         return skip(settings, shared, &gathered, about, "budget", why)
@@ -223,6 +236,10 @@ pub async fn run(
                 .inc("kausa_model_calls_total", &[("outcome", "error")]);
             if !error.reached {
                 shared.budget.borrow_mut().refund();
+            }
+            // The term ended during the call: no retry, no skip.
+            if !shared.term.holds() {
+                return Ok(None);
             }
             if error.transient
                 && let Some(retry) = retry
@@ -287,6 +304,10 @@ pub async fn run(
     shared
         .metrics
         .inc("kausa_model_calls_total", &[("outcome", "ok")]);
+    // The term ended while the model answered: the answer is dropped, not cached.
+    if !shared.term.holds() {
+        return Ok(None);
+    }
     let restored = explanation.map_clean(|text| redactor.restore(text));
     // The notification's text maps back only the namespace and the top-level owner.
     let narrow = settings.notify.is_some().then(|| {
@@ -392,6 +413,9 @@ async fn skip(
     reason: &str,
     why: &str,
 ) -> io::Result<()> {
+    if !shared.term.holds() {
+        return Ok(());
+    }
     shared
         .metrics
         .inc("kausa_explanations_skipped_total", &[("reason", reason)]);
@@ -401,6 +425,7 @@ async fn skip(
 
 /// Writes an outcome: as an Event when Events are on, then, for an explanation, into the history
 /// when it is on. Each step stands alone: a failure of one is logged and does not stop the other.
+/// Each writer checks the term before each of its calls and skips silently once it has ended.
 async fn emit(
     settings: &Settings,
     shared: &Shared<'_>,
@@ -417,6 +442,7 @@ async fn emit(
                 explanation,
                 &settings.model_name,
                 shared.metrics,
+                shared.term,
             )
             .await?;
     }
@@ -434,15 +460,16 @@ async fn write_event(
         Outcome::Skipped(_) => "ExplanationSkipped",
     };
     match writer
-        .emit(&gathered.incident, outcome, Timestamp::now())
+        .emit(&gathered.incident, outcome, Timestamp::now(), shared.term)
         .await
     {
-        Ok(()) => {
+        Ok(Emitted::Written) => {
             shared
                 .metrics
                 .inc("kausa_events_written_total", &[("reason", reason)]);
             Ok(())
         }
+        Ok(Emitted::Skipped) => Ok(()),
         Err(error) => {
             shared.metrics.inc("kausa_event_write_errors_total", &[]);
             log::warn(
@@ -542,6 +569,7 @@ mod tests {
     use std::net::TcpListener;
 
     use crate::incident::{Incident, IncidentKey, Signal};
+    use crate::leader::Term;
     use crate::model::ModelClient;
     use crate::notify::{Format, Notifier};
     use crate::prompt::Explanation;
@@ -738,6 +766,11 @@ mod tests {
     }
 
     fn shared<'a>(settings: &Settings, metrics: &'a Metrics) -> Shared<'a> {
+        // Without --leader-lease the term never ends.
+        shared_in(settings, metrics, Box::leak(Box::new(Term::unbounded())))
+    }
+
+    fn shared_in<'a>(settings: &Settings, metrics: &'a Metrics, term: &'a Term) -> Shared<'a> {
         Shared {
             budget: RefCell::new(Budget::new(settings.calls_per_hour, settings.calls_per_day)),
             dedup: RefCell::new(Dedup::new(settings.dedup_ttl, 1024)),
@@ -745,6 +778,7 @@ mod tests {
             history: None,
             metrics,
             notifications: RefCell::new(VecDeque::new()),
+            term,
         }
     }
 
@@ -1214,5 +1248,289 @@ mod tests {
                 "{id}: sent over the cap"
             );
         }
+    }
+
+    // Acceptance tests for the standby replica (docs/adr/0019-high-availability.md), written before
+    // the code: `Shared` carries `term: &'a Term`, and `run` checks it before the budget is taken,
+    // after the model answers (before the cache), before each Event and history write, and on the
+    // cached path before the writes. Past the term's end the work is dropped silently: no call, no
+    // budget, no cache entry, no notification, no counter of a skip or an error.
+
+    use std::sync::mpsc;
+
+    use crate::events::Writer;
+    use crate::history::History;
+
+    /// A fake model that answers every request with `answer()` after `wait`, and tells the channel
+    /// of each connection. Returns its base URL.
+    fn counted_model(wait: Duration) -> (String, mpsc::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
+        let (seen, calls) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let _ = seen.send(());
+                let mut request = Vec::new();
+                let mut buffer = vec![0; 65536];
+                loop {
+                    let n = stream.read(&mut buffer).unwrap_or(0);
+                    request.extend_from_slice(&buffer[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(str::to_owned)
+                            })
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                std::thread::sleep(wait);
+                let body = json!({
+                    "choices": [{"message": {"content": answer()}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+                })
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        (url, calls)
+    }
+
+    /// A fake API server that answers every request `500` and tells the channel of each request
+    /// line. Returns its URL.
+    fn counted_api_server() -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}", listener.local_addr().expect("an address"));
+        let (seen, calls) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = vec![0; 65536];
+                let n = stream.read(&mut buffer).unwrap_or(0);
+                let line = String::from_utf8_lossy(&buffer[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                let _ = seen.send(line);
+                let body = json!({
+                    "apiVersion": "v1", "kind": "Status", "metadata": {}, "status": "Failure",
+                    "message": "an invented message", "reason": "InternalError", "code": 500,
+                })
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        (url, calls)
+    }
+
+    fn kube_client(url: &str) -> Client {
+        Client::try_from(kube::Config::new(url.parse().expect("a URL"))).expect("a client")
+    }
+
+    /// What one guarded explanation left behind.
+    struct Left {
+        retry: bool,
+        budget_left: bool,
+        cached: bool,
+        queued: usize,
+    }
+
+    /// Runs one explanation of `work()` with Events and the history on, written to the fake API
+    /// server at `api`, under a term that ends `term_left` from now (`None`: unbounded). `entry`
+    /// is put in the cache first. The budget allows one call.
+    fn explain_under(
+        model_url: String,
+        api: &str,
+        term_left: Option<Duration>,
+        entry: bool,
+        metrics: &Metrics,
+    ) -> Left {
+        let mut settings = settings(Some(model_url), true, 1);
+        settings.events = true;
+        settings.history_days = Some(7);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(async {
+                let term = match term_left {
+                    None => Term::unbounded(),
+                    Some(left) => {
+                        let term = Term::closed();
+                        if !left.is_zero() {
+                            term.extend_to(std::time::Instant::now() + left);
+                        }
+                        term
+                    }
+                };
+                let mut shared = shared_in(&settings, metrics, &term);
+                shared.writer = Some(Writer::new(kube_client(api), "kausa".into()));
+                shared.history = Some(History::new(kube_client(api), 7));
+                if entry {
+                    shared.dedup.borrow_mut().put(
+                        FINGERPRINT,
+                        stored("full text"),
+                        Some(stored("notification text")),
+                        std::time::Instant::now(),
+                    );
+                }
+                let retry = run(
+                    work(),
+                    kube_client("http://127.0.0.1:9"),
+                    &settings,
+                    &shared,
+                )
+                .await
+                .expect("the log")
+                .is_some();
+                let budget_left = shared
+                    .budget
+                    .borrow_mut()
+                    .take(std::time::Instant::now())
+                    .is_ok();
+                let cached = shared.dedup.borrow().peek(FINGERPRINT).is_some();
+                let queued = shared.notifications.borrow().len();
+                Left {
+                    retry,
+                    budget_left,
+                    cached,
+                    queued,
+                }
+            })
+    }
+
+    /// No counter of a skip, a failed or refused write, or a model call moved.
+    fn assert_nothing_counted(metrics: &Metrics, case: &str) {
+        let text = metrics.render();
+        for line in [
+            "kausa_model_calls_total 0\n",
+            "kausa_explanations_skipped_total 0\n",
+            "kausa_events_written_total 0\n",
+            "kausa_event_write_errors_total 0\n",
+            "kausa_history_writes_total 0\n",
+            "kausa_notifications_total 0\n",
+        ] {
+            assert!(text.contains(line), "{case}: no '{}'", line.trim());
+        }
+    }
+
+    #[test]
+    fn a_closed_term_calls_nothing_and_spends_nothing() {
+        let (model_url, model_calls) = counted_model(Duration::ZERO);
+        let (api, api_calls) = counted_api_server();
+        let metrics = Metrics::default();
+        let left = explain_under(model_url, &api, Some(Duration::ZERO), false, &metrics);
+        assert!(!left.retry);
+        assert!(left.budget_left, "the budget was spent");
+        assert!(!left.cached);
+        assert_eq!(left.queued, 0);
+        assert!(
+            model_calls
+                .recv_timeout(Duration::from_millis(300))
+                .is_err(),
+            "the model was called"
+        );
+        assert!(
+            api_calls.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the API server was called"
+        );
+        assert_nothing_counted(&metrics, "closed");
+    }
+
+    #[test]
+    fn an_answer_that_arrives_after_the_term_is_dropped() {
+        let (model_url, model_calls) = counted_model(Duration::from_millis(400));
+        let (api, api_calls) = counted_api_server();
+        let metrics = Metrics::default();
+        let left = explain_under(
+            model_url,
+            &api,
+            Some(Duration::from_millis(150)),
+            false,
+            &metrics,
+        );
+        assert!(!left.retry);
+        assert!(
+            model_calls.recv_timeout(Duration::from_secs(1)).is_ok(),
+            "the model was asked"
+        );
+        assert!(!left.cached, "a dropped answer is not cached");
+        assert_eq!(left.queued, 0, "a dropped answer is not notified");
+        assert!(
+            api_calls.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the API server was called"
+        );
+        let text = metrics.render();
+        for line in [
+            "kausa_explanations_skipped_total 0\n",
+            "kausa_events_written_total 0\n",
+            "kausa_event_write_errors_total 0\n",
+            "kausa_history_writes_total 0\n",
+        ] {
+            assert!(text.contains(line), "no '{}'", line.trim());
+        }
+    }
+
+    #[test]
+    fn a_cached_explanation_is_not_written_past_the_term() {
+        let (api, api_calls) = counted_api_server();
+        let metrics = Metrics::default();
+        let left = explain_under(nowhere(), &api, Some(Duration::ZERO), true, &metrics);
+        assert!(!left.retry);
+        assert!(left.budget_left);
+        assert!(
+            api_calls.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the API server was called"
+        );
+        let text = metrics.render();
+        for line in [
+            "kausa_events_written_total 0\n",
+            "kausa_event_write_errors_total 0\n",
+            "kausa_history_writes_total 0\n",
+        ] {
+            assert!(text.contains(line), "no '{}'", line.trim());
+        }
+    }
+
+    #[test]
+    fn an_unbounded_term_explains_and_writes_as_before() {
+        let (model_url, model_calls) = counted_model(Duration::ZERO);
+        let (api, api_calls) = counted_api_server();
+        let metrics = Metrics::default();
+        let left = explain_under(model_url, &api, None, false, &metrics);
+        assert!(!left.retry);
+        assert!(!left.budget_left, "the one call of the budget was spent");
+        assert!(left.cached);
+        assert_eq!(left.queued, 1);
+        assert!(model_calls.recv_timeout(Duration::from_secs(1)).is_ok());
+        let line = api_calls
+            .recv_timeout(Duration::from_secs(1))
+            .expect("an Event write");
+        assert!(line.starts_with("POST /apis/events.k8s.io/v1/"), "{line}");
+        assert!(
+            metrics
+                .render()
+                .contains("kausa_model_calls_total{outcome=\"ok\"} 1\n")
+        );
     }
 }

@@ -74,3 +74,9 @@ only, not published; the end-to-end tests in kind on GitHub Actions.
   Dockerfile and must not depend on the ci stage.
 - The kind test does not run until GitHub Actions run for the account; until then the chart is
   checked by the lint, the renders, and a server-side dry run against a live cluster.
+
+Update 2026-10-29: [0019. Offer an optional standby replica that takes over through a
+chart-created Lease, elected by kausa's own code](0019-high-availability.md) keeps one replica with `Recreate` as the chart's default, and adds the value `replicaCount`, `1`
+or `2`: with `2`, two replicas, still with `Recreate`, of which only the holder of a Lease acts,
+with a PodDisruptionBudget and a preferred pod anti-affinity. With `1` the chart renders as
+before, byte for byte ([Helm chart](../reference/helm-chart.md)).

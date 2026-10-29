@@ -4,7 +4,7 @@
 
 ![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-0969da) ![rust: 1.99+](https://img.shields.io/badge/rust-1.99%2B-0969da) [![CI](https://github.com/fedeam/kausa/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fedeam/kausa/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/fedeam/kausa/badge)](https://scorecard.dev/viewer/?uri=github.com/fedeam/kausa) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16024/badge)](https://www.bestpractices.dev/projects/16024)
 
-A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects.
+A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects and, with `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease.
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
@@ -103,7 +103,8 @@ notifications](docs/reference/data-sent-in-notifications.md)).
 - **Read-only, except for its Events.** It reads Pods, Events, and the metadata of ReplicaSets
   and Jobs to follow owners; `pods/log` only for crash loops, out-of-memory kills and failed
   Jobs, and that can be turned off. It never reads Secrets or ConfigMaps, and the only thing it
-  writes is Events and, with `--history`, its own Explanations
+  writes is Events and, with `--history`, its own Explanations and, with `--leader-lease` (the
+  chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease
   ([Permissions](docs/reference/permissions.md)).
 - **Deterministic before the model.** Detection, grouping, fingerprints and redaction are rules,
   tested like code. One incident is one request.
@@ -223,6 +224,12 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   `rollouts=false` turn it off, and with it the chart's `list` and `watch` on Deployments)
   ([0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch that is
   on by default, and add nothing for StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)).
+  An optional standby replica, off by default: the chart's `replicaCount=2` runs a second Pod that
+  waits and takes over through a Lease when the one that acts stops (`kausa run
+  --leader-lease`), with `get` and `patch` on that one Lease as its only new permission ([0019.
+  Offer an optional standby replica that takes over through a chart-created Lease, elected by
+  kausa's own code](docs/adr/0019-high-availability.md)); its takeover times in kind are still to
+  be measured before the release.
 - **Next:** a test against a hosted provider, and a real post to a Slack workspace (the `slack`
   format is checked only against Slack's documentation so far).
 

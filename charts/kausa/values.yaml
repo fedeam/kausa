@@ -1,6 +1,12 @@
 # Values of the kausa chart. The full reference, with what each one turns into:
 # docs/reference/helm-chart.md.
 
+# 1 runs kausa alone. 2 adds a standby: only the replica that holds the Lease <fullname>-leader
+# watches, explains and writes, and the other takes over if it stops
+# (docs/adr/0019-high-availability.md). Each replica keeps its own call budget, so two can spend up
+# to twice budget.callsPerHour and budget.callsPerDay while both run. Scale only through this value.
+replicaCount: 1
+
 image:
   # The image published with each release, signed with cosign (docs/adr/0012-releases.md); to run
   # your own build, set the repository and the tag (docs/how-to/install-with-helm.md).

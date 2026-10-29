@@ -5,7 +5,8 @@ fails: it watches Warning events, Pod status and Deployments, groups the failure
 into one incident, sends a redacted context to one OpenAI-compatible model endpoint within a call
 and token budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
 ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
-`--no-events`) and, with `--history` (off by default), its own Explanation objects. With
+`--no-events`) and, with `--history` (off by default), its own Explanation objects and, with
+`--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease. With
 `--notify-url-file` (off by default) it also posts each new explanation to one webhook.
 
 Status as of 2026-10-29: **in development** (pre-alpha). The four implementation weekends of v0.1
@@ -39,7 +40,9 @@ Notifications](journal/2026-10-29-notifications.md)). In development for v0.4, n
 2026-10-29: the detection rules `D011` to `D013`, and `D014`, a Deployment past its progress
 deadline, from a watch on Deployments that is on by default (`kausa run --no-rollouts`, the
 chart's `rollouts` value); the kind test passed in both scopes with it on 2026-10-29 (same
-journal, "stuck rollouts").
+journal, "stuck rollouts"). Also for v0.4, an optional standby replica (the chart's
+`replicaCount=2`, `kausa run --leader-lease`), whose kind test was left to GitHub Actions and whose
+takeover times are still to be measured (same journal, "a standby replica").
 
 ## Key facts
 

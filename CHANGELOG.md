@@ -31,6 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rollouts`, and the log `deployment watch error`.
 - The chart's `rollouts` value, `true` by default (a missing value means on): `false` passes
   `--no-rollouts` and removes the `deployments` rule.
+- An optional standby replica: the chart's `replicaCount` value, `1` by default (a missing value
+  or `null` means `1`; anything but `1` or `2` is refused). With `2`, two Pods run with
+  `Recreate`, and the chart adds the Lease `<fullname>-leader` (`spec: {}`), a Role and
+  RoleBinding of that name with `get` and `patch` on that one Lease in the release namespace (the
+  same in both scopes), a PodDisruptionBudget (`maxUnavailable: 1`, `unhealthyPodEvictionPolicy:
+  AlwaysAllow`), a preferred pod anti-affinity while `affinity` is empty, and a paragraph in
+  `NOTES.txt`. With `1` the chart renders as before, byte for byte ([0019. Offer an optional
+  standby replica that takes over through a chart-created Lease, elected by kausa's own
+  code](docs/adr/0019-high-availability.md)).
+- `kausa run --leader-lease <NAMESPACE>/<NAME>`: act only while holding that Lease, as a standby
+  otherwise, in every mode; it needs `POD_NAME`. The `started` line gains `leader_lease`, and the
+  log `standby`, `leading`, `leadership lost`, `lease released`, `lease release failed` and
+  `lease error`.
+- The gauge `kausa_leader` (`1` while the process acts, which is always without
+  `--leader-lease`; `0` as a standby), and the counters `kausa_leadership_changes_total{to}` and
+  `kausa_lease_errors_total{call}`.
+- `/readyz` answers `200` with `standby` on a replica that waits for the Lease.
 
 ### Changed
 
@@ -60,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgrade the chart and the image together: the new image without the `deployments` rule (the
   previous chart's role, RBAC made outside the chart, a read-only proxy) explains everything else
   but is never Ready; add the rule or use `--no-rollouts`.
+- An Event write (its create, and on a repeat its list and series patch) gives up after 10 seconds
+  and logs `event write failed` with `no answer within 10 seconds`; it had no timeout. Each list
+  and delete of the history sweep is bounded to 10 seconds within the sweep's 30. Both hold with
+  or without `--leader-lease` ([0019. Offer an optional standby replica that takes over through a
+  chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md)).
 
 ### Fixed
 

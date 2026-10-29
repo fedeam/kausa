@@ -1496,3 +1496,279 @@ fn the_rollouts_flag_has_no_other_form() {
         "kausa --no-rollouts",
     );
 }
+
+// `kausa run --leader-lease <NAMESPACE>/<NAME>` (docs/adr/0019-high-availability.md): act only
+// while holding that Lease, as POD_NAME. Usage errors exit 2 with the exact message before
+// anything connects; a valid flag with POD_NAME gets past the checks and fails only on the
+// missing cluster. Whether `started` names the Lease is checked by the kind test.
+
+const LEASE: &str = "kausa/kausa-leader";
+const POD: &str = "kausa-7d9c8b6f4d-2xkqp";
+const LEASE_NEEDS_VALUE: &str = "--leader-lease needs <NAMESPACE>/<NAME>";
+const LEASE_TWICE: &str = "--leader-lease is given twice";
+const LEASE_NEEDS_POD_NAME: &str = "--leader-lease needs POD_NAME, the name this replica holds \
+                                    the Lease with (the chart sets it from the Pod's name)";
+const POD_NAME_TOO_LONG: &str = "POD_NAME is longer than 253 bytes";
+
+fn lease_shape(value: &str) -> String {
+    format!("--leader-lease takes <NAMESPACE>/<NAME>, not '{value}'")
+}
+
+fn lease_namespace(part: &str) -> String {
+    format!("--leader-lease: '{part}' is not a namespace name")
+}
+
+fn lease_name(part: &str) -> String {
+    format!("--leader-lease: '{part}' is not a Lease name")
+}
+
+/// Runs the binary with `POD_NAME` set to `pod`, or unset with `None`.
+fn kausa_as(pod: Option<&str>, args: &[&str]) -> Output {
+    let mut command = command();
+    match pod {
+        Some(pod) => command.env("POD_NAME", pod),
+        None => command.env_remove("POD_NAME"),
+    };
+    command
+        .args(args)
+        .output()
+        .expect("the kausa binary should start")
+}
+
+#[test]
+fn run_accepts_a_leader_lease_and_fails_only_on_the_missing_cluster() {
+    let long_name = "a".repeat(253);
+    let long_namespace = "n".repeat(63);
+    let long_pod = "p".repeat(253);
+    let with_long_name = format!("kausa/{long_name}");
+    let with_long_namespace = format!("{long_namespace}/kausa-leader");
+    for (pod, args) in [
+        (POD, vec!["run", "--leader-lease", LEASE]),
+        (
+            POD,
+            vec!["run", "--leader-lease", "kausa-system/tenant-kausa-leader"],
+        ),
+        (POD, vec!["run", "--leader-lease", "0/a"]),
+        (POD, vec!["run", "--leader-lease", "kausa/kausa.leader"]),
+        (POD, vec!["run", "--leader-lease", &with_long_name]),
+        (POD, vec!["run", "--leader-lease", &with_long_namespace]),
+        (long_pod.as_str(), vec!["run", "--leader-lease", LEASE]),
+        // POD_NAME is compared byte for byte, never checked as a name.
+        ("Any Name_at_all", vec!["run", "--leader-lease", LEASE]),
+        // With the other flags, in any order, as the chart passes them.
+        (
+            POD,
+            vec![
+                "run",
+                "--namespace",
+                "shop",
+                "--leader-lease",
+                LEASE,
+                "--settle-seconds",
+                "60",
+                "--dry-run",
+            ],
+        ),
+        (
+            POD,
+            vec![
+                "run",
+                "--dry-run",
+                "--leader-lease",
+                LEASE,
+                "--namespace",
+                "kausa",
+            ],
+        ),
+    ] {
+        let case = format!("{args:?} with a POD_NAME of {} bytes", pod.len());
+        assert_gets_past_the_flags(&kausa_as(Some(pod), &args), &case);
+    }
+}
+
+#[test]
+fn a_leader_lease_needs_a_value() {
+    for args in [
+        &["run", "--leader-lease"][..],
+        &["run", "--leader-lease", ""][..],
+        &["run", "--dry-run", "--leader-lease"][..],
+    ] {
+        assert_usage_error(
+            &kausa_as(Some(POD), args),
+            LEASE_NEEDS_VALUE,
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn a_leader_lease_is_given_once() {
+    for args in [
+        &["run", "--leader-lease", LEASE, "--leader-lease", LEASE][..],
+        &[
+            "run",
+            "--leader-lease",
+            LEASE,
+            "--leader-lease",
+            "other/lease",
+        ][..],
+    ] {
+        assert_usage_error(
+            &kausa_as(Some(POD), args),
+            LEASE_TWICE,
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn a_leader_lease_is_one_namespace_and_one_name() {
+    for value in [
+        "kausa",
+        "kausa-leader",
+        "a/b/c",
+        "/kausa-leader",
+        "kausa/",
+        "/",
+        "//",
+    ] {
+        assert_usage_error(
+            &kausa_as(Some(POD), &["run", "--leader-lease", value]),
+            &lease_shape(value),
+            value,
+        );
+    }
+}
+
+#[test]
+fn a_leader_lease_namespace_is_a_namespace_name() {
+    let too_long = "n".repeat(64);
+    for part in [
+        "Kausa",
+        "kausa_system",
+        "-kausa",
+        "kausa-",
+        "kausa.system",
+        too_long.as_str(),
+    ] {
+        let value = format!("{part}/kausa-leader");
+        assert_usage_error(
+            &kausa_as(Some(POD), &["run", "--leader-lease", &value]),
+            &lease_namespace(part),
+            part,
+        );
+    }
+}
+
+#[test]
+fn a_leader_lease_name_is_a_dns_subdomain() {
+    let too_long = "a".repeat(254);
+    for part in [
+        "Kausa-Leader",
+        "kausa_leader",
+        "-kausa",
+        "kausa-",
+        ".kausa",
+        "kausa.",
+        "kausa leader",
+        too_long.as_str(),
+    ] {
+        let value = format!("kausa/{part}");
+        let shown = if part.len() > 64 { "254 bytes" } else { part };
+        assert_usage_error(
+            &kausa_as(Some(POD), &["run", "--leader-lease", &value]),
+            &lease_name(part),
+            shown,
+        );
+    }
+}
+
+#[test]
+fn a_leader_lease_needs_a_pod_name() {
+    for pod in [None, Some("")] {
+        assert_usage_error(
+            &kausa_as(pod, &["run", "--leader-lease", LEASE]),
+            LEASE_NEEDS_POD_NAME,
+            &format!("POD_NAME {:?}", pod.map(str::len)),
+        );
+    }
+    let too_long = "p".repeat(254);
+    assert_usage_error(
+        &kausa_as(Some(&too_long), &["run", "--leader-lease", LEASE]),
+        POD_NAME_TOO_LONG,
+        "POD_NAME of 254 bytes",
+    );
+    // A malformed value is refused in the loop, before POD_NAME is looked at.
+    assert_usage_error(
+        &kausa_as(None, &["run", "--leader-lease", "kausa"]),
+        &lease_shape("kausa"),
+        "no POD_NAME and no '/'",
+    );
+    // Without the flag, POD_NAME is not needed (the Events' instance falls back to kausa).
+    assert_gets_past_the_flags(&kausa_as(None, &["run"]), "run without POD_NAME");
+}
+
+#[test]
+fn the_leader_lease_flag_has_no_other_form() {
+    for flag in [
+        "--leader-lease=kausa/kausa-leader",
+        "--leader-election",
+        "--lease",
+    ] {
+        assert_usage_error(
+            &kausa_as(Some(POD), &["run", flag]),
+            &format!("unexpected argument '{flag}'"),
+            flag,
+        );
+    }
+    assert_usage_error(
+        &kausa_as(Some(POD), &["--leader-lease", LEASE]),
+        "unknown command or option '--leader-lease'",
+        "kausa --leader-lease",
+    );
+}
+
+#[test]
+fn help_lists_the_leader_lease_flag_and_what_kausa_writes() {
+    let output = kausa(&["--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = stdout(&output);
+    let options: Vec<&str> = help
+        .lines()
+        .skip_while(|l| *l != "Options of kausa run:")
+        .take_while(|l| !l.is_empty())
+        .collect();
+    let lines = [
+        "  --leader-lease <NS>/<NAME>  Act only while holding this Lease; wait as a",
+        "                              standby otherwise (for two replicas)",
+    ];
+    assert!(
+        options.windows(2).any(|w| w == lines),
+        "the --leader-lease lines are not under 'Options of kausa run:': {help}"
+    );
+    assert!(help.lines().all(|l| l.len() <= 84), "{help}");
+    let by_design: String = help
+        .split("\n\n")
+        .find(|p| p.starts_with("By design"))
+        .expect("a 'By design' paragraph")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for words in [
+        "writes nothing but Events and, with --history, its own Explanation objects, and, with \
+         --leader-lease, the spec of its one Lease,",
+        "nothing unredacted",
+    ] {
+        assert!(by_design.contains(words), "no '{words}' in: {by_design}");
+    }
+    // A lost Lease is not an exit: the exit statuses do not change.
+    let collapsed = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        collapsed.contains(
+            "Exit status: 0 on success or a clean stop, 1 when it cannot start or a watch ends \
+             (watch errors are logged and retried), 2 on a usage error or when stdout cannot be \
+             written."
+        ),
+        "{help}"
+    );
+}

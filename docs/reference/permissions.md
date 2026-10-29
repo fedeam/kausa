@@ -7,14 +7,19 @@ kausa explains incidents (an endpoint or dry-run) with log collection on, and th
 only with an endpoint, outside dry-run, unless they are turned off, and the `explanations` row only
 while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; since v0.3.0), and the
 `deployments` row while Deployments are watched for stalled rollouts (`rollouts`, on by default;
-added for v0.4 on 2026-10-29) ([Helm chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
+added for v0.4 on 2026-10-29), and, only with `replicaCount: 2`, `get` and `patch` on one Lease in
+kausa's own namespace ([In kausa's own namespace, with two
+replicas](#in-kausas-own-namespace-with-two-replicas); added for v0.4 on 2026-10-29) ([Helm
+chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
 namespaces only (`namespaced`, since v0.3.0; see [Where the permissions
 apply](#where-the-permissions-apply)). Why it is this list: [0009. Run with read-only permissions
 that never include Secrets](../adr/0009-least-privilege-rbac.md); why there are two scopes: [0013.
 Offer a namespaced install mode: one watch pair and one Role per listed namespace, and nothing
 cluster-wide](../adr/0013-namespaced-install-mode.md); why kausa reads Deployments: [0018. Explain a
 Deployment past its progress deadline (`D014`) from a Deployment watch that is on by default, and
-add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md). The kind test (`tests/e2e/run.sh`) checks
+add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md); why a second replica
+needs a Lease: [0019. Offer an optional standby replica that takes over through a chart-created
+Lease, elected by kausa's own code](../adr/0019-high-availability.md). The kind test (`tests/e2e/run.sh`) checks
 the installed role against this table with `kubectl auth can-i`, both what it allows and a list
 of what it must refuse, in each scope; both scopes passed on 2026-10-28 on the maintainer's
 machine. As of 2026-10-26,
@@ -83,6 +88,33 @@ without it. It changes where the rows above apply, never which rows there are:
   namespaces only. Inside a listed namespace, RBAC still cannot limit them to kausa's own Events
   (see the [Security policy](../../SECURITY.md)).
 
+## In kausa's own namespace, with two replicas
+
+With `replicaCount: 2` (since v0.4; off by default), the chart renders
+`templates/leader-election.yaml`: a Lease `<full name>-leader` in the release namespace, with the
+chart's labels and `spec: {}`, a Role of the same name with one rule, and a RoleBinding of the same
+name to kausa's service account. kausa runs with `--leader-lease <release namespace>/<full
+name>-leader`, and only the replica that holds the Lease watches, explains and writes:
+
+| API group | Resource | Resource names | Verbs | Why |
+|---|---|---|---|---|
+| `coordination.k8s.io` | `leases` | `<full name>-leader` | `get`, `patch` | `get`: read the holder and the `resourceVersion`, every 5 s; `patch`: a JSON merge patch of the Lease's `spec` (take it, renew it, release it), always with the `resourceVersion` it read, so that one writer wins each version |
+
+- **The same in both scopes.** This rule is not in `kausa.rules` and does not follow
+  `rbac.scope`: those rules are about the namespaces kausa watches, while the Lease is kausa's own
+  object in its own namespace. A namespaced release gets it even when its own namespace is not
+  listed, and nothing else there.
+- **Helm owns the object, kausa its `spec`.** kausa never creates the Lease: RBAC cannot bind
+  `create` to a name, so a grant to create would let kausa create any Lease name in the namespace.
+  A deleted Lease is a `lease error` with the hint `the chart creates this Lease: run helm
+  upgrade`, and no replica acts until it is back. `helm uninstall`, or going back to
+  `replicaCount: 1`, deletes the Lease, the Role and the RoleBinding.
+- **`patch` is not narrowed to `spec`.** RBAC cannot limit a patch to some fields, so the token can
+  also change the Lease's labels and annotations (checked in kind, Kubernetes v1.36.4, on
+  2026-10-29). kausa sends only `metadata.resourceVersion` and `spec` fields.
+- **Nothing else changes.** The rows above, the ClusterRole or the Roles of `kausa.rules`, and
+  what is never granted are the same with one replica or two.
+
 ## Who reads the history
 
 With the history on and `history.installCRD`, the chart also installs a ClusterRole
@@ -114,14 +146,22 @@ What the kind test asks `kubectl auth can-i`, as kausa's service account
   namespace whose RoleBinding is removed also gives a `deployment watch error`. With `rollouts:
   false` (the cluster scope's upgrade in the test), the ClusterRole has no `deployments` rule,
   `list deployments.apps` is refused, and kausa runs with `--no-rollouts` and is Ready.
+- **The Lease**, in both scopes: with two replicas, `get` and `patch` on `leases/<full
+  name>-leader` in kausa's own namespace `yes`, and `no` in every other namespace and with `-A`;
+  with one replica, `no` everywhere. Always `no`, in every namespace and with `-A`: `create` (with
+  and without the name), `update`, `delete`, `list`, `watch` and `deletecollection` on Leases, and
+  `get` and `patch` on another Lease or without a name. Because `kubectl auth can-i` answers `yes`
+  to a `create` with a name when a rule grants `create` with `resourceNames` (seen in kind on
+  2026-10-29), the test also sends a real `kubectl create --dry-run=server` of a Lease as kausa,
+  under a new name and under the Lease's own, and expects it refused.
 - **The readers**, in both scopes: service accounts bound to `view` and to `edit` in a watched
   namespace can `list` Explanations and cannot `create` or `delete` them.
 
 ## Never granted
 
 - `secrets` and `configmaps`, in any verb. `list` on Secrets would return their data.
-- Any write verb other than `create` and `patch` on Events and, with the history, `create`,
-  `patch` and `delete` on `explanations`.
+- Any write verb other than `create` and `patch` on Events, with the history `create`, `patch`
+  and `delete` on `explanations`, and with two replicas `patch` on kausa's one Lease.
 - On Deployments, anything but `list` and `watch`: no `get`, `create`, `update`, `patch`,
   `delete` or `deletecollection`, and no `deployments/status`, `deployments/scale` or
   `deployments/rollback`. No verb on `statefulsets`, `daemonsets` or `cronjobs`, and no `list` or
@@ -131,14 +171,32 @@ What the kind test asks `kubectl auth can-i`, as kausa's service account
 - Any custom resource but kausa's own Explanations, and on those never `get`, `watch`, `update`,
   `deletecollection` or a subresource (there is none).
 - Any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never does.
+- On Leases, `create`, `update`, `list`, `watch`, `delete` and `deletecollection`, in any
+  namespace; `get` and `patch` on any Lease but `<full name>-leader` in kausa's own namespace;
+  any grant on Leases with one replica; and no Lease rule in a ClusterRole.
 
 ## The pod that runs kausa
 
 The chart's defaults:
 
-- One replica, `strategy: Recreate`, so that a rollout never runs two instances at once; a node
-  partition can still briefly run two (hypothesis: the worst case is a duplicate Event, since
-  kausa never changes a workload). Leader election with a Lease is not planned for v0.1.
+- One replica by default, `strategy: Recreate`, so that a rollout never runs two instances at
+  once. With `replicaCount: 2` two Pods run, still with `Recreate`, and only the holder of the
+  Lease acts ([In kausa's own namespace, with two
+  replicas](#in-kausas-own-namespace-with-two-replicas)). The election is kausa's own code, on
+  the monotonic clock of each replica: a standby takes the Lease once it has seen it unchanged for
+  30 s (`LEASE_DURATION`), and a leader acts only until 20 s (`RENEW_DEADLINE`) after it sent its
+  last good renewal, and every cluster write and webhook attempt ends within 10 s
+  (`WRITE_BOUND`). So a deposed leader's last write ends before a standby may take over. Two
+  overlaps remain, both hypotheses with no fencing token: the API server applying a request
+  after the client gave up on it, and a paused VM whose monotonic clock does not advance. Their
+  worst case is a duplicate: one more call, Event series patch or new Event, history merge and
+  notification for an incident that still fails, never a change to a workload. With one replica,
+  a node partition can still briefly run two instances, as before (hypothesis, with the same
+  worst case). Scale only through `replicaCount`: `kubectl scale` on a one-replica release runs
+  Pods that do not elect a leader, and each would act.
+- A PodDisruptionBudget `<full name>` with two replicas only: `maxUnavailable: 1`, so a drain
+  never evicts both, and `unhealthyPodEvictionPolicy: AlwaysAllow`, so a replica that is not
+  Ready never blocks a drain.
 - `runAsNonRoot`, a numeric non-root user, `readOnlyRootFilesystem`, all capabilities dropped,
   `allowPrivilegeEscalation: false`, the `RuntimeDefault` seccomp profile.
 - Requests and limits for CPU and memory declared: requests of 10m and 32 MiB, limits of 200m

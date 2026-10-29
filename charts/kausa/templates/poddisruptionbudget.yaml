@@ -1,0 +1,20 @@
+{{- /*
+With two replicas (replicaCount=2), a drain never evicts both at once; a replica that is not
+Ready can always be evicted, so a broken one never blocks a drain
+(docs/adr/0019-high-availability.md). With one replica there is none: it would block every drain.
+*/}}
+{{- if eq (include "kausa.replicas" .) "2" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kausa.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "kausa.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -5,6 +5,9 @@ name: e2e
 # (docs/adr/0013-namespaced-install-mode.md), as the checks "kind (cluster)" and
 # "kind (namespaced)". Both are to gate pull requests, like ci.yml's: pending until the ruleset on
 # main requires them in place of "kind" (docs/how-to/maintain.md, "Change the required checks").
+# A third run, "kind (namespaced, standby)", installs two replicas, a leader and a standby behind a
+# Lease (docs/adr/0019-high-availability.md), and checks the handovers; the other two keep the
+# chart's one replica.
 on:
   push:
     branches: [main]
@@ -19,17 +22,25 @@ concurrency:
 
 jobs:
   kind:
-    name: kind (${{ matrix.scope }})
+    name: kind (${{ matrix.scope }}${{ matrix.replicas == 2 && ', standby' || '' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
-      # Each scope reports on its own: a failure in one does not cancel the other.
+      # Each run reports on its own: a failure in one does not cancel the others.
       fail-fast: false
       matrix:
         scope: [cluster, namespaced]
+        # replicas is a matrix key of its own, so that the entry below, which sets it to another
+        # value, is a third run and does not change the namespaced one.
+        replicas: [1]
+        include:
+          - scope: namespaced
+            replicas: 2
     env:
       # tests/e2e/run.sh installs the chart with this rbac.scope.
       KAUSA_E2E_SCOPE: ${{ matrix.scope }}
+      # And with replicaCount=2 when this is 2; with 1 it leaves replicaCount unset.
+      KAUSA_E2E_REPLICAS: ${{ matrix.replicas || 1 }}
       # Pinned tools, each checked against a SHA-256 before it is installed; bumped by hand, like
       # the Dockerfile's (docs/how-to/maintain.md). kind: the checksums published next to each
       # binary in https://github.com/kubernetes-sigs/kind/releases. helm: the same version and

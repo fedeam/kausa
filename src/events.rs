@@ -7,6 +7,8 @@
 //! patches an Event whose reporting controller is `kausa`, and only its series
 //! (docs/adr/0009-least-privilege-rbac.md).
 
+use std::time::Duration;
+
 use k8s_openapi::api::core::v1::ObjectReference;
 use k8s_openapi::api::events::v1::{Event, EventSeries};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
@@ -17,6 +19,8 @@ use serde_json::json;
 
 use crate::fingerprint::fingerprint;
 use crate::incident::Incident;
+use crate::leader::Term;
+use crate::leader::pure::WRITE_BOUND;
 use crate::prompt::Explanation;
 use crate::run::REPORTING_CONTROLLER;
 
@@ -123,6 +127,24 @@ pub fn build(incident: &Incident, outcome: &Outcome<'_>, instance: &str, now: Ti
     }
 }
 
+/// The longest one emit may take, all of its calls together: `WRITE_BOUND` (a deposed leader's
+/// write ends before a standby may take over, docs/adr/0019-high-availability.md), and a short one
+/// in the tests.
+#[cfg(not(test))]
+const EMIT_TIMEOUT: Duration = WRITE_BOUND;
+#[cfg(test)]
+const EMIT_TIMEOUT: Duration = Duration::from_secs(1);
+const _: () = assert!(EMIT_TIMEOUT.as_nanos() <= WRITE_BOUND.as_nanos());
+
+/// How an emit that did not fail ended.
+#[derive(Debug)]
+pub enum Emitted {
+    /// The Event was created or its series patched.
+    Written,
+    /// The lease term ended before a call: nothing more was sent. Neither a write nor an error.
+    Skipped,
+}
+
 /// Writes Events.
 pub struct Writer {
     client: Client,
@@ -135,20 +157,49 @@ impl Writer {
     }
 
     /// Creates the Event or, when one with its name exists, reads it (with the `list` kausa is
-    /// granted) and patches its series, provided kausa wrote it.
+    /// granted) and patches its series, provided kausa wrote it. Each call is made only while
+    /// `term` holds, and the whole emit ends within `EMIT_TIMEOUT`.
     pub async fn emit(
         &self,
         incident: &Incident,
         outcome: &Outcome<'_>,
         now: Timestamp,
-    ) -> Result<(), String> {
+        term: &Term,
+    ) -> Result<Emitted, String> {
+        match tokio::time::timeout(
+            EMIT_TIMEOUT,
+            self.create_or_patch(incident, outcome, now, term),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "no answer within {} seconds",
+                EMIT_TIMEOUT.as_secs()
+            )),
+        }
+    }
+
+    async fn create_or_patch(
+        &self,
+        incident: &Incident,
+        outcome: &Outcome<'_>,
+        now: Timestamp,
+        term: &Term,
+    ) -> Result<Emitted, String> {
         let event = build(incident, outcome, &self.instance, now);
         let namespace = incident.key.namespace.clone();
         let name = event.metadata.name.clone().unwrap_or_default();
         let api = Api::<Event>::namespaced(self.client.clone(), &namespace);
+        if !term.holds() {
+            return Ok(Emitted::Skipped);
+        }
         match api.create(&PostParams::default(), &event).await {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(Emitted::Written),
             Err(kube::Error::Api(status)) if status.code == 409 => {
+                if !term.holds() {
+                    return Ok(Emitted::Skipped);
+                }
                 let params = ListParams::default().fields(&format!("metadata.name={name}"));
                 let stored = api
                     .list(&params)
@@ -164,9 +215,12 @@ impl Writer {
                     ));
                 }
                 let patch = repeat_patch(&stored, now);
+                if !term.holds() {
+                    return Ok(Emitted::Skipped);
+                }
                 api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
                     .await
-                    .map(|_| ())
+                    .map(|_| Emitted::Written)
                     .map_err(|e| e.to_string())
             }
             Err(error) => Err(error.to_string()),
@@ -315,5 +369,189 @@ mod tests {
         );
         assert_eq!(event.type_.as_deref(), Some("Warning"));
         assert_eq!(event.reason.as_deref(), Some("ExplanationSkipped"));
+    }
+
+    // Acceptance tests for the standby replica (docs/adr/0019-high-availability.md), written before
+    // the code: `Writer::emit` takes the term (`term: &Term`, last) and checks it before each call
+    // (the create, the list after a `409` and the series patch); past the term's end it makes no
+    // call and returns `Ok(Emitted::Skipped)`, which the caller counts neither as written nor as an
+    // error. The whole emit is bounded by `WRITE_BOUND` in every mode (shorter under cfg(test)).
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use crate::leader::Term;
+    use crate::leader::pure::WRITE_BOUND;
+
+    /// What the fake API server does with one connection.
+    enum Reply {
+        /// Waits this long, then answers this status line and JSON body.
+        After(Duration, &'static str, serde_json::Value),
+        /// Reads the request and never answers (the connection stays open).
+        Never,
+    }
+
+    /// A fake API server: one connection per reply, in order. The request line of each request is
+    /// sent back on the channel. Returns `http://127.0.0.1:<port>`.
+    fn api_server(replies: Vec<Reply>) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}", listener.local_addr().expect("an address"));
+        let (sent, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut open = Vec::new();
+            for reply in replies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut buffer = vec![0; 65536];
+                loop {
+                    let n = stream.read(&mut buffer).unwrap_or(0);
+                    request.extend_from_slice(&buffer[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(str::to_owned)
+                            })
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            let line = text.lines().next().unwrap_or_default().to_owned();
+                            let _ = sent.send(line);
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                match reply {
+                    Reply::After(wait, status, body) => {
+                        std::thread::sleep(wait);
+                        let body = body.to_string();
+                        let answer = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(answer.as_bytes());
+                    }
+                    Reply::Never => open.push(stream),
+                }
+            }
+            // Keep the unanswered connections open until the test is over.
+            std::thread::sleep(Duration::from_secs(60));
+            drop(open);
+        });
+        (url, received)
+    }
+
+    fn conflict() -> serde_json::Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "Status",
+            "metadata": {},
+            "status": "Failure",
+            "message": "an invented message",
+            "reason": "AlreadyExists",
+            "code": 409,
+        })
+    }
+
+    /// Emits the explanation of `incident()` against the fake API server at `url` under `term`,
+    /// and returns the result and how long it took.
+    fn emit_at(url: &str, term: &Term) -> (Result<Emitted, String>, Duration) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(async {
+                let config = kube::Config::new(url.parse().expect("a URL"));
+                let writer = Writer::new(Client::try_from(config).expect("a client"), "k".into());
+                let e = explanation(1, 0);
+                let started = Instant::now();
+                let outcome = Outcome::Explained(&e);
+                let result = tokio::time::timeout(
+                    WRITE_BOUND + Duration::from_secs(2),
+                    writer.emit(&incident(), &outcome, Timestamp::UNIX_EPOCH, term),
+                )
+                .await
+                .expect("emit is bounded by WRITE_BOUND");
+                (result, started.elapsed())
+            })
+    }
+
+    #[test]
+    fn a_closed_term_writes_no_event() {
+        let (url, requests) =
+            api_server(vec![Reply::After(Duration::ZERO, "201 Created", json!({}))]);
+        let (result, _) = emit_at(&url, &Term::closed());
+        assert!(matches!(result, Ok(Emitted::Skipped)), "{result:?}");
+        assert!(
+            requests.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the API server was called"
+        );
+    }
+
+    #[test]
+    fn an_unbounded_term_writes_as_before() {
+        let e = explanation(1, 0);
+        let created = serde_json::to_value(build(
+            &incident(),
+            &Outcome::Explained(&e),
+            "k",
+            Timestamp::UNIX_EPOCH,
+        ))
+        .expect("an Event");
+        let (url, requests) =
+            api_server(vec![Reply::After(Duration::ZERO, "201 Created", created)]);
+        let (result, _) = emit_at(&url, &Term::unbounded());
+        assert!(matches!(result, Ok(Emitted::Written)), "{result:?}");
+        let line = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a create");
+        assert!(
+            line.starts_with("POST /apis/events.k8s.io/v1/namespaces/shop/events"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_term_that_ends_during_the_create_makes_no_further_call() {
+        // The create is answered 409 after the term has ended: no list and no series patch.
+        let (url, requests) = api_server(vec![
+            Reply::After(Duration::from_millis(300), "409 Conflict", conflict()),
+            Reply::After(Duration::ZERO, "200 OK", json!({"items": []})),
+        ]);
+        let term = Term::closed();
+        term.extend_to(Instant::now() + Duration::from_millis(100));
+        let (result, _) = emit_at(&url, &term);
+        assert!(matches!(result, Ok(Emitted::Skipped)), "{result:?}");
+        let line = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the create");
+        assert!(line.starts_with("POST "), "{line}");
+        assert!(
+            requests.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a call was made after the term ended"
+        );
+    }
+
+    #[test]
+    fn an_emit_against_a_silent_api_server_times_out() {
+        let (url, requests) = api_server(vec![Reply::Never]);
+        let (result, elapsed) = emit_at(&url, &Term::unbounded());
+        assert!(result.is_err(), "an unanswered create is an error");
+        assert!(
+            elapsed <= WRITE_BOUND + Duration::from_millis(500),
+            "{elapsed:?}"
+        );
+        assert!(requests.recv_timeout(Duration::from_secs(1)).is_ok());
     }
 }

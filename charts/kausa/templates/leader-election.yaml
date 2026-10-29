@@ -1,0 +1,49 @@
+{{- /*
+With two replicas (replicaCount=2), the Lease the replicas elect their leader with, and the one
+permission on it: get and patch on that Lease alone, in the release namespace
+(docs/adr/0019-high-availability.md). Never create, update, list, watch or delete, and no other
+Lease. The chart creates the Lease with an empty spec, which kausa fills in; Helm owns the object.
+
+This is not in kausa.rules: those rules are about the namespaces kausa watches, and rbac.scope
+picks where they are granted. The Lease is kausa's own object in its own namespace, so its Role is
+the same in both scopes.
+*/}}
+{{- if eq (include "kausa.replicas" .) "2" }}
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: {{ include "kausa.leaderLease" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+spec: {}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kausa.leaderLease" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ include "kausa.leaderLease" . | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kausa.leaderLease" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kausa.leaderLease" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kausa.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

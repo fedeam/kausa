@@ -23,6 +23,19 @@ cluster{{ if $readsLogs }}, and container logs too{{ end }}.
 {{- end }}
 
 kausa is running in {{ .Release.Namespace }}.
+{{- if eq (include "kausa.replicas" .) "2" }}
+{{- $lease := include "kausa.leaderLease" . }}
+
+Two replicas run (replicaCount=2): only the one that holds the Lease
+{{ .Release.Namespace }}/{{ $lease }} watches, explains and writes, and the other is a standby that
+takes over if it stops. See the holder with:
+
+  kubectl -n {{ .Release.Namespace }} get lease {{ $lease }} -o jsonpath='{.spec.holderIdentity}'
+
+Each replica keeps its own call budget, so two can spend up to twice budget.callsPerHour and
+budget.callsPerDay. Scale only through replicaCount: kubectl scale runs replicas that elect no
+leader (from replicaCount=1), or is undone by the next helm upgrade.
+{{- end }}
 {{- if include "kausa.writesEvents" . }}
 
 Its explanations are Events on the failing workloads, for example:

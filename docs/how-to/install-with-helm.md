@@ -17,7 +17,9 @@ and notifications (`notifications.enabled`, off by default; [Send notifications 
 or a webhook](send-notifications.md)). The chart in the repository adds, for v0.4 (not released as
 of 2026-10-29), a watch on Deployments for stalled rollouts (`rollouts`, on by default), which the
 kind test installed in both scopes on 2026-10-29 ([Upgrade to the Deployment
-watch](#upgrade-to-the-deployment-watch)).
+watch](#upgrade-to-the-deployment-watch)), and an optional standby replica (`replicaCount: 2`,
+off by default), whose renders are checked in both scopes and whose kind test runs on GitHub
+Actions ([Run a standby replica](#run-a-standby-replica)).
 
 ## Before you start
 
@@ -265,10 +267,103 @@ v0.3.0 is the first release with it.
   `count/explanations.kausa.fedeam.com`, if tenants there can create Explanations
   ([Security policy](../../SECURITY.md)).
 
+## Run a standby replica
+
+With `replicaCount: 2`, a second Pod waits as a standby and takes over when the one that acts
+stops: within about 35 seconds when its node dies or it freezes, and within about 5 seconds when
+it is deleted or drained, then the new leader lists and its incidents settle ([Architecture](../explanation/architecture.md#failover)).
+Without it, a lost node leaves kausa down until its Pod is replaced, about five minutes by default
+(hypothesis: the default `tolerationSeconds` of 300). Status as of 2026-10-29: in the chart in the
+repository, for v0.4, not released; those times are the design's, and their measurement in kind is
+still open ([0019. Offer an optional standby replica that takes over through a chart-created
+Lease, elected by kausa's own code](../adr/0019-high-availability.md)).
+
+1. **Turn it on**, in either scope:
+
+   ```sh
+   helm upgrade kausa <chart> -n kausa --reuse-values --set replicaCount=2 --wait
+   ```
+
+   The chart runs two Pods with `--leader-lease kausa/kausa-leader` and adds, in the release
+   namespace, the Lease `kausa-leader`, a Role and RoleBinding of that name with `get` and `patch`
+   on that one Lease ([Permissions](../reference/permissions.md#in-kausas-own-namespace-with-two-replicas)),
+   a PodDisruptionBudget, and, while `affinity` is empty, a preferred anti-affinity that spreads
+   the Pods over nodes when it can ([Helm chart](../reference/helm-chart.md#a-standby-replica)).
+   `strategy` stays `Recreate`, so this upgrade, like every later one, stops both old Pods before
+   the new ones start. `--wait` waits for both Pods to be Ready (checked with Helm 3.16.1).
+   `replicaCount` takes `1` or `2` only; scale only through it, never with `kubectl scale`.
+
+2. **See which one acts:**
+
+   ```sh
+   kubectl -n kausa get lease kausa-leader -o jsonpath='{.spec.holderIdentity}'
+   ```
+
+   It prints the name of the Pod that holds the Lease. Its log has a `leading` line; the other's
+   has `standby`, and nothing else after `started`: no incident, no explanation. Both are Ready;
+   `/readyz` answers `ready` on the leader and `standby` on the other. Use the holder's log:
+
+   ```sh
+   kubectl -n kausa logs "$(kubectl -n kausa get lease kausa-leader -o jsonpath='{.spec.holderIdentity}')"
+   ```
+
+3. **Scrape each Pod, not the Service.** The Service `kausa-metrics` selects both Pods, so a scrape
+   through it reaches either one at random. Each Pod has its own counters, its own budget and its
+   own `kausa_leader` gauge (`1` on the leader, `0` on the standby): scrape them as Pods, with a
+   PodMonitor if you run the Prometheus Operator,
+
+   ```yaml
+   apiVersion: monitoring.coreos.com/v1
+   kind: PodMonitor
+   metadata:
+     name: kausa
+     namespace: kausa
+   spec:
+     selector:
+       matchLabels:
+         app.kubernetes.io/name: kausa
+         app.kubernetes.io/instance: kausa
+     podMetricsEndpoints:
+       - port: metrics
+   ```
+
+   or with the scrape annotations your Prometheus reads on Pods, through `podAnnotations` (for
+   example `prometheus.io/scrape: "true"` and `prometheus.io/port: "9090"`, if your scrape
+   configuration uses them). With `networkPolicy.metricsFrom`, allow your Prometheus to reach both
+   Pods.
+
+4. **Alert** on nobody acting, or two, and on a Lease that changes hands too often:
+
+   ```text
+   sum(kausa_leader) != 1                                          for: 2m
+   increase(kausa_leadership_changes_total{to="leader"}[1h]) > 6
+   ```
+
+   Scope both to your release's Pods (for example by their `namespace` and `pod` labels). The
+   first fires when the Lease is held by someone else, has been deleted, or cannot be renewed (an
+   API server outage, a deleted `kausa-leader` RoleBinding): kausa then explains nothing, on
+   purpose, rather than act without the Lease. The second shows a Lease that flips, by failures or
+   by someone writing it.
+
+What to expect:
+
+- **Each replica keeps its own call budget,** so while both run they can spend up to twice
+  `budget.callsPerHour` and `budget.callsPerDay`; set the provider's own spending cap accordingly.
+- **A failover may explain an incident again.** The new leader does not have the old one's
+  deduplication cache, so an incident that still fails is explained once more: one more call,
+  Event (or series update), history entry and notification.
+- **Whoever can write Leases in kausa's namespace can stop it** in both replicas (the default
+  `edit` and `admin` roles can, as a review found in kind; [Security policy](../../SECURITY.md)). Keep kausa in a
+  namespace of its own, administered by the people who administer kausa.
+- **Going back to one replica** (`--set replicaCount=1`) removes the Lease, its Role and
+  RoleBinding and the PodDisruptionBudget, and the remaining Pod runs without `--leader-lease`
+  (Helm deletes what a release no longer renders; not checked in kind for these objects).
+
 ## Verify
 
 - `kubectl -n kausa get pods`: one Pod, ready once every watch has listed (three, or three per
-  listed namespace; two, or two per listed namespace, with `rollouts=false`).
+  listed namespace; two, or two per listed namespace, with `rollouts=false`). With
+  `replicaCount=2`, two Pods, both Ready, and the Lease `kausa-leader` names one of them.
 - When a workload has been failing for a minute:
   `kubectl get events.events.k8s.io -A --field-selector reportingController=kausa` (or `-n
   <namespace>` for each listed namespace) lists kausa's Events, and `kubectl describe deployment -n <namespace> <name>` shows the explanation.
@@ -302,6 +397,13 @@ v0.3.0 is the first release with it.
   the v0.3 chart's role, or RBAC made outside the chart) → upgrade the chart with the image, add
   the rule of [Upgrade to the Deployment watch](#upgrade-to-the-deployment-watch), or set
   `rollouts=false`.
+- **With `replicaCount=2`, both Pods log `standby` and `sum(kausa_leader)` is 0** → nobody holds
+  the Lease → a `lease error` line names the call and, on a `403`, has the hint `kausa needs get
+  and patch on this Lease`: the `kausa-leader` Role or RoleBinding was deleted or changed; on a
+  `404`, `the chart creates this Lease: run helm upgrade`: the Lease was deleted. `helm upgrade`
+  with the same values puts all three back. Without a `lease error`, someone else holds the Lease:
+  `kubectl -n kausa get lease kausa-leader -o yaml` shows who, and whoever can write Leases in the
+  namespace can take it.
 - **The Pod restarts with exit code 2** → kausa refused its arguments → `kubectl -n kausa logs
   deploy/kausa --previous` says which.
 - **`history write failed`** with `the CustomResourceDefinition explanations.kausa.fedeam.com is
@@ -324,3 +426,5 @@ kausa's Events expire with the API server's event TTL (one hour by default). Wit
 and `history.installCRD=true`, `helm uninstall` also deletes the CustomResourceDefinition and every
 Explanation in the cluster; with `history.installCRD=false`, the administrator who installed it
 deletes it (`kubectl delete crd explanations.kausa.fedeam.com`), which deletes every Explanation.
+With `replicaCount=2`, `helm uninstall` also deletes the Lease, its Role and RoleBinding and the
+PodDisruptionBudget.
