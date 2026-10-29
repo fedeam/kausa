@@ -1924,4 +1924,80 @@ mod tests {
             assert!(work.log.is_none(), "{about:?}");
         }
     }
+
+    /// Records every owner lookup, and answers it as `Parents` does.
+    #[derive(Default)]
+    struct Lookups(std::cell::RefCell<Vec<(Hop, String)>>);
+
+    impl OwnerLookup for Lookups {
+        async fn controller_of(
+            &self,
+            hop: Hop,
+            namespace: &str,
+            name: &str,
+        ) -> Result<Option<OwnerRef>, String> {
+            self.0.borrow_mut().push((hop, name.to_owned()));
+            Parents.controller_of(hop, namespace, name).await
+        }
+    }
+
+    #[test]
+    fn only_replicasets_and_jobs_are_looked_up_and_a_failed_lookup_keeps_the_controller() {
+        // `D011` to `D013` need no new permission: kausa may `get` ReplicaSets and Jobs only, so
+        // an event about a StatefulSet, a DaemonSet, a claim or an autoscaler, or a Deployment's
+        // own event, makes no lookup at all.
+        let lookups = Lookups::default();
+        let mut state = State::default();
+        for (about, reason) in [
+            (("apps/v1", "StatefulSet", "db"), "FailedCreate"),
+            (("apps/v1", "DaemonSet", "node-agent"), "FailedCreate"),
+            (
+                ("v1", "PersistentVolumeClaim", "orders-data"),
+                "ProvisioningFailed",
+            ),
+            (
+                ("autoscaling/v2", "HorizontalPodAutoscaler", "checkout"),
+                "FailedGetScale",
+            ),
+            (("apps/v1", "Deployment", "storefront"), "FailedCreate"),
+            (
+                ("apps/v1", "ReplicaSet", "checkout-7fffb9bf5c"),
+                "FailedDelete",
+            ),
+        ] {
+            block_on(state.on_event(
+                &CLUSTER,
+                watcher::Event::Apply(event_about(about, reason)),
+                &lookups,
+            ))
+            .expect("the log is written");
+        }
+        assert!(lookups.0.borrow().is_empty(), "{:?}", lookups.0.borrow());
+        // The two events no detection matches are not kept.
+        assert_eq!(state.events.len(), 4);
+        // An event about a ReplicaSet is looked up; when the lookup fails, its incident names the
+        // ReplicaSet itself until a lookup works (docs/reference/command-line.md).
+        let orphan = ("apps/v1", "ReplicaSet", "orphan-5d4c3b2a1");
+        let mut state = State::default();
+        block_on(state.on_event(
+            &CLUSTER,
+            watcher::Event::Apply(event_about(orphan, "FailedCreate")),
+            &lookups,
+        ))
+        .expect("the log is written");
+        assert_eq!(
+            *lookups.0.borrow(),
+            [(Hop::ReplicaSet, "orphan-5d4c3b2a1".to_owned())]
+        );
+        let mut tracker = Tracker::new(SignedDuration::from_secs(60));
+        let incidents = state.tick(&mut tracker, Timestamp::now());
+        assert_eq!(incidents.len(), 1, "{incidents:?}");
+        let incident = &incidents[0];
+        assert_eq!(incident.key.detection.id(), "D011");
+        assert_eq!(
+            (incident.owner.kind.as_str(), incident.owner.name.as_str()),
+            ("ReplicaSet", "orphan-5d4c3b2a1")
+        );
+        assert_eq!(incident.owner.uid, "uid-orphan-5d4c3b2a1");
+    }
 }

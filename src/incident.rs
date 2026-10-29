@@ -1573,4 +1573,59 @@ mod tests {
         assert_eq!(reasons, ["FailedGetResourceMetric", "FailedGetScale"]);
         assert_eq!(ids(&signals), ["D013", "D013"]);
     }
+
+    #[test]
+    fn generated_names_are_the_words_that_extend_the_owner_name() {
+        // A StatefulSet's ordinals, quoted or not, and a Pod name at the end of a sentence.
+        assert_eq!(
+            generated_names(
+                "Create Pod db-0 in StatefulSet db failed error: pods \"db-0\" is forbidden",
+                "db"
+            ),
+            ["db-0", "db-0"]
+        );
+        assert_eq!(
+            generated_names("refused pod web-7d9c8b6f4d-d98v6.", "web"),
+            ["web-7d9c8b6f4d-d98v6"]
+        );
+        // Not generated: the owner's own name, the bare prefix, a longer word that does not
+        // continue it with a hyphen, a name that only contains it, and nothing for no owner.
+        assert!(
+            generated_names(
+                "web web- webapp-1 api-web-1 Web-1 (get pods.metrics.k8s.io)",
+                "web"
+            )
+            .is_empty()
+        );
+        assert!(generated_names("pods \"-1\" is forbidden", "").is_empty());
+    }
+
+    #[test]
+    fn the_d011_fingerprint_keeps_the_names_that_are_not_generated() {
+        // Only the names that extend the top-level owner's name are dropped: a quota that is
+        // another object stays in the fingerprint, so two quotas are two failures.
+        let fingerprint = |note: &str| {
+            let events = [(
+                event_about("e1", REPLICASET, "FailedCreate", note, (t(0), t(0), 1)),
+                Some(owner("Deployment", "checkout")),
+            )];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            tracker
+                .tick(t(0), collect_signals(&[], &views(&events), t(0), FRESH))
+                .first()
+                .expect("a D011 incident")
+                .fingerprint
+                .clone()
+        };
+        let refusal = |quota: &str| {
+            format!(
+                "Error creating: pods \"checkout-7fffb9bf5c-d98v6\" is forbidden: exceeded \
+                 quota: {quota}, requested: pods=1, used: pods=3, limited: pods=3"
+            )
+        };
+        assert_ne!(
+            fingerprint(&refusal("compute-budget")),
+            fingerprint(&refusal("team-pods"))
+        );
+    }
 }
