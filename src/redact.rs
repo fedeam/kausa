@@ -80,6 +80,7 @@ pub fn object_kind(kind: &str) -> &'static str {
         "CronJob" => "CronJob",
         "Pod" => "Pod",
         "PersistentVolumeClaim" => "PersistentVolumeClaim",
+        "HorizontalPodAutoscaler" => "HorizontalPodAutoscaler",
         _ => "Object",
     }
 }

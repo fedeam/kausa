@@ -159,8 +159,9 @@ pub fn collect_signals(
             continue;
         }
         let regarding = &record.regarding;
-        // An event about an object that is not a Pod (`D008`, `D011`) needs no Pod: it is about the
-        // object's top-level owner, or the object itself when there is none or it is not known.
+        // An event about an object that is not a Pod (`D008`, `D011` to `D013`) needs no Pod: it is
+        // about the object's top-level owner, or the object itself when there is none or it is not
+        // known (a claim, an autoscaler).
         let (owner, pod) = if regarding.kind != "Pod" {
             let fallback = OwnerRef {
                 api_version: regarding.api_version.clone(),

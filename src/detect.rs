@@ -36,6 +36,9 @@ pub enum Detection {
     /// `D012`: a PersistentVolumeClaim cannot be provisioned (a StorageClass that does not exist,
     /// or a request the provisioner refuses).
     ClaimProvisioning,
+    /// `D013`: a HorizontalPodAutoscaler cannot get its metrics, compute a replica count from
+    /// them, or read its target's scale (no metrics API, a target that does not exist).
+    AutoscalerMetrics,
 }
 
 impl Detection {
@@ -53,6 +56,7 @@ impl Detection {
             Detection::SandboxCreate => "D010",
             Detection::PodCreate => "D011",
             Detection::ClaimProvisioning => "D012",
+            Detection::AutoscalerMetrics => "D013",
         }
     }
 
@@ -70,6 +74,7 @@ impl Detection {
             Detection::SandboxCreate => "pod sandbox cannot be created",
             Detection::PodCreate => "workload cannot create pods",
             Detection::ClaimProvisioning => "volume claim cannot be provisioned",
+            Detection::AutoscalerMetrics => "autoscaler cannot get metrics",
         }
     }
 
@@ -166,9 +171,9 @@ pub fn detect_pod_container(pod: &PodRecord, container: &ContainerRecord) -> Opt
     }
 }
 
-/// The detection that a Warning event matches, if any. Events about Pods, and about the controllers
-/// of their workloads; scheduling failures come from the Pod's condition instead
-/// (`detect_unschedulable`).
+/// The detection that a Warning event matches, if any. Events about Pods, about the controllers of
+/// their workloads, about PersistentVolumeClaims and about HorizontalPodAutoscalers; scheduling
+/// failures come from the Pod's condition instead (`detect_unschedulable`).
 pub fn detect_event(event: &EventRecord) -> Option<Detection> {
     match (event.regarding.kind.as_str(), event.reason.as_str()) {
         ("Pod", "Unhealthy") => Some(Detection::ProbeFailure),
@@ -194,6 +199,21 @@ pub fn detect_event(event: &EventRecord) -> Option<Detection> {
         // its volume (seen on kind, Kubernetes 1.37, with a StorageClass that does not exist and
         // with an access mode the provisioner refuses, on 2026-10-28).
         ("PersistentVolumeClaim", "ProvisioningFailed") => Some(Detection::ClaimProvisioning),
+        // The HorizontalPodAutoscaler controller (pkg/controller/podautoscaler/horizontal.go)
+        // emits these on the autoscaler when it cannot read a metric, compute a replica count from
+        // the metrics, or read its target's scale; a failed rescale after that is not one of them
+        // (seen on kind, Kubernetes 1.37, with no metrics API and with a target that does not
+        // exist, on 2026-10-28).
+        (
+            "HorizontalPodAutoscaler",
+            "FailedGetResourceMetric"
+            | "FailedGetContainerResourceMetric"
+            | "FailedGetPodsMetric"
+            | "FailedGetObjectMetric"
+            | "FailedGetExternalMetric"
+            | "FailedComputeMetricsReplicas"
+            | "FailedGetScale",
+        ) => Some(Detection::AutoscalerMetrics),
         _ => None,
     }
 }
@@ -246,13 +266,14 @@ mod tests {
             Detection::SandboxCreate,
             Detection::PodCreate,
             Detection::ClaimProvisioning,
+            Detection::AutoscalerMetrics,
         ];
         let ids: Vec<_> = all.iter().map(|d| d.id()).collect();
         assert_eq!(
             ids,
             [
                 "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008", "D009", "D010",
-                "D011", "D012"
+                "D011", "D012", "D013"
             ]
         );
     }

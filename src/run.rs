@@ -546,7 +546,8 @@ type PodEntry = (PodRecord, OwnerRef, bool);
 struct State {
     pods: HashMap<String, PodEntry>,
     /// Only Warning events that a detection matches, with the top-level owner of the object an
-    /// event is about when that is not a Pod (the Job's for `D008`, the controller's for `D011`).
+    /// event is about when that is not a Pod (the Job's for `D008`, the controller's for `D011`,
+    /// the claim or the autoscaler itself for `D012` and `D013`).
     events: HashMap<String, (EventRecord, Option<OwnerRef>)>,
     /// The UIDs seen during the open relist of each watch, to drop the ones that disappeared
     /// from that watch.
