@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-29
+
+A namespaced install mode, the explanation history and notifications to one webhook, the last two
+off by default. Breaking: the chart's `rbac.scope` is required on every install and upgrade.
+
 ### Added
 
 - A namespaced install mode ([0013. Offer a namespaced install mode: one watch pair and one Role
@@ -150,6 +155,7 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/fedeam/kausa/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fedeam/kausa/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fedeam/kausa/releases/tag/v0.1.0

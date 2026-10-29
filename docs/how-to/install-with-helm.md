@@ -3,16 +3,18 @@
 Install the released chart, which runs the published image, first in dry-run and then pointed at
 a model.
 
-Status as of 2026-10-28: the v0.1.0 chart from the GitHub release was installed in dry-run in kind
+Status as of 2026-10-29: the v0.1.0 chart from the GitHub release was installed in dry-run in kind
 (Kubernetes v1.37) with the published image, on 2026-10-28. The chart in the repository was
 checked with a server-side dry run against Kubernetes v1.36, installed in dry-run on a Raspberry
 Pi 4 node, and installed with an endpoint by the kind test (`tests/e2e/run.sh`, passed on
-2026-10-27). The chart in the repository adds the required `rbac.scope` and the namespaced scope,
-which no release has yet; both scopes passed the kind test on 2026-10-28 ([0013. Offer a
+2026-10-27). The v0.3.0 chart (2026-10-29) adds the required `rbac.scope` and the namespaced
+scope; both scopes passed the kind test on 2026-10-28 ([0013. Offer a
 namespaced install mode: one watch pair and one Role per listed namespace, and nothing
 cluster-wide](../adr/0013-namespaced-install-mode.md)). It also adds the explanation history
-(`history.enabled`, off by default), which no release has yet either; the kind test installed it
-in both scopes on 2026-10-28 ([Keep the history of explanations](#keep-the-history-of-explanations)).
+(`history.enabled`, off by default), which the kind test installed
+in both scopes on 2026-10-28 ([Keep the history of explanations](#keep-the-history-of-explanations)),
+and notifications (`notifications.enabled`, off by default; [Send notifications to Slack, Telegram
+or a webhook](send-notifications.md)).
 
 ## Before you start
 
@@ -34,7 +36,7 @@ in both scopes on 2026-10-28 ([Keep the history of explanations](#keep-the-histo
    image's signature and provenance and the chart's checksum with cosign and the GitHub CLI.
 
    ```sh
-   CHART=https://github.com/fedeam/kausa/releases/download/v0.2.0/kausa-0.2.0.tgz
+   CHART=https://github.com/fedeam/kausa/releases/download/v0.3.0/kausa-0.3.0.tgz
    ```
 
 2. **Create the namespace and, for a hosted endpoint, the API key's Secret.** kausa never reads it
@@ -113,9 +115,8 @@ and the chart grants it a Role and a RoleBinding in each of them and nothing clu
 ClusterRole, no access to `kube-system`, to other namespaces or to its own namespace unless it is
 listed ([Permissions](../reference/permissions.md)).
 
-Status as of 2026-10-28, no release has this scope yet: it needs the chart and the image of the
-same commit ([Run your own build](#run-your-own-build)). The v0.2.0 image refuses `--namespace`,
-and the v0.2.0 chart ignores `rbac` and creates a ClusterRole.
+Status as of 2026-10-29: v0.3.0 is the first release with this scope. The v0.2.0 image refuses
+`--namespace`, and the v0.2.0 chart ignores `rbac` and creates a ClusterRole.
 
 1. **Create the namespaces first.** The chart creates none, and Helm cannot create a Role in a
    namespace that does not exist.
@@ -166,9 +167,8 @@ and the v0.2.0 chart ignores `rbac` and creates a ClusterRole.
 An Event keeps a short version of the explanation, cut to 1024 bytes, and the API server deletes
 it after an hour by default. With `history.enabled=true`, kausa also keeps each incident's whole
 explanations in an Explanation object in its namespace, for `history.days` days (7 by default, 1
-to 30) ([Explanation resource](../reference/explanation-resource.md)). Status as of 2026-10-28,
-no release has it: it needs the chart and the image of the same commit ([Run your own
-build](#run-your-own-build)).
+to 30) ([Explanation resource](../reference/explanation-resource.md)). Status as of 2026-10-29:
+v0.3.0 is the first release with it.
 
 1. **Turn it on** with an endpoint and without `dryRun`; the history is written for explained
    incidents only:

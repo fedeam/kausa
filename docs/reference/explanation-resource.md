@@ -4,7 +4,7 @@ The custom resource in which kausa keeps each incident's full explanations with 
 CustomResourceDefinition, its schema and limits, the objects kausa writes and deletes, and what is
 never stored.
 
-Status as of 2026-10-28: in the code and the chart, not in a release yet; off by default. The
+Status as of 2026-10-29: released in v0.3.0; off by default. The
 kind test (`tests/e2e/run.sh`) installs it with `history.enabled=true` in both `rbac.scope`s and
 reads every field back, and the hypotheses of the decision were checked in kind on 2026-10-28
 ([2026-10-28 — First release](../journal/2026-10-28-first-release.md), "the hypotheses of the

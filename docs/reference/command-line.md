@@ -2,9 +2,9 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-29: what the code of v0.2.0 does, with the namespaced mode, the
-explanation history and the notifications planned for v0.3 (`--namespace`, `--history`,
-`--history-days` and the `--notify-*` flags, not in a release yet). `kausa
+Status as of 2026-10-29: what v0.3.0 does, with the namespaced mode, the
+explanation history and the notifications it added (`--namespace`, `--history`,
+`--history-days` and the `--notify-*` flags). `kausa
 run` detects and groups failures and logs incidents; with `--endpoint` it explains each one within
 a call budget, reuses explanations of repeated incidents, and writes the explanation as an Event
 on the failing workload; with `--dry-run` it logs the request instead; with `--metrics-address` it

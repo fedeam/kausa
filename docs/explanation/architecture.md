@@ -15,8 +15,8 @@ Raspberry Pi 4: about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)). This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
-incident](../adr/0001-scope-and-positioning.md). Status as of 2026-10-28, the namespaced mode
-planned for v0.3 is in the code, not in a release yet ([0013. Offer a namespaced install mode: one watch pair
+incident](../adr/0001-scope-and-positioning.md). Status as of 2026-10-29, the namespaced mode
+is released in v0.3.0 ([0013. Offer a namespaced install mode: one watch pair
 and one Role per listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)).
 
 ## Pipeline
@@ -211,8 +211,7 @@ produces the same incident, the same fingerprint and the same request bytes.
   is the summary, `Likely cause:` and the numbered steps, cut at a UTF-8 character boundary with an
   ellipsis when it does not fit.
 - **The full explanation** goes to kausa's own log, with real names mapped back.
-- **An Explanation beside the Event**, with `--history` (off by default; in the code and the
-  chart, not in a release yet): the whole text, not cut to 1024 bytes and not deleted after an
+- **An Explanation beside the Event**, with `--history` (off by default; since v0.3.0): the whole text, not cut to 1024 bytes and not deleted after an
   hour, in an `Explanation` object named `kausa.<fingerprint>` in the failing workload's namespace,
   so the Event's name leads to it. It keeps up to five distinct texts with their counts and times,
   is written after the Event and independently of it (a failure of one never stops the other),
@@ -220,8 +219,7 @@ produces the same incident, the same fingerprint and the same request bytes.
   reads its object back as untrusted input and never logs or sends what it read ([Explanation
   resource](../reference/explanation-resource.md), [0014. Keep each incident's full explanations
   in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md)).
-- **A notification**, with `--notify-url-file` (off by default; in the code and the chart, not in
-  a release yet): each explanation the model wrote is posted to one webhook, as a documented
+- **A notification**, with `--notify-url-file` (off by default; since v0.3.0): each explanation the model wrote is posted to one webhook, as a documented
   `json` body, a Slack incoming webhook's plain text or a Telegram `sendMessage`, with the real
   names of the namespace and the top-level owner only; every other name stays a placeholder
   (`Redactor::restore_only`). It is queued after the Event, never for a skip, and sent by its own
