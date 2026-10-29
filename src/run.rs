@@ -9,7 +9,9 @@
 //! Jobs, `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`, the Event writes and, with
 //! `--history`, the Explanation writes and their sweep, at start and hourly in the explanation
 //! slot (docs/reference/permissions.md, docs/adr/0014-explanation-history.md).
-//! `--metrics-address` serves the counters (`metrics.rs`).
+//! With `--notify-url-file`, each new explanation is also posted to the webhook, one at a time,
+//! from a slot of its own beside the explanation's (`notify.rs`,
+//! docs/adr/0015-notifications.md). `--metrics-address` serves the counters (`metrics.rs`).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -45,6 +47,7 @@ use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals};
 use crate::log;
 use crate::metrics::{self, Metrics};
+use crate::notify::{self, Notifier};
 use crate::owner::{Hop, OwnerLookup, top_owner};
 use crate::record::{EventRecord, OwnerRef, PodRecord, controller_of};
 
@@ -279,6 +282,15 @@ fn watched(namespaces: &[String]) -> serde_json::Value {
     json!(sorted)
 }
 
+/// The `notifications` field of the `started` line: the format and the webhook's host (never its
+/// path, query or token), or `null` with notifications off.
+fn notifications(notifier: Option<&Notifier>) -> serde_json::Value {
+    notifier.map_or(
+        serde_json::Value::Null,
+        |n| json!({"format": n.format().name(), "host": n.host()}),
+    )
+}
+
 /// Runs until `SIGTERM` or `SIGINT`.
 pub async fn run(options: Options) -> Result<(), RunError> {
     let client = client()
@@ -295,6 +307,9 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             "server": version.git_version,
             "settle_seconds": options.settle.as_secs(),
             "namespaces": watched(&options.namespaces),
+            "notifications": notifications(
+                options.explain.as_ref().and_then(|s| s.notify.as_ref())
+            ),
         }),
     )?;
 
@@ -327,6 +342,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             .filter(|_| settings.model.is_some())
             .map(|days| History::new(client.clone(), days)),
         metrics: &metrics,
+        notifications: RefCell::new(VecDeque::new()),
     });
     let mut readiness = Readiness::new(&options.namespaces);
     let mut pods = watches::<Pod>(&client, &options.namespaces, &watcher::Config::default());
@@ -341,6 +357,8 @@ pub async fn run(options: Options) -> Result<(), RunError> {
     let mut ticker = tokio::time::interval(TICK);
     let mut queue: VecDeque<Work> = VecDeque::new();
     let mut running: Option<Explaining<'_>> = None;
+    // The notification being sent, beside the explanation slot: a slow webhook never holds it.
+    let mut notifying: Option<Notifying<'_>> = None;
     // Jobs whose first call failed with a transient error, and when they may be tried again.
     let mut delayed: Vec<(Instant, Work)> = Vec::new();
     let mut connections = FuturesUnordered::new();
@@ -383,6 +401,17 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 }
                 None => {}
             }
+            if let Some(notifier) = settings.notify.as_ref()
+                && notifying.is_none()
+            {
+                let next = {
+                    let dedup = shared.dedup.borrow();
+                    notify::take_next(&mut shared.notifications.borrow_mut(), &dedup)
+                };
+                if let Some(item) = next {
+                    notifying = Some(Box::pin(notify::deliver(notifier, item, shared)));
+                }
+            }
         }
         tokio::select! {
             result = async { running.as_mut().expect("guarded by the condition").await },
@@ -391,6 +420,12 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 if let Some(job) = result? {
                     delayed.push((Instant::now() + explain::RETRY_DELAY, job));
                 }
+            }
+            result = async { notifying.as_mut().expect("guarded by the condition").await },
+                if notifying.is_some() => {
+                notifying = None;
+                // A failed send is only logged and counted; the error is kausa's own log.
+                result?;
             }
             accepted = async { listener.as_ref().expect("guarded by the condition").accept().await },
                 if listener.is_some() && connections.len() < MAX_CONNECTIONS => match accepted {
@@ -798,6 +833,10 @@ impl State {
 /// What holds the explanation slot: an explanation, which ends with a job to retry if its call
 /// failed transiently, or a sweep of the history, which ends with none.
 type Explaining<'a> = Pin<Box<dyn Future<Output = io::Result<Option<Work>>> + 'a>>;
+
+/// What holds the notification slot: the delivery of one notification, with its retry and the
+/// least interval before the next.
+type Notifying<'a> = Pin<Box<dyn Future<Output = io::Result<()>> + 'a>>;
 
 /// What takes the free explanation slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1584,6 +1623,37 @@ mod tests {
         let given = ["web".to_owned(), "api".to_owned(), "shop".to_owned()];
         assert_eq!(watched(&given), json!(["api", "shop", "web"]));
         assert_eq!(given, ["web", "api", "shop"]);
+    }
+
+    #[test]
+    fn started_names_the_notification_format_and_host_only() {
+        use crate::notification::ChatId;
+        use crate::notify::Format;
+
+        assert_eq!(notifications(None), serde_json::Value::Null);
+        // A visibly fake token, built to look like a Telegram bot token.
+        let token = format!("123456789:{}", "FAKE-token-for-tests-only-000000000");
+        let text = format!("https://api.example.com:8443/bot{token}/sendMessage?x=1");
+        let format = Format::Telegram(ChatId::Id(-1001234567890));
+        let url = notify::check_url(&text, &format, false).expect("a valid URL");
+        let notifier = Notifier::new(url, format, None, false).expect("a client");
+        let field = notifications(Some(&notifier));
+        assert_eq!(
+            field,
+            json!({"format": "telegram", "host": "api.example.com"})
+        );
+        assert!(!field.to_string().contains(&token));
+
+        let url = notify::check_url("https://hooks.example.com/a/b", &Format::Json, false)
+            .expect("a valid URL");
+        let bearer = Some("FAKE-bearer-for-tests-only".to_owned());
+        let notifier = Notifier::new(url, Format::Json, bearer, false).expect("a client");
+        let field = notifications(Some(&notifier));
+        assert_eq!(
+            field,
+            json!({"format": "json", "host": "hooks.example.com"})
+        );
+        assert!(!field.to_string().contains("FAKE-bearer"));
     }
 
     // Acceptance tests for the history sweep (docs/adr/0014-explanation-history.md), written

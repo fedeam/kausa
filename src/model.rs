@@ -161,7 +161,7 @@ fn error_detail(body: &[u8]) -> String {
 }
 
 /// A reqwest error without its URL, which may carry the base URL's user information.
-fn without_url(error: &reqwest::Error) -> String {
+pub(crate) fn without_url(error: &reqwest::Error) -> String {
     let mut text = error.to_string();
     if let Some(url) = error.url() {
         text = text.replace(url.as_str(), "<endpoint>");

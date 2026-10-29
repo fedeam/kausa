@@ -46,4 +46,14 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     {{- end }}
+    {{- if include "kausa.notifies" . }}
+    {{- $npNotify := .Values.networkPolicy.notifications | default dict }}
+    {{- /* Always ports: TCP 443 when missing or empty, never every port to the peers. */}}
+    {{- $ports := $npNotify.ports | default (list (dict "port" 443 "protocol" "TCP")) }}
+    # The notification webhook.
+    - to:
+        {{- toYaml $npNotify.to | nindent 8 }}
+      ports:
+        {{- toYaml $ports | nindent 8 }}
+    {{- end }}
 {{- end }}

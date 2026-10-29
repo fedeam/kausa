@@ -60,6 +60,27 @@ history:
   readers:
     # Let the built-in view, edit and admin roles read Explanations, as they read Events.
     aggregate: true
+# Post each new explanation to one webhook, as JSON, a Slack message or a Telegram message
+# (docs/adr/0015-notifications.md). Only the documented fields of each new explanation are sent.
+# Needs model.endpoint and dryRun false; with networkPolicy.enabled, also
+# networkPolicy.notifications.to.
+notifications:
+  enabled: false
+  # json, slack or telegram.
+  format: json
+  # Required when enabled: a Secret you create in kausa's namespace, which holds the webhook URL.
+  # The URL is a secret, never a value here: the kubelet mounts the Secret as files (kausa never
+  # reads Secrets through the API).
+  existingSecret: ""
+  # The key of the Secret that holds the whole webhook URL.
+  urlKey: url
+  # json only, optional: the key of the Secret that holds a bearer token for the webhook.
+  tokenKey: ""
+  # Required with telegram: the chat, an integer (for example "-1001234567890") or @ and a
+  # channel's username.
+  telegramChatId: ""
+  # Allow a plain http:// webhook: only for one in the cluster or on the same private network.
+  allowHttp: false
 # How long a failure must persist before it is an incident, in seconds (0-3600).
 settleSeconds: 60
 # The call and token budget, and how long an explanation is reused for a repeated incident.
@@ -98,8 +119,9 @@ resources:
     cpu: 200m
     memory: 128Mi
 
-# Limit kausa's traffic with a NetworkPolicy: egress to DNS, the API server and the model
-# endpoint only, and ingress to the metrics port only. Needs a CNI that enforces NetworkPolicy.
+# Limit kausa's traffic with a NetworkPolicy: egress to DNS, the API server, the model endpoint
+# and, with notifications, the webhook only, and ingress to the metrics port only. Needs a CNI
+# that enforces NetworkPolicy.
 networkPolicy:
   enabled: false
   # The API server's addresses and port, as seen from Pods: `kubectl get endpointslices -n default
@@ -113,6 +135,15 @@ networkPolicy:
   endpoint:
     to: []
     ports: []
+  # NetworkPolicy peers (to:) and ports of the notification webhook, required with
+  # notifications.enabled. NetworkPolicy cannot select a hostname: a hosted receiver such as Slack
+  # or Telegram needs an ipBlock, a CNI with FQDN policies or an egress proxy.
+  notifications:
+    to: []
+    # TCP 443 when missing or empty: unlike endpoint.ports, there is no every-port form.
+    ports:
+      - port: 443
+        protocol: TCP
   # NetworkPolicy peers (from:) allowed to reach the metrics port; empty allows any.
   metricsFrom: []
 

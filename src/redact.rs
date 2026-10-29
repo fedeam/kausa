@@ -180,6 +180,20 @@ impl Redactor {
     /// name is never replaced again. A placeholder capitalized by the model (`Pod-1`) is restored
     /// too. Placeholders of other rules (`<redacted:…>`, `host-N`) stay.
     pub fn restore(&self, text: &str) -> String {
+        self.restore_if(text, |_| true)
+    }
+
+    /// Like `restore`, but maps a placeholder back only when its real name is one of `names`
+    /// (for a notification, the namespace and the top-level owner: docs/adr/0015-notifications.md).
+    /// Every other placeholder stays, so the names of Pods, containers, nodes, service accounts
+    /// and private images never leave in a notification.
+    pub fn restore_only(&self, text: &str, names: &[&str]) -> String {
+        self.restore_if(text, |real| names.contains(&real))
+    }
+
+    /// Maps each placeholder in `text` whose real name passes `keep` back to that name, in one
+    /// pass; the rest stay as they are.
+    fn restore_if(&self, text: &str, keep: impl Fn(&str) -> bool) -> String {
         PLACEHOLDER
             .replace_all(text, |c: &Captures<'_>| {
                 let found = &c[0];
@@ -188,6 +202,7 @@ impl Redactor {
                 self.names
                     .iter()
                     .find(|(_, placeholder)| *placeholder == lowered)
+                    .filter(|(real, _)| keep(real))
                     .map_or_else(|| found.to_owned(), |(real, _)| real.clone())
             })
             .into_owned()
@@ -1003,5 +1018,127 @@ mod tests {
     fn redaction_is_deterministic() {
         let line = "db.shop.svc.cluster.local at 192.0.2.10 with token=abc";
         assert_eq!(redact(line), redact(line));
+    }
+
+    // Acceptance tests for notifications (docs/adr/0015-notifications.md), written before the
+    // code. They use `Redactor::restore_only(&self, text: &str, names: &[&str]) -> String`, which
+    // maps a placeholder back only when its real name is one of `names`.
+
+    /// A redactor with the names `context::build` registers for a Deployment `web` in `shop`:
+    /// its Pod, container, node, service account and private image.
+    fn incident_redactor() -> Redactor {
+        let mut r = Redactor::new();
+        assert_eq!(r.name(NameKind::Namespace, "shop"), "namespace-1");
+        assert_eq!(
+            r.name(NameKind::Object("Deployment"), "web"),
+            "deployment-1"
+        );
+        assert_eq!(r.name(NameKind::Pod, "web-7d9c8b6f4d-2xkqp"), "pod-1");
+        assert_eq!(r.name(NameKind::Container, "server"), "container-1");
+        assert_eq!(r.name(NameKind::Node, "worker-7"), "node-1");
+        assert_eq!(
+            r.name(NameKind::ServiceAccount, "web-runner"),
+            "serviceaccount-1"
+        );
+        assert_eq!(
+            r.image("registry.example.com/team/web:1.4.2"),
+            "registry-1/image-1:1.4.2"
+        );
+        r
+    }
+
+    const ANSWER: &str = "deployment-1 in namespace-1 crashes: pod-1 on node-1 runs container-1 \
+                          as serviceaccount-1 from registry-1/image-1:1.4.2";
+
+    #[test]
+    fn restore_only_maps_back_the_namespace_and_the_owner_and_nothing_else() {
+        let r = incident_redactor();
+        assert_eq!(
+            r.restore_only(ANSWER, &["shop", "web"]),
+            "web in shop crashes: pod-1 on node-1 runs container-1 as serviceaccount-1 from \
+             registry-1/image-1:1.4.2"
+        );
+        // The full restore, for the Event and the log, maps every name back.
+        assert_eq!(
+            r.restore(ANSWER),
+            "web in shop crashes: web-7d9c8b6f4d-2xkqp on worker-7 runs server as web-runner \
+             from registry.example.com/team/web:1.4.2"
+        );
+    }
+
+    #[test]
+    fn restore_only_maps_capitalized_placeholders_back_too() {
+        let r = incident_redactor();
+        assert_eq!(
+            r.restore_only(
+                "Deployment-1 in Namespace-1; Pod-1 on Node-1",
+                &["shop", "web"]
+            ),
+            "web in shop; Pod-1 on Node-1"
+        );
+    }
+
+    #[test]
+    fn restore_only_maps_a_bare_pod_owner_back() {
+        let mut r = Redactor::new();
+        r.name(NameKind::Namespace, "shop");
+        assert_eq!(r.name(NameKind::Object("Pod"), "solo"), "pod-1");
+        assert_eq!(r.name(NameKind::Pod, "solo"), "pod-1");
+        assert_eq!(r.name(NameKind::Container, "main"), "container-1");
+        assert_eq!(r.name(NameKind::Node, "worker-7"), "node-1");
+        assert_eq!(
+            r.restore_only(
+                "Pod-1 in namespace-1 on node-1: container-1 exits",
+                &["shop", "solo"]
+            ),
+            "solo in shop on node-1: container-1 exits"
+        );
+    }
+
+    #[test]
+    fn restore_only_maps_a_container_named_like_the_owner_to_the_owner() {
+        let mut r = Redactor::new();
+        r.name(NameKind::Namespace, "shop");
+        r.name(NameKind::Object("Deployment"), "web");
+        // The same real name gets the same placeholder.
+        assert_eq!(r.name(NameKind::Container, "web"), "deployment-1");
+        assert_eq!(
+            r.restore_only("container deployment-1 of deployment-1", &["shop", "web"]),
+            "container web of web"
+        );
+    }
+
+    #[test]
+    fn restore_only_leaves_every_other_placeholder() {
+        let r = incident_redactor();
+        assert_eq!(r.restore_only(ANSWER, &[]), ANSWER);
+        assert_eq!(r.restore_only(ANSWER, &["not-registered"]), ANSWER);
+        // Unknown placeholders and the markers of other rules stay.
+        assert_eq!(
+            r.restore_only(
+                "pod-9, host-1 and <redacted:ip> in namespace-1",
+                &["shop", "web"]
+            ),
+            "pod-9, host-1 and <redacted:ip> in shop"
+        );
+        // A name that is registered but not listed stays a placeholder.
+        assert_eq!(
+            r.restore_only(ANSWER, &["shop", "web", "worker-7"]),
+            "web in shop crashes: pod-1 on worker-7 runs container-1 as serviceaccount-1 from \
+             registry-1/image-1:1.4.2"
+        );
+    }
+
+    #[test]
+    fn restore_only_is_one_pass() {
+        let mut r = Redactor::new();
+        // A namespace whose real name looks like a node's placeholder.
+        assert_eq!(r.name(NameKind::Namespace, "node-1"), "namespace-1");
+        r.name(NameKind::Object("Deployment"), "web");
+        assert_eq!(r.name(NameKind::Node, "worker-7"), "node-1");
+        assert_eq!(
+            r.restore_only("namespace-1 and node-1", &["node-1", "web"]),
+            "node-1 and node-1"
+        );
     }
 }

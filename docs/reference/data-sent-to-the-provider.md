@@ -3,7 +3,7 @@
 Exactly what a kausa request to the language model endpoint contains, and what it never
 contains.
 
-Status as of 2026-10-28: **implemented** (second implementation weekend, `src/context.rs`,
+Status as of 2026-10-29: **implemented** (second implementation weekend, `src/context.rs`,
 `src/redact.rs`, `src/prompt.rs`). Why it works this way: [0008. Send only allowlisted, redacted
 data to one OpenAI-compatible endpoint](../adr/0008-data-leaving-the-cluster.md) and, for the
 Pods' status reason and message, [0016. Send each Pod's status reason and message to the model,
@@ -16,6 +16,12 @@ model](../how-to/try-with-a-local-model.md)).
 One endpoint, the base URL given with `--endpoint`, with `POST <base URL>/chat/completions`.
 Nothing else: no telemetry, no update checks, no fallback provider. With a model served inside the
 cluster or the private network, nothing leaves it.
+
+The model endpoint is the only destination of an incident's context. With notifications on
+(`--notify-url-file`, off by default), a second, optional destination, the webhook, receives each
+new explanation with the real names of the namespace and the top-level owner, the rule and the
+fingerprint, and nothing of this page's request: [Data sent in
+notifications](data-sent-in-notifications.md).
 
 ## What one request contains
 
@@ -71,5 +77,10 @@ estimate of the request, before it is sent. The model gets no tools and no funct
 - With `--history`, the whole explanation, with real names, in an Explanation object in the
   failing workload's namespace ([Explanation resource](explanation-resource.md)). Nothing stored
   there is sent to the provider or read back into a request, the cache, an Event or the log.
+- With notifications on, everything but the fields of [Data sent in
+  notifications](data-sent-in-notifications.md): the log lines, event and status messages, the
+  request and its context, the pseudonym mapping and every real name but the namespace's and the
+  top-level owner's stay in the cluster; the webhook gets the explanation, which can repeat
+  redacted log text.
 - The pseudonym mapping and the deduplication cache, in kausa's memory only (fingerprints also
   appear in the log and in the Events' names); nothing is written to disk.

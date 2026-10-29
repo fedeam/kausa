@@ -66,6 +66,16 @@ CustomResourceDefinition and every Explanation, this release's too; uninstalling
 does not delete its Explanations.
 {{- end }}
 {{- end }}
+{{- if include "kausa.notifies" . }}
+{{- $notify := .Values.notifications | default dict }}
+
+kausa posts each new explanation to a webhook (notifications.format={{ include "kausa.notifyFormat" . }}). The webhook
+URL is in the key {{ $notify.urlKey | default "url" }} of the Secret {{ $notify.existingSecret }}{{ with $notify.tokenKey }}, and a bearer token in the key {{ . }}{{ end }}.
+A failed notification counts in kausa_notifications_total{outcome="failed"} and logs a
+"notification failed" line:
+
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "kausa.fullname" . }} | grep 'notification failed'
+{{- end }}
 
 rbac.scope must be set on every helm upgrade: keep it in a values file, or upgrade with
 --reuse-values. An upgrade without it fails.

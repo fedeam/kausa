@@ -62,10 +62,17 @@ impl Budget {
     }
 }
 
-/// A stored explanation and when it was stored.
+/// A stored explanation and when it was stored. With notifications on
+/// (docs/adr/0015-notifications.md), the entry also keeps the notification's version of the
+/// explanation, which restores only the namespace and the top-level owner, and whether that
+/// version was sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cached {
     pub explanation: Explanation,
+    /// The notification's text, `None` with notifications off.
+    pub notice: Option<Explanation>,
+    /// Whether the webhook acknowledged `notice` with a `2xx`.
+    pub notified: bool,
     pub stored_at: Instant,
 }
 
@@ -87,8 +94,9 @@ impl Dedup {
         }
     }
 
-    /// The explanation stored for `fingerprint`, if it has not expired at `now`.
-    pub fn get(&mut self, fingerprint: &str, now: Instant) -> Option<Explanation> {
+    /// The entry stored for `fingerprint`, if it has not expired at `now`; an expired entry is
+    /// removed.
+    pub fn get(&mut self, fingerprint: &str, now: Instant) -> Option<Cached> {
         let fresh = self
             .entries
             .get(fingerprint)
@@ -97,10 +105,18 @@ impl Dedup {
             self.entries.remove(fingerprint);
             return None;
         }
-        self.entries.get(fingerprint).map(|c| c.explanation.clone())
+        self.entries.get(fingerprint).cloned()
     }
 
-    pub fn put(&mut self, fingerprint: &str, explanation: Explanation, now: Instant) {
+    /// Stores `explanation` and, with notifications on, its `notice`. The entry starts not
+    /// notified, also when it replaces one: a new model call wrote it.
+    pub fn put(
+        &mut self,
+        fingerprint: &str,
+        explanation: Explanation,
+        notice: Option<Explanation>,
+        now: Instant,
+    ) {
         if self.capacity == 0 {
             return;
         }
@@ -118,9 +134,35 @@ impl Dedup {
             fingerprint.to_owned(),
             Cached {
                 explanation,
+                notice,
+                notified: false,
                 stored_at: now,
             },
         );
+    }
+
+    /// The entry stored for `fingerprint`, expired or not; removes nothing.
+    pub fn peek(&self, fingerprint: &str) -> Option<&Cached> {
+        self.entries.get(fingerprint)
+    }
+
+    /// Marks the entry of `fingerprint` notified, only if it still stores `notice`: an evicted
+    /// entry, or one replaced by another text, is left as it is. Returns whether it is marked.
+    pub fn mark_notified(&mut self, fingerprint: &str, notice: &Explanation) -> bool {
+        match self.entries.get_mut(fingerprint) {
+            Some(cached) if cached.notice.as_ref() == Some(notice) => {
+                cached.notified = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `notice` was already sent for `fingerprint`: the entry, expired or not, stores it
+    /// and is notified.
+    pub fn already_sent(&self, fingerprint: &str, notice: &Explanation) -> bool {
+        self.peek(fingerprint)
+            .is_some_and(|c| c.notified && c.notice.as_ref() == Some(notice))
     }
 }
 
@@ -188,8 +230,11 @@ mod tests {
     #[test]
     fn explanations_are_reused_until_they_expire() {
         let mut dedup = Dedup::new(Duration::from_secs(6 * 3600), 10);
-        dedup.put("f1", explanation("a"), t(0));
-        assert_eq!(dedup.get("f1", t(3600)), Some(explanation("a")));
+        dedup.put("f1", explanation("a"), None, t(0));
+        assert_eq!(
+            dedup.get("f1", t(3600)).map(|c| c.explanation),
+            Some(explanation("a"))
+        );
         assert_eq!(dedup.get("f1", t(6 * 3600)), None);
         assert_eq!(dedup.get("f2", t(0)), None);
     }
@@ -197,11 +242,142 @@ mod tests {
     #[test]
     fn the_cache_keeps_its_capacity_by_dropping_the_oldest() {
         let mut dedup = Dedup::new(Duration::from_secs(6 * 3600), 2);
-        dedup.put("a", explanation("a"), t(0));
-        dedup.put("b", explanation("b"), t(1));
-        dedup.put("c", explanation("c"), t(2));
+        dedup.put("a", explanation("a"), None, t(0));
+        dedup.put("b", explanation("b"), None, t(1));
+        dedup.put("c", explanation("c"), None, t(2));
         assert_eq!(dedup.get("a", t(3)), None);
         assert!(dedup.get("b", t(3)).is_some());
         assert!(dedup.get("c", t(3)).is_some());
+    }
+
+    // Acceptance tests for notifications (docs/adr/0015-notifications.md), written before the
+    // code. They use this API, which budget.rs does not have yet:
+    //
+    // - `Cached { explanation, notice: Option<Explanation>, notified: bool, stored_at }`, every
+    //   field `pub`;
+    // - `Dedup::put(&mut self, fingerprint, explanation, notice: Option<Explanation>, now)`, which
+    //   always stores `notified: false`, also when it replaces an entry;
+    // - `Dedup::get(&mut self, fingerprint, now) -> Option<Cached>`: the TTL and the removal of
+    //   today, returning a clone of the entry;
+    // - `Dedup::peek(&self, fingerprint) -> Option<&Cached>`: no TTL, removes nothing;
+    // - `Dedup::mark_notified(&mut self, fingerprint, notice: &Explanation) -> bool`: sets
+    //   `notified` only when the entry exists and stores `Some(notice)`;
+    // - `Dedup::already_sent(&self, fingerprint, notice: &Explanation) -> bool`: the entry stores
+    //   `Some(notice)` and `notified` is true.
+
+    const TTL: Duration = Duration::from_secs(6 * 3600);
+
+    #[test]
+    fn a_stored_entry_keeps_its_notice_and_starts_not_notified() {
+        let mut dedup = Dedup::new(TTL, 10);
+        dedup.put("f", explanation("full"), Some(explanation("narrow")), t(0));
+        let cached = dedup.peek("f").expect("an entry");
+        assert_eq!(cached.explanation, explanation("full"));
+        assert_eq!(cached.notice, Some(explanation("narrow")));
+        assert!(!cached.notified);
+        assert_eq!(cached.stored_at, t(0));
+        let got = dedup.get("f", t(1)).expect("a fresh entry");
+        assert_eq!(got.explanation, explanation("full"));
+        assert_eq!(got.notice, Some(explanation("narrow")));
+        assert!(!got.notified);
+        // Without notifications there is no notice.
+        dedup.put("g", explanation("full"), None, t(0));
+        assert_eq!(dedup.peek("g").expect("an entry").notice, None);
+    }
+
+    #[test]
+    fn a_successful_send_marks_the_entry_that_stores_its_notice() {
+        let mut dedup = Dedup::new(TTL, 10);
+        dedup.put("f", explanation("full"), Some(explanation("narrow")), t(0));
+        assert!(!dedup.already_sent("f", &explanation("narrow")));
+        assert!(dedup.mark_notified("f", &explanation("narrow")));
+        assert!(dedup.peek("f").expect("an entry").notified);
+        assert!(dedup.already_sent("f", &explanation("narrow")));
+        assert!(dedup.get("f", t(1)).expect("a fresh entry").notified);
+        // Marking twice changes nothing.
+        assert!(dedup.mark_notified("f", &explanation("narrow")));
+        assert!(dedup.peek("f").expect("an entry").notified);
+    }
+
+    #[test]
+    fn mark_notified_marks_nothing_for_another_text_or_a_missing_entry() {
+        let mut dedup = Dedup::new(TTL, 10);
+        assert!(!dedup.mark_notified("missing", &explanation("narrow")));
+        assert!(dedup.peek("missing").is_none());
+        // An entry stored without a notice is never marked.
+        dedup.put("plain", explanation("full"), None, t(0));
+        assert!(!dedup.mark_notified("plain", &explanation("full")));
+        assert!(!dedup.peek("plain").expect("an entry").notified);
+        // An entry replaced by another text is not marked by the older send.
+        dedup.put("f", explanation("full"), Some(explanation("old")), t(0));
+        dedup.put("f", explanation("full 2"), Some(explanation("new")), t(10));
+        assert!(!dedup.mark_notified("f", &explanation("old")));
+        assert!(!dedup.peek("f").expect("an entry").notified);
+        assert!(!dedup.already_sent("f", &explanation("old")));
+        assert!(!dedup.already_sent("f", &explanation("new")));
+        assert!(dedup.mark_notified("f", &explanation("new")));
+        assert!(!dedup.already_sent("f", &explanation("old")));
+        assert!(dedup.already_sent("f", &explanation("new")));
+    }
+
+    #[test]
+    fn a_replacing_put_starts_not_notified_again() {
+        let mut dedup = Dedup::new(TTL, 10);
+        dedup.put("f", explanation("full"), Some(explanation("narrow")), t(0));
+        assert!(dedup.mark_notified("f", &explanation("narrow")));
+        // The same text stored again (a new model call after the entry was used) is a new entry.
+        dedup.put("f", explanation("full"), Some(explanation("narrow")), t(5));
+        let cached = dedup.peek("f").expect("an entry");
+        assert!(!cached.notified);
+        assert_eq!(cached.stored_at, t(5));
+        assert!(!dedup.already_sent("f", &explanation("narrow")));
+    }
+
+    #[test]
+    fn the_notified_mark_goes_with_its_entry() {
+        // Expiry: get removes the entry, and peek then finds nothing.
+        let mut dedup = Dedup::new(TTL, 10);
+        dedup.put("f", explanation("full"), Some(explanation("narrow")), t(0));
+        assert!(dedup.mark_notified("f", &explanation("narrow")));
+        assert_eq!(dedup.get("f", t(6 * 3600)), None);
+        assert!(dedup.peek("f").is_none());
+        assert!(!dedup.already_sent("f", &explanation("narrow")));
+        // Eviction: the oldest entry goes, with its mark.
+        let mut dedup = Dedup::new(TTL, 1);
+        dedup.put("a", explanation("a"), Some(explanation("na")), t(0));
+        assert!(dedup.mark_notified("a", &explanation("na")));
+        dedup.put("b", explanation("b"), Some(explanation("nb")), t(1));
+        assert!(dedup.peek("a").is_none());
+        assert!(!dedup.already_sent("a", &explanation("na")));
+        assert!(!dedup.mark_notified("a", &explanation("na")));
+        assert!(!dedup.peek("b").expect("an entry").notified);
+    }
+
+    #[test]
+    fn peek_applies_no_ttl_and_removes_nothing() {
+        let mut dedup = Dedup::new(TTL, 10);
+        dedup.put("f", explanation("full"), Some(explanation("narrow")), t(0));
+        assert!(dedup.mark_notified("f", &explanation("narrow")));
+        // Long after the TTL, peek still sees the entry, as often as asked.
+        for _ in 0..3 {
+            let cached = dedup.peek("f").expect("an entry");
+            assert!(cached.notified);
+            assert_eq!(cached.notice, Some(explanation("narrow")));
+        }
+        assert!(dedup.already_sent("f", &explanation("narrow")));
+        // get still expires it.
+        assert_eq!(dedup.get("f", t(7 * 3600)), None);
+        assert!(dedup.peek("f").is_none());
+    }
+
+    #[test]
+    fn with_a_ttl_of_zero_every_occurrence_is_a_new_entry_not_notified() {
+        let mut dedup = Dedup::new(Duration::ZERO, 10);
+        dedup.put("f", explanation("full"), Some(explanation("narrow")), t(0));
+        assert!(dedup.mark_notified("f", &explanation("narrow")));
+        // The next occurrence finds no fresh entry, so it calls the model and stores again.
+        assert_eq!(dedup.get("f", t(0)), None);
+        dedup.put("f", explanation("full"), Some(explanation("narrow")), t(1));
+        assert!(!dedup.already_sent("f", &explanation("narrow")));
     }
 }

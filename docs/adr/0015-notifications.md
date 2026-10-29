@@ -198,3 +198,22 @@ are independent outputs, so they need no CRD; the history object's name can join
   `failing-job`, no context or placeholder in any body, Events despite the `503`, the counters, no
   token in the log and unchanged `kubectl auth can-i`. Slack and Telegram are not tested end to end
   (CI has no secrets); the log check holds only because the fake model never echoes its input.
+
+Update 2026-10-29: [Slack and Telegram for
+notifications](../research/2026-10-28-slack-and-telegram-for-notifications.md) checked this ADR's
+hypotheses against Slack's and Telegram's documentation, and found three things that differ from
+what it assumed; FedeAM decided each one. First, Telegram turns `@username`, `/command` and
+`/command@bot` in plain text into entities, and a mention notifies a member even in a muted group,
+so a tenant could make the model's text ping someone or reach another bot. The Telegram text, and
+only it, now carries U+2060 (WORD JOINER) after every `@` and every `/`: it looks the same, and
+should leave Telegram no mention, bot command or `/command@bot` to detect (a hypothesis until the
+first real post). The joiners are added after the cut, and the cut counts them, so the text, joiners
+included, stays within 4,000 UTF-16 units; with many `@` or `/` it is cut earlier than Slack's.
+Slack's text does not need them, since kausa never sends `link_names`. Whether Telegram still
+detects a URL whose slashes carry a joiner was not checked. Second, Telegram lets a bot send 20
+messages a minute to a group, not one a second, so `telegram` sends start at least 3 s apart; `json`
+and `slack` keep 1 s, Slack's documented rate for incoming webhooks. Third, escaping keeps Slack's
+mentions inert but a plain URL still becomes a link, so the `slack` body adds `"parse": "none"`;
+Slack does not say that webhooks honour it, and one that ignores it is no worse off. The other
+results, and what stays a hypothesis, are in the note; nothing has been posted to a real Slack
+workspace or Telegram chat yet.

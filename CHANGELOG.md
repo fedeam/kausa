@@ -31,6 +31,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Explanation. New counters `kausa_history_writes_total{outcome}`,
   `kausa_history_deleted_total{reason}` and `kausa_history_sweep_errors_total`, and the log lines
   `history write failed`, `history write refused`, `history sweep failed` and `history swept`.
+- Notifications, off by default ([0015. Post each new explanation to one optional webhook, as
+  JSON, Slack or Telegram](docs/adr/0015-notifications.md)): `kausa run --notify-url-file <PATH>`
+  posts each new explanation, after its Event, to the webhook whose URL is in that file, as the
+  documented `json` body (schema `kausa.fedeam.com/notification/v1`), a Slack incoming webhook's
+  plain text or a Telegram `sendMessage` (`--notify-format json|slack|telegram`,
+  `--notify-telegram-chat-id`, `--notify-token-file` for a bearer token with `json`,
+  `--notify-allow-http`). Only the namespace's and the top-level owner's real names are sent;
+  every other name stays a placeholder, and no field holds a log line or the request ([Data sent
+  in notifications](docs/reference/data-sent-in-notifications.md)). Needs `--endpoint`; refused
+  with `--dry-run`. The chart's new `notifications` values (`enabled: false`, `format: json`,
+  `existingSecret`, `urlKey: url`, `tokenKey`, `telegramChatId`, `allowHttp: false`) mount the
+  Secret that holds the URL, and `networkPolicy.notifications` (`to`, `ports`, TCP 443 by default)
+  adds an egress rule; no RBAC change. New counters `kausa_notifications_total{outcome}` and
+  `kausa_notifications_retried_total`, the log lines `notification sent`, `notification retried`,
+  `notification failed` and `notification dropped`, and a `notifications` field in the `started`
+  line. The Slack and Telegram formats are not yet tested against the real services.
 
 ### Changed
 

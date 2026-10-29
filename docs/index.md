@@ -5,9 +5,10 @@ fails: it watches Warning events and Pod status, groups the failures of one work
 incident, sends a redacted context to one OpenAI-compatible model endpoint within a call and token
 budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
 ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
-`--no-events`) and, with `--history` (off by default), its own Explanation objects.
+`--no-events`) and, with `--history` (off by default), its own Explanation objects. With
+`--notify-url-file` (off by default) it also posts each new explanation to one webhook.
 
-Status as of 2026-10-28: **in development** (pre-alpha). The four implementation weekends of v0.1
+Status as of 2026-10-29: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
@@ -26,7 +27,12 @@ The namespaced install mode planned for v0.3 (`kausa run --namespace`, the chart
 ([2026-10-28 — First release](journal/2026-10-28-first-release.md), "the namespaced install
 mode"). The explanation history of 0014 (`kausa run --history`, the chart's `history` values and
 the Explanation resource) is in the code too, off by default and not in a release yet; the kind
-test passed in both scopes with it on 2026-10-28 (same journal, "explanation history").
+test passed in both scopes with it on 2026-10-28 (same journal, "explanation history"). The
+notifications of 0015 (`kausa run --notify-url-file`, the chart's `notifications` values) are in
+the code too, off by default and not in a release yet; the kind test passed in both scopes with
+the `json` format against a fake receiver on 2026-10-29, and the `slack` and `telegram` formats
+have not been posted to a real Slack workspace or Telegram chat yet ([2026-10-29 —
+Notifications](journal/2026-10-29-notifications.md)).
 
 ## Key facts
 
@@ -54,7 +60,9 @@ test passed in both scopes with it on 2026-10-28 (same journal, "explanation his
 - **Changelog:** [`CHANGELOG.md`](../CHANGELOG.md), in the Keep a Changelog format.
 - **Deploy:** none from this repository; users install kausa in their clusters.
 - **Secrets:** none needed to build or test. To run against a hosted provider, its API key, in a
-  Kubernetes Secret of the user's that the kubelet passes to the container. CI uses the automatic
+  Kubernetes Secret of the user's that the kubelet passes to the container; with notifications,
+  the webhook URL and an optional bearer token, in another Secret of the user's, mounted the same
+  way. CI uses the automatic
   job token.
 - **Language:** everything in the repository is in English.
 
@@ -85,13 +93,17 @@ checks](how-to/develop.md).
   model, calls and tokens counted; [Memory and CPU on a Raspberry Pi
   4](research/2026-10-26-resource-use-on-a-raspberry-pi.md); [Thousands of
   Pods](research/2026-10-28-thousands-of-pods.md); [Thirty-two
-  namespaces](research/2026-10-28-32-namespaces.md).
+  namespaces](research/2026-10-28-32-namespaces.md); [Slack and Telegram for
+  notifications](research/2026-10-28-slack-and-telegram-for-notifications.md).
 - [ARCHITECTURE.md](../ARCHITECTURE.md): the map of the code, its invariants and the path of each
   kind of change.
 - [Architecture](explanation/architecture.md): the planned pipeline, the model call, cost
   controls, the Event output and the safety model.
 - [Data sent to the provider](reference/data-sent-to-the-provider.md) and
   [Permissions](reference/permissions.md): what leaves the cluster and what kausa may read.
+- [Data sent in notifications](reference/data-sent-in-notifications.md): what kausa posts to the
+  webhook, in each format, and what it never posts; [Send notifications to Slack, Telegram or a
+  webhook](how-to/send-notifications.md).
 - [Explanation resource](reference/explanation-resource.md): what the history keeps, for how
   long, and what it never stores.
 - [Try kausa against a cluster with a local model](how-to/try-with-a-local-model.md): a

@@ -22,6 +22,12 @@ ran against a live cluster through a `kubectl proxy` that let only these reads t
 `POST` and `PATCH` on Events in one test namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a local
 model](../how-to/try-with-a-local-model.md)).
 
+Notifications (`--notify-url-file`, the chart's `notifications.enabled`; not in a release yet)
+add no row and change no row, in either scope: a webhook `POST` is not a call to the Kubernetes
+API, and the kubelet, not kausa, reads the Secret that holds the webhook URL ([0015. Post each new
+explanation to one optional webhook, as JSON, Slack or Telegram](../adr/0015-notifications.md)).
+The kind test checks that the `kubectl auth can-i` lists stay the same with notifications on.
+
 ## Granted
 
 | API group | Resource | Verbs | Why |
@@ -124,11 +130,18 @@ The chart's defaults:
   CPU on a Raspberry Pi 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)), to leave
   room for larger clusters and for the explanation path.
 - The service account token is mounted, because kausa talks to the API server; the only other
-  volume is the optional Secret with the provider's API key, mounted read-only as a file by the
-  kubelet (or, outside the chart, passed as `KAUSA_API_KEY`), so kausa needs no permission on Secrets. kausa takes its
+  volumes are the optional Secret with the provider's API key, mounted read-only as a file by the
+  kubelet (or, outside the chart, passed as `KAUSA_API_KEY`), and, with notifications on, the
+  Secret `notifications.existingSecret` with the webhook URL and the optional bearer token,
+  mounted read-only at `/var/run/secrets/kausa-notify/` (mode 0440), so kausa needs no permission
+  on Secrets. That volume is never optional: a missing Secret or key leaves kausa's Pod in
+  `ContainerCreating` with a `FailedMount` event on the Pod (`MountVolume.SetUp failed for volume
+  "notify" : secret "kausa-notify" not found`, or `references non-existent secret key: url`), and
+  the same Pod starts, with no restart, once the Secret is fixed (seen in kind, Kubernetes
+  v1.36.4, on 2026-10-29). kausa takes its
   settings as command-line flags in its Pod spec: whoever can edit kausa's Deployment chooses
   where it sends data, so write access to it belongs to cluster administrators only.
-- An optional NetworkPolicy that limits egress to the API server, DNS and the configured model
-  endpoint: by Pod and namespace selector for an endpoint in the cluster, and by IP block and port
+- An optional NetworkPolicy that limits egress to the API server, DNS, the configured model
+  endpoint and, with notifications on, the webhook (on TCP 443 unless other ports are given): by Pod and namespace selector for an endpoint in the cluster, and by IP block and port
   otherwise. Standard NetworkPolicy cannot select a hostname, so a hosted endpoint whose addresses
   change needs a CNI with FQDN policies or an egress proxy to be limited to that host.

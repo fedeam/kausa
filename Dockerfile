@@ -274,10 +274,115 @@ RUN set -eu; \
       helm lint --strict charts/kausa $scope $endpoint $on > /tmp/lint 2>&1 || { cat /tmp/lint >&2; fail "helm lint --strict with $scope fails with the history on"; }; \
     done; \
     rm -f /tmp/lint
+# Notifications (docs/adr/0015-notifications.md), off by default. With notifications.enabled, the
+# args get --notify-url-file /var/run/secrets/kausa-notify/url --notify-format "<format>" and, by
+# format, the Telegram chat id, the token file and --notify-allow-http, before --metrics-address;
+# the Secret notifications.existingSecret becomes the notify volume (defaultMode 0440, the items
+# url and token, never optional), mounted read-only at /var/run/secrets/kausa-notify, in the same
+# lists as the API key's; and, with networkPolicy.enabled, a fourth egress rule reaches
+# networkPolicy.notifications.to on its ports, TCP 443 when they are empty. Nothing else changes:
+# not kausa's ClusterRole or Roles, nor any other object. An unquoted chat id in a values file (a
+# float64) renders as a whole number. A chart whose values.yaml has no notifications map and no
+# networkPolicy.notifications (helm upgrade --reuse-values from v0.2) renders like the chart and
+# refuses without a nil-pointer error. tests/chart/render.sh checks the same renders in more
+# detail, and NOTES.txt.
+RUN set -euf; \
+    endpoint="--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k"; \
+    on="--set notifications.enabled=true --set notifications.existingSecret=hook"; \
+    np="--set networkPolicy.enabled=true --set networkPolicy.apiServer.cidrs[0]=192.0.2.1/32 --set networkPolicy.endpoint.to[0].ipBlock.cidr=192.0.2.2/32"; \
+    to="--set networkPolicy.notifications.to[0].ipBlock.cidr=198.51.100.0/24"; \
+    cluster="--set rbac.scope=cluster"; \
+    namespaced="--set rbac.scope=namespaced --set rbac.namespaces={e2e-a,e2e-b}"; \
+    dir=/var/run/secrets/kausa-notify; \
+    chat=-1001234567890; \
+    fail() { echo "notifications: $*" >&2; exit 1; }; \
+    render_in() { chart=$1; shift; helm template kausa "$chart" --kube-version 1.36.0 --namespace kausa-system "$@" || fail "$chart does not render with $*"; }; \
+    render() { render_in charts/kausa "$@"; }; \
+    doc() { printf '%s\n' "$1" | awk -v kind="$2" '/^---/ { on = 0 }; $0 == "kind: " kind { on = 1 }; on'; }; \
+    others() { printf '%s\n' "$1" | awk 'function flush() { if (!skip) printf "%s", d; d = ""; skip = 0 }; /^---/ { flush() }; /^kind: (Deployment|NetworkPolicy)$/ { skip = 1 }; { d = d $0 "\n" }; END { flush() }'; }; \
+    args() { printf '%s\n' "$1" | sed -n '/^ *args:$/,/^ *env:$/p' | sed 's/^ *//'; }; \
+    plus_notify() { awk '$0 == "- --metrics-address" { while ((getline l < "/tmp/notify-args") > 0) print l }; { print }'; }; \
+    item() { doc "$1" Deployment | awk -v head="$2" -v ind="$3" '$0 == head { on = 1; print; next }; on && match($0, /^ */) && RLENGTH > ind { print; next }; { on = 0 }'; }; \
+    unnotified() { awk '/^ *- --notify-(url-file|format|telegram-chat-id|token-file)$/ { value = 1; next }; value { value = 0; next }; /^ *- --notify-allow-http$/ { next }; /^ *- name: notify$/ { match($0, /^ */); ind = RLENGTH; next }; ind && match($0, /^ */) && RLENGTH > ind { next }; { ind = 0; print }'; }; \
+    egress_rules() { doc "$1" NetworkPolicy | sed -n '/^  egress:$/,$p' | grep -c '^    - ' || true; }; \
+    webhook_rule() { printf '%s\n' '    # The notification webhook.' '    - to:' '        - ipBlock:' '            cidr: 198.51.100.0/24' '      ports:'; for port in "$@"; do printf '%s\n' "        - port: $port" '          protocol: TCP'; done; }; \
+    volume() { printf '%s\n' '        - name: notify' '          secret:' '            secretName: "hook"' '            defaultMode: 0440' '            items:' '              - key: "url"' '                path: url'; if [ "$1" = yes ]; then printf '%s\n' '              - key: "token"' '                path: token'; fi; }; \
+    mount=$(printf '%s\n' '            - name: notify' "              mountPath: $dir" '              readOnly: true'); \
+    printf '%s\n' notifications: '  enabled: true' '  format: telegram' '  existingSecret: hook' "  telegramChatId: $chat" > /tmp/telegram.yaml; \
+    for scope in "$cluster" "$namespaced"; do \
+      for values in "" "$endpoint" "--set dryRun=true" "$endpoint $np $to"; do \
+        out=$(render $scope $values); \
+        ! args "$out" | grep -q -- '^- --notify' || fail "a --notify arg with notifications off and $scope $values"; \
+        ! printf '%s\n' "$out" | grep -qE 'kausa-notify|notification webhook' || fail "the notify volume or the webhook rule with notifications off and $scope $values"; \
+      done; \
+      off=$(render $scope $endpoint); \
+      off_np=$(render $scope $endpoint $np); \
+      [ "$(egress_rules "$off_np")" -eq 3 ] || fail "$scope: not three egress rules with notifications off"; \
+      for case in json json-token slack telegram telegram-float telegram-channel; do \
+        format=$case; id=""; token=no; http=no; \
+        case $case in \
+          json) values="" ;; \
+          json-token) format=json; token=yes; values="--set notifications.tokenKey=token" ;; \
+          slack) http=yes; values="--set notifications.format=slack --set notifications.allowHttp=true" ;; \
+          telegram) id=$chat; values="--set notifications.format=telegram --set-string notifications.telegramChatId=$chat" ;; \
+          telegram-float) format=telegram; id=$chat; values="-f /tmp/telegram.yaml" ;; \
+          telegram-channel) format=telegram; id=@valid_name; values="--set notifications.format=telegram --set notifications.telegramChatId=@valid_name" ;; \
+        esac; \
+        { printf '%s\n' '- --notify-url-file' "- $dir/url" '- --notify-format' "- \"$format\""; \
+          if [ -n "$id" ]; then printf '%s\n' '- --notify-telegram-chat-id' "- \"$id\""; fi; \
+          if [ "$token" = yes ]; then printf '%s\n' '- --notify-token-file' "- $dir/token"; fi; \
+          if [ "$http" = yes ]; then printf '%s\n' '- --notify-allow-http'; fi; } > /tmp/notify-args; \
+        for policy in without with; do \
+          what="$case $policy the NetworkPolicy, $scope"; \
+          if [ "$policy" = with ]; then base=$off_np; out=$(render $scope $endpoint $np $on $values $to); \
+          else base=$off; out=$(render $scope $endpoint $on $values); fi; \
+          [ "$(args "$out")" = "$(args "$base" | plus_notify)" ] || fail "$what: the args are not those without notifications plus $(tr '\n' ' ' < /tmp/notify-args)before --metrics-address"; \
+          [ "$(item "$out" '        - name: notify' 8)" = "$(volume "$token")" ] || fail "$what: the notify volume"; \
+          [ "$(item "$out" '            - name: notify' 12)" = "$mount" ] || fail "$what: the notify mount"; \
+          [ "$(doc "$out" Deployment | unnotified)" = "$(doc "$base" Deployment)" ] || fail "$what: the Deployment changes beyond the notify args, volume and mount"; \
+          [ "$(others "$out")" = "$(others "$base")" ] || fail "$what: kausa's ClusterRole, a Role or another object changes"; \
+          if [ "$policy" = with ]; then \
+            [ "$(doc "$out" NetworkPolicy | sed '/^    # The notification webhook\.$/,$d')" = "$(doc "$base" NetworkPolicy)" ] || fail "$what: the NetworkPolicy changes beyond a fourth egress rule"; \
+            [ "$(doc "$out" NetworkPolicy | sed -n '/^    # The notification webhook\.$/,$p')" = "$(webhook_rule 443)" ] || fail "$what: the webhook's egress rule is not to its peers on TCP 443"; \
+          else \
+            [ -z "$(doc "$out" NetworkPolicy)" ] || fail "$what: a NetworkPolicy"; \
+          fi; \
+        done; \
+      done; \
+    done; \
+    for ports in '[{"port":8443,"protocol":"TCP"}]|8443' '[]|443' 'null|443'; do \
+      out=$(render $cluster $endpoint $np $on $to --set-json "networkPolicy.notifications.ports=${ports%|*}"); \
+      [ "$(doc "$out" NetworkPolicy | sed -n '/^    # The notification webhook\.$/,$p')" = "$(webhook_rule "${ports#*|}")" ] || fail "networkPolicy.notifications.ports=${ports%|*}: the webhook's egress rule is not on TCP ${ports#*|}"; \
+    done; \
+    off=$(render $cluster $endpoint); \
+    for values in "--set notifications.format=xml --set notifications.telegramChatId=1 --set notifications.tokenKey=t --set notifications.allowHttp=true" "--set notifications=null" "--set networkPolicy.notifications=null"; do \
+      [ "$(render $cluster $endpoint $values)" = "$off" ] || fail "$values changes the render with notifications off"; \
+    done; \
+    cp -R charts/kausa /tmp/nonotify; \
+    awk '{ match($0, /^ */); ind = RLENGTH; blank = ($0 ~ /^ *$/) }; skip && !blank && ind <= skip_ind { skip = 0 }; /^[^ #]/ { top = $0 }; !skip && /^notifications:/ { skip = 1; skip_ind = 0; next }; !skip && top ~ /^networkPolicy:/ && /^  notifications:/ { skip = 1; skip_ind = 2; next }; !skip' charts/kausa/values.yaml > /tmp/nonotify/values.yaml; \
+    ! grep -qE '^ {0,2}notifications:' /tmp/nonotify/values.yaml || fail "the chart copy still has a notifications map"; \
+    for values in "" "$endpoint" "$endpoint $on" "$endpoint $on --set notifications.tokenKey=token" "$endpoint $np $on $to"; do \
+      [ "$(render $cluster $values)" = "$(render_in /tmp/nonotify $cluster $values)" ] || fail "a chart without the notifications maps renders unlike the chart with $values"; \
+    done; \
+    for refusal in \
+      "notifications.existingSecret is required with notifications.enabled: the Secret that holds the webhook URL|$endpoint --set notifications.enabled=true" \
+      "networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook|$endpoint $np $on"; do \
+      if helm template kausa /tmp/nonotify --kube-version 1.36.0 $cluster ${refusal#*|} > /dev/null 2> /tmp/refusal; then fail "a chart without the notifications maps renders with ${refusal#*|}"; fi; \
+      ! grep -qi 'nil pointer' /tmp/refusal || fail "a chart without the notifications maps: a nil-pointer error with ${refusal#*|}"; \
+      grep -qF -- "${refusal%%|*}" /tmp/refusal || fail "a chart without the notifications maps does not refuse ${refusal#*|} with '${refusal%%|*}'"; \
+    done; \
+    rm -rf /tmp/nonotify /tmp/refusal; \
+    for scope in "$cluster" "$namespaced"; do \
+      for values in "" "--set notifications.format=slack" "-f /tmp/telegram.yaml"; do \
+        helm lint --strict charts/kausa $scope $endpoint $on $values > /tmp/lint 2>&1 || { cat /tmp/lint >&2; fail "helm lint --strict with $scope $values fails with notifications on"; }; \
+      done; \
+    done; \
+    rm -f /tmp/lint /tmp/notify-args /tmp/telegram.yaml
 # The refusals of kausa.validate: helm template fails with the exact message (helm lint does not
 # fail on a template's fail). The default values and rbac=null (a v0.1 release's stored values have
-# no rbac map) must reach the rbac.scope message, never a nil-pointer error. history.days, checked
-# last, is refused with the history on and off.
+# no rbac map) must reach the rbac.scope message, never a nil-pointer error. history.days comes
+# next, refused with the history on and off. The notification checks come last, only with
+# notifications.enabled and in their order: each case below also breaks every later check.
 RUN set -eu; \
     long=$(printf '%064d' 0 | tr 0 a); \
     names33=$(seq -f 'n%g' 1 33 | paste -sd, -); \
@@ -306,6 +411,25 @@ RUN set -eu; \
       refuse "history.days must be a whole number of days from 1 to 30, not '$days'" --set rbac.scope=cluster --set "history.days=$days"; \
       refuse "history.days must be a whole number of days from 1 to 30, not '$days'" --set rbac.scope=cluster --set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k --set history.enabled=true --set "history.days=$days"; \
     done; \
+    set -f; \
+    endpoint="--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k"; \
+    np="--set networkPolicy.enabled=true --set networkPolicy.apiServer.cidrs[0]=192.0.2.1/32 --set networkPolicy.endpoint.to[0].ipBlock.cidr=192.0.2.2/32"; \
+    on="--set notifications.enabled=true --set notifications.existingSecret=hook"; \
+    later="--set notifications.tokenKey=token --set dryRun=true $np"; \
+    refuse "history.days must be a whole number of days from 1 to 30, not '0'" --set rbac.scope=cluster --set notifications.enabled=true --set notifications.format=xml $later --set history.days=0; \
+    refuse "notifications.existingSecret is required with notifications.enabled: the Secret that holds the webhook URL" --set rbac.scope=cluster --set notifications.enabled=true --set notifications.format=xml --set notifications.telegramChatId=1 $later; \
+    refuse "notifications.existingSecret is required with notifications.enabled: the Secret that holds the webhook URL" --set rbac.scope=namespaced --set 'rbac.namespaces={a}' $endpoint --set notifications.enabled=true; \
+    refuse "notifications.format must be json, slack or telegram, not 'xml'" --set rbac.scope=cluster $on --set notifications.format=xml --set notifications.telegramChatId=1 $later; \
+    refuse "notifications.format must be json, slack or telegram, not 'Slack'" --set rbac.scope=cluster $endpoint $on --set notifications.format=Slack; \
+    refuse "notifications.telegramChatId is required with notifications.format=telegram" --set rbac.scope=cluster $on --set notifications.format=telegram $later; \
+    refuse "notifications.telegramChatId is used only with notifications.format=telegram" --set rbac.scope=cluster $on --set notifications.format=slack --set notifications.telegramChatId=1 $later; \
+    refuse "notifications.tokenKey is used only with notifications.format=json" --set rbac.scope=cluster $on --set notifications.format=slack $later; \
+    refuse "notifications.tokenKey is used only with notifications.format=json" --set rbac.scope=cluster $on --set notifications.format=telegram --set-string notifications.telegramChatId=-1001234567890 $later; \
+    refuse "notifications.enabled needs model.endpoint" --set rbac.scope=cluster $on $later; \
+    refuse "notifications.enabled needs model.endpoint" --set rbac.scope=namespaced --set 'rbac.namespaces={a}' $on; \
+    refuse "notifications.enabled is not used with dryRun: no explanation is written" --set rbac.scope=cluster $endpoint $on $later; \
+    refuse "networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook" --set rbac.scope=cluster $endpoint $on $np; \
+    refuse "networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook" --set rbac.scope=cluster $endpoint $on $np --set-json 'networkPolicy.notifications.to=[]'; \
     rm -f /tmp/refusal
 RUN cargo clippy --locked --all-targets --all-features -- -D warnings
 RUN cargo test --locked --all-features
