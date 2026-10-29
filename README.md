@@ -214,10 +214,10 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   resource](docs/reference/explanation-resource.md)). Notifications to one webhook, off by
   default: `kausa run --notify-url-file` and the chart's `notifications.enabled=true` post each
   new explanation as JSON, to Slack or to Telegram ([Send notifications to Slack, Telegram or a
-  webhook](docs/how-to/send-notifications.md); Slack and Telegram not yet tested with real
-  webhooks).
-- **Next:** a test against a hosted provider, and a real post to a Slack workspace and a Telegram
-  chat (both formats are checked only against their documentation so far).
+  webhook](docs/how-to/send-notifications.md); Telegram posted to for real on 2026-10-29, Slack
+  not yet).
+- **Next:** a test against a hosted provider, and a real post to a Slack workspace (the `slack`
+  format is checked only against Slack's documentation so far).
 
 ## Documentation
 

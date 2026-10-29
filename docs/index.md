@@ -32,8 +32,9 @@ the Explanation resource) is in v0.3.0 too, off by default; the kind
 test passed in both scopes with it on 2026-10-28 (same journal, "explanation history"). The
 notifications of 0015 (`kausa run --notify-url-file`, the chart's `notifications` values) are in
 v0.3.0 too, off by default; the kind test passed in both scopes with
-the `json` format against a fake receiver on 2026-10-29, and the `slack` and `telegram` formats
-have not been posted to a real Slack workspace or Telegram chat yet ([2026-10-29 —
+the `json` format against a fake receiver on 2026-10-29, the `telegram` format was posted to a
+real Telegram chat the same day, and the `slack` format has not been posted to a real Slack
+workspace yet ([2026-10-29 —
 Notifications](journal/2026-10-29-notifications.md)).
 
 ## Key facts

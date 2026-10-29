@@ -180,3 +180,20 @@ runs only when it names a ref.
 - Install the released v0.3.0 chart in a throwaway kind cluster, as was done for v0.1.0.
 - Post once to a real Slack incoming webhook and a real Telegram group, and record the result.
 - A test against a hosted provider.
+
+## Later the same day: a real Telegram post
+
+- The maintainer asked to test the notifications with the Telegram bot another project of theirs
+  already uses. Its token and chat id stay in that project's secret store, which the agents cannot
+  read; the maintainer provided the login for the test, the values went to kausa through a pipe and
+  an environment variable, and nothing was printed or written to disk. The CLI was logged out
+  after.
+- kausa v0.3.0 (a release build on the maintainer's machine) watched a throwaway kind cluster with
+  a crash-looping Deployment, used a fake model whose answer carried `@kausa_test_nobody_x`,
+  `/start@kausa_nobody_bot` and a URL, and posted the `telegram` notification: `notification sent`,
+  status `200`, attempt 1, about a second after the explanation.
+- Two control messages sent straight to the same chat, reading the entities Telegram returned:
+  without the joiners, `mention`, `bot_command` and `url`; with them, only `url`. The joiners work
+  as ADR 0015 intended, and a URL stays a link (previews are off).
+- Slack has still not been posted to: there is no workspace webhook to test with.
+

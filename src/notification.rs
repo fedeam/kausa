@@ -108,8 +108,8 @@ pub fn text(n: &Notice) -> String {
 /// The text Telegram gets: the rendering cut so that it stays within `MAX_TEXT_UNITS` UTF-16 code
 /// units with its joiners, then a `JOINER` after every `@` and every `/`. It looks the same, and
 /// the joiners are meant to keep Telegram from finding a mention, bot command or `/command@bot` in
-/// it (a hypothesis until a real post confirms it; ADR 0015). A prefix of [`text`] once each
-/// joiner after an `@` or a `/` is taken out.
+/// it (seen in a real post on 2026-10-29; a URL stays a link; ADR 0015). A prefix of [`text`] once
+/// each joiner after an `@` or a `/` is taken out.
 pub fn telegram_text(n: &Notice) -> String {
     let cut = cut(render(n), |c| c.len_utf16() + usize::from(is_joined(c)));
     let mut joined = String::with_capacity(cut.len() + 3 * cut.matches(is_joined).count());
