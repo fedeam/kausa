@@ -1279,15 +1279,25 @@ mod tests {
     fn a_quote_left_open_after_a_new_kind_does_not_hide_a_name_caught_before() {
         // Invariant 4: before the names of `D011` to `D013`, `secret "<name>"` was caught in these
         // lines; an unclosed quote after `pod`, `pods` or a dotted word must not swallow it.
-        for (line, secret) in [
+        for (case, (line, name)) in [
             (r#"pod "y secret "topsecret-x" not found"#, "topsecret-x"),
             (r#"see pods "a", "b secret "topsecret-y""#, "topsecret-y"),
             (r#"app.conf "z, secret "topsecret-z""#, "topsecret-z"),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut r = Redactor::new();
             let out = r.text(line);
-            assert!(!out.contains(secret), "{secret} in {out}");
-            assert!(out.contains(r#"secret "<redacted:name>""#), "{out}");
+            // The messages name the case only, never the text (CodeQL rust/cleartext-logging).
+            assert!(
+                !out.contains(name),
+                "case {case}: the name was not redacted"
+            );
+            assert!(
+                out.contains(r#"secret "<redacted:name>""#),
+                "case {case}: no redacted name"
+            );
         }
     }
 }
