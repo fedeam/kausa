@@ -39,7 +39,8 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-26: the four implementation weekends of v0.1 are done; nothing is released. `kausa run` reads Pods,
+Status as of 2026-10-28: v0.2.0 is released, and the namespaced install mode planned for v0.3 is
+in the code and the chart, not in a release yet. `kausa run` reads Pods,
 their logs (crash loops, out-of-memory kills and failed Jobs only), Events and the metadata of ReplicaSets and Jobs; it
 redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
 logs it with `--dry-run`; it logs incidents and explanations with real names to its own stdout.
@@ -48,7 +49,10 @@ reused, and the queue in front of the model holds 16. It writes the explanation 
 failing workload's namespace (`create` and `patch` on Events only), and serves metrics only with
 `--metrics-address`. Each of these is implemented: the redaction, the prompt's validation, the
 budget, the Event writes and the metrics responder have unit tests, and the permissions are
-checked by the kind test (`kubectl auth can-i`, what is allowed and what must be refused). Not
+checked by the kind test (`kubectl auth can-i`, what is allowed and what must be refused) in both
+`rbac.scope`s: every namespace with `cluster`, or the listed namespaces only with `namespaced`
+([0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace, and
+nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)). Not
 tested yet: a hosted provider over HTTPS (the distroless CA bundle with rustls), clusters larger
 than about a hundred Pods, and long runs ([Architecture](docs/explanation/architecture.md)).
 
@@ -73,7 +77,12 @@ kausa must:
   write Events, `get` on ReplicaSets and Jobs, and `get` on `pods/log` only while log collection
   is on. Never Secrets, never ConfigMaps, no other write verb, no `exec`, no wildcards
   ([Permissions](docs/reference/permissions.md), [0009. Run with read-only permissions that never
-  include Secrets](docs/adr/0009-least-privilege-rbac.md)). Pod objects arrive whole from the API
+  include Secrets](docs/adr/0009-least-privilege-rbac.md)), in every namespace with
+  `rbac.scope=cluster`, or only in the namespaces of `rbac.namespaces` with
+  `rbac.scope=namespaced`, where the chart creates nothing cluster-scoped. `rbac.scope` has no
+  default, so an upgrade that resets the values fails instead of widening a namespaced install to
+  the whole cluster: keep the `rbac` values in a values file passed on every upgrade, or upgrade
+  with `--reuse-values`. Pod objects arrive whole from the API
   server, inline environment values and arguments included; kausa reduces each to the small record
   in [Architecture](docs/explanation/architecture.md) at once, and never logs, formats or returns
   a raw object.
@@ -127,10 +136,12 @@ kausa must:
   is advice for a person, who has to read it as such.
 - **The provider sees what is sent.** Its retention and training policies are the provider's.
   kausa documents what it sends; choosing the provider is the operator's decision.
-- **The budget is shared.** The call budget and the queue are cluster-wide, so a tenant that makes
+- **The budget is shared.** The call budget and the queue are one per release, shared by every
+  namespace it watches (the whole cluster, or the listed namespaces), so a tenant that makes
   many workloads fail can use up the budget and push other namespaces' incidents out of the queue:
   their failures then get an `ExplanationSkipped` Event or none. It protects the bill, not
-  fairness between namespaces.
+  fairness between namespaces; separate releases with disjoint `rbac.namespaces` have separate
+  budgets.
 - **The hard cost limit is the provider's.** kausa's budget starts over when kausa restarts, and a
   kausa that restarts often can spend more than its daily cap. Operators should set a spending cap
   or rate limit on the provider key.
@@ -142,12 +153,24 @@ kausa must:
   Whoever can read kausa's Pod logs, and any log shipper that exports them, sees them: restrict
   access to kausa's namespace accordingly.
 - **Event writes cannot be limited to kausa's own Events.** `create` and `patch` on Events
-  cluster-wide cannot be narrowed by RBAC, which has no filter on the reporting controller, so a
-  compromised kausa could create or rewrite any Event in the namespaces it covers. kausa names
+  cannot be narrowed by RBAC to kausa's own, since RBAC has no filter on the reporting controller,
+  so a compromised kausa could create or rewrite any Event in the namespaces it covers: every
+  namespace with `rbac.scope=cluster`, the listed namespaces only with `rbac.scope=namespaced`. kausa names
   its Events `kausa.<fingerprint>.<hash of the note>` (or `kausa.skipped.…`), patches one only
   when it already exists with that name and with reporting controller `kausa`, refuses the patch
   otherwise, and patches only its series (count and last time); it never changes another
   Event's note.
+- **Tenants of a listed namespace can change kausa's access there** (`rbac.scope=namespaced`).
+  kausa's Role and RoleBinding live in that namespace, so whoever administers it can:
+  - **delete the RoleBinding.** kausa's watches there are refused (`403`); it drops what they had
+    seen and keeps working in the other namespaces. After its next restart it never becomes ready,
+    so `helm upgrade --wait` times out and `--atomic` rolls back, security fixes included. The
+    way out is to remove the namespace from `rbac.namespaces`, or to restore the binding, then
+    upgrade; the `pod watch error` and `event watch error` lines name the namespace;
+  - **edit the Role**, which gives a stolen kausa token more in that namespace; compare it with
+    `helm get manifest`. An upgrade with the same values put an edited Role back in kind on
+    2026-10-28 (Helm 3.16.1);
+  - **bind more roles to kausa's service account**, as was already possible in cluster scope.
 
 A missing detection or a weak explanation is a bug: open an issue. Anything in the list under
 [Reporting a vulnerability](#reporting-a-vulnerability) is a security issue: report it privately.

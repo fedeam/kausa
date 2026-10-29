@@ -58,7 +58,7 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    cargo fmt --all -- --check
    cargo deny --locked check
    cargo audit
-   helm lint --strict charts/kausa
+   helm lint --strict charts/kausa --set rbac.scope=cluster
    cargo clippy --locked --all-targets --all-features -- -D warnings
    cargo test --locked --all-features
    ```
@@ -68,6 +68,10 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    ```sh
    docker build --target ci .
    ```
+
+   The chart has no default `rbac.scope`, so every `helm lint` and `helm template` sets it. The
+   `ci` target also renders both scopes and every refusal of the chart; `tests/chart/render.sh`
+   runs a longer set of chart checks with helm alone, without a cluster.
 
    On an arm64 Mac this builds for linux/arm64, the same platform as the Gitea Actions runner
    that checks `main`. GitHub's hosted runners, which check pull requests, are linux/amd64; to
@@ -82,10 +86,17 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
 
 6. Optionally, run the end-to-end test. It creates a kind cluster named `kausa-e2e` (and deletes
    it at the end), installs the chart with the image, runs a fake model endpoint on your machine,
-   and checks the Events, what the endpoint received, the ClusterRole and the metrics:
+   and checks the Events, what the endpoint received, the RBAC objects and what they grant, and
+   the metrics. `KAUSA_E2E_SCOPE` picks the chart's `rbac.scope`: `cluster` when unset (a
+   ClusterRole; then an Event about another namespace, which kausa must ignore, and an upgrade to
+   the namespaced scope), or `namespaced` (Roles in two namespaces, an unlisted namespace with the
+   same failures, a reset upgrade that must fail, a namespace that refuses kausa, and an uninstall
+   that must leave no Role). CI runs both, as the checks `kind (cluster)` and `kind (namespaced)`:
 
    ```sh
    KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the node image pinned in .github/workflows/e2e.yml> \
+     tests/e2e/run.sh
+   KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the same image> KAUSA_E2E_SCOPE=namespaced \
      tests/e2e/run.sh
    ```
 

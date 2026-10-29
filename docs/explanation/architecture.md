@@ -15,7 +15,9 @@ Raspberry Pi 4: about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)). This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
-incident](../adr/0001-scope-and-positioning.md).
+incident](../adr/0001-scope-and-positioning.md). Status as of 2026-10-28, the namespaced mode
+planned for v0.3 is in the code, not in a release yet ([0013. Offer a namespaced install mode: one watch pair
+and one Role per listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)).
 
 ## Pipeline
 
@@ -33,8 +35,18 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 ## Watching without a large cache
 
-- **Two watches:** `events.k8s.io/v1` Events of type `Warning` about Pods and Jobs, and Pods.
-  Both through kube-rs watchers, with restarts and backoff handled by the library.
+- **A watch pair per namespace, or one per kind for the whole cluster:** `events.k8s.io/v1`
+  Events of type `Warning` about Pods and Jobs, and Pods. Without `--namespace`, one Pod watch and
+  one event watch across all namespaces (`Api::all`); with `--namespace`, one of each in every
+  listed namespace (`Api::namespaced`), since kube-rs has no watcher of several namespaces and a
+  field selector cannot pick several. All through kube-rs watchers, with restarts and backoff
+  (0.8 to 30 seconds) handled by the library, except after a `403` (below); each is one HTTP
+  connection to the API server.
+- **Merged per kind, tagged with their watch.** The Pod watches are merged into one stream with
+  `futures`' `select_all`, and so are the event watches, each item carrying its watch (a namespace,
+  or none for the whole cluster) and each watch ending with an "ended" item: the loop keeps one Pod
+  branch and one event branch, with no task per namespace and no new crate. A watch that ends
+  stops kausa with exit code `1` and names it (`the pod watch of namespace shop ended`).
 - **No full-object cache.** A reflector that stores every Pod cluster-wide is the usual way to
   grow a controller's memory with the cluster. kausa reduces each watch event to a small record per
   Pod (namespace, name, owner reference, phase, the status reason and message and, for a failed
@@ -52,7 +64,21 @@ produces the same incident, the same fingerprint and the same request bytes.
   checked again in kausa in case a server does not apply it.
 - **Only what can be a signal.** A Warning event is kept only if a detection matches it and it
   happened in the last 10 minutes; messages and notes are cut at 1024 bytes. When a watch
-  restarts, it lists again, and records whose objects did not come back are dropped.
+  restarts, it lists again, and records whose objects did not come back are dropped: **per
+  watch**, so the relist of one namespace drops only that namespace's unseen records, never
+  another's.
+- **A refused watch forgets what it saw.** When a watch fails with `403` (its Role or binding is
+  gone), kausa can no longer see its objects go away, so it drops that watch's records of that
+  kind, in that namespace only (in cluster mode, every record of that kind). Other errors keep
+  them, so a transient failure does not reset the settle window. kausa never exits on a refusal
+  and never widens its watch: the other namespaces keep working. The refused watch then starts
+  over with a new watcher, which lists again once access is back and so brings back the objects
+  that did not change meanwhile: kube-rs itself would resume a refused watch from where it was,
+  sending only the changes. The delay between tries still grows to 30 seconds across new
+  watchers.
+- **Only within the namespace an Event is in.** An Event whose `regarding` object is in another
+  namespace, or that has none, is ignored, so an incident's namespace is always that of a watched
+  Pod or Event, and its owner lookups, log read and Event write stay there.
 
 ## Detection, settle and correlation
 
@@ -153,7 +179,8 @@ produces the same incident, the same fingerprint and the same request bytes.
 - **Metrics.** With `--metrics-address`, Prometheus counters on their own port: incidents by
   detection, model calls by outcome, tokens in and out as the endpoint reports them, cache hits,
   skipped explanations by reason, dropped ones, logged requests, redactions by rule, and Events
-  written and failed; `/healthz`, and `/readyz` once both watches have listed. A minimal HTTP/1.1
+  written and failed; `/healthz`, and `/readyz` once every watch has listed (two, or two per
+  watched namespace), never going back. A minimal HTTP/1.1
   responder on `tokio::net`, with no framework. The list: [Command line and log
   format](../reference/command-line.md#metrics).
 
@@ -189,8 +216,11 @@ produces the same incident, the same fingerprint and the same request bytes.
   allowed, the settle window, log collection and structured output ([Command line and log
   format](../reference/command-line.md)). The configuration file planned at first was dropped on
   2026-10-26: flags need no parser and no ConfigMap, and keep what kausa is told to do visible in
-  its Pod spec. The budget is set with flags too. kausa watches every namespace; a flag to
-  narrow it is not implemented.
+  its Pod spec. The budget is set with flags too. kausa watches every namespace, or with
+  `--namespace` (repeatable, up to 32) only the ones listed; the chart's `rbac.scope=namespaced`
+  passes `rbac.namespaces` as those flags and grants a Role in each, so the watch and the
+  permissions come from one list. The budget, the queue and the deduplication cache stay one per
+  process, shared by every watched namespace.
 - The API key from a file (`--api-key-file`, a Secret mounted by the kubelet) or the environment
   variable `KAUSA_API_KEY` (filled from a Secret), never from an argument.
 - **Dry-run:** the whole pipeline up to the request, which is logged and not sent. No Event is
@@ -215,7 +245,7 @@ and not published yet](../adr/0010-packaging.md).
   fixtures; the chart linted and rendered in CI; an end-to-end test in kind (`tests/e2e/run.sh`)
   that installs the chart, creates failing workloads, runs kausa against a fake model endpoint,
   and checks the Events, that no real name reached the endpoint, the chart's role against the
-  reference, and the metrics.
+  reference, and the metrics, once per `rbac.scope` (`KAUSA_E2E_SCOPE`).
 
 ## Exit codes
 

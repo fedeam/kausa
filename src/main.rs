@@ -33,6 +33,10 @@ const VERSION_LINE: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_
 /// The default settle window: a failure has to persist this long to be an incident.
 const DEFAULT_SETTLE_SECONDS: u32 = 60;
 
+/// The most namespaces `kausa run --namespace` watches (docs/adr/0013-namespaced-install-mode.md).
+/// The help line spells the number out, so the two must change together.
+const MAX_NAMESPACES: usize = 32;
+
 const HELP: &str = concat!(
     env!("CARGO_PKG_NAME"),
     " ",
@@ -52,6 +56,7 @@ const HELP: &str = concat!(
     "\n",
     "Options of kausa run:\n",
     "  --settle-seconds <N>   How long a failure must persist (0-3600, default 60)\n",
+    "  --namespace <NAME>     Watch only this namespace; repeat for more (up to 32)\n",
     "  --endpoint <URL>       OpenAI-compatible base URL, e.g. https://host/v1;\n",
     "                         each incident's redacted context is sent there\n",
     "  --model <NAME>         The model to ask (needed with --endpoint)\n",
@@ -120,6 +125,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
         (false, false, false, false);
     let mut no_events = false;
     let mut metrics_address: Option<String> = None;
+    let mut namespaces: Vec<String> = Vec::new();
     let mut limits = Limits::default();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -173,6 +179,10 @@ fn run_command(args: &[OsString]) -> ExitCode {
                     _ => limits.dedup_hours = n,
                 }
             }
+            "--namespace" => match value() {
+                Ok(v) => namespaces.push(v),
+                Err(code) => return code,
+            },
             "--metrics-address" => match value() {
                 Ok(v) if v.parse::<std::net::SocketAddr>().is_ok() => metrics_address = Some(v),
                 Ok(v) => {
@@ -189,6 +199,9 @@ fn run_command(args: &[OsString]) -> ExitCode {
             "--no-json-schema" => no_json_schema = true,
             _ => return usage_error(&format!("unexpected argument '{flag}'")),
         }
+    }
+    if let Err(message) = check_namespaces(&namespaces) {
+        return usage_error(&message);
     }
     let explain = match explain_settings(
         endpoint,
@@ -221,6 +234,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
         settle: SignedDuration::from_secs(i64::from(settle_seconds)),
         explain,
         metrics_address,
+        namespaces,
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -237,6 +251,42 @@ fn run_command(args: &[OsString]) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Checks the `--namespace` values in argument order: each must be a namespace name, the first
+/// repeat is refused, and then the count against [`MAX_NAMESPACES`].
+fn check_namespaces(namespaces: &[String]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for name in namespaces {
+        if !is_dns_label(name) {
+            return Err(format!(
+                "--namespace takes a namespace name (lowercase letters, digits and '-', starting \
+                 and ending with a letter or digit, at most 63 characters), not '{name}'"
+            ));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(format!("--namespace '{name}' is given twice"));
+        }
+    }
+    if namespaces.len() > MAX_NAMESPACES {
+        return Err(format!(
+            "--namespace is given {} times; kausa watches at most {MAX_NAMESPACES} namespaces \
+             (watch the whole cluster instead)",
+            namespaces.len()
+        ));
+    }
+    Ok(())
+}
+
+/// A DNS-1123 label, what Kubernetes takes as a namespace name: 1 to 63 characters out of
+/// `[a-z0-9-]`, starting and ending with a letter or digit.
+fn is_dns_label(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    (1..=63).contains(&bytes.len())
+        && bytes.first().is_some_and(edge)
+        && bytes.last().is_some_and(edge)
+        && bytes.iter().all(|b| edge(b) || *b == b'-')
 }
 
 /// The explanation settings from the flags: `None` when neither `--endpoint` nor `--dry-run` is
@@ -357,5 +407,18 @@ fn write_stdout(text: &str) -> ExitCode {
             );
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_help_line_names_the_namespace_cap() {
+        assert!(
+            HELP.contains(&format!("repeat for more (up to {MAX_NAMESPACES})\n")),
+            "{HELP}"
+        );
     }
 }

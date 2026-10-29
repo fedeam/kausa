@@ -12,6 +12,15 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
+rbac:
+  # Required, on every install and upgrade.
+  # cluster: a ClusterRole and ClusterRoleBinding, and kausa reads every namespace.
+  # namespaced: a Role and RoleBinding in each namespace below, nothing cluster-scoped, and kausa
+  # watches only those namespaces.
+  scope: ""
+  # With scope namespaced: the namespaces kausa watches. Each must exist before helm install.
+  namespaces: []
+
 # The model endpoint. With no endpoint and no dryRun, kausa only logs incidents, and the chart
 # grants neither pods/log nor the Event writes.
 model:
@@ -33,10 +42,10 @@ model:
 # Log the redacted request of each incident instead of sending it. No Event is written.
 dryRun: false
 # Read the last lines of the failed container for crash loops, out-of-memory kills and failed
-# Jobs. false also removes pods/log from the ClusterRole.
+# Jobs. false also removes pods/log from the ClusterRole or the Roles.
 logs: true
 # Write each explanation as an Event on the failing workload. false also removes the Event writes
-# from the ClusterRole.
+# from the ClusterRole or the Roles.
 events: true
 # How long a failure must persist before it is an incident, in seconds (0-3600).
 settleSeconds: 60

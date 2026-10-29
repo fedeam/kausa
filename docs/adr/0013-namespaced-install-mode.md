@@ -193,3 +193,11 @@ names a namespace: the metrics port is open by default.
   Architecture, Set up a development environment, the [Security policy](../../SECURITY.md) (Event
   caveat, budget per release, tenant notes), `ARCHITECTURE.md`, `values.yaml` comments, the README
   and `CHANGELOG.md`. 0009 gets an `Update YYYY-MM-DD:` paragraph on acceptance pointing here.
+
+Update 2026-10-28: the drop on a `403` needs a relist to undo it, and kube-runtime 4.2.0 relists
+only after a failed list: a refused resumed watch (`WatchStartFailed`) or a `403` inside an open
+stream keeps its resource version, and once access is back the watcher resumes from it, so a Pod
+that did not change in between (`D004`, `D005`, `D009`) would never come back. kausa therefore
+starts a new watcher after any `403`, which lists again, and keeps the default backoff (0.8 to 30
+seconds) across those watchers: the `Init` of each new one does not reset the delay. No new crate;
+`Restarting` in `src/run.rs`, with unit tests over scripted watchers.
