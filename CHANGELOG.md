@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Detection rule `D011`, workload cannot create Pods: a Warning `FailedCreate` event about a
+  ReplicaSet, a Job, a StatefulSet or a DaemonSet (a quota, an admission webhook or Pod Security
+  admission refused the Pod), an incident about the Deployment, the CronJob or the controller
+  itself, settled like `D006` and `D007`.
+- Detection rule `D012`, volume claim cannot be provisioned: a Warning `ProvisioningFailed` event
+  about a PersistentVolumeClaim, an incident about the claim. A Pod that waits for that claim is
+  still `D005`, a second incident about its workload.
+- Detection rule `D013`, autoscaler cannot get metrics: a Warning `FailedGetResourceMetric`,
+  `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`,
+  `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` event about a
+  HorizontalPodAutoscaler, an incident about the autoscaler.
+
+### Changed
+
+- `R003` redacts more names in event messages: the quoted name after `pod`, `container` and
+  `StorageClass` (every name of a list), after a resource qualified by its API group
+  (`deployments.apps "<name>"`), and the quota's name in `exceeded quota: <name>`.
+- The request names a PersistentVolumeClaim or a HorizontalPodAutoscaler that an incident is about
+  by its kind (`persistentvolumeclaim-1`, `horizontalpodautoscaler-1`), not as `Object`.
+
 ## [0.3.0] - 2026-10-29
 
 A namespaced install mode, the explanation history and notifications to one webhook, the last two

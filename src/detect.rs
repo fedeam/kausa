@@ -432,4 +432,94 @@ mod tests {
             None
         );
     }
+
+    // Acceptance tests for `D011`, `D012` and `D013`, written before the code: rules from Warning
+    // events about an object that is not a Pod (a workload controller, a claim, an autoscaler),
+    // reproduced on kind (Kubernetes 1.37) on 2026-10-28. They name the detections by id, so the
+    // variants are free to choose; `ids_are_unique_and_in_order` gets the three new ones.
+
+    /// Asserts that `detection` is an event rule settled like `D006` and `D007`, that reads no log.
+    fn settled_event_without_logs(detection: Detection) {
+        assert!(detection.settles(), "{detection:?}");
+        assert!(!detection.is_state(), "{detection:?}");
+        assert!(!reads_logs(detection), "{detection:?}");
+    }
+
+    #[test]
+    fn a_controller_that_cannot_create_pods_is_d011() {
+        // The ReplicaSet, Job and DaemonSet controllers write `FailedCreate` on themselves when
+        // the API server refuses a Pod (a quota, an admission webhook, Pod Security admission),
+        // and the StatefulSet controller writes it on the StatefulSet; no Pod exists to be about.
+        for kind in ["ReplicaSet", "Job", "StatefulSet", "DaemonSet"] {
+            let detection = detect_event(&event(kind, "FailedCreate"));
+            assert_eq!(detection.map(Detection::id), Some("D011"), "{kind}");
+            let detection = detection.expect("a detection");
+            assert_eq!(detection.name(), "workload cannot create pods");
+            settled_event_without_logs(detection);
+        }
+        // Not D011: the same reason about a Pod or a Deployment (its ReplicaSet reports the
+        // failure), the controllers' other failures, and a Job's own failure, which stays D008.
+        assert_eq!(detect_event(&event("Pod", "FailedCreate")), None);
+        assert_eq!(detect_event(&event("Deployment", "FailedCreate")), None);
+        assert_eq!(detect_event(&event("ReplicaSet", "FailedDelete")), None);
+        assert_eq!(detect_event(&event("StatefulSet", "FailedDelete")), None);
+        assert_eq!(
+            detect_event(&event("Job", "BackoffLimitExceeded")).map(Detection::id),
+            Some("D008")
+        );
+    }
+
+    #[test]
+    fn a_claim_that_cannot_be_provisioned_is_d012() {
+        // The PersistentVolume controller (a StorageClass that does not exist) and external
+        // provisioners (a request they refuse) write `ProvisioningFailed` on the claim.
+        let detection = detect_event(&event("PersistentVolumeClaim", "ProvisioningFailed"));
+        assert_eq!(detection.map(Detection::id), Some("D012"));
+        let detection = detection.expect("a detection");
+        assert_eq!(detection.name(), "volume claim cannot be provisioned");
+        settled_event_without_logs(detection);
+        // Not D012: waiting for an external provisioner (a Normal event, but the reason alone
+        // must not match either), the same reason about another kind, and a mount failure (D007
+        // only about a Pod).
+        for (kind, reason) in [
+            ("PersistentVolumeClaim", "ExternalProvisioning"),
+            ("Pod", "ProvisioningFailed"),
+            ("PersistentVolume", "ProvisioningFailed"),
+            ("PersistentVolumeClaim", "FailedMount"),
+        ] {
+            assert_eq!(detect_event(&event(kind, reason)), None, "{kind} {reason}");
+        }
+    }
+
+    #[test]
+    fn an_autoscaler_that_cannot_get_metrics_is_d013() {
+        // Every Warning reason the HorizontalPodAutoscaler controller writes on the autoscaler
+        // when it cannot read a metric, compute a replica count from them, or read its target's
+        // scale (pkg/controller/podautoscaler/horizontal.go, Kubernetes v1.37.0).
+        for reason in [
+            "FailedGetResourceMetric",
+            "FailedGetContainerResourceMetric",
+            "FailedGetPodsMetric",
+            "FailedGetObjectMetric",
+            "FailedGetExternalMetric",
+            "FailedComputeMetricsReplicas",
+            "FailedGetScale",
+        ] {
+            let detection = detect_event(&event("HorizontalPodAutoscaler", reason));
+            assert_eq!(detection.map(Detection::id), Some("D013"), "{reason}");
+            let detection = detection.expect("a detection");
+            assert_eq!(detection.name(), "autoscaler cannot get metrics");
+            settled_event_without_logs(detection);
+        }
+        // Not D013: a rescale that failed after the metrics were read, a successful one, and the
+        // same reasons about another kind.
+        for (kind, reason) in [
+            ("HorizontalPodAutoscaler", "FailedRescale"),
+            ("HorizontalPodAutoscaler", "SuccessfulRescale"),
+            ("Deployment", "FailedGetScale"),
+            ("Pod", "FailedGetResourceMetric"),
+        ] {
+            assert_eq!(detect_event(&event(kind, reason)), None, "{kind} {reason}");
+        }
+    }
 }

@@ -42,7 +42,7 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `src/main.rs` | Flags, usage errors (`--namespace` checked before any connection, at most `MAX_NAMESPACES`), the settings passed to `run` | A flag is added or changed |
 | `src/run.rs` | The controller loop: one Pod watch and one event watch for the whole cluster, or a pair per `--namespace`, merged per kind and tagged with their watch; relists, `403` drops and a new watcher after a `403` (`Restarting`) per watch; readiness once every watch has listed; the tick, the explanation queue, the notification slot beside it (one send at a time, which a duplicate skips), the metrics listener, owner lookups with a cache | The loop's scheduling or what it watches changes |
 | `src/record.rs` | Reduces a Pod or an Event to the few fields kausa keeps; the object is dropped at once | A rule needs a field that is not recorded |
-| `src/detect.rs` | The detection rules `D001`–`D010`: pure functions of a record | A detection rule is added or changed |
+| `src/detect.rs` | The detection rules `D001`–`D013`: pure functions of a record | A detection rule is added or changed |
 | `src/incident.rs` | Signals, grouping by top-level owner, the settle window | Grouping or settling changes |
 | `src/fingerprint.rs` | The incident fingerprint (dedup key, Event name, notification field), never sent to the model | What makes two incidents "the same" changes |
 | `src/owner.rs` | ReplicaSet → Deployment and Job → CronJob, metadata only | A new owner hop (needs an ADR: a new permission) |

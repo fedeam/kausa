@@ -1141,4 +1141,89 @@ mod tests {
             "node-1 and node-1"
         );
     }
+
+    // Acceptance tests for the names in the notes of `D011`, `D012` and `D013` (new cases of
+    // `R003`), written before the code. The controllers write the API server's own errors into
+    // these events: a refused Pod (`pods "<name>" is forbidden`, with the generated name of a Pod
+    // that never existed), the quota that refused it (`exceeded quota: <name>`, in
+    // `staging/src/k8s.io/apiserver/pkg/admission/plugin/resourcequota/controller.go`), the
+    // containers Pod Security admission names (`container "<name>"`, `containers "<a>", "<b>"`,
+    // in `staging/src/k8s.io/pod-security-admission/policy/`), a missing object named with its
+    // API group (`deployments.apps "<name>" not found`), and the StorageClass an external
+    // provisioner names (`with StorageClass "<name>"`). Names, quantities and numbers invented.
+
+    #[test]
+    fn names_in_the_errors_of_controllers_are_redacted() {
+        for (line, leaked, kept) in [
+            (
+                "Error creating: pods \"web-7d9c8b6f4d-d98v6\" is forbidden: exceeded quota: \
+                 compute-budget, requested: pods=1, used: pods=3, limited: pods=3",
+                &["web-7d9c8b6f4d-d98v6", "d98v6", "compute-budget"][..],
+                &[
+                    "Error creating: pods \"<redacted:name>\" is forbidden: exceeded quota: ",
+                    ", requested: pods=1, used: pods=3, limited: pods=3",
+                ][..],
+            ),
+            (
+                "Create Pod db-0 in StatefulSet db failed error: pods \"db-0\" is forbidden: \
+                 exceeded quota: compute-budget, requested: pods=1, used: pods=3, limited: pods=3",
+                &["\"db-0\"", "compute-budget"][..],
+                &["pods \"<redacted:name>\" is forbidden: exceeded quota: "][..],
+            ),
+            (
+                "Error creating: pods \"agent-x7k2p\" is forbidden: violates PodSecurity \
+                 \"restricted:latest\": privileged (containers \"collector\", \"shipper\" must \
+                 not set securityContext.privileged=true), runAsNonRoot != true (pod or \
+                 container \"collector\" must set securityContext.runAsNonRoot=true)",
+                &["agent-x7k2p", "collector", "shipper"][..],
+                &[
+                    "is forbidden: violates PodSecurity \"restricted:latest\": privileged (",
+                    " must not set securityContext.privileged=true), runAsNonRoot != true (pod or ",
+                    " must set securityContext.runAsNonRoot=true)",
+                ][..],
+            ),
+            (
+                r#"deployments.apps "storefront" not found"#,
+                &["storefront"][..],
+                &[r#"deployments.apps "<redacted:name>" not found"#][..],
+            ),
+            (
+                r#"storageclass.storage.k8s.io "fast-ssd" not found"#,
+                &["fast-ssd"][..],
+                &[r#"storageclass.storage.k8s.io "<redacted:name>" not found"#][..],
+            ),
+            (
+                "failed to provision volume with StorageClass \"fast-ssd\": NodePath only \
+                 supports ReadWriteOnce and ReadWriteOncePod (1.22+) access modes",
+                &["fast-ssd"][..],
+                &[
+                    "failed to provision volume with StorageClass \"<redacted:name>\": NodePath \
+                     only supports ReadWriteOnce and ReadWriteOncePod (1.22+) access modes",
+                ][..],
+            ),
+        ] {
+            let mut r = Redactor::new();
+            let out = r.text(line);
+            for name in leaked {
+                assert!(!out.contains(name), "{name} in {out}");
+            }
+            for words in kept {
+                assert!(out.contains(words), "{words:?} not in {out}");
+            }
+            assert!(r.counts().contains_key("R003"), "{out}");
+        }
+    }
+
+    #[test]
+    fn the_words_around_names_in_errors_stay() {
+        // The same words with no name after them, and the metrics API's own resource names.
+        for line in [
+            "the server could not find the requested resource (get pods.metrics.k8s.io)",
+            "invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource \
+             metric value",
+            "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims.",
+        ] {
+            assert_eq!(redact(line), line, "{line}");
+        }
+    }
 }

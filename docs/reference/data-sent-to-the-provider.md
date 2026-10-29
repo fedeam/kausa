@@ -31,14 +31,14 @@ rules](rules.md):
 | Field | Example after redaction | Notes |
 |---|---|---|
 | `detection` | `{"id": "D001", "name": "crash loop"}` | The rule id and its name |
-| `workload` | `{"kind": "Deployment", "name": "deployment-1", "namespace": "namespace-1"}` | The top-level owner's kind (`Object` for a custom resource) and pseudonyms (`R002`) |
+| `workload` | `{"kind": "Deployment", "name": "deployment-1", "namespace": "namespace-1"}` | The top-level owner's kind (a built-in kind as it is, among them `PersistentVolumeClaim` and `HorizontalPodAutoscaler` for `D012` and `D013`; `Object` for a custom resource) and pseudonyms (`R002`) |
 | `pods_affected`, `pods_total` | `2`, `2` | |
-| `pods` | up to three Pods, the example first | Each with its pseudonym, `phase` and, for `D005`, the scheduler's redacted `unschedulable` message (of the `PodScheduled` condition, for reason `Unschedulable` or `SchedulerError`; the reason itself is not sent) |
+| `pods` | up to three Pods, the example first; none for an incident about a Job, a workload controller, a claim or an autoscaler (`D008`, `D011` to `D013`) | Each with its pseudonym, `phase` and, for `D005`, the scheduler's redacted `unschedulable` message (of the `PodScheduled` condition, for reason `Unschedulable` or `SchedulerError`; the reason itself is not sent) |
 | | `reason` `Evicted`, `message` `Pod ephemeral local storage usage exceeds the total limit of containers 50Mi.` | The Pod's `status.reason` and `status.message`, each cut at 1024 bytes and redacted like the other free text (any writer of `pods/status` can set either), when they are set (an eviction, `D009`, or a Pod past its deadline); `null` otherwise. The message names quantities and, for node pressure, a container (pseudonymized, `R002`); for an `emptyDir` limit it names the volume, which kausa does not know and sends as written unless a pattern matches it |
 | `pods[].containers` | `name` `container-1`, `init` `false`, `image` `busybox:1.37` or `registry-1/image-1:tag` | Whether it is an init container; public registries kept, others pseudonymized (`R002`) |
 | | waiting reason and redacted message; terminated and last termination reasons and exit codes; restart count | As Kubernetes reports them |
 | | `memory_limit` `32Mi`, `cpu_limit` `50m`; each probe's kind and timings | Numbers only; never a probe's command, path or headers |
-| `warning_events` | up to ten: reason, redacted message, count | Only events a detection matches, of the incident's Pods or Job |
+| `warning_events` | up to ten: reason, redacted message, count | Only events a detection matches, of the incident's Pods or of the object the incident is about (a Job, or for `D011` to `D013` the ReplicaSet, Job, StatefulSet, DaemonSet, claim or autoscaler). Their messages can name other objects: a refused Pod, a quota, a container, a StorageClass, an autoscaler's target; `R003` redacts the formats of [Detection and redaction rules](rules.md#redaction-rules) |
 | `log_tail` | `connect ECONNREFUSED <redacted:ip>:5432` | Only `D001`, `D003` and `D008`: the previous instance for a container that restarted and runs or waits again, otherwise the terminated one; the last 50 lines asked for, cut to the last 4 KiB after redaction; `--no-logs` turns it off |
 
 The whole body of the request: `model`; two messages, the fixed system message and one user

@@ -34,10 +34,10 @@ The kind test checks that the `kubectl auth can-i` lists stay the same with noti
 |---|---|---|---|
 | `""` (core) | `pods` | `get`, `list`, `watch` | Container states, restart counts, phase, owner references |
 | `""` (core) | `pods/log` | `get` | The last lines of the failed container (the previous instance if it restarted) for crash-type and Job detections. Only while log collection is on |
-| `events.k8s.io` | `events` | `list`, `watch` | Warning events about Pods and Jobs |
+| `events.k8s.io` | `events` | `list`, `watch` | Warning events about Pods, Jobs, ReplicaSets, StatefulSets, DaemonSets, PersistentVolumeClaims and HorizontalPodAutoscalers (the objects themselves are never read) |
 | `events.k8s.io` | `events` | `create`, `patch` | Write the explanation, and update its series count when the incident repeats |
-| `apps` | `replicasets` | `get` | Follow a ReplicaSet's owner reference to its Deployment |
-| `batch` | `jobs` | `get` | Follow a Job's owner reference to its CronJob |
+| `apps` | `replicasets` | `get` | Follow a ReplicaSet's owner reference to its Deployment, for a Pod or for an event about the ReplicaSet (`D011`) |
+| `batch` | `jobs` | `get` | Follow a Job's owner reference to its CronJob, for a Pod or for an event about the Job (`D008`, `D011`) |
 | `kausa.fedeam.com` | `explanations` | `list`, `create`, `patch`, `delete` | Only while kausa writes history. `list`: read one object by name (a `metadata.name` field selector) before a write, and the sweep; `create`: an incident's first explanation; `patch`: append to its history (`status` and `resourceVersion` only; `spec` is immutable); `delete`: retention by age and by count ([Explanation resource](explanation-resource.md)) |
 
 The `explanations` rule comes last in the rules and only with the history on; why kausa may write
