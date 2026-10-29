@@ -124,6 +124,13 @@ checks](how-to/develop.md).
   webhook, as JSON, Slack or Telegram](adr/0015-notifications.md).
   [0016. Send each Pod's status reason and message to the model, redacted and
   bounded](adr/0016-send-the-pod-status-reason-and-message.md) came with v0.2.0's detection rules.
+  Proposed for v0.4: [0017. Send the model resource requests, probe handlers, image pull settings
+  and an unschedulable Pod's scheduling keys, reduced and
+  redacted](adr/0017-richer-context-for-the-model.md), [0018. Explain a Deployment past its
+  progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
+  StatefulSets or DaemonSets](adr/0018-stuck-rollouts.md) and [0019. Offer an optional standby
+  replica that takes over through a chart-created Lease, elected by kausa's own
+  code](adr/0019-high-availability.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
