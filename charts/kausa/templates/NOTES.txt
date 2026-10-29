@@ -37,6 +37,35 @@ kausa logs incidents (no endpoint is configured, or events is false):
 
   kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "kausa.fullname" . }}
 {{- end }}
+{{- if include "kausa.writesHistory" . }}
+{{- $days := include "kausa.historyDays" . }}
+
+kausa keeps each incident's explanations in an Explanation object in its namespace, and deletes
+the ones older than {{ $days }} {{ if eq $days "1" }}day{{ else }}days{{ end }} (history.days):
+{{ if eq $scope "namespaced" }}
+{{- range $namespaces }}
+  kubectl get explanations -n {{ . }}
+{{- end }}
+{{- else }}
+  kubectl get explanations -A
+{{- end }}
+  kubectl get explanation -n <namespace> <name> -o yaml
+{{- if include "kausa.installsCRD" . }}
+
+This release installs the CustomResourceDefinition explanations.kausa.fedeam.com: uninstalling
+it, or turning its history off (history.enabled=false, no model.endpoint, or dryRun=true),
+deletes the CustomResourceDefinition and every Explanation.
+{{- else }}
+
+history.installCRD is false: this release does not install the CustomResourceDefinition
+explanations.kausa.fedeam.com, and a cluster administrator installs it (helm template with the
+same values, history.installCRD=true and --show-only on templates/explanation-crd.yaml and
+templates/explanation-reader.yaml). Until it exists, kausa only logs a warning. Uninstalling the
+release that installs it, or turning that release's history off, deletes the
+CustomResourceDefinition and every Explanation, this release's too; uninstalling this release
+does not delete its Explanations.
+{{- end }}
+{{- end }}
 
 rbac.scope must be set on every helm upgrade: keep it in a values file, or upgrade with
 --reuse-values. An upgrade without it fails.

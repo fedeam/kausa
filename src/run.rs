@@ -6,8 +6,10 @@
 //! request logged (`explain.rs`); with `--endpoint` and without `--no-events`, the explanation is also an
 //! Event (`events.rs`). The API calls are the watches (one of Pods and one of Warning events on
 //! the whole cluster, or one of each per watched namespace), the metadata reads of ReplicaSets and
-//! Jobs, `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`, and the Event writes
-//! (docs/reference/permissions.md). `--metrics-address` serves the counters (`metrics.rs`).
+//! Jobs, `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`, the Event writes and, with
+//! `--history`, the Explanation writes and their sweep, at start and hourly in the explanation
+//! slot (docs/reference/permissions.md, docs/adr/0014-explanation-history.md).
+//! `--metrics-address` serves the counters (`metrics.rs`).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -39,6 +41,7 @@ use crate::context::Gathered;
 use crate::detect::{Detection, detect_event};
 use crate::events::Writer;
 use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Shared, Work};
+use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals};
 use crate::log;
 use crate::metrics::{self, Metrics};
@@ -319,6 +322,10 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         dedup: RefCell::new(Dedup::new(settings.dedup_ttl, DEDUP_CAPACITY)),
         writer: (settings.events && settings.model.is_some())
             .then(|| Writer::new(client.clone(), settings.instance.clone())),
+        history: settings
+            .history_days
+            .filter(|_| settings.model.is_some())
+            .map(|days| History::new(client.clone(), days)),
         metrics: &metrics,
     });
     let mut readiness = Readiness::new(&options.namespaces);
@@ -338,17 +345,44 @@ pub async fn run(options: Options) -> Result<(), RunError> {
     let mut delayed: Vec<(Instant, Work)> = Vec::new();
     let mut connections = FuturesUnordered::new();
 
+    // When the last sweep of the history began (docs/adr/0014-explanation-history.md).
+    let mut last_sweep: Option<Instant> = None;
+
     loop {
-        if running.is_none()
-            && let (Some(settings), Some(shared), Some(job)) =
-                (options.explain.as_ref(), shared.as_ref(), queue.pop_front())
-        {
-            running = Some(Box::pin(explain::run(
-                job,
-                explainer.clone(),
-                settings,
-                shared,
-            )));
+        if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared.as_ref()) {
+            let now = Instant::now();
+            let history = shared.history.as_ref();
+            match next_in_slot(
+                running.is_some(),
+                history.is_some(),
+                last_sweep,
+                now,
+                !queue.is_empty(),
+            ) {
+                Some(Slot::Sweep) => {
+                    if let Some(history) = history {
+                        last_sweep = Some(now);
+                        let namespaces = &options.namespaces;
+                        running = Some(Box::pin(async move {
+                            history
+                                .sweep(namespaces, shared.metrics)
+                                .await
+                                .map(|()| None)
+                        }));
+                    }
+                }
+                Some(Slot::Explain) => {
+                    if let Some(job) = queue.pop_front() {
+                        running = Some(Box::pin(explain::run(
+                            job,
+                            explainer.clone(),
+                            settings,
+                            shared,
+                        )));
+                    }
+                }
+                None => {}
+            }
         }
         tokio::select! {
             result = async { running.as_mut().expect("guarded by the condition").await },
@@ -761,10 +795,45 @@ impl State {
     }
 }
 
-/// A cached owner lookup: the answer (or the error) and when it was read.
-/// The explanation in progress: it ends with a job to retry, if its call failed transiently.
+/// What holds the explanation slot: an explanation, which ends with a job to retry if its call
+/// failed transiently, or a sweep of the history, which ends with none.
 type Explaining<'a> = Pin<Box<dyn Future<Output = io::Result<Option<Work>>> + 'a>>;
 
+/// What takes the free explanation slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    /// A sweep of the history.
+    Sweep,
+    /// The next job of the queue.
+    Explain,
+}
+
+/// Whether a sweep of the history is due: at start, and once `SWEEP_INTERVAL` has passed since the
+/// last one began.
+fn sweep_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= history::SWEEP_INTERVAL)
+}
+
+/// What takes the explanation slot: nothing while it is `busy`; with the history on, a due sweep
+/// before the queue, so a queue that never empties cannot starve retention; otherwise the next job,
+/// if one is `queued`.
+fn next_in_slot(
+    busy: bool,
+    history: bool,
+    last_sweep: Option<Instant>,
+    now: Instant,
+    queued: bool,
+) -> Option<Slot> {
+    if busy {
+        None
+    } else if history && sweep_due(last_sweep, now) {
+        Some(Slot::Sweep)
+    } else {
+        queued.then_some(Slot::Explain)
+    }
+}
+
+/// A cached owner lookup: the answer (or the error) and when it was read.
 type CachedLookup = (Result<Option<OwnerRef>, String>, Instant);
 
 /// Owner lookups against the API server: metadata only, with a timeout, cached for a while.
@@ -1515,6 +1584,132 @@ mod tests {
         let given = ["web".to_owned(), "api".to_owned(), "shop".to_owned()];
         assert_eq!(watched(&given), json!(["api", "shop", "web"]));
         assert_eq!(given, ["web", "api", "shop"]);
+    }
+
+    // Acceptance tests for the history sweep (docs/adr/0014-explanation-history.md), written
+    // before the code. They use this API, which run.rs does not have yet:
+    //
+    // - `fn sweep_due(last: Option<Instant>, now: Instant) -> bool`: true with no sweep yet, and
+    //   once `history::SWEEP_INTERVAL` has passed since the last one began;
+    // - `enum Slot { Sweep, Explain }` (`Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`);
+    // - `fn next_in_slot(busy: bool, history: bool, last_sweep: Option<Instant>, now: Instant,
+    //   queued: bool) -> Option<Slot>`: what takes the explanation slot. Nothing while it is
+    //   busy; with the history on, a due sweep before the queue; otherwise the next job, if any.
+
+    #[test]
+    fn a_sweep_is_due_at_start_and_once_the_interval_has_passed() {
+        let start = Instant::now();
+        let interval = crate::history::SWEEP_INTERVAL;
+        assert!(sweep_due(None, start));
+        assert!(!sweep_due(Some(start), start));
+        assert!(!sweep_due(
+            Some(start),
+            start + interval - Duration::from_secs(1)
+        ));
+        assert!(sweep_due(Some(start), start + interval));
+        assert!(sweep_due(Some(start), start + interval * 3));
+    }
+
+    #[test]
+    fn a_due_sweep_takes_the_slot_before_a_waiting_job() {
+        let start = Instant::now();
+        let later = start + Duration::from_secs(60);
+        // Due (never swept, or an hour ago): the sweep goes first, queue or not.
+        assert_eq!(
+            next_in_slot(false, true, None, start, true),
+            Some(Slot::Sweep)
+        );
+        assert_eq!(
+            next_in_slot(false, true, None, start, false),
+            Some(Slot::Sweep)
+        );
+        let hour_ago = start;
+        let now = start + crate::history::SWEEP_INTERVAL;
+        assert_eq!(
+            next_in_slot(false, true, Some(hour_ago), now, true),
+            Some(Slot::Sweep)
+        );
+        // Not due: the queue, or nothing.
+        assert_eq!(
+            next_in_slot(false, true, Some(start), later, true),
+            Some(Slot::Explain)
+        );
+        assert_eq!(next_in_slot(false, true, Some(start), later, false), None);
+    }
+
+    #[test]
+    fn nothing_starts_while_the_slot_is_busy() {
+        let start = Instant::now();
+        for history in [true, false] {
+            for last in [None, Some(start)] {
+                for queued in [true, false] {
+                    let now = start + crate::history::SWEEP_INTERVAL * 2;
+                    assert_eq!(
+                        next_in_slot(true, history, last, now, queued),
+                        None,
+                        "history {history}, last {last:?}, queued {queued}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn there_is_no_sweep_without_the_history() {
+        let start = Instant::now();
+        assert_eq!(
+            next_in_slot(false, false, None, start, true),
+            Some(Slot::Explain)
+        );
+        assert_eq!(next_in_slot(false, false, None, start, false), None);
+        let now = start + crate::history::SWEEP_INTERVAL * 5;
+        assert_eq!(
+            next_in_slot(false, false, Some(start), now, true),
+            Some(Slot::Explain)
+        );
+        assert_eq!(next_in_slot(false, false, Some(start), now, false), None);
+    }
+
+    #[test]
+    fn a_queue_that_never_empties_cannot_starve_the_sweep() {
+        // Three hours of a slot that is never idle: each explanation holds it for 45 seconds and
+        // the queue always has another; a sweep holds it for SWEEP_TIME. The loop records when a
+        // sweep starts, as run does.
+        let interval = crate::history::SWEEP_INTERVAL;
+        let explanation = Duration::from_secs(45);
+        let start = Instant::now();
+        let mut elapsed = Duration::ZERO;
+        let mut last_sweep: Option<Instant> = None;
+        let mut sweeps: Vec<Duration> = Vec::new();
+        let mut explained = 0;
+        while elapsed < interval * 3 + Duration::from_secs(120) {
+            let now = start + elapsed;
+            match next_in_slot(false, true, last_sweep, now, true) {
+                Some(Slot::Sweep) => {
+                    sweeps.push(elapsed);
+                    last_sweep = Some(now);
+                    elapsed += crate::history::SWEEP_TIME;
+                }
+                Some(Slot::Explain) => {
+                    explained += 1;
+                    elapsed += explanation;
+                }
+                None => panic!("the slot stayed idle with a job waiting at {elapsed:?}"),
+            }
+        }
+        assert_eq!(sweeps.first(), Some(&Duration::ZERO), "{sweeps:?}");
+        assert!(sweeps.len() >= 4, "{sweeps:?}");
+        for pair in sweeps.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(
+                gap >= interval && gap < interval + explanation,
+                "{sweeps:?}"
+            );
+        }
+        assert!(
+            explained > 200,
+            "the sweep took the slot from the queue: {explained}"
+        );
     }
 
     #[test]

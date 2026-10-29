@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 12] = [
+pub const COUNTERS: [(&str, &str); 15] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -60,6 +60,18 @@ pub const COUNTERS: [(&str, &str); 12] = [
     (
         "kausa_watch_errors_total",
         "Errors of the Pod and Event watches, which retry with backoff, by watch.",
+    ),
+    (
+        "kausa_history_writes_total",
+        "Explanation objects written, by outcome (created, updated, refused, conflict, error).",
+    ),
+    (
+        "kausa_history_deleted_total",
+        "Explanation objects deleted by the sweep, by reason (age, cap).",
+    ),
+    (
+        "kausa_history_sweep_errors_total",
+        "Failed list or delete calls of the history sweep.",
     ),
 ];
 
@@ -192,6 +204,68 @@ mod tests {
         );
         assert!(text.contains("kausa_model_tokens_total{direction=\"in\"} 500\n"));
         assert!(text.contains("kausa_events_written_total 0\n"));
+    }
+
+    // Acceptance tests for the explanation history (docs/adr/0014-explanation-history.md),
+    // written before the code: three more counters in `COUNTERS`.
+    #[test]
+    fn the_history_counters_are_exported_with_their_help() {
+        assert_eq!(COUNTERS.len(), 15);
+        for counter in [
+            (
+                "kausa_history_writes_total",
+                "Explanation objects written, by outcome (created, updated, refused, conflict, error).",
+            ),
+            (
+                "kausa_history_deleted_total",
+                "Explanation objects deleted by the sweep, by reason (age, cap).",
+            ),
+            (
+                "kausa_history_sweep_errors_total",
+                "Failed list or delete calls of the history sweep.",
+            ),
+        ] {
+            assert!(COUNTERS.contains(&counter), "{counter:?}");
+        }
+        let names: std::collections::BTreeSet<&str> = COUNTERS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), COUNTERS.len(), "a counter is listed twice");
+    }
+
+    #[test]
+    fn the_history_counters_render_as_zero_when_unused() {
+        let m = Metrics::default();
+        let text = m.render();
+        for name in [
+            "kausa_history_writes_total",
+            "kausa_history_deleted_total",
+            "kausa_history_sweep_errors_total",
+        ] {
+            assert!(
+                text.contains(&format!("# TYPE {name} counter\n{name} 0\n")),
+                "{name}: {text}"
+            );
+        }
+        m.inc("kausa_history_writes_total", &[("outcome", "created")]);
+        m.inc("kausa_history_writes_total", &[("outcome", "conflict")]);
+        m.add("kausa_history_deleted_total", &[("reason", "age")], 3);
+        m.inc("kausa_history_sweep_errors_total", &[]);
+        let text = m.render();
+        assert!(
+            text.contains("kausa_history_writes_total{outcome=\"created\"} 1\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("kausa_history_writes_total{outcome=\"conflict\"} 1\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("kausa_history_deleted_total{reason=\"age\"} 3\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("kausa_history_sweep_errors_total 1\n"),
+            "{text}"
+        );
     }
 
     #[test]

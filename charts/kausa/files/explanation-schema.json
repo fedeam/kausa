@@ -1,0 +1,152 @@
+{
+  "type": "object",
+  "description": "The explanation history of one incident, written by kausa: one object per incident fingerprint, named kausa.<fingerprint>, in the failing workload's namespace. Its texts carry the real names of the cluster, mapped back from the placeholders the model saw.",
+  "required": [
+    "spec"
+  ],
+  "properties": {
+    "spec": {
+      "type": "object",
+      "description": "The incident's identity, written by kausa when it creates the object. It is required and immutable, for kausa and for everyone else.",
+      "required": [
+        "rule",
+        "target"
+      ],
+      "x-kubernetes-validations": [
+        {
+          "rule": "self == oldSelf",
+          "message": "spec is immutable"
+        }
+      ],
+      "properties": {
+        "rule": {
+          "type": "string",
+          "description": "The id of the detection rule that found the incident, for example D001.",
+          "pattern": "^D[0-9]{3}$",
+          "maxLength": 4
+        },
+        "target": {
+          "type": "object",
+          "description": "The failing workload's top-level owner, the object that kausa's Event is about. It has no uid: a workload recreated under the same name continues its history.",
+          "required": [
+            "apiVersion",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "apiVersion": {
+              "type": "string",
+              "description": "The apiVersion of the top-level owner, for example apps/v1.",
+              "maxLength": 253
+            },
+            "kind": {
+              "type": "string",
+              "description": "The kind of the top-level owner, for example Deployment.",
+              "maxLength": 63
+            },
+            "name": {
+              "type": "string",
+              "description": "The name of the top-level owner.",
+              "maxLength": 253
+            }
+          }
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "description": "The explanations kausa wrote for this incident. kausa reads it back as untrusted data: an entry that is malformed, oversized, dated in the future or not clean is dropped on the next write.",
+      "properties": {
+        "occurrences": {
+          "type": "integer",
+          "description": "How many times kausa wrote an explanation for this incident, fresh or from its cache, since the object was created. Entries dropped by age or by the limit of five still count.",
+          "minimum": 1
+        },
+        "lastTime": {
+          "type": "string",
+          "description": "When kausa last wrote this object, in UTC to the second, for example 2026-10-28T10:00:00Z. kausa deletes the object once this is older than its --history-days.",
+          "format": "date-time",
+          "maxLength": 20
+        },
+        "entries": {
+          "type": "array",
+          "description": "At most five distinct explanation texts, newest first. A text whose last write is older than --history-days is dropped on the next write.",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "description": "One distinct explanation text (summary, cause, steps and confidence), and when and how often kausa wrote it.",
+            "required": [
+              "summary",
+              "cause",
+              "steps",
+              "confidence",
+              "model",
+              "promptVersion",
+              "firstTime",
+              "lastTime",
+              "count"
+            ],
+            "properties": {
+              "summary": {
+                "type": "string",
+                "description": "The whole summary of the model's answer, validated and cleaned, with the real names mapped back.",
+                "maxLength": 300
+              },
+              "cause": {
+                "type": "string",
+                "description": "The whole likely cause of the model's answer, validated and cleaned, with the real names mapped back.",
+                "maxLength": 600
+              },
+              "steps": {
+                "type": "array",
+                "description": "The suggested steps of the model's answer, at most five; the list may be empty. kausa never acts on them.",
+                "maxItems": 5,
+                "items": {
+                  "type": "string",
+                  "description": "One suggested step, validated and cleaned, with the real names mapped back.",
+                  "maxLength": 300
+                }
+              },
+              "confidence": {
+                "type": "string",
+                "description": "The model's confidence in its answer: low, medium or high.",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "model": {
+                "type": "string",
+                "description": "The --model value of the last write of this text, cleaned and cut to 253 characters.",
+                "maxLength": 253
+              },
+              "promptVersion": {
+                "type": "string",
+                "description": "The version of kausa's fixed request to the model at the last write of this text.",
+                "maxLength": 16
+              },
+              "firstTime": {
+                "type": "string",
+                "description": "When kausa first wrote this text, in UTC to the second.",
+                "format": "date-time",
+                "maxLength": 20
+              },
+              "lastTime": {
+                "type": "string",
+                "description": "When kausa last wrote this text, in UTC to the second.",
+                "format": "date-time",
+                "maxLength": 20
+              },
+              "count": {
+                "type": "integer",
+                "description": "How many times kausa wrote this text, like the series count of its Event.",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

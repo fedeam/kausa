@@ -45,6 +45,33 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end }}
 
 {{/*
+The history map is read nil-safe: a release made before it (helm upgrade --reuse-values) or
+--set history=null has none. The keys that default to something other than false default with
+hasKey, never with default, which would turn a false into true.
+*/}}
+
+{{/* kausa writes the history with history.enabled, an endpoint and outside dry-run. */}}
+{{- define "kausa.writesHistory" -}}
+{{- $h := .Values.history | default dict }}
+{{- if and $h.enabled .Values.model.endpoint (not .Values.dryRun) }}true{{ end }}
+{{- end }}
+
+{{/* history.days as a string, 7 when missing; kausa.validate checks it. */}}
+{{- define "kausa.historyDays" -}}
+{{- $h := .Values.history | default dict }}
+{{- if hasKey $h "days" }}{{ toString $h.days }}{{ else }}7{{ end }}
+{{- end }}
+
+{{/* The chart installs the Explanation CRD while kausa writes the history, unless installCRD is
+false (another release or a cluster administrator installs it). */}}
+{{- define "kausa.installsCRD" -}}
+{{- $h := .Values.history | default dict }}
+{{- $install := true }}
+{{- if hasKey $h "installCRD" }}{{ $install = $h.installCRD }}{{ end }}
+{{- if and (include "kausa.writesHistory" .) $install }}true{{ end }}
+{{- end }}
+
+{{/*
 The rules of the ClusterRole (rbac.scope=cluster) and of every Role (rbac.scope=namespaced): the
 permissions in docs/reference/permissions.md, and nothing else. A later feature adds its rules
 only here, so that both scopes grant the same.
@@ -72,13 +99,18 @@ only here, so that both scopes grant the same.
 - apiGroups: ["batch"]
   resources: ["jobs"]
   verbs: ["get"]
+{{- if include "kausa.writesHistory" . }}
+- apiGroups: ["kausa.fedeam.com"]
+  resources: ["explanations"]
+  verbs: ["list", "create", "patch", "delete"]
+{{- end }}
 {{- end }}
 
 {{/*
 Refuses to render with a reason. The rbac checks come first, in this order: the scope, the list
 against the scope, every name, the first repeat, and the count. rbac is read nil-safe: a v0.1
 release's stored values and --set rbac=null have no rbac map, and must reach the "not set"
-message, not a nil-pointer error.
+message, not a nil-pointer error. history.days comes last, with the history on or off.
 */}}
 {{- define "kausa.validate" -}}
 {{- $rbac := .Values.rbac | default dict }}
@@ -125,5 +157,9 @@ message, not a nil-pointer error.
 {{- end }}
 {{- if and .Values.networkPolicy.enabled .Values.model.endpoint (not .Values.dryRun) (not .Values.networkPolicy.endpoint.to) }}
 {{- fail "networkPolicy.endpoint.to is required with networkPolicy.enabled and model.endpoint: without it kausa cannot reach the model" }}
+{{- end }}
+{{- $days := include "kausa.historyDays" . }}
+{{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $days) }}
+{{- fail (printf "history.days must be a whole number of days from 1 to 30, not '%s'" $days) }}
 {{- end }}
 {{- end }}

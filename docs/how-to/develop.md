@@ -91,7 +91,12 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    ClusterRole; then an Event about another namespace, which kausa must ignore, and an upgrade to
    the namespaced scope), or `namespaced` (Roles in two namespaces, an unlisted namespace with the
    same failures, a reset upgrade that must fail, a namespace that refuses kausa, and an uninstall
-   that must leave no Role). CI runs both, as the checks `kind (cluster)` and `kind (namespaced)`:
+   that must leave no Role). Both install with `history.enabled=true` and check each failing
+   workload's Explanation, its columns, who may read and write it, what the
+   CustomResourceDefinition refuses, the sweep after a restart, and kausa's own update of an
+   Explanation after it; the cluster scope also turns the history off with `dryRun=true` and
+   `history.enabled=false`, and restarts kausa without the CustomResourceDefinition. CI runs
+   both, as the checks `kind (cluster)` and `kind (namespaced)`:
 
    ```sh
    KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the node image pinned in .github/workflows/e2e.yml> \
@@ -110,9 +115,11 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
 ## Fuzz
 
 `fuzz/` holds fuzz targets for the code that parses untrusted text: `redact` (redaction of
-anything a cluster could produce) and `validate` (validation of anything a model could answer).
-GitHub Actions run them with ClusterFuzzLite on pull requests that change that code and every
-week (`.github/workflows/cflite.yml`). To run one locally you need a nightly toolchain and
+anything a cluster could produce), `validate` (validation of anything a model could answer) and
+`history` (merging an explanation into any stored Explanation, which also checks that what kausa
+writes survives its next read and that `prompt::clean` is idempotent). GitHub Actions run them
+with ClusterFuzzLite on pull requests that change that code and every week
+(`.github/workflows/cflite.yml`). To run one locally you need a nightly toolchain and
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (`cargo install cargo-fuzz`):
 
 ```sh

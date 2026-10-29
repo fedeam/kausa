@@ -4,7 +4,7 @@
 
 ![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-0969da) ![rust: 1.99+](https://img.shields.io/badge/rust-1.99%2B-0969da) [![CI](https://github.com/fedeam/kausa/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fedeam/kausa/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/fedeam/kausa/badge)](https://scorecard.dev/viewer/?uri=github.com/fedeam/kausa) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16024/badge)](https://www.bestpractices.dev/projects/16024)
 
-A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events.
+A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects.
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
@@ -96,7 +96,8 @@ full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.
 - **Read-only, except for its Events.** It reads Pods, Events, and the metadata of ReplicaSets
   and Jobs to follow owners; `pods/log` only for crash loops, out-of-memory kills and failed
   Jobs, and that can be turned off. It never reads Secrets or ConfigMaps, and the only thing it
-  writes is Events ([Permissions](docs/reference/permissions.md)).
+  writes is Events and, with `--history`, its own Explanations
+  ([Permissions](docs/reference/permissions.md)).
 - **Deterministic before the model.** Detection, grouping, fingerprints and redaction are rules,
   tested like code. One incident is one request.
 - **Cluster text is untrusted.** Logs and event messages are data inside the prompt. The model
@@ -198,9 +199,12 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
 - **v0.3:** a namespaced install mode, in the code and the chart, not released yet: `kausa run
   --namespace` and the chart's `rbac.scope=namespaced`, with a Role per listed namespace and
   nothing cluster-wide ([0013. Offer a namespaced install mode: one watch pair and one Role per
-  listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)); then
-  the history of explanations in a custom resource, and notifications to one webhook ([ADRs 0013
-  to 0015](docs/adr/)).
+  listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)), and
+  the history of explanations, also in the code and the chart and off by default: `kausa run
+  --history` and the chart's `history.enabled=true` keep each incident's whole explanations in an
+  Explanation object in its namespace for up to 30 days ([Explanation
+  resource](docs/reference/explanation-resource.md)); then notifications to one webhook ([ADRs
+  0013 to 0015](docs/adr/)).
 
 ## Documentation
 
@@ -211,6 +215,7 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
 - [Permissions](docs/reference/permissions.md)
 - [Command line and log format](docs/reference/command-line.md)
 - [Helm chart](docs/reference/helm-chart.md)
+- [Explanation resource](docs/reference/explanation-resource.md)
 - [Install kausa with Helm](docs/how-to/install-with-helm.md)
 - [Try kausa against a cluster with a local model](docs/how-to/try-with-a-local-model.md)
 - [Set up a development environment and run the checks](docs/how-to/develop.md)

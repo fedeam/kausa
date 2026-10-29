@@ -10,12 +10,15 @@ Since v0.1.0 (2026-10-28) each release attaches the packaged chart to its GitHub
 publishes the image it uses by default, and the v0.1.0 chart was installed in dry-run in kind with
 that image ([Install kausa with Helm](../how-to/install-with-helm.md)). `rbac.scope` and
 `rbac.namespaces` are in the chart of the repository, not in a release yet: the v0.2.0 and v0.1.0
-charts have neither and always create the ClusterRole. Why it is built this way: [0010. Ship a static binary
+charts have neither and always create the ClusterRole. The `history` values, the Explanation
+CustomResourceDefinition and its reader role are in the chart of the repository too, not in a
+release yet, and the kind test installs them in both scopes. Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
 yet](../adr/0010-packaging.md), [0012. Release from a tag: a signed image on GHCR and the
 chart on the GitHub release](../adr/0012-releases.md) and [0013. Offer a namespaced install mode:
 one watch pair and one Role per listed namespace, and nothing
-cluster-wide](../adr/0013-namespaced-install-mode.md).
+cluster-wide](../adr/0013-namespaced-install-mode.md) and [0014. Keep each incident's full
+explanations in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md).
 
 ## Objects
 
@@ -27,15 +30,20 @@ cluster-wide](../adr/0013-namespaced-install-mode.md).
 | Deployment | the release's full name | One replica, `Recreate`, the restricted Pod Security settings, a read-only root filesystem, `POD_NAME` from the downward API |
 | Service | `<full name>-metrics` | Only with `metrics.enabled` |
 | NetworkPolicy | the release's full name | Only with `networkPolicy.enabled` |
+| CustomResourceDefinition | `explanations.kausa.fedeam.com` | Only while the release writes history (`kausa.writesHistory`) and `history.installCRD` is true. Cluster-scoped, in both `rbac.scope`s. No `helm.sh/resource-policy: keep` ([Explanation resource](explanation-resource.md)) |
+| ClusterRole | `<full name>-explanation-reader` | Only with the CustomResourceDefinition and `history.readers.aggregate`: `get`, `list` and `watch` on `explanations`, aggregated to `view` ([Permissions](permissions.md)) |
 
 The full name is the release name when it contains `kausa`, and `<release>-kausa` otherwise.
 Every object is in the release namespace, except the Roles and RoleBindings, which are in the
-listed namespaces. The chart creates no Namespace: each listed one must exist before `helm
+listed namespaces, and the CustomResourceDefinition and the reader role, which are
+cluster-scoped. The chart creates no Namespace: each listed one must exist before `helm
 install` (a chart that owned them would delete their workloads on `helm uninstall`).
 
 The RBAC objects come from `templates/rbac.yaml`, and their rules from the `kausa.rules` helper in
 `templates/_helpers.tpl`, which the ClusterRole and every Role render: a permission added later
-goes there only, so that both scopes grant the same.
+goes there only, so that both scopes grant the same. The history's rule (`list`, `create`,
+`patch` and `delete` on `explanations` in `kausa.fedeam.com`) is appended last, only while the
+release writes history.
 
 ## Values
 
@@ -57,6 +65,10 @@ goes there only, so that both scopes grant the same.
 | `dryRun` | `false` | `--dry-run` |
 | `logs` | `true` | `false` adds `--no-logs` and removes `pods/log` |
 | `events` | `true` | `false` adds `--no-events` and removes the Event writes |
+| `history.enabled` | `false` | With an endpoint and without `dryRun`: `--history --history-days <days>`, the `explanations` rule, and (with `installCRD`) the CustomResourceDefinition and the reader role. Turning it off, removing the endpoint or setting `dryRun` deletes them, and every Explanation in the cluster |
+| `history.days` | `7` | `--history-days`: Explanations older than this many days are deleted, 1 to 30 |
+| `history.installCRD` | `true` | Whether this release installs the CustomResourceDefinition and the reader role. `false` when another release or a cluster administrator installs them |
+| `history.readers.aggregate` | `true` | The reader role, which lets `view`, `edit` and `admin` read Explanations; `false` leaves it out |
 | `settleSeconds` | `60` | `--settle-seconds` |
 | `budget.callsPerHour` | `30` | `--max-calls-per-hour` |
 | `budget.callsPerDay` | `200` | `--max-calls-per-day` |
@@ -94,16 +106,69 @@ reason, and nothing is applied) in these cases, checked in this order, with thes
 | An `http://` endpoint without `model.allowHttp` | `model.endpoint is plain http://: set model.allowHttp=true (only for an endpoint in the cluster or on the same private network)` |
 | The NetworkPolicy without the API server's addresses | `networkPolicy.apiServer.cidrs is required with networkPolicy.enabled: without it kausa cannot reach the API server` |
 | The NetworkPolicy with an endpoint (outside `dryRun`) and without its peers | `networkPolicy.endpoint.to is required with networkPolicy.enabled and model.endpoint: without it kausa cannot reach the model` |
+| `history.days` is not a whole number from 1 to 30, whether the history is on or off (for example `0`, `31`, `abc` or `7.5`) | `history.days must be a whole number of days from 1 to 30, not '<value>'` |
 
 The checks are in `kausa.validate` (`templates/_helpers.tpl`). `rbac` is read with defaults, so a
 missing or null map reaches the first message and never a nil-pointer error.
+
+## The history
+
+Three helpers in `templates/_helpers.tpl` decide what the history renders:
+
+| Helper | Gives `true` when | Renders |
+|---|---|---|
+| `kausa.writesHistory` | `history.enabled`, `model.endpoint` set, and `dryRun` false | `--history --history-days "<days>"` in the Deployment's arguments (after the `--no-events` position), the `explanations` rule in `kausa.rules`, and the history lines of `NOTES.txt` |
+| `kausa.historyDays` | (gives the days as a string) | The value of `--history-days` and of the `history.days` check |
+| `kausa.installsCRD` | `kausa.writesHistory` and `history.installCRD` | `templates/explanation-crd.yaml`, and with `history.readers.aggregate`, `templates/explanation-reader.yaml` |
+
+`history` is read nil-safely: a release whose stored values have no `history` map (one installed
+with an earlier chart and upgraded with `--reuse-values`, which renders with the old chart's
+values) renders as `enabled: false`, `days: 7`, `installCRD: true` and `readers.aggregate: true`,
+with no nil-pointer error. `days`, `installCRD` and `readers.aggregate` default only when the key
+is missing, so an explicit `false` stays false. The NetworkPolicy does not change: the history
+goes to the API server only.
+
+**Life cycle.** The CustomResourceDefinition is a template, not in `crds/`, so Helm upgrades it
+with the release, and it carries no `helm.sh/resource-policy: keep`. It exists exactly while the
+release's kausa writes, and so sweeps, the history. **`helm uninstall`, `history.enabled=false`,
+an empty `model.endpoint` or `dryRun=true` deletes the CustomResourceDefinition and every
+Explanation in the cluster**; the next explanation after turning the history back on starts it
+again. In kind on 2026-10-28, `helm upgrade --reuse-values --set history.enabled=false` and `--set
+dryRun=true` removed the rule, the CRD, the reader and every Explanation.
+
+**Two releases in one cluster** (namespaced scope, with disjoint `rbac.namespaces`): exactly one
+sets `history.installCRD=true`, the others `false`. Helm refuses to install a second release that
+renders the same CustomResourceDefinition (`invalid ownership metadata`, naming the release that
+owns it; seen in kind on 2026-10-28). Uninstalling the release that owns it, or turning its
+history off, deletes every release's history. Each kausa sweeps only its own namespaces.
+
+**`history.installCRD=false`**, for an installer without the right to create a
+CustomResourceDefinition or a ClusterRole: the release renders the flags and the rule but neither
+object, and a cluster administrator applies both from the same values:
+
+```sh
+helm template kausa charts/kausa --kube-version 1.36.0 -f values.yaml \
+  --set history.installCRD=true \
+  --show-only templates/explanation-crd.yaml --show-only templates/explanation-reader.yaml |
+  kubectl apply -f -
+```
+
+That CustomResourceDefinition's lifetime is then the administrator's: uninstalling the release does
+not delete it, and nothing prunes its Explanations while no kausa runs with `--history`. Until it
+exists, kausa logs `history write failed` and `history sweep failed` naming it, and keeps working.
+A namespaced install with `installCRD=false` creates nothing cluster-scoped.
 
 `NOTES.txt`, printed after an install or upgrade, names the scope: in cluster scope its first
 lines say that kausa can read Pods and Events (and container logs, when it explains with `logs`
 on) in every namespace; in namespaced scope it lists the namespaces and, when kausa writes Events, prints one `kubectl get
 events.events.k8s.io -n <namespace> --field-selector reportingController=kausa` per namespace
 instead of one with `-A`.
-Both remind that `rbac.scope` must be set on every upgrade.
+Both remind that `rbac.scope` must be set on every upgrade. When the release writes history,
+`NOTES.txt` adds `kubectl get explanations -A` (or one `kubectl get explanations -n <namespace>`
+per listed namespace) and `kubectl get explanation -n <namespace> <name> -o yaml`, and says that
+uninstalling or turning the history off deletes the CustomResourceDefinition and every
+Explanation; with `history.installCRD=false`, it names `explanations.kausa.fedeam.com` and says
+that a cluster administrator installs it.
 
 To lint and render the chart without a cluster:
 
@@ -114,7 +179,8 @@ helm template kausa charts/kausa --kube-version 1.36.0 \
   --set rbac.scope=namespaced --set 'rbac.namespaces={shop,web}'
 ```
 
-The Dockerfile's `ci` target renders both scopes and every `rbac` refusal, and
+The Dockerfile's `ci` target renders both scopes, the history toggles and every `rbac` and
+`history.days` refusal, and
 `tests/chart/render.sh` runs a longer set of the same checks (helm only, no cluster), including a
 comparison of the cluster-scope rules with the v0.1.0 chart's.
 

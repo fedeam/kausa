@@ -120,3 +120,7 @@ and the namespaced install mode of the v0.2 row move to v0.3, together with the 
 [0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace, and
 nothing cluster-wide](0013-namespaced-install-mode.md) and [0014. Keep each incident's full
 explanations in a namespaced Explanation resource, off by default](0014-explanation-history.md).
+
+Update 2026-10-28: with 0014, the out-of-scope line "Changing anything in the cluster other than
+writing Events" reads "other than writing Events and, with `--history`, kausa's own Explanation
+objects": kausa still changes no workload, patches nothing else and never remediates.

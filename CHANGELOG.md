@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as `--namespace`, and creates nothing cluster-scoped. The `started` log line names the watched
   namespaces (`namespaces`, or `null` for the whole cluster), and `pod watch error` and
   `event watch error` name the namespace of the failing watch (`namespace`).
+- The explanation history, off by default ([0014. Keep each incident's full explanations in a
+  namespaced Explanation resource, off by default](docs/adr/0014-explanation-history.md)):
+  `kausa run --history` keeps each explained incident's whole explanations (up to five distinct
+  texts, with counts and times) in an Explanation object named `kausa.<fingerprint>` in its
+  namespace, and deletes those older than `--history-days` (1 to 30, default 7) or beyond 500
+  objects. `--history` needs `--endpoint` and is refused with `--dry-run`. The chart's new
+  `history` values (`enabled: false`, `days: 7`, `installCRD: true`, `readers.aggregate: true`)
+  install the CustomResourceDefinition `explanations.kausa.fedeam.com`
+  (`charts/kausa/files/explanation-schema.json`, `v1alpha1`), a reader ClusterRole aggregated to
+  `view`, and the rule `list`, `create`, `patch` and `delete` on `explanations`, only while kausa
+  writes history; turning it off or uninstalling deletes the CustomResourceDefinition and every
+  Explanation. New counters `kausa_history_writes_total{outcome}`,
+  `kausa_history_deleted_total{reason}` and `kausa_history_sweep_errors_total`, and the log lines
+  `history write failed`, `history write refused`, `history sweep failed` and `history swept`.
 
 ### Changed
 
@@ -31,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespace's only) and lists again once access is back.
 - The chart's `templates/clusterrole.yaml` became `templates/rbac.yaml`, and its rules moved to the
   `kausa.rules` helper, which the ClusterRole and every Role render.
+- `/metrics` lists three more counters, `0` unless the history is on:
+  `kausa_history_writes_total`, `kausa_history_deleted_total` and
+  `kausa_history_sweep_errors_total`.
+
+### Fixed
+
+- A text of an explanation cut at its limit no longer ends in a space or in part of a
+  `<redacted:…>` marker, and cleaning a cleaned text gives the same text: a character removed
+  between two others can no longer leave a pair that Unicode normalization joins.
 
 ## [0.2.0] - 2026-10-28
 
