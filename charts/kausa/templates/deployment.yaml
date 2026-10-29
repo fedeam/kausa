@@ -98,6 +98,9 @@ spec:
             {{- if not .Values.logs }}
             - --no-logs
             {{- end }}
+            {{- if not (include "kausa.rollouts" .) }}
+            - --no-rollouts
+            {{- end }}
             {{- if not .Values.events }}
             - --no-events
             {{- end }}

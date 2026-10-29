@@ -279,3 +279,84 @@ ADR's hypotheses was checked on a live cluster in this session.
   versions word the scheduler's and kubelet's messages alike.
 - `docs/reference/rules.md` repeats its "Which Events count" paragraph, as it did before this
   change; left for a separate fix.
+
+## Later the same day: stuck rollouts (D014)
+
+Request: implement [0018. Explain a Deployment past its progress deadline (`D014`) from a
+Deployment watch that is on by default, and add nothing for StatefulSets or
+DaemonSets](../adr/0018-stuck-rollouts.md) on top of `D011` to `D013`, with its documentation and
+the measurement it makes a condition of shipping.
+
+### What was done
+
+- A code track and a chart track from the same base, with acceptance tests written first, merged
+  into one branch. Code: `DeploymentRecord` (`src/record.rs`), `Detection::RolloutStalled` and
+  `detect_rollout` (`src/detect.rs`), `rollout_signals`, the two-pass `Tracker::tick` and the
+  `revision <n>` fingerprint (`src/incident.rs`), the `rollout` object of the request
+  (`src/context.rs`), the Deployment watch, `--no-rollouts` and readiness over three watches
+  (`src/run.rs`, `src/main.rs`). Chart: the `rollouts` value, the `deployments` rule in
+  `kausa.rules` right after `replicasets`, `--no-rollouts` in the args, `NOTES.txt`; the renders
+  in `tests/chart/render.sh` and the `ci` target; the kind test's seeds `stalled` and `refused`
+  and its checks.
+- The documentation 0018 lists, `Update 2026-10-29` paragraphs in 0008, 0009 and 0013, and the
+  measurement in [Ninety-six watches](../research/2026-10-29-96-watches.md).
+
+### Decisions
+
+- As 0018 says, `D014` yields only to an **emitted** incident of the same namespace, owner kind and
+  owner name, and is deferred while one is pending but not emitted. The task outline also had it
+  handled by an unsettled `D001`, `D005`, `D006` or `D011`; the ADR won, so one fresh `Unhealthy`
+  event delays `D014` instead of silencing it (unit tests for both cases, and for the same-tick
+  settle that the `BTreeMap` order would otherwise break).
+- `D014`'s signals come from their own pure function, `rollout_signals`, beside
+  `collect_signals`, whose signature stays as it was: fewer conflicts with the parallel work on
+  0017.
+- `started.rollouts` is checked in the kind test, not in `tests/cli.rs`: with the nonexistent
+  kubeconfig of the CLI tests, `kausa run` stops at `cannot configure the Kubernetes client`
+  before its `started` line. `tests/cli.rs` checks the help line and that the flag is accepted.
+- `crasher` needed more than the planned `progressDeadlineSeconds: 20`: its Pod was Ready for the
+  instant its container ran, so the rollout completed (`NewReplicaSetAvailable`) and never passed
+  its deadline. A readiness gate nobody sets keeps it from being Ready.
+- `rules.md` had the paragraph "Which Events count" twice; the second copy went with the `D014`
+  edit.
+
+### How it was checked
+
+- Locally, on the merged branch: `cargo fmt --all -- --check`, `cargo clippy --locked
+  --all-targets --all-features -- -D warnings`, `cargo test --locked --all-features` (376 tests),
+  `cargo deny --locked check`, `helm lint --strict` in both scopes with and without
+  `rollouts=false`, `bash tests/chart/render.sh`, and `shellcheck` on `render.sh` and `run.sh`.
+  The `ci` target was not built locally (the Docker disk is nearly full); CI builds it on the pull
+  request.
+- The kind test passed in both scopes (`KAUSA_E2E_SCOPE=cluster`, then `namespaced`), each in
+  about three minutes after the cluster started, with about 4 GB free on the Docker disk:
+  `stalled` explained by `D014` alone (`revision 1`), its request with the seven counts and no Pod
+  or log tail; `crasher` and `refused` past their deadlines with `D001` and `D011` and no `D014`;
+  nothing in `e2e-other`; the `can-i` lists; Ready without `get` on Deployments; the
+  `deployment watch error` of `e2e-denied`; and the `rollouts=false` upgrade with `--no-rollouts`
+  and `"rollouts": false`. Each run used its own kubeconfig file, deleted afterwards with the
+  cluster, and `~/.kube/config` kept its checksum.
+- [Ninety-six watches](../research/2026-10-29-96-watches.md): a peak of 25.7 MiB with 96 watches,
+  3.0 MiB above the 64-watch run, so the cap of 32 namespaces stays.
+
+### Hypotheses, settled
+
+- A Deployment's template may carry `schedulingGates`, and its rollout then passes its deadline:
+  true on kind v0.33.0, Kubernetes v1.36.4. The readiness-gate fallback for `stalled` was not
+  needed.
+- `kubectl proxy --accept-paths` matches a watch's path without its query: kausa ran through the
+  proxy of [Try kausa against a cluster with a local model](../how-to/try-with-a-local-model.md)
+  with `^/apis/apps/v1/deployments$` added, became ready, and no request was rejected (cluster
+  scope only).
+- 96 watches cost about 4 MiB more than 64: 3.0 MiB more at the peak, in one run per scope.
+
+### Follow-ups
+
+- One issue for smaller list pages on all three watches, measured for time to ready (0018,
+  "Memory"): a page of 500 whole Deployments scaled to zero is bounded by no Pod quota.
+- `R003` patterns for the names in `D011`'s admission messages: `no PriorityClass with name
+  <name>` (what `refused` should produce; its event text was not read),
+  `ValidatingAdmissionPolicy '<name>' with binding '<name>'` and `admission webhook "<name>"`
+  (hypotheses, not reproduced).
+- Before merging: the pull requests of `D011` to `D013` and of the v0.4 ADRs merge first, and the
+  `ci` target and the kind test pass on GitHub.

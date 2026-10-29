@@ -7,12 +7,15 @@ lets kausa's own reads through.
 Status as of 2026-10-26: what the code of the third implementation weekend can do. kausa logs each
 incident, the redacted request and the model's explanation, and writes the explanation as an Event
 on the failing workload unless `--no-events`. Tested on 2026-10-26
-with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
+with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s). The Deployment
+watch, added for v0.4 on 2026-10-29, adds a path to the proxy of step 2 (two with
+`--namespace`); kausa ran through that proxy in kind on 2026-10-29 (below).
 
 ## Before you start
 
-- A cluster you may read, and `kubectl` working against it. kausa reads Pods, Warning events, the
-  metadata of ReplicaSets and Jobs, and the logs of failed containers, and writes Events
+- A cluster you may read, and `kubectl` working against it. kausa reads Pods, Warning events,
+  Deployments (unless `--no-rollouts`), the metadata of ReplicaSets and Jobs, and the logs of
+  failed containers, and writes Events
   ([Permissions](../reference/permissions.md)). To keep it strictly read-only, add `--no-events`.
 - [Ollama](https://ollama.com) installed, and a model pulled (`ollama pull qwen3:0.6b` is about
   500 MB; a larger model explains better).
@@ -36,8 +39,15 @@ with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
    ```sh
    kubectl --context=<context> proxy --address=127.0.0.1 --port=18001 \
      --reject-methods='^(POST|PUT|PATCH|DELETE)$' \
-     --accept-paths='^/version$|^/api/v1/pods$|^/apis/events\.k8s\.io/v1/events$|^/apis/apps/v1/namespaces/[^/]+/replicasets/[^/]+$|^/apis/batch/v1/namespaces/[^/]+/jobs/[^/]+$|^/api/v1/namespaces/[^/]+/pods/[^/]+/log$' &
+     --accept-paths='^/version$|^/api/v1/pods$|^/apis/events\.k8s\.io/v1/events$|^/apis/apps/v1/deployments$|^/apis/apps/v1/namespaces/[^/]+/replicasets/[^/]+$|^/apis/batch/v1/namespaces/[^/]+/jobs/[^/]+$|^/api/v1/namespaces/[^/]+/pods/[^/]+/log$' &
    ```
+
+   `^/apis/apps/v1/deployments$` is the Deployment watch's list and watch; without it, run kausa
+   with `--no-rollouts`, or it is never ready (it keeps explaining the rest). `--accept-paths`
+   matches the path without its query (`?watch=true&…`): on 2026-10-29, kausa built from the v0.4
+   branch, with `--dry-run --no-events`, ran through this proxy against a kind cluster (Kubernetes
+   v1.36.4) holding more than 320 Deployments, became ready, and the proxy (`-v=4`) rejected none of its
+   requests. The namespaced paths below were not run.
 
    Then a kubeconfig with no credentials that points at it:
 
@@ -61,7 +71,9 @@ with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s).
    To watch only some namespaces (step 3's `--namespace`), let through the namespaced paths of the
    two watches instead of the cluster-wide ones: replace `^/api/v1/pods$` with
    `^/api/v1/namespaces/<namespace>/pods$` and `^/apis/events\.k8s\.io/v1/events$` with
-   `^/apis/events\.k8s\.io/v1/namespaces/<namespace>/events$`, one pair per namespace (or
+   `^/apis/events\.k8s\.io/v1/namespaces/<namespace>/events$`, and `^/apis/apps/v1/deployments$`
+   with `^/apis/apps/v1/namespaces/<namespace>/deployments$` (or
+   `^/apis/apps/v1/namespaces/[^/]+/deployments$`), one set per namespace (or
    `(shop|payments)` in place of `<namespace>`). The other paths are already per namespace, and
    kausa only follows them in the namespaces it watches.
 

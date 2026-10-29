@@ -59,7 +59,7 @@ pub const COUNTERS: [(&str, &str); 17] = [
     ),
     (
         "kausa_watch_errors_total",
-        "Errors of the Pod and Event watches, which retry with backoff, by watch.",
+        "Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch.",
     ),
     (
         "kausa_history_writes_total",
@@ -351,6 +351,30 @@ mod tests {
         assert_eq!(
             respond("POST /metrics HTTP/1.1", &m).0,
             "405 Method Not Allowed"
+        );
+    }
+
+    // Acceptance test for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code: the
+    // Deployment watch adds no counter; its errors are counted with the other watches', under
+    // `watch="deployments"`, and `D014` incidents under `kausa_incidents_total`.
+    #[test]
+    fn the_deployment_watch_adds_no_counter() {
+        assert_eq!(COUNTERS.len(), 17, "a counter was added");
+        assert!(COUNTERS.contains(&(
+            "kausa_watch_errors_total",
+            "Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch."
+        )));
+        let m = Metrics::default();
+        m.inc("kausa_watch_errors_total", &[("watch", "deployments")]);
+        m.inc("kausa_incidents_total", &[("detection", "D014")]);
+        let text = m.render();
+        assert!(
+            text.contains("kausa_watch_errors_total{watch=\"deployments\"} 1\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("kausa_incidents_total{detection=\"D014\"} 1\n"),
+            "{text}"
         );
     }
 }

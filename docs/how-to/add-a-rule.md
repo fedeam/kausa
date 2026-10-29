@@ -5,7 +5,7 @@ an existing one. What a rule needs to be accepted (an id, evidence, fixtures, ex
 in [Contributing to kausa](../../CONTRIBUTING.md#propose-a-rule); the rules themselves are in
 [Detection and redaction rules](../reference/rules.md).
 
-Status as of 2026-10-29: thirteen detection rules (`D001` to `D013`) and thirteen redaction rules
+Status as of 2026-10-29: fourteen detection rules (`D001` to `D014`) and thirteen redaction rules
 (`R001` to `R013`); the paths below are the ones in the code today.
 
 ## Before you start
@@ -41,7 +41,11 @@ Status as of 2026-10-29: thirteen detection rules (`D001` to `D013`) and thirtee
    - a Warning event (its reason, and the kind of object it is about): `detect_event` in
      `src/detect.rs`. An event about an object other than a Pod is keyed in `collect_signals` on
      that object's top-level owner, which `run.rs` resolves only through the hops of
-     `src/owner.rs`; a new hop is a new permission.
+     `src/owner.rs`; a new hop is a new permission;
+   - a Deployment's condition: a pure function over the `DeploymentRecord` of `src/record.rs`, like
+     `detect_rollout`, turned into signals by a function like `rollout_signals` in
+     `src/incident.rs`. A rule on another kind of object needs a watch on it, which is a new
+     permission and an ADR ([0018](../adr/0018-stuck-rollouts.md)).
 
    If the rule needs a field kausa does not record yet, it goes into the small records of
    `src/record.rs` first. A field that would reach the model's request is a decision about data
@@ -51,6 +55,14 @@ Status as of 2026-10-29: thirteen detection rules (`D001` to `D013`) and thirtee
    rule, and the closest ones that must not (a single restart during a rollout, a `Completed`
    container, an event about another kind). If the rule changes how incidents are grouped or when
    they settle, add a case to the tests of `src/incident.rs` as well.
+
+   **A rule that yields.** When the new rule can describe the same failure as another rule on the
+   same key, decide which one is explained. `D014` shows the pattern: `Tracker::tick` decides
+   every other key first and the yielding keys after them, so the order of the keys does not
+   matter; a yielding key not yet emitted is handled (silent for as long as it lasts) when a key of
+   the same namespace, owner kind and owner name was emitted, and deferred while one is pending
+   but not emitted, so a signal that never settles delays it but cannot silence it. Test the
+   same-tick case, a signal that never settles, and another owner of the same name.
 4. **Document it**: a row in the table of [Detection and redaction
    rules](../reference/rules.md#detection-rules) (id, name, the signal, whether it reads logs), and
    a line under `Unreleased` in [`CHANGELOG.md`](../../CHANGELOG.md).

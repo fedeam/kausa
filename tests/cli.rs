@@ -1419,3 +1419,80 @@ fn help_lists_the_notify_flags_and_where_data_goes() {
         assert!(by_design.contains(words), "no '{words}' in: {by_design}");
     }
 }
+
+// `kausa run --no-rollouts` (docs/adr/0018-stuck-rollouts.md): the Deployment watch of `D014` is on
+// by default, and the flag turns it off. It needs no other flag, so it gets past the checks and
+// fails only on the missing cluster. Whether `started` says `"rollouts"`, `true` or `false`, is
+// checked by the kind test: with no cluster, `kausa run` stops before it logs `started`.
+
+const ROLLOUTS_HELP_LINE: &str =
+    "  --no-rollouts          Do not watch Deployments for stalled rollouts (D014)";
+
+#[test]
+fn help_lists_the_rollouts_flag_after_the_namespace_flag() {
+    let output = kausa(&["--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = stdout(&output);
+    let options: Vec<&str> = help
+        .lines()
+        .skip_while(|l| *l != "Options of kausa run:")
+        .take_while(|l| !l.is_empty())
+        .collect();
+    let at = |line: &str| options.iter().position(|l| *l == line);
+    let namespace = at(NAMESPACE_HELP_LINE).expect("the --namespace help line");
+    assert_eq!(
+        at(ROLLOUTS_HELP_LINE),
+        Some(namespace + 1),
+        "the --no-rollouts help line is not right after --namespace: {help}"
+    );
+    assert!(help.lines().all(|l| l.len() <= 84), "{help}");
+    // The paragraph on what `kausa run` watches names the Deployments.
+    let lines: Vec<&str> = help.lines().collect();
+    let paragraph = [
+        "  current context of the kubeconfig otherwise. It watches Pods, Warning events",
+        "  and Deployments, groups the failures of one workload into one incident once",
+        "  they persist for the settle window, and writes one JSON object per line to",
+        "  stdout. It stops on SIGTERM or Ctrl-C.",
+    ];
+    let start = lines
+        .iter()
+        .position(|l| *l == paragraph[0])
+        .unwrap_or_else(|| panic!("missing '{}': {help}", paragraph[0]));
+    assert_eq!(lines[start..start + paragraph.len()], paragraph, "{help}");
+}
+
+#[test]
+fn run_accepts_no_rollouts_and_fails_only_on_the_missing_cluster() {
+    for args in [
+        &["run", "--no-rollouts"][..],
+        &["run", "--namespace", "shop", "--no-rollouts", "--dry-run"][..],
+        &[
+            "run",
+            "--no-rollouts",
+            "--namespace",
+            "a",
+            "--namespace",
+            "b",
+        ][..],
+        &["run", "--no-logs", "--no-rollouts", "--settle-seconds", "5"][..],
+    ] {
+        assert_gets_past_the_flags(&kausa(args), &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn the_rollouts_flag_has_no_other_form() {
+    for flag in ["--no-rollout", "--no-rollouts=true", "--rollouts"] {
+        assert_usage_error(
+            &kausa(&["run", flag]),
+            &format!("unexpected argument '{flag}'"),
+            flag,
+        );
+    }
+    // It belongs to `kausa run` only.
+    assert_usage_error(
+        &kausa(&["--no-rollouts"]),
+        "unknown command or option '--no-rollouts'",
+        "kausa --no-rollouts",
+    );
+}

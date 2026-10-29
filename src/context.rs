@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 
 use crate::detect::Detection;
 use crate::incident::Incident;
-use crate::record::{EventRecord, Key, PodAffinityEntry, PodRecord, SchedulingRecord};
+use crate::record::{
+    DeploymentRecord, EventRecord, Key, PodAffinityEntry, PodRecord, SchedulingRecord,
+};
 use crate::redact::{NameKind, Redactor, object_kind};
 
 /// How many Pods, events and log bytes one request carries at most.
@@ -25,6 +27,8 @@ pub struct Gathered {
     pub pods_total: usize,
     /// The last lines of the failed container, as read (redacted here).
     pub log_tail: Option<String>,
+    /// For `D014`, the record kausa keeps of the stalled Deployment, if it still does.
+    pub rollout: Option<DeploymentRecord>,
 }
 
 /// Which rule-gated fields a request carries (docs/adr/0017-richer-context-for-the-model.md).
@@ -123,6 +127,13 @@ pub fn build(gathered: &Gathered) -> (Value, Redactor) {
     if let Some(log_tail) = log_tail {
         context["log_tail"] = Value::from(log_tail);
     }
+    if incident.key.detection == Detection::RolloutStalled {
+        // Counts only, so nothing here is text to redact; `null` once the record is gone.
+        context["rollout"] = gathered
+            .rollout
+            .as_ref()
+            .map_or(Value::Null, rollout_context);
+    }
     (context, r)
 }
 
@@ -182,6 +193,18 @@ fn scheduling_context(s: &SchedulingRecord, r: &mut Redactor) -> Value {
         "pod_anti_affinity": anti_affinity,
         "tolerations": tolerations,
         "omitted": s.omitted,
+    })
+}
+
+fn rollout_context(d: &DeploymentRecord) -> Value {
+    json!({
+        "replicas": d.replicas,
+        "updated_replicas": d.updated_replicas,
+        "ready_replicas": d.ready_replicas,
+        "available_replicas": d.available_replicas,
+        "unavailable_replicas": d.unavailable_replicas,
+        "progress_deadline_seconds": d.progress_deadline_seconds,
+        "min_ready_seconds": d.min_ready_seconds,
     })
 }
 
@@ -346,6 +369,7 @@ mod tests {
                  Error: connect ECONNREFUSED 192.0.2.10:5432"
                     .into(),
             ),
+            rollout: None,
         }
     }
 
@@ -652,6 +676,7 @@ mod tests {
             events: records,
             pods_total: 0,
             log_tail: None,
+            rollout: None,
         };
         let (context, _) = build(&gathered);
         let messages = context["warning_events"]
@@ -1249,5 +1274,163 @@ mod tests {
             r.counts().contains_key("R013"),
             "R013 did not count the host"
         );
+    }
+
+    // Acceptance tests for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code: the
+    // request for a stalled rollout carries the Deployment's replica counts as a top-level
+    // `rollout` of integers or null, no condition message and no Pod; any other request carries
+    // no `rollout` at all. Names and numbers are invented.
+
+    fn stalled_rollout() -> crate::record::DeploymentRecord {
+        crate::record::DeploymentRecord {
+            namespace: "shop".into(),
+            name: "checkout".into(),
+            uid: "uid-checkout".into(),
+            generation: Some(3),
+            observed_generation: Some(3),
+            paused: false,
+            revision: Some(7),
+            replicas: Some(3),
+            progress_deadline_seconds: Some(600),
+            min_ready_seconds: Some(0),
+            updated_replicas: 1,
+            ready_replicas: 2,
+            available_replicas: 2,
+            unavailable_replicas: 1,
+            progressing_status: Some("False".into()),
+            progressing_reason: Some("ProgressDeadlineExceeded".into()),
+        }
+    }
+
+    /// What `run.rs` gathers for the `D014` incident of Deployment `checkout` in `shop`: no Pod,
+    /// no event, no log, and the record it keeps of the Deployment, if it still does.
+    fn rollout_gathered(rollout: Option<crate::record::DeploymentRecord>) -> Gathered {
+        let owner = OwnerRef {
+            api_version: "apps/v1".into(),
+            kind: "Deployment".into(),
+            name: "checkout".into(),
+            uid: "uid-checkout".into(),
+        };
+        let key = IncidentKey {
+            namespace: "shop".into(),
+            owner_kind: "Deployment".into(),
+            owner_name: "checkout".into(),
+            detection: Detection::RolloutStalled,
+        };
+        let sample = Signal {
+            key: key.clone(),
+            owner: owner.clone(),
+            observed_at: Timestamp::UNIX_EPOCH,
+            event: None,
+            pod: None,
+            container: None,
+            image: None,
+            reason: "ProgressDeadlineExceeded".into(),
+            message: "revision 7".into(),
+            exit_code: None,
+        };
+        Gathered {
+            incident: Incident {
+                key,
+                owner,
+                fingerprint: "0".into(),
+                first_seen: Timestamp::UNIX_EPOCH,
+                last_seen: Timestamp::UNIX_EPOCH,
+                pods: BTreeSet::new(),
+                sample,
+            },
+            pods: Vec::new(),
+            events: Vec::new(),
+            pods_total: 2,
+            log_tail: None,
+            rollout,
+        }
+    }
+
+    #[test]
+    fn a_stalled_rollout_sends_its_replica_counts_as_integers() {
+        let (context, _) = build(&rollout_gathered(Some(stalled_rollout())));
+        assert_eq!(
+            context["detection"],
+            json!({"id": "D014", "name": "rollout does not progress"})
+        );
+        assert_eq!(
+            context["workload"],
+            json!({"kind": "Deployment", "name": "deployment-1", "namespace": "namespace-1"})
+        );
+        assert_eq!(context["pods_affected"], 0);
+        assert_eq!(context["pods_total"], 2);
+        assert_eq!(context["pods"], json!([]));
+        assert_eq!(context["warning_events"], json!([]));
+        assert!(context.get("log_tail").is_none(), "a log tail was sent");
+        assert_eq!(
+            context["rollout"],
+            json!({
+                "replicas": 3,
+                "updated_replicas": 1,
+                "ready_replicas": 2,
+                "available_replicas": 2,
+                "unavailable_replicas": 1,
+                "progress_deadline_seconds": 600,
+                "min_ready_seconds": 0
+            })
+        );
+        let rollout = context["rollout"].as_object().expect("a rollout object");
+        assert_eq!(rollout.len(), 7);
+        assert!(
+            rollout.values().all(Value::is_i64),
+            "a count is not an integer"
+        );
+        assert!(!rollout.contains_key("message"));
+        // The failure messages name what leaked, not the context.
+        let sent = context.to_string();
+        assert!(!sent.contains("checkout"), "the Deployment's name was sent");
+        assert!(!sent.contains("shop"), "the namespace was sent");
+        assert!(
+            !sent.contains("ProgressDeadlineExceeded"),
+            "the reason was sent"
+        );
+        assert!(!sent.contains("revision"), "the revision was sent");
+    }
+
+    #[test]
+    fn an_unknown_count_is_null() {
+        let mut record = stalled_rollout();
+        (
+            record.replicas,
+            record.progress_deadline_seconds,
+            record.min_ready_seconds,
+        ) = (None, None, None);
+        let (context, _) = build(&rollout_gathered(Some(record)));
+        let rollout = context["rollout"].as_object().expect("a rollout object");
+        assert_eq!(rollout.len(), 7);
+        for key in ["replicas", "progress_deadline_seconds", "min_ready_seconds"] {
+            assert_eq!(rollout[key], Value::Null, "{key}");
+        }
+        assert!(
+            rollout.values().all(|v| v.is_null() || v.is_i64()),
+            "a count is neither an integer nor null"
+        );
+    }
+
+    #[test]
+    fn a_stalled_rollout_whose_record_is_gone_sends_a_null_rollout() {
+        let (context, _) = build(&rollout_gathered(None));
+        let object = context.as_object().expect("a context object");
+        assert_eq!(object.get("rollout"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn no_other_detection_sends_a_rollout() {
+        for detection in [Detection::CrashLoop, Detection::PodCreate] {
+            let mut g = rollout_gathered(Some(stalled_rollout()));
+            g.incident.key.detection = detection;
+            g.incident.sample.key.detection = detection;
+            let (context, _) = build(&g);
+            assert!(context.get("rollout").is_none(), "{detection:?}");
+        }
+        let mut g = gathered();
+        g.rollout = Some(stalled_rollout());
+        assert!(build(&g).0.get("rollout").is_none());
     }
 }

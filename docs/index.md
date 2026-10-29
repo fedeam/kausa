@@ -1,9 +1,9 @@
 # kausa — a tiny Kubernetes controller that explains failing workloads with an LLM
 
 kausa is a Kubernetes controller for people who run small clusters and want to know why a workload
-fails: it watches Warning events and Pod status, groups the failures of one workload into one
-incident, sends a redacted context to one OpenAI-compatible model endpoint within a call and token
-budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
+fails: it watches Warning events, Pod status and Deployments, groups the failures of one workload
+into one incident, sends a redacted context to one OpenAI-compatible model endpoint within a call
+and token budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
 ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
 `--no-events`) and, with `--history` (off by default), its own Explanation objects. With
 `--notify-url-file` (off by default) it also posts each new explanation to one webhook.
@@ -35,7 +35,11 @@ v0.3.0 too, off by default; the kind test passed in both scopes with
 the `json` format against a fake receiver on 2026-10-29, the `telegram` format was posted to a
 real Telegram chat the same day, and the `slack` format has not been posted to a real Slack
 workspace yet ([2026-10-29 —
-Notifications](journal/2026-10-29-notifications.md)).
+Notifications](journal/2026-10-29-notifications.md)). In development for v0.4, not released as of
+2026-10-29: the detection rules `D011` to `D013`, and `D014`, a Deployment past its progress
+deadline, from a watch on Deployments that is on by default (`kausa run --no-rollouts`, the
+chart's `rollouts` value); the kind test passed in both scopes with it on 2026-10-29 (same
+journal, "stuck rollouts").
 
 ## Key facts
 
@@ -96,7 +100,8 @@ checks](how-to/develop.md).
   model, calls and tokens counted; [Memory and CPU on a Raspberry Pi
   4](research/2026-10-26-resource-use-on-a-raspberry-pi.md); [Thousands of
   Pods](research/2026-10-28-thousands-of-pods.md); [Thirty-two
-  namespaces](research/2026-10-28-32-namespaces.md); [Slack and Telegram for
+  namespaces](research/2026-10-28-32-namespaces.md); [Ninety-six
+  watches](research/2026-10-29-96-watches.md); [Slack and Telegram for
   notifications](research/2026-10-28-slack-and-telegram-for-notifications.md).
 - [ARCHITECTURE.md](../ARCHITECTURE.md): the map of the code, its invariants and the path of each
   kind of change.

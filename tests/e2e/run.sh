@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test: kausa installed with its Helm chart in a kind cluster, against a fake model
-# endpoint, with three seeded failures. It checks the Events, what left the cluster, the RBAC
+# endpoint, with five seeded failures. It checks the Events, what left the cluster, the RBAC
 # objects and what they grant, and the metrics. Needs docker, kind, kubectl, helm and python3;
 # KIND_NODE_IMAGE names the node image (pinned in .github/workflows/e2e.yml). It creates the
 # cluster kausa-e2e and deletes it at the end. See docs/how-to/develop.md.
@@ -26,6 +26,16 @@
 # every later one 200; before the first restart the test checks one v1 body for each failing
 # workload, what no body may hold, the bearer token, the counters, the started line, and that
 # kausa's log holds neither token. The dryRun=true upgrade turns notifications off.
+#
+# Both watch Deployments (docs/adr/0018-stuck-rollouts.md): stalled, held by a scheduling gate, is
+# explained by D014 alone, and the request for it carries only the replica counts; crasher and
+# refused also pass their progress deadline, and before the first restart (after one, refused's
+# FailedCreate events may be stale) they keep their D001 and D011, with no D014. In namespaced
+# scope, nothing about the same Deployments in e2e-other. kausa may list and watch Deployments
+# and nothing more (it is Ready though it cannot get one), the e2e-denied step also needs a
+# deployment watch error, and the cluster scope's history.enabled=false upgrade also sets
+# rollouts=false: no deployments rule, --no-rollouts in the args, a Ready Pod whose started line
+# has rollouts false, kept by the later upgrades through --reuse-values.
 set -euo pipefail
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -244,6 +254,33 @@ else:
     print("other rules: " + json.dumps(about))
 '
 }
+# What the rules of an RBAC object ($@, as kubectl get takes it) say about Deployments
+# (docs/adr/0018-stuck-rollouts.md): "yes" when the one rule about them is list and watch and comes
+# right after the replicasets rule, "no" when there is none.
+deployments_rule() {
+  k get "$@" -o json | python3 -c '
+import json, sys
+rules = json.load(sys.stdin).get("rules") or []
+want = {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["list", "watch"]}
+replicasets = {"apiGroups": ["apps"], "resources": ["replicasets"], "verbs": ["get"]}
+about = [r for r in rules if any(x.startswith("deployments") for x in r.get("resources") or [])]
+if not about:
+    print("no")
+elif about == [want] and replicasets in rules and rules.index(want) == rules.index(replicasets) + 1:
+    print("yes")
+else:
+    print("other rules: " + json.dumps(about))
+'
+}
+# The arguments of kausa's container in Pod $1 (pod/<name>), one per line.
+kausa_args() {
+  k -n "$NAMESPACE" get "$1" -o json | python3 -c '
+import json, sys
+for container in json.load(sys.stdin)["spec"]["containers"]:
+    if container["name"] == "kausa":
+        print("\n".join(container.get("args") or []))
+'
+}
 # The Explanations in namespace $1 (all of them, with -A), one namespace/name per line.
 explanations() {
   if [ "$1" = -A ]; then where=(-A); else where=(-n "$1"); fi
@@ -390,33 +427,61 @@ has_roles() {
     fail "no Role and RoleBinding $RELEASE in $1"
 }
 
+# The value of field $1 of the one started line in kausa's log in WORK, as JSON.
+started_field() {
+  python3 -c '
+import json, sys
+started = []
+for line in open(sys.argv[2] + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "started":
+        started.append(entry)
+if len(started) != 1:
+    sys.exit("FAIL: %d started lines in the log" % len(started))
+print(json.dumps(started[0].get(sys.argv[1], "<missing>")))
+' "$1" "$WORK"
+}
+
 for _ in $(seq 1 60); do
   deployment_note=$(explained Deployment crasher)
   job_note=$(explained Job failing-job)
   stranded_note=$(explained Deployment stranded)
-  [ -n "$deployment_note" ] && [ -n "$job_note" ] && [ -n "$stranded_note" ] && break
+  stalled_note=$(explained Deployment stalled)
+  refused_note=$(explained Deployment refused)
+  [ -n "$deployment_note" ] && [ -n "$job_note" ] && [ -n "$stranded_note" ] &&
+    [ -n "$stalled_note" ] && [ -n "$refused_note" ] && break
   sleep 5
 done
 [ -n "$deployment_note" ] || fail "no Explained Event about Deployment crasher"
 [ -n "$job_note" ] || fail "no Explained Event about Job failing-job"
 [ -n "$stranded_note" ] || fail "no Explained Event about Deployment stranded"
+[ -n "$stalled_note" ] || fail "no Explained Event about Deployment stalled"
+[ -n "$refused_note" ] || fail "no Explained Event about Deployment refused"
 echo "Deployment crasher: $deployment_note"
 echo "Job failing-job: $job_note"
 echo "Deployment stranded: $stranded_note"
+echo "Deployment stalled: $stalled_note"
+echo "Deployment refused: $refused_note"
 
 # The model named namespace-1; the Event names the real namespace.
 case "$deployment_note" in *"$TARGET"*) ;; *) fail "the placeholder was not mapped back" ;; esac
 
 if [ "$SCOPE" = namespaced ]; then
   # The failures in OTHER were seeded with TARGET's: one more settle window and tick, and kausa
-  # still has neither explained nor logged them.
+  # still has neither explained nor logged them. Its stalled and refused are past their deadline
+  # first, so that D014 had its chance there too.
+  k -n "$OTHER" wait deploy/stalled deploy/refused --timeout=180s \
+    --for=jsonpath='{.status.conditions[?(@.type=="Progressing")].reason}'=ProgressDeadlineExceeded
   sleep $((SETTLE + TICK + 5))
   [ "$(kausa_events "$OTHER")" = 0 ] || fail "kausa wrote an Event in $OTHER"
   kausa_log
   if log_has incident "$OTHER" < "$WORK/kausa.log"; then
     fail "kausa logged an incident in $OTHER"
   fi
-  echo "$OTHER: no Event and no incident"
+  echo "$OTHER: no Event and no incident, stalled and refused included"
 fi
 
 # Each failing workload's Explanation (src/detect.rs: D001 is a crash loop, D008 a failed Job).
@@ -424,6 +489,104 @@ explanations_of Deployment crasher D001 apps/v1
 deployment_history=$history_names
 explanations_of Job failing-job D008 batch/v1
 echo "Explanations: $deployment_history $history_names"
+# The stalled rollouts (docs/adr/0018-stuck-rollouts.md): stalled is explained by D014, the only
+# rule its Pod meets, and refused by D011, its ReplicaSet's FailedCreate.
+explanations_of Deployment stalled D014 apps/v1
+stalled_history=$history_names
+explanations_of Deployment refused D011 apps/v1
+echo "Explanations: $stalled_history (stalled) $history_names (refused)"
+# stalled's incident, in the log explanations_of read: about the Deployment, with no Pod, and the
+# rollout's revision as its message.
+python3 -c '
+import json, re, sys
+target, work = sys.argv[1:3]
+
+def fail(message):
+    sys.exit("FAIL: the D014 incident of stalled: " + message)
+
+owner = {"apiVersion": "apps/v1", "kind": "Deployment", "name": "stalled"}
+found = []
+for line in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if (isinstance(entry, dict) and entry.get("msg") == "incident"
+            and entry.get("detection") == "D014" and entry.get("namespace") == target
+            and entry.get("owner") == owner):
+        found.append(entry)
+if not found:
+    fail("none in the log")
+for entry in found:
+    sample = entry.get("sample") or {}
+    if entry.get("detection_name") != "rollout does not progress":
+        fail("detection_name %s" % json.dumps(entry.get("detection_name")))
+    if entry.get("pods") != []:
+        fail("it names %d Pods" % len(entry.get("pods") or []))
+    if sample.get("reason") != "ProgressDeadlineExceeded":
+        fail("sample.reason %s" % json.dumps(sample.get("reason")))
+    message = sample.get("message")
+    if not isinstance(message, str) or not re.fullmatch(r"(revision [0-9]+)?", message):
+        fail("sample.message %s" % json.dumps(message))
+    if [sample.get(k) for k in ("pod", "container", "exit_code")] != [None, None, None]:
+        fail("its sample names a Pod, a container or an exit code")
+print("stalled: %d D014 incident, %s" % (len(found), json.dumps(found[0]["sample"]["message"])))
+' "$TARGET" "$WORK"
+rollouts=$(started_field rollouts)
+[ "$rollouts" = true ] || fail "the started line has rollouts $rollouts"
+
+# crasher and refused pass their 20 s progress deadline too, and D014 gives way to their D001 and
+# D011: a settle window and two ticks after both are past it, kausa has logged no D014 about either
+# and has no D014 Event or Explanation for them, and both keep their own incident. Only before the
+# first restart: after one, refused's FailedCreate events may be stale (they stop being updated
+# after about 11 minutes), and a D014 is then the documented behaviour.
+k -n "$TARGET" wait deploy/crasher deploy/refused --timeout=180s \
+  --for=jsonpath='{.status.conditions[?(@.type=="Progressing")].reason}'=ProgressDeadlineExceeded
+sleep $((SETTLE + 2 * TICK + 5))
+k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
+k -n "$TARGET" get "$EXPLANATIONS" -o json > "$WORK/explanations.json"
+kausa_log
+python3 -c '
+import json, re, sys
+target, work = sys.argv[1:3]
+
+def fail(message):
+    sys.exit("FAIL: D014 does not give way: " + message)
+
+incidents = {}
+for line in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if (isinstance(entry, dict) and entry.get("msg") == "incident"
+            and entry.get("namespace") == target):
+        incidents[entry.get("fingerprint")] = entry
+for name, kept in (("crasher", "D001"), ("refused", "D011")):
+    owner = {"apiVersion": "apps/v1", "kind": "Deployment", "name": name}
+    rules = sorted({e.get("detection") for e in incidents.values() if e.get("owner") == owner})
+    if "D014" in rules:
+        fail("kausa logged a D014 incident about %s" % name)
+    if kept not in rules:
+        fail("%s has no %s incident in the log, only %s" % (name, kept, rules))
+    for event in json.load(open(work + "/events.json"))["items"]:
+        if (event.get("reportingController") != "kausa"
+                or event["regarding"].get("kind") != "Deployment"
+                or event["regarding"].get("name") != name):
+            continue
+        # src/events.rs: kausa.<fingerprint>.<hash>, or kausa.skipped.<fingerprint>.<hash>.
+        match = re.match(r"kausa\.(?:skipped\.)?([0-9a-f]{16})\.", event["metadata"]["name"])
+        incident = incidents.get(match.group(1)) if match else None
+        if incident is None or incident.get("detection") == "D014":
+            fail("the Event %s about %s is no %s incident" % (
+                event["metadata"]["name"], name, kept))
+for item in json.load(open(work + "/explanations.json"))["items"]:
+    spec = item.get("spec") or {}
+    if spec.get("rule") == "D014" and (spec.get("target") or {}).get("name") in (
+            "crasher", "refused"):
+        fail("the Explanation %s" % item["metadata"]["name"])
+print("crasher and refused: past their deadline, no D014; D001 and D011 kept")
+' "$TARGET" "$WORK"
 # In both scopes, all of kausa's Explanations are in TARGET.
 outside=$(explanations -A | grep -v "^$TARGET/" || true)
 [ -z "$outside" ] || fail "Explanations outside $TARGET: $outside"
@@ -445,7 +608,7 @@ done
 
 # What left the cluster: requests were sent, and none holds a real name.
 [ -s "$WORK/requests.jsonl" ] || fail "the fake endpoint received no request"
-for name in "$TARGET" "$OTHER" crasher failing-job stranded; do
+for name in "$TARGET" "$OTHER" crasher failing-job stranded stalled refused; do
   if grep -q -- "$name" "$WORK/requests.jsonl"; then fail "a request contains '$name'"; fi
 done
 # The richer context (docs/adr/0017-richer-context-for-the-model.md): crasher's probe path without
@@ -523,9 +686,50 @@ for context in contexts["D005"]:
 print("requests: %d D001 and %d D005 with their own fields"
       % (len(contexts["D001"]), len(contexts["D005"])))
 ' "$WORK/requests.jsonl"
+# The request for stalled's D014 carries the rollout's replica counts and nothing else of it: no
+# Pod, no log tail, and no text (docs/reference/data-sent-to-the-provider.md).
+python3 -c '
+import json, sys
+
+def fail(message):
+    sys.exit("FAIL: the D014 request: " + message)
+
+KEYS = ["available_replicas", "min_ready_seconds", "progress_deadline_seconds", "ready_replicas",
+        "replicas", "unavailable_replicas", "updated_replicas"]
+contexts = []
+for line in open(sys.argv[1]):
+    request = json.loads(line)
+    for message in request.get("messages") or []:
+        if message.get("role") != "user":
+            continue
+        try:
+            context = json.loads(message["content"])["untrusted_cluster_data"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if (context.get("detection") or {}).get("id") == "D014":
+            contexts.append(context)
+if not contexts:
+    fail("the fake endpoint received none")
+for context in contexts:
+    rollout = context.get("rollout")
+    if not isinstance(rollout, dict) or sorted(rollout) != KEYS:
+        fail("rollout is not an object with the keys %s" % KEYS)
+    for key, value in rollout.items():
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+            fail("rollout.%s is not an integer or null" % key)
+    if context.get("pods") != []:
+        fail("pods is not empty")
+    if "log_tail" in context:
+        fail("it has a log_tail")
+    if (context.get("workload") or {}).get("kind") != "Deployment":
+        fail("workload.kind is %s" % json.dumps((context.get("workload") or {}).get("kind")))
+print("the D014 request: %d, a rollout of %d counts, no Pod and no log tail" % (
+    len(contexts), len(KEYS)))
+' "$WORK/requests.jsonl"
 
 # The notifications (docs/adr/0015-notifications.md). The fake receiver answered the first one 503,
-# which kausa sends again 30 seconds later, and one per failing workload is due.
+# which kausa sends again 30 seconds later, and one per failing workload is due: crasher,
+# failing-job, stranded, stalled and refused.
 hooks_answered() {
   python3 -c '
 import json, sys
@@ -541,10 +745,10 @@ print(count)
 answered=0
 for _ in $(seq 1 60); do
   answered=$(hooks_answered)
-  [ "$answered" -ge 3 ] && break
+  [ "$answered" -ge 5 ] && break
   sleep 2
 done
-[ "$answered" -ge 3 ] || fail "the webhook answered $answered of 3 notifications 200 in 120 seconds"
+[ "$answered" -ge 5 ] || fail "the webhook answered $answered notifications 200 in 120 seconds"
 k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
 kausa_log
 # What reached the webhook: the first POST got 503, every one carried the bearer token and went to
@@ -669,7 +873,8 @@ for body in bodies:
         fail("a notification about namespace " + body["object"]["namespace"])
 for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1"),
                                       ("Job", "failing-job", "D008", "batch/v1"),
-                                      ("Deployment", "stranded", "D005", "apps/v1")):
+                                      ("Deployment", "stranded", "D005", "apps/v1"),
+                                      ("Deployment", "stalled", "D014", "apps/v1")):
     mine = [b for b in bodies if (b["object"]["kind"], b["object"]["name"]) == (kind, name)]
     if len(mine) != 1:
         fail("%d notifications answered 200 about %s %s" % (len(mine), kind, name))
@@ -696,34 +901,40 @@ for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1
     if body["explanation"] != explanation:
         fail("%s %s: explanation %s" % (kind, name, json.dumps(body["explanation"])))
 print("notifications: %d POSTs, the first answered 503; one v1 body each for crasher, "
-      "failing-job and stranded" % len(hooks))
+      "failing-job, stranded and stalled" % len(hooks))
 ' "$TARGET" "$OTHER" "$WORK" "$gateway" "$HOOK_PATH" "$FAKE_BEARER" "$FAKE_BOT"
 # The counters, once kausa has handled the answers the receiver logged.
 counted=""
 for _ in $(seq 1 10); do
   metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
-  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 3' |
+  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 5' |
     grep -q . && echo "$metrics" | grep -E '^kausa_notifications_retried_total [1-9]' >/dev/null
   then
     counted=yes && break
   fi
   sleep 2
 done
-[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 3, or" \
+[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 5, or" \
   "kausa_notifications_retried_total under 1"
-echo "notifications: at least 3 sent and 1 retried"
+echo "notifications: at least 5 sent and 1 retried"
 
 # The grant is the table in docs/reference/permissions.md.
 sa="system:serviceaccount:$NAMESPACE:kausa"
 allowed() { [ "$(k auth can-i --as="$sa" "$@" 2>/dev/null)" = yes ]; }
 granted=("list pods" "watch pods" "get pods --subresource=log" "list events.events.k8s.io"
   "watch events.events.k8s.io" "create events.events.k8s.io" "patch events.events.k8s.io"
-  "get replicasets.apps" "get jobs.batch"
+  "get replicasets.apps" "get jobs.batch" "list deployments.apps" "watch deployments.apps"
   "list $EXPLANATIONS" "create $EXPLANATIONS" "patch $EXPLANATIONS" "delete $EXPLANATIONS")
+# D014 reads Deployments through a list and a watch only (docs/adr/0018-stuck-rollouts.md): no
+# get, no write, no subresource, and no other workload kind.
 refused=("get secrets" "list secrets" "get configmaps" "list configmaps" "delete pods"
   "create pods" "create pods --subresource=exec" "update events.events.k8s.io"
   "delete events.events.k8s.io" "list nodes" "create serviceaccounts --subresource=token"
-  "impersonate users" "list replicasets.apps" "list jobs.batch"
+  "impersonate users" "list replicasets.apps" "watch replicasets.apps" "list jobs.batch"
+  "get deployments.apps" "update deployments.apps" "patch deployments.apps"
+  "delete deployments.apps" "get deployments.apps --subresource=scale"
+  "update deployments.apps --subresource=status" "list statefulsets.apps"
+  "watch statefulsets.apps" "list daemonsets.apps" "watch daemonsets.apps"
   "get $EXPLANATIONS" "watch $EXPLANATIONS" "update $EXPLANATIONS"
   "deletecollection $EXPLANATIONS"
   "create customresourcedefinitions.apiextensions.k8s.io"
@@ -740,15 +951,22 @@ if [ "$SCOPE" = namespaced ]; then
     done
   done
   for check in "${refused[@]}"; do
-    # shellcheck disable=SC2086
-    if allowed $check -n "$TARGET"; then fail "kausa can $check -n $TARGET"; fi
+    for where in "-n $TARGET" "-n $DENIED" "-n $OTHER" "-n $NAMESPACE" -A; do
+      # shellcheck disable=SC2086
+      if allowed $check $where; then fail "kausa can $check $where"; fi
+    done
   done
   no_cluster_rbac
   for ns in "$TARGET" "$DENIED"; do
     [ "$(history_rule role/"$RELEASE" -n "$ns")" = yes ] || fail "no history rule in $ns's Role"
+    [ "$(deployments_rule role/"$RELEASE" -n "$ns")" = yes ] ||
+      fail "no deployments rule right after the replicasets rule in $ns's Role"
   done
+  can_get_deployments=(-n "$TARGET")
 else
   [ "$(history_rule clusterrole/"$RELEASE")" = yes ] || fail "no history rule in the ClusterRole"
+  [ "$(deployments_rule clusterrole/"$RELEASE")" = yes ] ||
+    fail "no deployments rule right after the replicasets rule in the ClusterRole"
   for check in "${granted[@]}"; do
     # shellcheck disable=SC2086
     allowed $check -A || fail "kausa cannot $check"
@@ -757,7 +975,16 @@ else
     # shellcheck disable=SC2086
     if allowed $check -A; then fail "kausa can $check"; fi
   done
+  can_get_deployments=(-A)
 fi
+# kausa is Ready with list and watch alone: it never gets a Deployment.
+if allowed get deployments.apps "${can_get_deployments[@]}"; then
+  fail "kausa can get deployments.apps"
+fi
+ready=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa \
+  -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}')
+[ "$ready" = True ] || fail "kausa is not Ready ($ready) without get on deployments.apps"
+echo "can-i: list and watch on deployments.apps granted, get refused, and kausa is Ready"
 
 # The metrics, through the API server's service proxy, which reaches only a Ready Pod.
 metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
@@ -765,6 +992,9 @@ echo "$metrics" | grep -E '^kausa_events_written_total\{reason="Explained"\} [1-
   fail "kausa_events_written_total does not count the Events"
 echo "$metrics" | grep -E '^kausa_history_writes_total\{outcome="created"\} [1-9]' >/dev/null ||
   fail "kausa_history_writes_total does not count the Explanations created"
+echo "$metrics" |
+  awk '$1 == "kausa_incidents_total{detection=\"D014\"}" && $2 >= 1 { n++ } END { exit !n }' ||
+  fail "kausa_incidents_total does not count stalled's D014"
 restarts=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa \
   -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}')
 [ "$restarts" = 0 ] || fail "kausa restarted $restarts times"
@@ -872,8 +1102,10 @@ sys.exit(1)
 done
 [ -n "$swept" ] ||
   fail "no 'history swept' line deleting by age, or the old kausa-shaped Explanation remains"
+# Read once, then searched: with pipefail, a grep -q that stops reading early can fail the pipe.
+remaining=$(explanations "$TARGET")
 for name in e2e-old-labelled kausa.0000000000000002; do
-  explanations "$TARGET" | grep -qxF -- "$TARGET/$name" || fail "the sweep deleted $name"
+  printf '%s\n' "$remaining" | grep -qxF -- "$TARGET/$name" || fail "the sweep deleted $name"
 done
 metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
 echo "$metrics" | grep -E '^kausa_history_deleted_total\{reason="age"\} [1-9]' >/dev/null ||
@@ -949,18 +1181,23 @@ if [ "$SCOPE" = namespaced ]; then
     sleep 2
   done
   [ -n "$pod" ] || fail "no new kausa Pod is Running after the restart"
-  # The watch errors come at once; an incident in TARGET after a settle window and a tick. The
-  # wait also gives the readiness probe (every 10 seconds) several tries.
+  # The watch errors come at once, the Deployment watch's too (docs/adr/0018-stuck-rollouts.md);
+  # an incident in TARGET after a settle window and a tick. The wait also gives the readiness
+  # probe (every 10 seconds) several tries.
   started=$SECONDS
-  denied_logged="" target_logged=""
+  denied_logged="" denied_rollouts="" target_logged=""
   for _ in $(seq 1 60); do
     kausa_log "$pod"
     log_has "pod watch error|event watch error" "$DENIED" < "$WORK/kausa.log" && denied_logged=yes
+    log_has "deployment watch error" "$DENIED" < "$WORK/kausa.log" && denied_rollouts=yes
     log_has incident "$TARGET" < "$WORK/kausa.log" && target_logged=yes
-    [ -n "$denied_logged" ] && [ -n "$target_logged" ] && [ $((SECONDS - started)) -ge 30 ] && break
+    [ -n "$denied_logged" ] && [ -n "$denied_rollouts" ] && [ -n "$target_logged" ] &&
+      [ $((SECONDS - started)) -ge 30 ] && break
     sleep 2
   done
   [ -n "$denied_logged" ] || fail "no watch error with namespace $DENIED in the new Pod's log"
+  [ -n "$denied_rollouts" ] ||
+    fail "no deployment watch error with namespace $DENIED in the new Pod's log"
   [ -n "$target_logged" ] || fail "no incident with namespace $TARGET in the new Pod's log"
   # Read from the Pod: a Pod that is not Ready is no endpoint of the metrics Service.
   ready=$(k -n "$NAMESPACE" get "$pod" \
@@ -968,7 +1205,8 @@ if [ "$SCOPE" = namespaced ]; then
   [ "$ready" = False ] || fail "the new kausa Pod is Ready ($ready) though $DENIED refuses it"
   restarts=$(k -n "$NAMESPACE" get "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')
   [ "$restarts" = 0 ] || fail "the new kausa Pod restarted $restarts times"
-  echo "$DENIED refused: kausa is not Ready, did not restart and still explains $TARGET"
+  echo "$DENIED refused, its Deployment watch too: kausa is not Ready, did not restart and still" \
+    "explains $TARGET"
 
   h uninstall "$RELEASE" -n "$NAMESPACE"
   left=""
@@ -1052,15 +1290,39 @@ EOF
   done
   echo "helm upgrade --set dryRun=true: no history rule, reader role or Explanation left"
 
-  # history.enabled=false: the rule, the reader role and the CustomResourceDefinition go.
+  # history.enabled=false: the rule, the reader role and the CustomResourceDefinition go. With
+  # rollouts=false (docs/adr/0018-stuck-rollouts.md), the deployments rule goes too, and the new
+  # Pod runs with --no-rollouts and is Ready on two watches.
+  old=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name)
   h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 120s --reuse-values \
-    --set history.enabled=false
+    --set history.enabled=false --set rollouts=false
   HISTORY=off
   [ "$(history_rule clusterrole/"$RELEASE")" = no ] || fail "a history rule without the history"
   [ -z "$(k get clusterrole "$READER" --ignore-not-found -o name)" ] ||
     fail "the reader role remains without the history"
   crd_gone
   echo "helm upgrade --set history.enabled=false: no history rule, reader role or CRD left"
+  [ "$(deployments_rule clusterrole/"$RELEASE")" = no ] ||
+    fail "a deployments rule in the ClusterRole with rollouts=false"
+  for check in "list deployments.apps" "watch deployments.apps"; do
+    # shellcheck disable=SC2086
+    if allowed $check -A; then fail "kausa can $check with rollouts=false"; fi
+  done
+  k -n "$NAMESPACE" rollout status deploy/kausa --timeout 120s
+  pod=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name |
+    grep -vxF -- "$old" | head -n 1 || true)
+  [ -n "$pod" ] || fail "no new kausa Pod after the upgrade to rollouts=false"
+  # Read once, then searched: with pipefail, a grep -q that stops reading early can fail the pipe.
+  args=$(kausa_args "$pod")
+  printf '%s\n' "$args" | grep -qxF -- --no-rollouts ||
+    fail "the kausa Pod runs without --no-rollouts with rollouts=false"
+  ready=$(k -n "$NAMESPACE" get "$pod" \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+  [ "$ready" = True ] || fail "kausa is not Ready ($ready) with rollouts=false"
+  kausa_log "$pod"
+  rollouts=$(started_field rollouts)
+  [ "$rollouts" = false ] || fail "the started line has rollouts $rollouts with rollouts=false"
+  echo "helm upgrade --set rollouts=false: no deployments rule, --no-rollouts, a Ready Pod"
 
   # From cluster to namespaced scope in place, with the history on again: the ClusterRole and its
   # binding go, a Role and a RoleBinding come; the reader role and the CustomResourceDefinition are
@@ -1071,6 +1333,9 @@ EOF
   no_cluster_rbac
   has_roles "$TARGET"
   [ "$(history_rule role/"$RELEASE" -n "$TARGET")" = yes ] || fail "no history rule in the Role"
+  # rollouts=false stays through --reuse-values.
+  [ "$(deployments_rule role/"$RELEASE" -n "$TARGET")" = no ] ||
+    fail "a deployments rule in the Role, though rollouts=false was reused"
   echo "helm upgrade to rbac.scope=namespaced: no cluster-scoped RBAC object, a Role in $TARGET"
 
   # A deleted CustomResourceDefinition: kausa starts, is Ready, does not restart, and says why it
@@ -1090,6 +1355,12 @@ EOF
   [ "$ready" = True ] || fail "kausa is not Ready ($ready) without the CustomResourceDefinition"
   restarts=$(k -n "$NAMESPACE" get "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')
   [ "$restarts" = 0 ] || fail "kausa restarted $restarts times without the CRD"
+  # Still rollouts=false, from the values reused since that upgrade.
+  args=$(kausa_args "$pod")
+  printf '%s\n' "$args" | grep -qxF -- --no-rollouts ||
+    fail "--no-rollouts did not survive the upgrades"
+  rollouts=$(started_field rollouts)
+  [ "$rollouts" = false ] || fail "the started line has rollouts $rollouts after the restart"
   echo "without the CustomResourceDefinition: kausa is Ready, did not restart and logs why"
 fi
 

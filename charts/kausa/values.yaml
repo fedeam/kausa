@@ -47,6 +47,10 @@ logs: true
 # Write each explanation as an Event on the failing workload. false also removes the Event writes
 # from the ClusterRole or the Roles.
 events: true
+# Watch Deployments and explain rollouts past their progress deadline (D014). false also removes
+# list and watch on deployments from the ClusterRole or the Roles, and passes --no-rollouts. true
+# or false.
+rollouts: true
 history:
   # Keep the full explanations of each incident in an Explanation object in its namespace.
   # Needs an endpoint and dryRun false. false, no endpoint or dryRun true deletes the

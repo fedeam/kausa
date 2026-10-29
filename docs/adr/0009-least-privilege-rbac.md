@@ -83,3 +83,13 @@ resource, off by default](0014-explanation-history.md) amends "the only write is
 either scope). Under Never granted in [Permissions](../reference/permissions.md), "Custom
 resources, in v0.1" becomes "any custom resource but kausa's own Explanations", and any verb on
 CustomResourceDefinitions is never granted. Secrets and ConfigMaps stay out in every verb.
+
+Update 2026-10-29: [0018. Explain a Deployment past its progress deadline (`D014`) from a
+Deployment watch that is on by default, and add nothing for StatefulSets or
+DaemonSets](0018-stuck-rollouts.md) amends "nothing on Deployments, StatefulSets, DaemonSets or
+CronJobs": while the chart's `rollouts` is on (the default), kausa is granted `list` and `watch`
+on `deployments` in `apps`, through the same rules in the ClusterRole and in every Role, right
+after the `replicasets` rule. Never `get` or a write on Deployments, never their `status`, `scale`
+or `rollback` subresources, nothing on StatefulSets, DaemonSets or CronJobs, and still only `get`
+on ReplicaSets. With `rollouts: false` the rules are v0.3.0's. Secrets and ConfigMaps stay out in
+every verb ([Permissions](../reference/permissions.md)).

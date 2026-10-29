@@ -1,9 +1,9 @@
 # Architecture
 
-How kausa is planned to work: it watches Warning events and Pod status, turns the failures of one
-workload into one incident with deterministic rules, sends a redacted context to one
-OpenAI-compatible endpoint within a budget, and writes the explanation as an Event on the failing
-workload.
+How kausa is planned to work: it watches Warning events, Pod status and Deployments, turns the
+failures of one workload into one incident with deterministic rules, sends a redacted context to
+one OpenAI-compatible endpoint within a budget, and writes the explanation as an Event on the
+failing workload.
 
 Status as of 2026-10-26: **the code of the four implementation weekends of v0.1 is done**:
 watching, detection, the settle window, owner correlation, fingerprints, the context with log
@@ -18,13 +18,17 @@ for v0.1 and is updated as the code lands. Why kausa exists and what it leaves o
 incident](../adr/0001-scope-and-positioning.md). Status as of 2026-10-29, the namespaced mode
 is released in v0.3.0 ([0013. Offer a namespaced install mode: one watch pair
 and one Role per listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)).
+For v0.4 (2026-10-29), a third watch, on Deployments, explains rollouts past their progress
+deadline (`D014`) ([0018. Explain a Deployment past its progress deadline (`D014`) from a
+Deployment watch that is on by default, and add nothing for StatefulSets or
+DaemonSets](../adr/0018-stuck-rollouts.md)).
 
 ## Pipeline
 
 ```text
 Warning events ─┐
-                ├─▶ detect ─▶ settle ─▶ correlate ─▶ incident + fingerprint
-Pod status ─────┘                                          │
+Pod status ─────┼─▶ detect ─▶ settle ─▶ correlate ─▶ incident + fingerprint
+Deployments ────┘                                          │
                                          seen before? ─────┼──▶ re-emit the stored explanation
                                                            ▼
           gather context ─▶ redact ─▶ budget ─▶ model ─▶ validate ─▶ map names back ─▶ Event
@@ -36,19 +40,21 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 ## Watching without a large cache
 
-- **A watch pair per namespace, or one per kind for the whole cluster:** `events.k8s.io/v1`
+- **Three watches per namespace, or one per kind for the whole cluster:** `events.k8s.io/v1`
   Events of type `Warning` (kept only when a detection matches: about Pods, Jobs, workload
-  controllers, PersistentVolumeClaims and HorizontalPodAutoscalers), and Pods. Without
-  `--namespace`, one Pod watch and
-  one event watch across all namespaces (`Api::all`); with `--namespace`, one of each in every
+  controllers, PersistentVolumeClaims and HorizontalPodAutoscalers), Pods and, unless
+  `--no-rollouts`, `apps/v1` Deployments (two per namespace with it). Without `--namespace`, one
+  Pod watch, one event watch and one Deployment watch across all namespaces (`Api::all`); with
+  `--namespace`, one of each in every
   listed namespace (`Api::namespaced`), since kube-rs has no watcher of several namespaces and a
   field selector cannot pick several. All through kube-rs watchers, with restarts and backoff
   (0.8 to 30 seconds) handled by the library, except after a `403` (below); each is one HTTP
   connection to the API server.
 - **Merged per kind, tagged with their watch.** The Pod watches are merged into one stream with
-  `futures`' `select_all`, and so are the event watches, each item carrying its watch (a namespace,
-  or none for the whole cluster) and each watch ending with an "ended" item: the loop keeps one Pod
-  branch and one event branch, with no task per namespace and no new crate. A watch that ends
+  `futures`' `select_all`, and so are the event watches and the Deployment watches, each item
+  carrying its watch (a namespace, or none for the whole cluster) and each watch ending with an
+  "ended" item: the loop keeps one Pod branch, one event branch and one Deployment branch, with no
+  task per namespace and no new crate. A watch that ends
   stops kausa with exit code `1` and names it (`the pod watch of namespace shop ended`).
 - **No full-object cache.** A reflector that stores every Pod cluster-wide is the usual way to
   grow a controller's memory with the cluster. kausa reduces each watch event to a small record per
@@ -63,6 +69,14 @@ produces the same incident, the same fingerprint and the same request bytes.
   ([Memory and CPU on a Raspberry Pi
   4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)), and 31 MiB with 10,000 Pods in
   kind ([Thousands of Pods](../research/2026-10-28-thousands-of-pods.md)).
+- **A Deployment is kept only while it is stalled.** Each Deployment is reduced at once to a
+  record of what `D014` needs (namespace, name, UID, generation and observed generation, whether it
+  is paused, its revision, its deadline, `minReadySeconds`, the desired and status replica counts,
+  and the `Progressing` condition's status and reason), never its Pod template, labels, other
+  annotations, selector, strategy or any condition message. The record is kept only while the rule
+  matches, and dropped on any update that does not, and on delete, so memory grows with stalled
+  Deployments, not with Deployments. A list page still holds up to 500 whole objects while it is
+  decoded, as for Pods.
 - **Server-side filtering.** The event watch uses the field selector
   `type=Warning,reportingController!=kausa`: `events.k8s.io/v1` supports both fields (its field
   label conversion in Kubernetes' `pkg/apis/events/v1/conversion.go`, checked on 2026-10-26).
@@ -91,7 +105,9 @@ produces the same incident, the same fingerprint and the same request bytes.
 - **Detection** is a fixed set of rules over the Pod records and events, listed in [Detection and
   redaction rules](../reference/rules.md): crash loops, image pull failures, out-of-memory kills,
   container creation errors, scheduling failures, probe failures, volume failures, failed Jobs,
-  evicted Pods and Pod sandboxes that cannot be created. A container matches at most one
+  evicted Pods, Pod sandboxes that cannot be created, workloads whose Pods are refused, claims that
+  cannot be provisioned, autoscalers without metrics, and Deployments past their progress
+  deadline. A container matches at most one
   detection, the most specific one (`D003` before `D001`), before grouping.
 - **Settle window.** A failure has to persist for a while (60 seconds by default) before it
   becomes an incident. Every five seconds kausa turns its records into signals: states (a failing
@@ -99,7 +115,10 @@ produces the same incident, the same fingerprint and the same request bytes.
   has been present over the window, and is forgotten only after 330 seconds without it, so a
   crash loop that runs between back-offs stays one incident. An event settles when the same event
   happens again a window after it was first seen; events of different Pods never add up. A failed
-  Job settles at once. The exact rules: [Detection and redaction rules](../reference/rules.md).
+  Job settles at once. A stalled rollout (`D014`) is decided after the other signals of the same
+  check and yields to an explained incident of the same Deployment, so a crash-looping or refused
+  rollout is explained once, by the rule that names its cause. The exact rules: [Detection and
+  redaction rules](../reference/rules.md).
 - **Correlation.** kausa follows owner references up to the top-level owner. A Pod's reference
   already names its ReplicaSet, StatefulSet, DaemonSet or Job; only the ReplicaSet → Deployment
   and Job → CronJob hops need a `get`, a metadata-only request (PartialObjectMetadata), so
@@ -188,8 +207,8 @@ produces the same incident, the same fingerprint and the same request bytes.
 - **Metrics.** With `--metrics-address`, Prometheus counters on their own port: incidents by
   detection, model calls by outcome, tokens in and out as the endpoint reports them, cache hits,
   skipped explanations by reason, dropped ones, logged requests, redactions by rule, and Events
-  written and failed; `/healthz`, and `/readyz` once every watch has listed (two, or two per
-  watched namespace), never going back. A minimal HTTP/1.1
+  written and failed; `/healthz`, and `/readyz` once every watch has listed (three, or three per
+  watched namespace; two with `--no-rollouts`), never going back. A minimal HTTP/1.1
   responder on `tokio::net`, with no framework. The list: [Command line and log
   format](../reference/command-line.md#metrics).
 

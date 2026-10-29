@@ -1,12 +1,14 @@
 //! The small records kausa keeps instead of whole objects.
 //!
-//! A watch delivers whole Pods and Events, inline environment values and command lines included.
+//! A watch delivers whole Pods, Events and Deployments, inline environment values and command
+//! lines included.
 //! Each one is reduced here, at once, to the few fields the detection rules and (later) the request
 //! to the model need; the object itself is dropped and never logged
 //! (docs/explanation/architecture.md, "Watching without a large cache").
 
 use std::sync::LazyLock;
 
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentStatus};
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, ContainerStatus, ObjectReference, Pod, PodSpec, PodStatus, Probe,
 };
@@ -754,6 +756,77 @@ impl EventRecord {
             first_seen,
             last_seen,
             count,
+        })
+    }
+}
+
+/// The annotation where the deployment controller writes a Deployment's revision.
+const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
+
+/// What kausa keeps of a Deployment: the fields of `D014` and of its request to the model
+/// (docs/adr/0018-stuck-rollouts.md). Never its Pod template, labels, other annotations, managed
+/// fields, selector or strategy, nor any condition's message or time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentRecord {
+    pub namespace: String,
+    pub name: String,
+    pub uid: String,
+    /// `metadata.generation` and `status.observedGeneration`.
+    pub generation: Option<i64>,
+    pub observed_generation: Option<i64>,
+    /// `spec.paused`; absent is `false`.
+    pub paused: bool,
+    /// The `deployment.kubernetes.io/revision` annotation, when it is an unsigned integer.
+    pub revision: Option<u64>,
+    /// `spec.replicas`, `spec.progressDeadlineSeconds` and `spec.minReadySeconds`, as written.
+    pub replicas: Option<i32>,
+    pub progress_deadline_seconds: Option<i32>,
+    pub min_ready_seconds: Option<i32>,
+    /// The status counts; absent is `0`.
+    pub updated_replicas: i32,
+    pub ready_replicas: i32,
+    pub available_replicas: i32,
+    pub unavailable_replicas: i32,
+    /// The status and reason of the first `Progressing` condition, bounded.
+    pub progressing_status: Option<String>,
+    pub progressing_reason: Option<String>,
+}
+
+impl DeploymentRecord {
+    /// Reduces a Deployment to its record. `None` when it has no namespace, name or UID.
+    pub fn from_deployment(deployment: &Deployment) -> Option<Self> {
+        let metadata = &deployment.metadata;
+        let spec = deployment.spec.as_ref();
+        let status = deployment.status.as_ref();
+        let progressing = status.and_then(|s| {
+            s.conditions
+                .iter()
+                .flatten()
+                .find(|c| c.type_ == "Progressing")
+        });
+        let count =
+            |field: fn(&DeploymentStatus) -> Option<i32>| status.and_then(field).unwrap_or(0);
+        Some(Self {
+            namespace: metadata.namespace.clone()?,
+            name: metadata.name.clone()?,
+            uid: metadata.uid.clone()?,
+            generation: metadata.generation,
+            observed_generation: status.and_then(|s| s.observed_generation),
+            paused: spec.and_then(|s| s.paused).unwrap_or(false),
+            revision: metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(REVISION_ANNOTATION))
+                .and_then(|r| r.parse::<u64>().ok()),
+            replicas: spec.and_then(|s| s.replicas),
+            progress_deadline_seconds: spec.and_then(|s| s.progress_deadline_seconds),
+            min_ready_seconds: spec.and_then(|s| s.min_ready_seconds),
+            updated_replicas: count(|s| s.updated_replicas),
+            ready_replicas: count(|s| s.ready_replicas),
+            available_replicas: count(|s| s.available_replicas),
+            unavailable_replicas: count(|s| s.unavailable_replicas),
+            progressing_status: progressing.map(|c| bounded(&c.status)),
+            progressing_reason: progressing.and_then(|c| c.reason.as_deref().map(bounded)),
         })
     }
 }
@@ -2098,5 +2171,257 @@ mod tests {
         );
         assert_eq!(mixed.value_count, 14);
         assert_eq!(ClosedValues::default().iter().count(), 0);
+    }
+
+    // Acceptance tests for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code: what
+    // kausa keeps of a Deployment. The Deployment watch delivers whole objects, Pod template and
+    // annotations included; the record keeps only the fields `D014` and its request need. The
+    // shapes follow what the deployment controller writes; names and numbers are invented.
+
+    /// A Deployment past its progress deadline: `Progressing` is `False` with reason
+    /// `ProgressDeadlineExceeded`, at revision 7, with its generation observed.
+    fn stalled_deployment() -> serde_json::Value {
+        json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": "checkout",
+                "namespace": "shop",
+                "uid": "55555555-5555-4555-8555-555555555555",
+                "generation": 3,
+                "annotations": {"deployment.kubernetes.io/revision": "7"}
+            },
+            "spec": {
+                "replicas": 3,
+                "progressDeadlineSeconds": 600,
+                "minReadySeconds": 0,
+                "selector": {"matchLabels": {"app": "checkout"}},
+                "template": {
+                    "metadata": {"labels": {"app": "checkout"}},
+                    "spec": {"containers": [{"name": "checkout",
+                                             "image": "registry.example.com/shop/checkout:2.0.1"}]}
+                }
+            },
+            "status": {
+                "observedGeneration": 3,
+                "replicas": 4,
+                "updatedReplicas": 1,
+                "readyReplicas": 2,
+                "availableReplicas": 2,
+                "unavailableReplicas": 1,
+                "conditions": [
+                    {"type": "Available", "status": "True", "reason": "MinimumReplicasAvailable",
+                     "message": "Deployment has minimum availability."},
+                    {"type": "Progressing", "status": "False",
+                     "reason": "ProgressDeadlineExceeded",
+                     "message": "ReplicaSet \"checkout-7fffb9bf5c\" has timed out progressing."}
+                ]
+            }
+        })
+    }
+
+    fn deployment_record(value: serde_json::Value) -> Option<DeploymentRecord> {
+        let deployment: k8s_openapi::api::apps::v1::Deployment =
+            serde_json::from_value(value).expect("the fixture is a valid Deployment");
+        DeploymentRecord::from_deployment(&deployment)
+    }
+
+    #[test]
+    fn a_deployment_becomes_a_small_record() {
+        let record = deployment_record(stalled_deployment()).expect("a complete Deployment");
+        assert_eq!(
+            record,
+            DeploymentRecord {
+                namespace: "shop".into(),
+                name: "checkout".into(),
+                uid: "55555555-5555-4555-8555-555555555555".into(),
+                generation: Some(3),
+                observed_generation: Some(3),
+                paused: false,
+                revision: Some(7),
+                replicas: Some(3),
+                progress_deadline_seconds: Some(600),
+                min_ready_seconds: Some(0),
+                updated_replicas: 1,
+                ready_replicas: 2,
+                available_replicas: 2,
+                unavailable_replicas: 1,
+                progressing_status: Some("False".into()),
+                progressing_reason: Some("ProgressDeadlineExceeded".into()),
+            }
+        );
+        let mut paused = stalled_deployment();
+        paused["spec"]["paused"] = json!(true);
+        let record = deployment_record(paused).expect("a complete Deployment");
+        assert!(record.paused);
+    }
+
+    #[test]
+    fn the_deployment_record_drops_the_template_annotations_labels_and_messages() {
+        let mut deployment = stalled_deployment();
+        deployment["metadata"]["labels"] = json!({"team": "invented-label-value"});
+        deployment["metadata"]["annotations"]["kubectl.kubernetes.io/last-applied-configuration"] =
+            json!("{\"invented\":\"last-applied-canary\"}");
+        deployment["spec"]["template"]["spec"]["containers"][0]["env"] =
+            json!([{"name": "FAKE_TOKEN", "value": "not-a-real-token-123"}]);
+        deployment["status"]["conditions"]
+            .as_array_mut()
+            .expect("the conditions")
+            .push(json!({
+                "type": "ReplicaFailure", "status": "True", "reason": "FailedCreate",
+                "message": "replica-failure-canary: pods are forbidden"
+            }));
+        let record = deployment_record(deployment).expect("a complete Deployment");
+        // The failure messages name what leaked, not the record: printing a record that holds a
+        // secret would log it (CodeQL's rust/cleartext-logging).
+        let debug = format!("{record:?}");
+        assert!(
+            !debug.contains("not-a-real-token-123"),
+            "the inline environment value reached the record"
+        );
+        assert!(
+            !debug.contains("FAKE_TOKEN"),
+            "the environment variable's name reached the record"
+        );
+        assert!(
+            !debug.contains("last-applied-canary"),
+            "the last-applied-configuration annotation reached the record"
+        );
+        assert!(
+            !debug.contains("invented-label-value"),
+            "a label reached the record"
+        );
+        assert!(
+            !debug.contains("replica-failure-canary"),
+            "the ReplicaFailure message reached the record"
+        );
+        assert!(
+            !debug.contains("timed out progressing"),
+            "the Progressing message reached the record"
+        );
+        assert!(
+            !debug.contains("registry.example.com"),
+            "the template's image reached the record"
+        );
+    }
+
+    #[test]
+    fn absent_status_counts_are_zero_and_absent_replicas_none() {
+        let mut deployment = stalled_deployment();
+        let spec = deployment["spec"].as_object_mut().expect("a spec");
+        for field in ["replicas", "progressDeadlineSeconds", "minReadySeconds"] {
+            spec.remove(field);
+        }
+        deployment["status"] = json!({
+            "observedGeneration": 3,
+            "conditions": [{"type": "Progressing", "status": "False",
+                            "reason": "ProgressDeadlineExceeded"}]
+        });
+        let record = deployment_record(deployment.clone()).expect("a complete Deployment");
+        assert_eq!(record.replicas, None);
+        assert_eq!(record.progress_deadline_seconds, None);
+        assert_eq!(record.min_ready_seconds, None);
+        assert_eq!(
+            (
+                record.updated_replicas,
+                record.ready_replicas,
+                record.available_replicas,
+                record.unavailable_replicas
+            ),
+            (0, 0, 0, 0)
+        );
+        // A Deployment with no status at all yet.
+        deployment
+            .as_object_mut()
+            .expect("an object")
+            .remove("status");
+        let record = deployment_record(deployment).expect("a complete Deployment");
+        assert_eq!(record.observed_generation, None);
+        assert_eq!(
+            (record.progressing_status, record.progressing_reason),
+            (None, None)
+        );
+        assert_eq!(
+            (
+                record.updated_replicas,
+                record.ready_replicas,
+                record.available_replicas,
+                record.unavailable_replicas
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn the_revision_is_kept_only_when_it_is_an_unsigned_integer() {
+        let revision = |value: Option<&str>| {
+            let mut deployment = stalled_deployment();
+            deployment["metadata"]["annotations"] = match value {
+                Some(value) => json!({"deployment.kubernetes.io/revision": value}),
+                None => json!({}),
+            };
+            deployment_record(deployment)
+                .expect("a complete Deployment")
+                .revision
+        };
+        assert_eq!(revision(Some("7")), Some(7));
+        assert_eq!(revision(Some("18446744073709551615")), Some(u64::MAX));
+        for value in [
+            "x7",
+            "",
+            "-1",
+            "7.0",
+            " 7",
+            "123456789012345678901234567890",
+        ] {
+            assert_eq!(revision(Some(value)), None, "{value:?}");
+        }
+        assert_eq!(revision(None), None);
+    }
+
+    #[test]
+    fn a_long_progressing_reason_or_status_is_cut_at_a_character_boundary() {
+        let long = "é".repeat(MAX_TEXT_BYTES); // two bytes each
+        let mut deployment = stalled_deployment();
+        deployment["status"]["conditions"] =
+            json!([{"type": "Progressing", "status": long, "reason": long}]);
+        let record = deployment_record(deployment).expect("a complete Deployment");
+        for (field, text) in [
+            ("status", record.progressing_status),
+            ("reason", record.progressing_reason),
+        ] {
+            let text = text.expect("a bounded text");
+            assert!(text.len() <= MAX_TEXT_BYTES, "{field}");
+            assert!(!text.is_empty(), "{field}");
+            assert!(text.chars().all(|c| c == 'é'), "{field}");
+        }
+    }
+
+    #[test]
+    fn a_deployment_without_a_namespace_name_or_uid_is_skipped() {
+        for field in ["namespace", "name", "uid"] {
+            let mut deployment = stalled_deployment();
+            deployment["metadata"]
+                .as_object_mut()
+                .expect("the metadata")
+                .remove(field);
+            assert_eq!(deployment_record(deployment), None, "{field}");
+        }
+    }
+
+    #[test]
+    fn the_first_progressing_condition_is_the_one_kept() {
+        let mut deployment = stalled_deployment();
+        deployment["status"]["conditions"] = json!([
+            {"type": "Available", "status": "False", "reason": "MinimumReplicasUnavailable"},
+            {"type": "Progressing", "status": "True", "reason": "NewReplicaSetAvailable"},
+            {"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded"}
+        ]);
+        let record = deployment_record(deployment).expect("a complete Deployment");
+        assert_eq!(record.progressing_status.as_deref(), Some("True"));
+        assert_eq!(
+            record.progressing_reason.as_deref(),
+            Some("NewReplicaSetAvailable")
+        );
     }
 }

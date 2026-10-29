@@ -10,7 +10,7 @@ and its reasons are in [Architecture](docs/explanation/architecture.md) and the 
 ```text
 API server ──watch──▶ run.rs ──▶ record.rs ──▶ detect.rs ──▶ incident.rs ──▶ (settled incident)
   Pods, Warning         loop      small records   rules         signals, grouping,      │
-  Events                          (objects dropped)              settle window,          │
+  Events, Deployments             (objects dropped)              settle window,          │
                                                                  fingerprint.rs          ▼
                           owner.rs ◀── metadata get of ReplicaSets and Jobs        explain.rs queue
                                                                                         │
@@ -40,10 +40,10 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | File | What it does | Change it when |
 |---|---|---|
 | `src/main.rs` | Flags, usage errors (`--namespace` checked before any connection, at most `MAX_NAMESPACES`), the settings passed to `run` | A flag is added or changed |
-| `src/run.rs` | The controller loop: one Pod watch and one event watch for the whole cluster, or a pair per `--namespace`, merged per kind and tagged with their watch; relists, `403` drops and a new watcher after a `403` (`Restarting`) per watch; readiness once every watch has listed; the tick, the explanation queue, the notification slot beside it (one send at a time, which a duplicate skips), the metrics listener, owner lookups with a cache | The loop's scheduling or what it watches changes |
-| `src/record.rs` | Reduces a Pod or an Event to the few fields kausa keeps; the object is dropped at once | A rule needs a field that is not recorded |
-| `src/detect.rs` | The detection rules `D001`–`D013`: pure functions of a record | A detection rule is added or changed |
-| `src/incident.rs` | Signals, grouping by top-level owner, the settle window | Grouping or settling changes |
+| `src/run.rs` | The controller loop: one Pod watch, one event watch and (unless `--no-rollouts`) one Deployment watch for the whole cluster, or three per `--namespace`, merged per kind and tagged with their watch; relists, `403` drops and a new watcher after a `403` (`Restarting`) per watch; readiness once every watch has listed; the tick, the explanation queue, the notification slot beside it (one send at a time, which a duplicate skips), the metrics listener, owner lookups with a cache | The loop's scheduling or what it watches changes |
+| `src/record.rs` | Reduces a Pod, an Event or a Deployment to the few fields kausa keeps; the object is dropped at once (a Deployment's record is kept only while `D014` matches) | A rule needs a field that is not recorded |
+| `src/detect.rs` | The detection rules `D001`–`D014`: pure functions of a record | A detection rule is added or changed |
+| `src/incident.rs` | Signals, grouping by top-level owner, the settle window, and the yield of `D014` to an explained incident of the same Deployment | Grouping or settling changes |
 | `src/fingerprint.rs` | The incident fingerprint (dedup key, Event name, notification field), never sent to the model | What makes two incidents "the same" changes |
 | `src/owner.rs` | ReplicaSet → Deployment and Job → CronJob, metadata only | A new owner hop (needs an ADR: a new permission) |
 | `src/explain.rs` | One incident to one explanation: log tail, fit to the token cap, dry-run or call, retry, validation, Event | The explanation pipeline changes |
