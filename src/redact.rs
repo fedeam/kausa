@@ -328,11 +328,25 @@ impl Redactor {
         let placeholders: Vec<String> = self.names.iter().map(|(_, p)| p.clone()).collect();
         let ours = |name: &str| placeholders.iter().any(|p| p == name);
         let mut n = 0;
+        // The pattern of v0.3 first, unchanged, so the second pass can only add redactions
+        // (invariant 4): a quote left open after a kind of the second pass cannot hide a name the
+        // first pass catches.
         let mut out = KUBERNETES_NAME
             .replace_all(&text, |c: &Captures<'_>| {
-                // Every name of a list (`containers "a", "b"`), each on its own.
+                if ours(&c[2]) {
+                    c[0].to_owned()
+                } else {
+                    n += 1;
+                    format!("{} \"<redacted:name>\"", &c[1])
+                }
+            })
+            .into_owned();
+        out = KUBERNETES_NAME_LIST
+            .replace_all(&out, |c: &Captures<'_>| {
+                // Every name of a list (`containers "a", "b"`), each on its own; a name the first
+                // pass already replaced is neither replaced nor counted again.
                 let names = QUOTED_NAME.replace_all(&c[2], |q: &Captures<'_>| {
-                    if ours(&q[1]) {
+                    if ours(&q[1]) || &q[1] == "<redacted:name>" {
                         q[0].to_owned()
                     } else {
                         n += 1;
@@ -620,16 +634,25 @@ static IPV4: LazyLock<Regex> = LazyLock::new(|| {
 });
 static IPV6_CANDIDATE: LazyLock<Regex> =
     LazyLock::new(|| regex(r"[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}"));
-/// The quoted names after a kind (`secret "<name>"`, `StorageClass "<name>"`) or after a resource
-/// qualified by its API group, as the API server's `NotFound` error writes it
-/// (`storageclass.storage.k8s.io "<name>" not found`, `deployments.apps "<name>" not found`).
+/// The quoted name after a kind (`secret "<name>"`): the pattern of v0.3, kept unchanged as the
+/// first pass so that no later pattern can let through a name it catches (invariant 4).
 static KUBERNETES_NAME: LazyLock<Regex> = LazyLock::new(|| {
     regex(
-        r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?|pods?|containers?|storageclass(?:es)?|[a-z0-9-]+(?:\.[a-z0-9-]+)+) (["'][^"']+["'](?:, ["'][^"']+["'])*)"#,
+        r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?) ["']([^"']+)["']"#,
     )
 });
-/// One quoted name of a `KUBERNETES_NAME` list.
-static QUOTED_NAME: LazyLock<Regex> = LazyLock::new(|| regex(r#"["']([^"']+)["']"#));
+/// The second pass, over the first one's output: the quoted names, one or a list, after a kind
+/// (`containers "<a>", "<b>"`, `StorageClass "<name>"`) or after a resource qualified by its API
+/// group, as the API server's `NotFound` error writes it (`storageclass.storage.k8s.io "<name>" not
+/// found`, `deployments.apps "<name>" not found`). A Kubernetes name has no whitespace, so a quote
+/// left open cannot run over the words after it.
+static KUBERNETES_NAME_LIST: LazyLock<Regex> = LazyLock::new(|| {
+    regex(
+        r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?|pods?|containers?|storageclass(?:es)?|[a-z0-9-]+(?:\.[a-z0-9-]+)+) (["'][^"'\s]+["'](?:, ["'][^"'\s]+["'])*)"#,
+    )
+});
+/// One quoted name of a `KUBERNETES_NAME_LIST` list.
+static QUOTED_NAME: LazyLock<Regex> = LazyLock::new(|| regex(r#"["']([^"'\s]+)["']"#));
 /// The quota in the API server's refusal of an object by a ResourceQuota: `exceeded quota: <name>,
 /// requested: …` (`staging/src/k8s.io/apiserver/pkg/admission/plugin/resourcequota/controller.go`).
 static EXCEEDED_QUOTA: LazyLock<Regex> =
@@ -1249,6 +1272,22 @@ mod tests {
             "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims.",
         ] {
             assert_eq!(redact(line), line, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_quote_left_open_after_a_new_kind_does_not_hide_a_name_caught_before() {
+        // Invariant 4: before the names of `D011` to `D013`, `secret "<name>"` was caught in these
+        // lines; an unclosed quote after `pod`, `pods` or a dotted word must not swallow it.
+        for (line, secret) in [
+            (r#"pod "y secret "topsecret-x" not found"#, "topsecret-x"),
+            (r#"see pods "a", "b secret "topsecret-y""#, "topsecret-y"),
+            (r#"app.conf "z, secret "topsecret-z""#, "topsecret-z"),
+        ] {
+            let mut r = Redactor::new();
+            let out = r.text(line);
+            assert!(!out.contains(secret), "{secret} in {out}");
+            assert!(out.contains(r#"secret "<redacted:name>""#), "{out}");
         }
     }
 }

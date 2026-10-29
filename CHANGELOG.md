@@ -25,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `R003` redacts more names in event messages: the quoted name after `pod`, `container` and
   `StorageClass` (every name of a list), after a resource qualified by its API group
-  (`deployments.apps "<name>"`), and the quota's name in `exceeded quota: <name>`.
+  (`deployments.apps "<name>"`), and the quota's name in `exceeded quota: <name>`. These run as a
+  second pass after the pattern of 0.3.0, which is unchanged, so they only add redactions.
 - The request names a PersistentVolumeClaim or a HorizontalPodAutoscaler that an incident is about
   by its kind (`persistentvolumeclaim-1`, `horizontalpodautoscaler-1`), not as `Object`.
 
