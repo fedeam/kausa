@@ -1,7 +1,10 @@
 # Seeded failures for the benchmarks in docs/research/2026-10-26-tokens-compared-with-k8sgpt.md:
-# five workloads that fail in five different ways. Apply them to a test cluster, never to one that
-# runs anything you care about, and delete the namespace afterwards. busybox is pinned by the digest
-# of its multi-architecture index; badimage names a tag that does not exist, on purpose.
+# five workloads that fail in five different ways, and, after them, three objects for D011, D012
+# and D013 (added on 2026-10-29, not part of that benchmark; each gave its Warning event on kind,
+# Kubernetes 1.36, on 2026-10-29, and the five workloads still got their Pods). Apply them to a
+# test cluster, never to one that runs anything you care about, and delete the namespace
+# afterwards. busybox is pinned by the digest of its multi-architecture index; badimage names a tag
+# that does not exist, on purpose.
 apiVersion: v1
 kind: Namespace
 metadata: {name: kausa-test, labels: {purpose: kausa-seeded-failures}}
@@ -78,3 +81,50 @@ spec:
         image: busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
         command: ["sh", "-c", "echo 'report failed: disk full'; exit 3"]
         resources: {requests: {cpu: 5m, memory: 8Mi}, limits: {cpu: 50m, memory: 32Mi}}
+---
+# D011: a quota that admits no BestEffort Pod. Only Pods without requests or limits are BestEffort,
+# so the five workloads above, which all set requests, are not affected; the ReplicaSet of
+# cannot-create keeps writing FailedCreate ("exceeded quota: no-best-effort").
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: no-best-effort, namespace: kausa-test}
+spec:
+  hard: {pods: "0"}
+  scopes: [BestEffort]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: cannot-create, namespace: kausa-test}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: cannot-create}}
+  template:
+    metadata: {labels: {app: cannot-create}}
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+        command: ["sleep", "3600"]
+---
+# D012: a claim whose StorageClass does not exist; the PersistentVolume controller keeps writing
+# ProvisioningFailed on it. No Pod uses it, so it raises no D005.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: no-class, namespace: kausa-test}
+spec:
+  storageClassName: kausa-no-such-class
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Mi}}
+---
+# D013: an autoscaler whose target does not exist; the controller keeps writing FailedGetScale,
+# whether or not the cluster serves the metrics API.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: no-target, namespace: kausa-test}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: kausa-no-such-target}
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+  - type: Resource
+    resource: {name: cpu, target: {type: Utilization, averageUtilization: 80}}

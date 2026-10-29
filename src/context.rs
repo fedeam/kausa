@@ -18,7 +18,8 @@ pub struct Gathered {
     pub incident: Incident,
     /// The incident's Pods that kausa still knows, sample first.
     pub pods: Vec<PodRecord>,
-    /// The Warning events of those Pods (or of the Job), most recent first.
+    /// The Warning events of those Pods (or of the object the incident is about, when it is not a
+    /// Pod: a Job, a workload controller, a claim, an autoscaler), most recent first.
     pub events: Vec<EventRecord>,
     pub pods_total: usize,
     /// The last lines of the failed container, as read (redacted here).
@@ -356,5 +357,235 @@ mod tests {
         for leaked in ["api-7d9c8b6f4d", "192.0.2.7", "hunter2"] {
             assert!(!reason.contains(leaked), "{leaked} in {reason}");
         }
+    }
+
+    // Acceptance tests for `D011`, `D012` and `D013`, written before the code. Their incidents
+    // have no Pod: the request carries the object the incident is about and the notes of its
+    // events, which are cluster text and reach the model only through redaction. The notes follow
+    // what the controllers wrote on kind (Kubernetes 1.37, 2026-10-28); names are invented.
+
+    /// The request for an incident about `owner` whose events, about `regarding`, are `events`
+    /// (reason and note), the first one the sample. Returns the context and the events' messages
+    /// as sent.
+    fn about(
+        (api_version, kind, name): (&str, &str, &str),
+        regarding: (&str, &str, &str),
+        events: &[(&str, &str)],
+    ) -> (Value, Vec<String>) {
+        let owner = OwnerRef {
+            api_version: api_version.into(),
+            kind: kind.into(),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        };
+        let records: Vec<EventRecord> = events
+            .iter()
+            .map(|(reason, note)| EventRecord {
+                uid: format!("e-{reason}"),
+                reason: (*reason).into(),
+                note: Some((*note).into()),
+                regarding: Regarding {
+                    api_version: regarding.0.into(),
+                    kind: regarding.1.into(),
+                    namespace: "shop".into(),
+                    name: regarding.2.into(),
+                    uid: Some(format!("uid-{}", regarding.2)),
+                },
+                reporting_controller: None,
+                first_seen: None,
+                last_seen: None,
+                count: 12,
+            })
+            .collect();
+        let first = &records[0];
+        let detection = crate::detect::detect_event(first).expect("a detection for the event");
+        let key = IncidentKey {
+            namespace: "shop".into(),
+            owner_kind: kind.into(),
+            owner_name: name.into(),
+            detection,
+        };
+        let sample = Signal {
+            key: key.clone(),
+            owner: owner.clone(),
+            observed_at: Timestamp::UNIX_EPOCH,
+            event: Some((first.uid.clone(), None)),
+            pod: None,
+            container: None,
+            image: None,
+            reason: first.reason.clone(),
+            message: first.note.clone().unwrap_or_default(),
+            exit_code: None,
+        };
+        let gathered = Gathered {
+            incident: Incident {
+                key,
+                owner,
+                fingerprint: "0".into(),
+                first_seen: Timestamp::UNIX_EPOCH,
+                last_seen: Timestamp::UNIX_EPOCH,
+                pods: BTreeSet::new(),
+                sample,
+            },
+            pods: Vec::new(),
+            events: records,
+            pods_total: 0,
+            log_tail: None,
+        };
+        let (context, _) = build(&gathered);
+        let messages = context["warning_events"]
+            .as_array()
+            .expect("the warning events")
+            .iter()
+            .map(|e| e["message"].as_str().expect("a message").to_owned())
+            .collect();
+        (context, messages)
+    }
+
+    /// Asserts that no name in `leaked` is in the context, and that each message keeps the words
+    /// that say what failed.
+    fn redacted(context: &Value, messages: &[String], leaked: &[&str], kept: &[&str]) {
+        let sent = context.to_string();
+        for name in leaked {
+            assert!(!sent.contains(name), "{name} in {sent}");
+        }
+        assert_eq!(messages.len(), kept.len(), "{messages:?}");
+        for (message, words) in messages.iter().zip(kept) {
+            assert!(message.contains(words), "{words} not in {message}");
+        }
+        assert!(context["pods"].as_array().is_some_and(Vec::is_empty));
+        assert!(context.get("log_tail").is_none());
+    }
+
+    #[test]
+    fn a_d011_note_reaches_the_model_redacted() {
+        // A quota refusal names the Pod the ReplicaSet tried to create and the quota; a Pod
+        // Security refusal names the containers.
+        let (context, messages) = about(
+            ("apps/v1", "Deployment", "checkout"),
+            ("apps/v1", "ReplicaSet", "checkout-7fffb9bf5c"),
+            &[
+                (
+                    "FailedCreate",
+                    "Error creating: pods \"checkout-7fffb9bf5c-d98v6\" is forbidden: exceeded \
+                     quota: compute-budget, requested: pods=1, used: pods=3, limited: pods=3",
+                ),
+                (
+                    "FailedCreate",
+                    "(combined from similar events): Error creating: pods \
+                     \"checkout-7fffb9bf5c-7frqt\" is forbidden: violates PodSecurity \
+                     \"restricted:latest\": privileged (containers \"collector\", \"shipper\" \
+                     must not set securityContext.privileged=true), runAsNonRoot != true (pod or \
+                     container \"collector\" must set securityContext.runAsNonRoot=true)",
+                ),
+            ],
+        );
+        assert_eq!(context["detection"]["id"], "D011");
+        assert_eq!(
+            context["workload"],
+            json!({"kind": "Deployment", "name": "deployment-1", "namespace": "namespace-1"})
+        );
+        redacted(
+            &context,
+            &messages,
+            &[
+                "shop",
+                "checkout",
+                "7fffb9bf5c",
+                "d98v6",
+                "7frqt",
+                "compute-budget",
+                "collector",
+                "shipper",
+            ],
+            &[
+                "is forbidden: exceeded quota",
+                "violates PodSecurity \"restricted:latest\": privileged",
+            ],
+        );
+        assert!(messages[0].contains("limited: pods=3"), "{}", messages[0]);
+        assert!(
+            messages[1].contains("must not set securityContext.privileged=true"),
+            "{}",
+            messages[1]
+        );
+    }
+
+    #[test]
+    fn a_d012_note_reaches_the_model_redacted() {
+        // The PersistentVolume controller and external provisioners name the StorageClass.
+        let claim = ("v1", "PersistentVolumeClaim", "orders-data");
+        let (context, messages) = about(
+            claim,
+            claim,
+            &[
+                (
+                    "ProvisioningFailed",
+                    r#"storageclass.storage.k8s.io "fast-ssd" not found"#,
+                ),
+                (
+                    "ProvisioningFailed",
+                    "failed to provision volume with StorageClass \"fast-ssd\": NodePath only \
+                     supports ReadWriteOnce and ReadWriteOncePod (1.22+) access modes",
+                ),
+            ],
+        );
+        assert_eq!(context["detection"]["id"], "D012");
+        // A built-in kind is sent as it is (`Object` is for custom resources only).
+        assert_eq!(
+            context["workload"],
+            json!({
+                "kind": "PersistentVolumeClaim",
+                "name": "persistentvolumeclaim-1",
+                "namespace": "namespace-1"
+            })
+        );
+        redacted(
+            &context,
+            &messages,
+            &["shop", "orders-data", "fast-ssd"],
+            &[
+                "not found",
+                "NodePath only supports ReadWriteOnce and ReadWriteOncePod",
+            ],
+        );
+    }
+
+    #[test]
+    fn a_d013_note_reaches_the_model_redacted() {
+        // An autoscaler whose target does not exist names the target; one with no metrics API
+        // names only the resource.
+        let hpa = ("autoscaling/v2", "HorizontalPodAutoscaler", "checkout");
+        let (context, messages) = about(
+            hpa,
+            hpa,
+            &[
+                (
+                    "FailedGetScale",
+                    r#"deployments.apps "storefront" not found"#,
+                ),
+                (
+                    "FailedGetResourceMetric",
+                    "failed to get cpu utilization: unable to get metrics for resource cpu: \
+                     unable to fetch metrics from resource metrics API: the server could not \
+                     find the requested resource (get pods.metrics.k8s.io)",
+                ),
+            ],
+        );
+        assert_eq!(context["detection"]["id"], "D013");
+        assert_eq!(
+            context["workload"],
+            json!({
+                "kind": "HorizontalPodAutoscaler",
+                "name": "horizontalpodautoscaler-1",
+                "namespace": "namespace-1"
+            })
+        );
+        redacted(
+            &context,
+            &messages,
+            &["shop", "checkout", "storefront"],
+            &["not found", "unable to get metrics for resource cpu"],
+        );
     }
 }

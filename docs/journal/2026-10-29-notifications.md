@@ -197,3 +197,20 @@ runs only when it names a ref.
   as ADR 0015 intended, and a URL stays a link (previews are off).
 - Slack has still not been posted to: there is no workspace webhook to test with.
 
+## Later the same day: D011, D012 and D013
+
+- Three detection rules from failures reproduced in kind on 2026-10-28, all from Warning events
+  kausa already watches and with no new permission: `D011`, a workload cannot create Pods
+  (`FailedCreate` about a ReplicaSet, Job, StatefulSet or DaemonSet: a quota, an admission webhook
+  or a policy refused them); `D012`, a PersistentVolumeClaim cannot be provisioned
+  (`ProvisioningFailed`); `D013`, a HorizontalPodAutoscaler cannot get its metrics or its target.
+- Built like the v0.2 rules: acceptance tests first, one developer per rule, then QA (the kind
+  test in cluster scope, and a live `D011` seeded with a ResourceQuota of zero Pods), a security
+  review and the standards guardian.
+- The security review found that widening the redaction pattern for names quoted in event notes
+  let through a `secret "<name>"` that v0.3 caught (invariant 4). The fix keeps the old pattern as
+  is and adds the new kinds in a second pass, with a regression test.
+- Not yet run locally: the `ci` target, for lack of space on the Docker disk; CI runs it on the
+  pull request. A `D011` request can spend its ten event slots on near-identical events; noted
+  for later.
+

@@ -54,8 +54,8 @@ pub struct PodView<'a> {
     pub owner: &'a OwnerRef,
 }
 
-/// An event record and, for events about a Job, the Job's top-level owner (events about Pods take
-/// their Pod's).
+/// An event record and, for an event about an object that is not a Pod (a Job, a ReplicaSet), that
+/// object's top-level owner when `run.rs` resolved it (events about Pods take their Pod's).
 pub struct EventView<'a> {
     pub record: &'a EventRecord,
     pub job_owner: Option<&'a OwnerRef>,
@@ -159,7 +159,10 @@ pub fn collect_signals(
             continue;
         }
         let regarding = &record.regarding;
-        let (owner, pod) = if regarding.kind == "Job" {
+        // An event about an object that is not a Pod (`D008`, `D011` to `D013`) needs no Pod: it is
+        // about the object's top-level owner, or the object itself when there is none or it is not
+        // known (a claim, an autoscaler).
+        let (owner, pod) = if regarding.kind != "Pod" {
             let fallback = OwnerRef {
                 api_version: regarding.api_version.clone(),
                 kind: regarding.kind.clone(),
@@ -357,9 +360,13 @@ impl Tracker {
 
 /// The fingerprint of an incident. The text it hashes is the sample's normalized message, except
 /// for an image that cannot be pulled, whose message alternates between `ErrImagePull` and
-/// `ImagePullBackOff`: there it is the image reference.
+/// `ImagePullBackOff`: there it is the image reference. For a workload that cannot create Pods,
+/// the names of the Pods its controller tried to create count as the incident's Pods too.
 fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<String>) -> String {
-    let names: Vec<&str> = pods.iter().map(String::as_str).collect();
+    let mut names: Vec<&str> = pods.iter().map(String::as_str).collect();
+    if key.detection == Detection::PodCreate {
+        names.extend(generated_names(&sample.message, &key.owner_name));
+    }
     let text = if key.detection == Detection::ImagePull {
         sample.image.clone().unwrap_or_default()
     } else {
@@ -372,6 +379,22 @@ fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<Stri
         &key.owner_name,
         &text,
     )
+}
+
+/// The names in `message` that start with `owner` and a hyphen: the Pods a controller tried to
+/// create and the API server refused (`D011`). Their suffix is generated (a ReplicaSet's or a
+/// Job's Pods) or an ordinal (a StatefulSet's), and the Pod never existed, so it is no part of
+/// what failed. A name is a run of the characters of a Kubernetes name, `[a-z0-9.-]`.
+fn generated_names<'a>(message: &'a str, owner: &str) -> Vec<&'a str> {
+    if owner.is_empty() {
+        return Vec::new();
+    }
+    let prefix = format!("{owner}-");
+    message
+        .split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'))
+        .map(|word| word.trim_end_matches(['.', '-']))
+        .filter(|word| word.len() > prefix.len() && word.starts_with(&prefix))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1116,5 +1139,493 @@ mod tests {
         let mut stale = unscheduled_pod("db-a", "SchedulerError", message);
         stale["status"]["phase"] = json!("Running");
         assert!(state_signals(&[record_of(stale)], t(0)).is_empty());
+    }
+
+    // Acceptance tests for `D011`, `D012` and `D013`, written before the code. Their events are
+    // about the object that fails, never about a Pod: `collect_signals` keys them on the top-level
+    // owner the event view carries (the Deployment of a ReplicaSet and the CronJob of a Job, which
+    // `run.rs` resolves through `owner.rs`, as it does for `D008`) or, without one, on the object
+    // itself, and needs no Pod. The shapes follow what the controllers wrote on kind (Kubernetes
+    // 1.37, 2026-10-28); names and numbers are invented.
+
+    /// A Warning event about the object `(api_version, kind, name)` in `shop`, whose series ran
+    /// from `first` to `last` with `count` occurrences.
+    fn event_about(
+        uid: &str,
+        (api_version, kind, name): (&str, &str, &str),
+        reason: &str,
+        note: &str,
+        (first, last, count): (Timestamp, Timestamp, i32),
+    ) -> EventRecord {
+        EventRecord {
+            uid: uid.into(),
+            reason: reason.into(),
+            note: Some(note.into()),
+            regarding: Regarding {
+                api_version: api_version.into(),
+                kind: kind.into(),
+                namespace: "shop".into(),
+                name: name.into(),
+                uid: Some(format!("uid-{name}")),
+            },
+            reporting_controller: None,
+            first_seen: Some(first),
+            last_seen: Some(last),
+            count,
+        }
+    }
+
+    /// The views of events, each with the top-level owner it was resolved to, if any.
+    fn views(events: &[(EventRecord, Option<OwnerRef>)]) -> Vec<EventView<'_>> {
+        events
+            .iter()
+            .map(|(record, owner)| EventView {
+                record,
+                job_owner: owner.as_ref(),
+            })
+            .collect()
+    }
+
+    /// The API server's refusal of a Pod by a ResourceQuota, as the controllers write it.
+    fn quota_refusal(pod: &str) -> String {
+        format!(
+            "Error creating: pods \"{pod}\" is forbidden: exceeded quota: compute-budget, \
+             requested: pods=1, used: pods=3, limited: pods=3"
+        )
+    }
+
+    const COMBINED: &str = "(combined from similar events): ";
+    const REPLICASET: (&str, &str, &str) = ("apps/v1", "ReplicaSet", "checkout-7fffb9bf5c");
+    const CLAIM: (&str, &str, &str) = ("v1", "PersistentVolumeClaim", "orders-data");
+    const NO_CLASS: &str = r#"storageclass.storage.k8s.io "fast-ssd" not found"#;
+
+    fn cronjob(name: &str) -> OwnerRef {
+        OwnerRef {
+            api_version: "batch/v1".into(),
+            kind: "CronJob".into(),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+        }
+    }
+
+    #[test]
+    fn a_replicaset_that_cannot_create_pods_is_one_incident_about_its_deployment() {
+        let deploy = owner("Deployment", "checkout");
+        // The first refusals are separate events, one per generated Pod name: they never add up.
+        let mut events: Vec<_> = [(0, "d98v6"), (2, "7frqt"), (4, "k2m4p"), (6, "x8w2n")]
+            .into_iter()
+            .map(|(at, suffix)| {
+                let note = quota_refusal(&format!("checkout-7fffb9bf5c-{suffix}"));
+                let event = event_about(
+                    &format!("e-{suffix}"),
+                    REPLICASET,
+                    "FailedCreate",
+                    &note,
+                    (t(at), t(at), 1),
+                );
+                (event, Some(deploy.clone()))
+            })
+            .collect();
+        let mut tracker = Tracker::new(SETTLE);
+        let mut check = |events: &[(EventRecord, Option<OwnerRef>)], now: i64| {
+            tracker.tick(t(now), collect_signals(&[], &views(events), t(now), FRESH))
+        };
+        assert!(check(&events, 10).is_empty());
+        // Then client-go folds them into one event that it keeps updating; it settles once its
+        // series spans the settle window.
+        let combined = |last: i64, count: i32| {
+            let note = format!("{COMBINED}{}", quota_refusal("checkout-7fffb9bf5c-b6n3s"));
+            let event = event_about(
+                "e-combined",
+                REPLICASET,
+                "FailedCreate",
+                &note,
+                (t(20), t(last), count),
+            );
+            (event, Some(deploy.clone()))
+        };
+        events.push(combined(20, 2));
+        assert!(check(&events, 20).is_empty());
+        events.pop();
+        events.push(combined(85, 9));
+        let incidents = check(&events, 90);
+        assert_eq!(incidents.len(), 1, "{incidents:?}");
+        let incident = &incidents[0];
+        assert_eq!(incident.key.detection.id(), "D011");
+        assert_eq!(
+            (
+                incident.key.owner_kind.as_str(),
+                incident.key.owner_name.as_str()
+            ),
+            ("Deployment", "checkout")
+        );
+        assert_eq!(incident.owner, deploy);
+        assert!(incident.pods.is_empty());
+        assert_eq!(incident.sample.reason, "FailedCreate");
+        assert_eq!(incident.sample.pod, None);
+        // Once a settle window has passed, the incident is not raised again while it lasts.
+        assert!(check(&events, 95).is_empty());
+    }
+
+    #[test]
+    fn an_event_about_a_controller_names_its_owner_or_the_controller_itself() {
+        let deploy = owner("Deployment", "checkout");
+        let statefulset = "Create Pod db-0 in StatefulSet db failed error: pods \"db-0\" is \
+                           forbidden: exceeded quota: compute-budget, requested: pods=1, used: \
+                           pods=3, limited: pods=3";
+        let pod_security = "Error creating: pods \"node-agent-x7k2p\" is forbidden: violates \
+                            PodSecurity \"restricted:latest\": privileged (container \"collector\" \
+                            must not set securityContext.privileged=true)";
+        let cases = [
+            // A ReplicaSet resolved to its Deployment, and one whose lookup failed.
+            (
+                REPLICASET,
+                quota_refusal("checkout-7fffb9bf5c-d98v6"),
+                Some(deploy.clone()),
+                ("apps/v1", "Deployment", "checkout"),
+            ),
+            (
+                REPLICASET,
+                quota_refusal("checkout-7fffb9bf5c-d98v6"),
+                None,
+                ("apps/v1", "ReplicaSet", "checkout-7fffb9bf5c"),
+            ),
+            // A Job resolved to its CronJob.
+            (
+                ("batch/v1", "Job", "report-29000000"),
+                quota_refusal("report-29000000-m4q9z"),
+                Some(cronjob("report")),
+                ("batch/v1", "CronJob", "report"),
+            ),
+            // StatefulSets and DaemonSets are top-level owners, named from the event alone.
+            (
+                ("apps/v1", "StatefulSet", "db"),
+                statefulset.to_owned(),
+                None,
+                ("apps/v1", "StatefulSet", "db"),
+            ),
+            (
+                ("apps/v1", "DaemonSet", "node-agent"),
+                pod_security.to_owned(),
+                None,
+                ("apps/v1", "DaemonSet", "node-agent"),
+            ),
+        ];
+        for (about, note, resolved, (api_version, kind, name)) in cases {
+            let events = [(
+                event_about("e1", about, "FailedCreate", &note, (t(0), t(0), 1)),
+                resolved,
+            )];
+            let signals = collect_signals(&[], &views(&events), t(1), FRESH);
+            assert_eq!(ids(&signals), ["D011"], "{about:?}");
+            let signal = &signals[0];
+            assert_eq!(
+                (
+                    signal.key.owner_kind.as_str(),
+                    signal.key.owner_name.as_str()
+                ),
+                (kind, name),
+                "{about:?}"
+            );
+            assert_eq!(signal.owner.api_version, api_version, "{about:?}");
+            assert_eq!(signal.owner.uid, format!("uid-{name}"), "{about:?}");
+            assert_eq!(signal.pod, None);
+            assert_eq!(signal.message, note);
+        }
+    }
+
+    #[test]
+    fn the_d011_fingerprint_does_not_depend_on_the_generated_pod_name() {
+        // Each refusal names the Pod the controller tried to create, a name the API server
+        // generated and nobody will see again; the aggregated event adds the prefix. The same
+        // refusal must keep one fingerprint, so that an incident that clears while the
+        // controller backs off and comes back reuses its explanation.
+        let fingerprint = |about, owner: Option<OwnerRef>, note: &str| {
+            let events = [(
+                event_about("e1", about, "FailedCreate", note, (t(0), t(0), 1)),
+                owner,
+            )];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            tracker
+                .tick(t(0), collect_signals(&[], &views(&events), t(0), FRESH))
+                .first()
+                .expect("a D011 incident")
+                .fingerprint
+                .clone()
+        };
+        let deploy = Some(owner("Deployment", "checkout"));
+        let job = ("batch/v1", "Job", "report-29000000");
+        let daemonset = ("apps/v1", "DaemonSet", "node-agent");
+        for (about, owner, a, b) in [
+            (
+                REPLICASET,
+                deploy.clone(),
+                "checkout-7fffb9bf5c-d98v6",
+                "checkout-7fffb9bf5c-7frqt",
+            ),
+            (
+                job,
+                Some(cronjob("report")),
+                "report-29000000-x7k2p",
+                "report-29000000-m4q9z",
+            ),
+            (daemonset, None, "node-agent-x7k2p", "node-agent-b2c4d"),
+        ] {
+            assert_eq!(
+                fingerprint(about, owner.clone(), &quota_refusal(a)),
+                fingerprint(about, owner, &format!("{COMBINED}{}", quota_refusal(b))),
+                "{about:?}"
+            );
+        }
+        // A different refusal of the same workload is a different failure.
+        let pod_security = "Error creating: pods \"checkout-7fffb9bf5c-d98v6\" is forbidden: \
+                            violates PodSecurity \"restricted:latest\": privileged (container \
+                            \"api\" must not set securityContext.privileged=true)";
+        assert_ne!(
+            fingerprint(
+                REPLICASET,
+                deploy.clone(),
+                &quota_refusal("checkout-7fffb9bf5c-d98v6")
+            ),
+            fingerprint(REPLICASET, deploy, pod_security)
+        );
+    }
+
+    #[test]
+    fn a_claim_that_cannot_be_provisioned_is_an_incident_about_the_claim() {
+        // A claim whose StorageClass does not exist: the PersistentVolume controller updates one
+        // event about every 15 seconds. No Pod has to use the claim.
+        let mut tracker = Tracker::new(SETTLE);
+        let mut check = |last: i64, count: i32| {
+            let events = [(
+                event_about(
+                    "e1",
+                    CLAIM,
+                    "ProvisioningFailed",
+                    NO_CLASS,
+                    (t(0), t(last), count),
+                ),
+                None,
+            )];
+            tracker.tick(
+                t(last + 1),
+                collect_signals(&[], &views(&events), t(last + 1), FRESH),
+            )
+        };
+        assert!(check(0, 1).is_empty());
+        let incidents = check(75, 6);
+        assert_eq!(incidents.len(), 1, "{incidents:?}");
+        let incident = &incidents[0];
+        assert_eq!(incident.key.detection.id(), "D012");
+        assert_eq!(
+            (
+                incident.key.owner_kind.as_str(),
+                incident.key.owner_name.as_str()
+            ),
+            ("PersistentVolumeClaim", "orders-data")
+        );
+        assert_eq!(
+            (
+                incident.owner.api_version.as_str(),
+                incident.owner.uid.as_str()
+            ),
+            ("v1", "uid-orders-data")
+        );
+        assert!(incident.pods.is_empty());
+        // An external provisioner that backs off stops updating its event while the claim stays
+        // Pending: after the freshness the event is no signal, like any other.
+        let silent = [(
+            event_about(
+                "e2",
+                CLAIM,
+                "ProvisioningFailed",
+                "failed to provision volume with StorageClass \"fast-ssd\": NodePath only \
+                 supports ReadWriteOnce and ReadWriteOncePod (1.22+) access modes",
+                (t(0), t(0), 8),
+            ),
+            None,
+        )];
+        assert!(collect_signals(&[], &views(&silent), t(601), FRESH).is_empty());
+    }
+
+    #[test]
+    fn an_unbound_claim_explains_the_claim_and_the_workload_apart() {
+        // A Deployment whose Pod mounts a claim with an unknown StorageClass: the Pod cannot be
+        // scheduled (D005, on the Deployment) and the claim cannot be provisioned (D012, on the
+        // claim). They are two incidents about two objects, each Event on the object it explains:
+        // kausa does not record which claims a Pod mounts, and an external provisioner's event
+        // goes quiet while the Pod's condition holds (docs/reference/rules.md).
+        let deploy = owner("Deployment", "orders");
+        let mut pending = pod("orders-7c9d5b8f6-q4w2e", "Pending", None);
+        pending.unschedulable = Some(
+            "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims. \
+             preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling."
+                .into(),
+        );
+        let pods = [PodView {
+            record: &pending,
+            owner: &deploy,
+        }];
+        let mut tracker = Tracker::new(SETTLE);
+        let mut produced = Vec::new();
+        for (at, count) in [(0, 1), (30, 3), (65, 5)] {
+            let events = [(
+                event_about(
+                    "e1",
+                    CLAIM,
+                    "ProvisioningFailed",
+                    NO_CLASS,
+                    (t(0), t(at), count),
+                ),
+                None,
+            )];
+            produced
+                .extend(tracker.tick(t(at), collect_signals(&pods, &views(&events), t(at), FRESH)));
+        }
+        let mut keys: Vec<_> = produced
+            .iter()
+            .map(|i| {
+                (
+                    i.key.detection.id(),
+                    i.key.owner_kind.as_str(),
+                    i.key.owner_name.as_str(),
+                )
+            })
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                ("D005", "Deployment", "orders"),
+                ("D012", "PersistentVolumeClaim", "orders-data")
+            ]
+        );
+    }
+
+    #[test]
+    fn an_autoscaler_that_cannot_get_metrics_is_one_incident_per_autoscaler() {
+        // No metrics API: the controller updates FailedGetResourceMetric about every 15 seconds,
+        // and stops updating FailedComputeMetricsReplicas after about three minutes while the
+        // failure goes on. An autoscaler whose target does not exist gets FailedGetScale.
+        let hpa = ("autoscaling/v2", "HorizontalPodAutoscaler", "checkout");
+        let orphan = ("autoscaling/v2", "HorizontalPodAutoscaler", "orphan");
+        let cpu = "failed to get cpu utilization: unable to get metrics for resource cpu: unable \
+                   to fetch metrics from resource metrics API: the server could not find the \
+                   requested resource (get pods.metrics.k8s.io)";
+        let replicas = format!(
+            "invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource \
+             metric value: {cpu}"
+        );
+        let at = |metric_last: i64, metric_count: i32| {
+            [
+                (
+                    event_about(
+                        "e-metric",
+                        hpa,
+                        "FailedGetResourceMetric",
+                        cpu,
+                        (t(0), t(metric_last), metric_count),
+                    ),
+                    None,
+                ),
+                (
+                    event_about(
+                        "e-replicas",
+                        hpa,
+                        "FailedComputeMetricsReplicas",
+                        &replicas,
+                        (t(0), t(180), 12),
+                    ),
+                    None,
+                ),
+                (
+                    event_about(
+                        "e-scale",
+                        orphan,
+                        "FailedGetScale",
+                        r#"deployments.apps "storefront" not found"#,
+                        (t(metric_last - 300), t(metric_last), 21),
+                    ),
+                    None,
+                ),
+            ]
+        };
+        // Early on, both reasons of one autoscaler are one incident.
+        let early = at(195, 14);
+        let mut tracker = Tracker::new(SETTLE);
+        let incidents = tracker.tick(t(200), collect_signals(&[], &views(&early), t(200), FRESH));
+        let mut owners: Vec<_> = incidents
+            .iter()
+            .map(|i| (i.key.detection.id(), i.key.owner_name.as_str()))
+            .collect();
+        owners.sort_unstable();
+        assert_eq!(owners, [("D013", "checkout"), ("D013", "orphan")]);
+        for incident in &incidents {
+            assert_eq!(incident.key.owner_kind, "HorizontalPodAutoscaler");
+            assert_eq!(incident.owner.api_version, "autoscaling/v2");
+            assert!(incident.pods.is_empty());
+        }
+        // Later, the event that keeps repeating carries the failure alone.
+        let late = at(1200, 81);
+        let signals = collect_signals(&[], &views(&late), t(1205), FRESH);
+        let mut reasons: Vec<_> = signals.iter().map(|s| s.reason.as_str()).collect();
+        reasons.sort_unstable();
+        assert_eq!(reasons, ["FailedGetResourceMetric", "FailedGetScale"]);
+        assert_eq!(ids(&signals), ["D013", "D013"]);
+    }
+
+    #[test]
+    fn generated_names_are_the_words_that_extend_the_owner_name() {
+        // A StatefulSet's ordinals, quoted or not, and a Pod name at the end of a sentence.
+        assert_eq!(
+            generated_names(
+                "Create Pod db-0 in StatefulSet db failed error: pods \"db-0\" is forbidden",
+                "db"
+            ),
+            ["db-0", "db-0"]
+        );
+        assert_eq!(
+            generated_names("refused pod web-7d9c8b6f4d-d98v6.", "web"),
+            ["web-7d9c8b6f4d-d98v6"]
+        );
+        // Not generated: the owner's own name, the bare prefix, a longer word that does not
+        // continue it with a hyphen, a name that only contains it, and nothing for no owner.
+        assert!(
+            generated_names(
+                "web web- webapp-1 api-web-1 Web-1 (get pods.metrics.k8s.io)",
+                "web"
+            )
+            .is_empty()
+        );
+        assert!(generated_names("pods \"-1\" is forbidden", "").is_empty());
+    }
+
+    #[test]
+    fn the_d011_fingerprint_keeps_the_names_that_are_not_generated() {
+        // Only the names that extend the top-level owner's name are dropped: a quota that is
+        // another object stays in the fingerprint, so two quotas are two failures.
+        let fingerprint = |note: &str| {
+            let events = [(
+                event_about("e1", REPLICASET, "FailedCreate", note, (t(0), t(0), 1)),
+                Some(owner("Deployment", "checkout")),
+            )];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            tracker
+                .tick(t(0), collect_signals(&[], &views(&events), t(0), FRESH))
+                .first()
+                .expect("a D011 incident")
+                .fingerprint
+                .clone()
+        };
+        let refusal = |quota: &str| {
+            format!(
+                "Error creating: pods \"checkout-7fffb9bf5c-d98v6\" is forbidden: exceeded \
+                 quota: {quota}, requested: pods=1, used: pods=3, limited: pods=3"
+            )
+        };
+        assert_ne!(
+            fingerprint(&refusal("compute-budget")),
+            fingerprint(&refusal("team-pods"))
+        );
     }
 }

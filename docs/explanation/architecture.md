@@ -37,7 +37,9 @@ produces the same incident, the same fingerprint and the same request bytes.
 ## Watching without a large cache
 
 - **A watch pair per namespace, or one per kind for the whole cluster:** `events.k8s.io/v1`
-  Events of type `Warning` about Pods and Jobs, and Pods. Without `--namespace`, one Pod watch and
+  Events of type `Warning` (kept only when a detection matches: about Pods, Jobs, workload
+  controllers, PersistentVolumeClaims and HorizontalPodAutoscalers), and Pods. Without
+  `--namespace`, one Pod watch and
   one event watch across all namespaces (`Api::all`); with `--namespace`, one of each in every
   listed namespace (`Api::namespaced`), since kube-rs has no watcher of several namespaces and a
   field selector cannot pick several. All through kube-rs watchers, with restarts and backoff

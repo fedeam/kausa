@@ -4,10 +4,11 @@ The deterministic rules kausa applies before any language model call: detection 
 is an incident and how failures are grouped, and redaction rules decide what never leaves the
 cluster.
 
-Status as of 2026-10-28: the **detection rules, grouping and fingerprint are implemented** (first
+Status as of 2026-10-29: the **detection rules, grouping and fingerprint are implemented** (first
 implementation weekend, `src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`), and so are the
 redaction rules and the log reading of the "Logs read" column (second weekend); `D009` and `D010`
-and the changes to `D001` and `D005` came on 2026-10-28, from failures reproduced in kind. Ids, triggers and
+and the changes to `D001` and `D005` came on 2026-10-28, and `D011` to `D013` and the new cases of
+`R003` on 2026-10-29, all from failures reproduced in kind. Ids, triggers and
 defaults may change until v0.1 is released; after that an id is never reused. How the rules fit in
 the pipeline: [Architecture](../explanation/architecture.md). Why redaction works this way: [0008.
 Send only allowlisted, redacted data to one OpenAI-compatible
@@ -16,7 +17,9 @@ endpoint](../adr/0008-data-leaving-the-cluster.md).
 ## Detection rules
 
 A detection matches a signal: a **state** read from a Pod at every check (a container state, the
-Pod's scheduling condition, or its eviction), or a Warning **event** about a Pod or a Job. The failure must
+Pod's scheduling condition, or its eviction), or a Warning **event** about a Pod, a Job, a workload
+controller (a ReplicaSet, a StatefulSet or a DaemonSet), a PersistentVolumeClaim or a
+HorizontalPodAutoscaler. The failure must
 persist through the **settle window** (60 seconds by default, `--settle-seconds`) before it becomes
 an incident, so a container that restarts once and recovers is not explained:
 
@@ -48,6 +51,9 @@ it was pending, so replicas whose crash loops are out of step all count.
 | `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of one failed Pod of the Job (the first by name) |
 | `D009` | Pod evicted | The Pod in phase `Failed` with `status.reason` `Evicted` (its containers' `ephemeral-storage` limits, an `emptyDir` `sizeLimit`, or node pressure; the status message says which), failed in the last 10 minutes, unless the message starts with `Pod was rejected:` | No |
 | `D010` | Pod sandbox cannot be created | Warning event `FailedCreatePodSandBox` about a Pod | No |
+| `D011` | Workload cannot create Pods | Warning event `FailedCreate` about a ReplicaSet, a Job, a StatefulSet or a DaemonSet (a quota, an admission webhook or Pod Security admission refused the Pod) | No |
+| `D012` | Volume claim cannot be provisioned | Warning event `ProvisioningFailed` about a PersistentVolumeClaim | No |
+| `D013` | Autoscaler cannot get metrics | Warning event `FailedGetResourceMetric`, `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` about a HorizontalPodAutoscaler | No |
 
 `D005` reads the Pod's condition rather than the scheduler's `FailedScheduling` events, which may
 stop being updated for a Pod that keeps failing (hypothesis about client-go's `events.k8s.io`
@@ -69,8 +75,13 @@ Pod → Job → CronJob, or the Pod itself) and the detection id. kausa follows 
 reference only through kinds it may `get` (ReplicaSet, Job). When the next owner is of another
 kind, including a custom resource, that owner reference is the top-level owner. It is named in the
 incident key and in `regarding` from the reference alone (apiVersion, kind, name, uid), without
-reading the object. A container matches at most one detection, the most specific one: `D003`
-takes precedence over `D001` when the last termination is `OOMKilled`, before grouping. No
+reading the object. An event about an object other than a Pod (`D008`, `D011` to `D013`) needs
+no Pod: its incident is about that object's top-level owner, found the same way from the object
+itself (a ReplicaSet's Deployment, a Job's CronJob), and a StatefulSet, a DaemonSet, a
+PersistentVolumeClaim or a HorizontalPodAutoscaler is its own top-level owner, named from the
+event's `regarding`; no new permission is needed. A container matches at most one detection, the
+most specific one: `D003` takes precedence over `D001` when the last termination is `OOMKilled`,
+before grouping. No
 container of a Pod in phase `Failed` is a crash loop: such a Pod runs no container again, and a
 container that had restarted before the kubelet evicted the Pod or ended it at its
 `activeDeadlineSeconds` stays terminated (`Error`, exit code 137) after a restart (seen on kind,
@@ -115,6 +126,76 @@ absorbed by the settle window (hypothesis, not reproduced), and a network plugin
 node gives one incident per workload on it, which the call budget bounds. Seen on kind (Kubernetes
 1.37) on 2026-10-28.
 
+`D011` covers a workload whose controller cannot create its Pods because the API server refuses
+them: a ResourceQuota (`exceeded quota: <name>, requested: …, used: …, limited: …`), Pod Security
+admission (`violates PodSecurity "restricted:latest": …`) or an admission webhook. No Pod exists,
+so the Warning `FailedCreate` event is about the controller: the ReplicaSet, Job and DaemonSet
+controllers write `Error creating: <error>` through the shared Pod control
+(`FailedCreatePodReason` and `RealPodControl` in `pkg/controller/controller_utils.go`), and the
+StatefulSet controller writes `Create Pod <pod> in StatefulSet <set> failed error: <error>`
+(`recordPodEvent` in `pkg/controller/statefulset/stateful_pod_control.go`), or, with the same
+reason, `Create Claim <claim> for Pod <pod> in StatefulSet <set> failed error: <error>` when it
+cannot create a claim of its `volumeClaimTemplates` (`recordClaimEvent`, same file; not reproduced,
+hypothesis that it shows the same way); the quota's message is
+in `staging/src/k8s.io/apiserver/pkg/admission/plugin/resourcequota/controller.go` and Pod
+Security's in `staging/src/k8s.io/pod-security-admission/admission/admission.go`; checked in
+Kubernetes v1.37.0 and on `master` on 2026-10-29. An event about a ReplicaSet is an incident about
+its Deployment and one about a Job about its CronJob, through the lookups kausa already makes for
+Pods. The first ten refusals are separate events, each naming the Pod the controller tried to
+create (a generated name), until client-go's aggregation folds them into one event with the prefix
+`(combined from similar events): ` (`defaultAggregateMaxEvents` 10 within 600 seconds in
+`staging/src/k8s.io/client-go/tools/record/events_cache.go`), which settles like `D006` and
+`D007`. On kind (Kubernetes 1.37, 2026-10-28), the Job controller kept updating its event, while
+the ReplicaSet's stopped after 11 minutes and the DaemonSet's after 16, with the failure still
+there (hypothesis: the controllers' rate-limited requeue backs off to minutes): the incident clears
+10 minutes later and comes back with the next event, with the same fingerprint, so a repeat reuses
+the cached explanation. A refusal that lasts less than the settle window, such as a StatefulSet
+blocked for ten seconds until the quota freed, is no incident. A Deployment's own conditions
+(`ReplicaFailure`) say the same, but reading them needs a new permission. `D011` reads no logs: no
+container ran.
+
+`D012` covers a PersistentVolumeClaim that cannot be provisioned: a StorageClass that does not
+exist, or a request the external provisioner refuses. The PersistentVolume controller writes the
+Warning `ProvisioningFailed` on the claim (`provisionClaim` in
+`pkg/controller/volume/persistentvolume/pv_controller.go`, the reason in
+`pkg/controller/volume/events/event.go`; Kubernetes v1.37.0 and `master`, checked on 2026-10-29),
+and so do external provisioners built on `sig-storage-lib-external-provisioner`, with the note
+`failed to provision volume with StorageClass "<name>": <error>` (`controller/controller.go`,
+v11.0.1, the version of `local-path-provisioner` v0.0.34, which kind v0.33.0 builds; checked on
+2026-10-29). The claim is the
+incident's object, whether a Pod uses it or not. On kind (2026-10-28) the in-tree event for a
+missing StorageClass kept being updated about every 15 seconds, while the external provisioner's
+stopped after 16 minutes with the claim still `Pending`, so that incident clears and comes back
+like `D011`'s. A provisioner that does not run at all writes only the Normal `ExternalProvisioning`
+event, which kausa does not watch: the Pods that wait for the claim are `D005`. `D012` reads no
+logs.
+
+**`D012` and `D005`.** A Pod that mounts a claim that cannot be provisioned cannot be scheduled
+either (`pod has unbound immediate PersistentVolumeClaims` with `Unschedulable`, or a
+`SchedulerError` from the `VolumeBinding` plugin for a `WaitForFirstConsumer` class), so one cause
+gives two incidents: `D005` about the workload and `D012` about the claim, each explained on its
+own object, at the cost of two calls. kausa does not record which claims a Pod mounts, so it cannot
+tell that the two are one failure, and the external provisioner's event goes quiet while the Pod's
+condition holds, so folding one into the other would still give a second explanation later. The
+`D005` explanation sees only the scheduler's message; the `D012` one sees the claim's events,
+which name the cause.
+
+`D013` covers a HorizontalPodAutoscaler that cannot read its metrics (no metrics API, a metric
+that does not exist), compute a replica count from them, or read its target's scale (a target that
+does not exist). The HorizontalPodAutoscaler controller writes each of these as a Warning event on
+the autoscaler: the `FailedGet…Metric` reasons through `getUnableComputeReplicaCountCondition`,
+which also sets `ScalingActive` to `False`; `FailedGetScale`, with `AbleToScale` `False`; and
+`FailedComputeMetricsReplicas` when no metric gave a replica count
+(`pkg/controller/podautoscaler/horizontal.go`; Kubernetes v1.37.0 and `master`, checked on
+2026-10-29). The autoscaler is the incident's object, and all its reasons are one incident. On kind
+without a metrics server (2026-10-28), `FailedGetResourceMetric` and `FailedGetScale` were updated
+about every 15 seconds, while `FailedComputeMetricsReplicas` stopped after three minutes with the
+failure still there; `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric` and
+`FailedGetContainerResourceMetric` come from the same code path but were not reproduced
+(hypothesis: they repeat the same way). A failed rescale (`FailedRescale`, after the metrics were
+read) is not `D013`. The Pods of the target are unaffected, so nothing else is raised. `D013`
+reads no logs.
+
 **Which Events count.** A Warning Event counts only when its own `metadata.namespace` is non-empty
 and equal to `regarding.namespace`, compared exactly (case-sensitive, no trimming). Events about
 cluster-scoped objects (a Node, whose `regarding` has no namespace) and Events about an object in
@@ -129,7 +210,8 @@ The **fingerprint** hashes the detection id, the namespace, the owner's kind and
 that stays the same for the same failure: the example's message without the prefix
 `(combined from similar events): ` of an aggregated event (so that the kubelet's first `D010`
 events and the event that folds them have one fingerprint), with the names of the incident's
-Pods, UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
+Pods (and, for `D011`, of the Pods the controller tried to create, which start with the top-level
+owner's name), UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
 and other numbers normalized; for `D002`, whose message alternates between `ErrImagePull` and
 `ImagePullBackOff`, the image reference instead. It is computed before redaction and never sent
 to the model; it is in kausa's log, the names of its Events and Explanations and, with
@@ -155,7 +237,7 @@ log format](command-line.md)).
 |---|---|---|
 | `R001` | Fields outside the allowlist | Never serialized |
 | `R002` | Known names | The namespace, the owner, the incident's Pods, their containers, nodes and service accounts, and the registry host and path of images outside the public registries (`docker.io`, `ghcr.io`, `quay.io`, `registry.k8s.io`, `gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`; an image with no registry is from Docker Hub), replaced by stable placeholders (`namespace-1`, `deployment-1`, `pod-1`, `container-1`, `node-1`, `serviceaccount-1`, `registry-1`, `image-1`; `object-1` for a custom resource's kind) wherever they appear as words, in any ASCII case: a hyphen, dot, slash, underscore or percent escape is a word boundary, so a Deployment's name is replaced inside its ReplicaSet's name and in `PAYMENTS_SERVICE_HOST` too. Mapped back in the answer in one pass, also when the model capitalizes them |
-| `R003` | Names in Kubernetes messages | The quoted name after `secret`, `configmap`, `persistentvolumeclaim`, `pvc`, `serviceaccount` or `service` (singular or plural, single or double quotes): `secret "<redacted:name>" not found`; the name in `Secret <namespace>/<name>` and `ConfigMap <namespace>/<name>`; the name in `system:serviceaccount:<namespace>:<name>` |
+| `R003` | Names in Kubernetes messages | The quoted name after `secret`, `configmap`, `persistentvolumeclaim`, `pvc`, `serviceaccount`, `service`, `pod`, `container` or `StorageClass` (singular or plural, single or double quotes, every name of a list such as `containers "a", "b"`): `secret "<redacted:name>" not found`, `pods "<redacted:name>" is forbidden`; the quoted name after a resource qualified by its API group: `deployments.apps "<redacted:name>" not found`, `storageclass.storage.k8s.io "<redacted:name>" not found`; the quota's name in `exceeded quota: <name>`; the name in `Secret <namespace>/<name>` and `ConfigMap <namespace>/<name>`; the name in `system:serviceaccount:<namespace>:<name>`. The names after `pod`, `container`, `StorageClass`, a qualified resource and in a list are a second pass over the output of the first (the six kinds before them, one quoted name each), and contain no whitespace, so a quote left open cannot hide a name the first pass catches |
 | `R004` | IP addresses | IPv4 addresses, and IPv6 addresses that parse as such once the colons around them are dropped (so `10:05:00` and `Foo::Bar` stay); the port after them is kept |
 | `R005` | Email addresses | `local@domain.tld` |
 | `R006` | Credentials in URLs | The user information of a URL, empty user and passwords with `@` or `/` included: `postgres://<redacted:userinfo>@db:5432`, `redis://<redacted:userinfo>@redis:6379`. The host is left to `R013` |

@@ -40,7 +40,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::budget::{Budget, Dedup};
 use crate::context::Gathered;
-use crate::detect::{Detection, detect_event};
+use crate::detect::detect_event;
 use crate::events::Writer;
 use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Shared, Work};
 use crate::history::{self, History};
@@ -545,7 +545,9 @@ type PodEntry = (PodRecord, OwnerRef, bool);
 #[derive(Default)]
 struct State {
     pods: HashMap<String, PodEntry>,
-    /// Only Warning events that a detection matches, with the Job's top-level owner for `D008`.
+    /// Only Warning events that a detection matches, with the top-level owner of the object an
+    /// event is about when that is not a Pod (the Job's for `D008`, the controller's for `D011`,
+    /// the claim or the autoscaler itself for `D012` and `D013`).
     events: HashMap<String, (EventRecord, Option<OwnerRef>)>,
     /// The UIDs seen during the open relist of each watch, to drop the ones that disappeared
     /// from that watch.
@@ -660,24 +662,29 @@ impl State {
                     self.events.remove(&record.uid);
                     return Ok(());
                 }
-                let job_owner = if detection == Some(Detection::JobFailed) {
-                    let job = OwnerRef {
+                // An event about an object that is not a Pod is about that object's top-level
+                // owner: a Job's CronJob, a ReplicaSet's Deployment, through the hops kausa may
+                // follow (`owner.rs`); any other object is its own.
+                let job_owner = if record.regarding.kind == "Pod" {
+                    None
+                } else {
+                    let object = OwnerRef {
                         api_version: record.regarding.api_version.clone(),
                         kind: record.regarding.kind.clone(),
                         name: record.regarding.name.clone(),
                         uid: record.regarding.uid.clone().unwrap_or_default(),
                     };
                     let namespace = record.regarding.namespace.clone();
-                    let (owner, error) = top_owner(lookup, &namespace, Some(&job), &job).await;
+                    let (owner, error) =
+                        top_owner(lookup, &namespace, Some(&object), &object).await;
                     if let Some(error) = error {
+                        let field = object.kind.to_ascii_lowercase();
                         log::warn(
                             "owner lookup failed",
-                            json!({"namespace": namespace, "job": job.name, "error": error}),
+                            json!({"namespace": namespace, field: object.name, "error": error}),
                         )?;
                     }
                     Some(owner)
-                } else {
-                    None
                 };
                 self.events.insert(record.uid.clone(), (record, job_owner));
             }
@@ -1787,5 +1794,210 @@ mod tests {
         let field = |watch: &WatchKey| json!({"namespace": watch})["namespace"].clone();
         assert_eq!(field(&ns("shop")), json!("shop"));
         assert_eq!(field(&CLUSTER), serde_json::Value::Null);
+    }
+
+    // Acceptance tests for `D011`, `D012` and `D013`, written before the code: what `State` keeps
+    // of an event about a workload controller, a claim or an autoscaler, and what it gathers for
+    // the explanation. Only the two hops kausa may already follow are looked up (a ReplicaSet's
+    // Deployment, a Job's CronJob); every other object is its own top-level owner, so the rules
+    // need no new permission.
+
+    /// Answers the two lookups kausa may make; any other lookup is an error.
+    struct Parents;
+
+    impl OwnerLookup for Parents {
+        async fn controller_of(
+            &self,
+            hop: Hop,
+            namespace: &str,
+            name: &str,
+        ) -> Result<Option<OwnerRef>, String> {
+            let parent = |api_version: &str, kind: &str, name: &str| OwnerRef {
+                api_version: api_version.into(),
+                kind: kind.into(),
+                name: name.into(),
+                uid: format!("uid-{name}"),
+            };
+            match (hop, namespace, name) {
+                (Hop::ReplicaSet, "shop", "checkout-7fffb9bf5c") => {
+                    Ok(Some(parent("apps/v1", "Deployment", "checkout")))
+                }
+                (Hop::Job, "shop", "report-29000000") => {
+                    Ok(Some(parent("batch/v1", "CronJob", "report")))
+                }
+                _ => Err(format!("unexpected owner lookup of {namespace}/{name}")),
+            }
+        }
+    }
+
+    /// A Warning Event about the object `(api_version, kind, name)` in `shop`, repeated for the
+    /// last five minutes.
+    fn event_about((api_version, kind, name): (&str, &str, &str), reason: &str) -> Event {
+        let mut event: Event = serde_json::from_value(json!({
+            "apiVersion": "events.k8s.io/v1",
+            "kind": "Event",
+            "metadata": {"name": format!("{name}.1"), "namespace": "shop",
+                         "uid": format!("event-{name}")},
+            "reason": reason,
+            "note": "an invented note",
+            "type": "Warning",
+            "action": "Create",
+            "reportingController": "example-controller",
+            "reportingInstance": "example-controller-1",
+            "regarding": {"apiVersion": api_version, "kind": kind, "namespace": "shop",
+                          "name": name, "uid": format!("uid-{name}")}
+        }))
+        .expect("the fixture is a valid Event");
+        let now = Timestamp::now();
+        let first = now
+            .checked_sub(SignedDuration::from_mins(5))
+            .expect("a valid time");
+        event.event_time = Some(MicroTime(first));
+        event.series = Some(k8s_openapi::api::events::v1::EventSeries {
+            count: 12,
+            last_observed_time: MicroTime(now),
+        });
+        event
+    }
+
+    #[test]
+    fn events_about_controllers_claims_and_autoscalers_are_incidents_about_their_owner() {
+        let cases = [
+            (
+                ("apps/v1", "ReplicaSet", "checkout-7fffb9bf5c"),
+                "FailedCreate",
+                "D011",
+                ("Deployment", "checkout"),
+            ),
+            (
+                ("batch/v1", "Job", "report-29000000"),
+                "FailedCreate",
+                "D011",
+                ("CronJob", "report"),
+            ),
+            (
+                ("apps/v1", "StatefulSet", "db"),
+                "FailedCreate",
+                "D011",
+                ("StatefulSet", "db"),
+            ),
+            (
+                ("apps/v1", "DaemonSet", "node-agent"),
+                "FailedCreate",
+                "D011",
+                ("DaemonSet", "node-agent"),
+            ),
+            (
+                ("v1", "PersistentVolumeClaim", "orders-data"),
+                "ProvisioningFailed",
+                "D012",
+                ("PersistentVolumeClaim", "orders-data"),
+            ),
+            (
+                ("autoscaling/v2", "HorizontalPodAutoscaler", "checkout"),
+                "FailedGetScale",
+                "D013",
+                ("HorizontalPodAutoscaler", "checkout"),
+            ),
+        ];
+        for (about, reason, id, (kind, name)) in cases {
+            let mut state = State::default();
+            let event = event_about(about, reason);
+            block_on(state.on_event(&CLUSTER, watcher::Event::Apply(event), &Parents))
+                .expect("the log is written");
+            let mut tracker = Tracker::new(SignedDuration::from_secs(60));
+            let incidents = state.tick(&mut tracker, Timestamp::now());
+            assert_eq!(incidents.len(), 1, "{about:?}");
+            let incident = incidents.into_iter().next().expect("an incident");
+            assert_eq!(incident.key.detection.id(), id, "{about:?}");
+            assert_eq!(
+                (incident.owner.kind.as_str(), incident.owner.name.as_str()),
+                (kind, name),
+                "{about:?}"
+            );
+            assert_eq!(incident.owner.uid, format!("uid-{name}"), "{about:?}");
+            // The explanation gathers the event, no Pod, and reads no log.
+            let work = state.job(incident);
+            let events: Vec<_> = work.gathered.events.iter().map(|e| &e.uid).collect();
+            assert_eq!(events, [&format!("event-{}", about.2)], "{about:?}");
+            assert!(work.gathered.pods.is_empty(), "{about:?}");
+            assert!(work.log.is_none(), "{about:?}");
+        }
+    }
+
+    /// Records every owner lookup, and answers it as `Parents` does.
+    #[derive(Default)]
+    struct Lookups(std::cell::RefCell<Vec<(Hop, String)>>);
+
+    impl OwnerLookup for Lookups {
+        async fn controller_of(
+            &self,
+            hop: Hop,
+            namespace: &str,
+            name: &str,
+        ) -> Result<Option<OwnerRef>, String> {
+            self.0.borrow_mut().push((hop, name.to_owned()));
+            Parents.controller_of(hop, namespace, name).await
+        }
+    }
+
+    #[test]
+    fn only_replicasets_and_jobs_are_looked_up_and_a_failed_lookup_keeps_the_controller() {
+        // `D011` to `D013` need no new permission: kausa may `get` ReplicaSets and Jobs only, so
+        // an event about a StatefulSet, a DaemonSet, a claim or an autoscaler, or a Deployment's
+        // own event, makes no lookup at all.
+        let lookups = Lookups::default();
+        let mut state = State::default();
+        for (about, reason) in [
+            (("apps/v1", "StatefulSet", "db"), "FailedCreate"),
+            (("apps/v1", "DaemonSet", "node-agent"), "FailedCreate"),
+            (
+                ("v1", "PersistentVolumeClaim", "orders-data"),
+                "ProvisioningFailed",
+            ),
+            (
+                ("autoscaling/v2", "HorizontalPodAutoscaler", "checkout"),
+                "FailedGetScale",
+            ),
+            (("apps/v1", "Deployment", "storefront"), "FailedCreate"),
+            (
+                ("apps/v1", "ReplicaSet", "checkout-7fffb9bf5c"),
+                "FailedDelete",
+            ),
+        ] {
+            block_on(state.on_event(
+                &CLUSTER,
+                watcher::Event::Apply(event_about(about, reason)),
+                &lookups,
+            ))
+            .expect("the log is written");
+        }
+        assert!(lookups.0.borrow().is_empty(), "{:?}", lookups.0.borrow());
+        // The two events no detection matches are not kept.
+        assert_eq!(state.events.len(), 4);
+        // An event about a ReplicaSet is looked up; when the lookup fails, its incident names the
+        // ReplicaSet itself until a lookup works (docs/reference/command-line.md).
+        let orphan = ("apps/v1", "ReplicaSet", "orphan-5d4c3b2a1");
+        let mut state = State::default();
+        block_on(state.on_event(
+            &CLUSTER,
+            watcher::Event::Apply(event_about(orphan, "FailedCreate")),
+            &lookups,
+        ))
+        .expect("the log is written");
+        assert_eq!(
+            *lookups.0.borrow(),
+            [(Hop::ReplicaSet, "orphan-5d4c3b2a1".to_owned())]
+        );
+        let mut tracker = Tracker::new(SignedDuration::from_secs(60));
+        let incidents = state.tick(&mut tracker, Timestamp::now());
+        assert_eq!(incidents.len(), 1, "{incidents:?}");
+        let incident = &incidents[0];
+        assert_eq!(incident.key.detection.id(), "D011");
+        assert_eq!(
+            (incident.owner.kind.as_str(), incident.owner.name.as_str()),
+            ("ReplicaSet", "orphan-5d4c3b2a1")
+        );
+        assert_eq!(incident.owner.uid, "uid-orphan-5d4c3b2a1");
     }
 }

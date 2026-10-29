@@ -79,6 +79,8 @@ pub fn object_kind(kind: &str) -> &'static str {
         "Job" => "Job",
         "CronJob" => "CronJob",
         "Pod" => "Pod",
+        "PersistentVolumeClaim" => "PersistentVolumeClaim",
+        "HorizontalPodAutoscaler" => "HorizontalPodAutoscaler",
         _ => "Object",
     }
 }
@@ -326,6 +328,9 @@ impl Redactor {
         let placeholders: Vec<String> = self.names.iter().map(|(_, p)| p.clone()).collect();
         let ours = |name: &str| placeholders.iter().any(|p| p == name);
         let mut n = 0;
+        // The pattern of v0.3 first, unchanged, so the second pass can only add redactions
+        // (invariant 4): a quote left open after a kind of the second pass cannot hide a name the
+        // first pass catches.
         let mut out = KUBERNETES_NAME
             .replace_all(&text, |c: &Captures<'_>| {
                 if ours(&c[2]) {
@@ -333,6 +338,31 @@ impl Redactor {
                 } else {
                     n += 1;
                     format!("{} \"<redacted:name>\"", &c[1])
+                }
+            })
+            .into_owned();
+        out = KUBERNETES_NAME_LIST
+            .replace_all(&out, |c: &Captures<'_>| {
+                // Every name of a list (`containers "a", "b"`), each on its own; a name the first
+                // pass already replaced is neither replaced nor counted again.
+                let names = QUOTED_NAME.replace_all(&c[2], |q: &Captures<'_>| {
+                    if ours(&q[1]) || &q[1] == "<redacted:name>" {
+                        q[0].to_owned()
+                    } else {
+                        n += 1;
+                        "\"<redacted:name>\"".to_owned()
+                    }
+                });
+                format!("{} {names}", &c[1])
+            })
+            .into_owned();
+        out = EXCEEDED_QUOTA
+            .replace_all(&out, |c: &Captures<'_>| {
+                if ours(&c[2]) {
+                    c[0].to_owned()
+                } else {
+                    n += 1;
+                    format!("{}<redacted:name>", &c[1])
                 }
             })
             .into_owned();
@@ -604,11 +634,29 @@ static IPV4: LazyLock<Regex> = LazyLock::new(|| {
 });
 static IPV6_CANDIDATE: LazyLock<Regex> =
     LazyLock::new(|| regex(r"[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}"));
+/// The quoted name after a kind (`secret "<name>"`): the pattern of v0.3, kept unchanged as the
+/// first pass so that no later pattern can let through a name it catches (invariant 4).
 static KUBERNETES_NAME: LazyLock<Regex> = LazyLock::new(|| {
     regex(
         r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?) ["']([^"']+)["']"#,
     )
 });
+/// The second pass, over the first one's output: the quoted names, one or a list, after a kind
+/// (`containers "<a>", "<b>"`, `StorageClass "<name>"`) or after a resource qualified by its API
+/// group, as the API server's `NotFound` error writes it (`storageclass.storage.k8s.io "<name>" not
+/// found`, `deployments.apps "<name>" not found`). A Kubernetes name has no whitespace, so a quote
+/// left open cannot run over the words after it.
+static KUBERNETES_NAME_LIST: LazyLock<Regex> = LazyLock::new(|| {
+    regex(
+        r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?|pods?|containers?|storageclass(?:es)?|[a-z0-9-]+(?:\.[a-z0-9-]+)+) (["'][^"'\s]+["'](?:, ["'][^"'\s]+["'])*)"#,
+    )
+});
+/// One quoted name of a `KUBERNETES_NAME_LIST` list.
+static QUOTED_NAME: LazyLock<Regex> = LazyLock::new(|| regex(r#"["']([^"'\s]+)["']"#));
+/// The quota in the API server's refusal of an object by a ResourceQuota: `exceeded quota: <name>,
+/// requested: …` (`staging/src/k8s.io/apiserver/pkg/admission/plugin/resourcequota/controller.go`).
+static EXCEEDED_QUOTA: LazyLock<Regex> =
+    LazyLock::new(|| regex(r"(?i)\b(exceeded quota: )([a-z0-9][a-z0-9.-]*)"));
 static KUBERNETES_NAMESPACED: LazyLock<Regex> =
     LazyLock::new(|| regex(r"(?i)\b(secret\s+|configmap\s+)([a-z0-9.-]+)/([a-z0-9.-]+)"));
 static SERVICE_ACCOUNT_USER: LazyLock<Regex> =
@@ -1140,5 +1188,116 @@ mod tests {
             r.restore_only("namespace-1 and node-1", &["node-1", "web"]),
             "node-1 and node-1"
         );
+    }
+
+    // Acceptance tests for the names in the notes of `D011`, `D012` and `D013` (new cases of
+    // `R003`), written before the code. The controllers write the API server's own errors into
+    // these events: a refused Pod (`pods "<name>" is forbidden`, with the generated name of a Pod
+    // that never existed), the quota that refused it (`exceeded quota: <name>`, in
+    // `staging/src/k8s.io/apiserver/pkg/admission/plugin/resourcequota/controller.go`), the
+    // containers Pod Security admission names (`container "<name>"`, `containers "<a>", "<b>"`,
+    // in `staging/src/k8s.io/pod-security-admission/policy/`), a missing object named with its
+    // API group (`deployments.apps "<name>" not found`), and the StorageClass an external
+    // provisioner names (`with StorageClass "<name>"`). Names, quantities and numbers invented.
+
+    #[test]
+    fn names_in_the_errors_of_controllers_are_redacted() {
+        for (line, leaked, kept) in [
+            (
+                "Error creating: pods \"web-7d9c8b6f4d-d98v6\" is forbidden: exceeded quota: \
+                 compute-budget, requested: pods=1, used: pods=3, limited: pods=3",
+                &["web-7d9c8b6f4d-d98v6", "d98v6", "compute-budget"][..],
+                &[
+                    "Error creating: pods \"<redacted:name>\" is forbidden: exceeded quota: ",
+                    ", requested: pods=1, used: pods=3, limited: pods=3",
+                ][..],
+            ),
+            (
+                "Create Pod db-0 in StatefulSet db failed error: pods \"db-0\" is forbidden: \
+                 exceeded quota: compute-budget, requested: pods=1, used: pods=3, limited: pods=3",
+                &["\"db-0\"", "compute-budget"][..],
+                &["pods \"<redacted:name>\" is forbidden: exceeded quota: "][..],
+            ),
+            (
+                "Error creating: pods \"agent-x7k2p\" is forbidden: violates PodSecurity \
+                 \"restricted:latest\": privileged (containers \"collector\", \"shipper\" must \
+                 not set securityContext.privileged=true), runAsNonRoot != true (pod or \
+                 container \"collector\" must set securityContext.runAsNonRoot=true)",
+                &["agent-x7k2p", "collector", "shipper"][..],
+                &[
+                    "is forbidden: violates PodSecurity \"restricted:latest\": privileged (",
+                    " must not set securityContext.privileged=true), runAsNonRoot != true (pod or ",
+                    " must set securityContext.runAsNonRoot=true)",
+                ][..],
+            ),
+            (
+                r#"deployments.apps "storefront" not found"#,
+                &["storefront"][..],
+                &[r#"deployments.apps "<redacted:name>" not found"#][..],
+            ),
+            (
+                r#"storageclass.storage.k8s.io "fast-ssd" not found"#,
+                &["fast-ssd"][..],
+                &[r#"storageclass.storage.k8s.io "<redacted:name>" not found"#][..],
+            ),
+            (
+                "failed to provision volume with StorageClass \"fast-ssd\": NodePath only \
+                 supports ReadWriteOnce and ReadWriteOncePod (1.22+) access modes",
+                &["fast-ssd"][..],
+                &[
+                    "failed to provision volume with StorageClass \"<redacted:name>\": NodePath \
+                     only supports ReadWriteOnce and ReadWriteOncePod (1.22+) access modes",
+                ][..],
+            ),
+        ] {
+            let mut r = Redactor::new();
+            let out = r.text(line);
+            for name in leaked {
+                assert!(!out.contains(name), "{name} in {out}");
+            }
+            for words in kept {
+                assert!(out.contains(words), "{words:?} not in {out}");
+            }
+            assert!(r.counts().contains_key("R003"), "{out}");
+        }
+    }
+
+    #[test]
+    fn the_words_around_names_in_errors_stay() {
+        // The same words with no name after them, and the metrics API's own resource names.
+        for line in [
+            "the server could not find the requested resource (get pods.metrics.k8s.io)",
+            "invalid metrics (1 invalid out of 1), first error is: failed to get cpu resource \
+             metric value",
+            "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims.",
+        ] {
+            assert_eq!(redact(line), line, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_quote_left_open_after_a_new_kind_does_not_hide_a_name_caught_before() {
+        // Invariant 4: before the names of `D011` to `D013`, `secret "<name>"` was caught in these
+        // lines; an unclosed quote after `pod`, `pods` or a dotted word must not swallow it.
+        for (case, (line, name)) in [
+            (r#"pod "y secret "topsecret-x" not found"#, "topsecret-x"),
+            (r#"see pods "a", "b secret "topsecret-y""#, "topsecret-y"),
+            (r#"app.conf "z, secret "topsecret-z""#, "topsecret-z"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut r = Redactor::new();
+            let out = r.text(line);
+            // The messages name the case only, never the text (CodeQL rust/cleartext-logging).
+            assert!(
+                !out.contains(name),
+                "case {case}: the name was not redacted"
+            );
+            assert!(
+                out.contains(r#"secret "<redacted:name>""#),
+                "case {case}: no redacted name"
+            );
+        }
     }
 }
