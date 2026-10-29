@@ -200,9 +200,84 @@ RUN set -eu; \
       [ "$(printf '%s\n' "$out" | grep -cx ' *- --namespace')" -eq 2 ] \
         || { echo "rbac.scope=namespaced $values: not exactly 2 --namespace args" >&2; exit 1; }; \
     done
-# The refusals of kausa.validate: helm template fails with the exact message. The default values
-# and rbac=null (a v0.1 release's stored values have no rbac map) must reach the rbac.scope message,
-# never a nil-pointer error.
+# The explanation history (docs/adr/0014-explanation-history.md), off by default. With
+# history.enabled, an endpoint and no dryRun, kausa's ClusterRole or each Role gets the
+# explanations rule last, the args get --history --history-days "<days>" before --metrics-address,
+# and the chart installs the CustomResourceDefinition explanations.kausa.fedeam.com
+# (history.installCRD) and a reader ClusterRole aggregated to view (history.readers.aggregate).
+# kausa's ClusterRole is selected by name, since the reader is a second one. A chart whose
+# values.yaml has no history map (helm upgrade --reuse-values from v0.2) renders like the chart.
+# tests/chart/render.sh checks the same renders in more detail, and NOTES.txt.
+RUN set -eu; \
+    endpoint="--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k"; \
+    no_events="--set model.endpoint=http://m.example.svc:11434/v1 --set model.name=m --set model.allowHttp=true --set events=false"; \
+    on="--set history.enabled=true"; \
+    cluster="--set rbac.scope=cluster"; \
+    namespaced="--set rbac.scope=namespaced --set rbac.namespaces={e2e-a,e2e-b}"; \
+    crd=CustomResourceDefinition/explanations.kausa.fedeam.com; \
+    reader=ClusterRole/kausa-explanation-reader; \
+    fail() { echo "history: $*" >&2; exit 1; }; \
+    render_in() { chart=$1; shift; helm template kausa "$chart" --kube-version 1.36.0 --namespace kausa-system "$@" || fail "$chart does not render with $*"; }; \
+    render() { render_in charts/kausa "$@"; }; \
+    has() { printf '%s\n' "$1" | grep -qx -- "$2"; }; \
+    rules() { printf '%s\n' "$1" | awk -v kind="$2" -v name="$3" 'function flush() { if (k && n) printf "%s", r; k = 0; n = 0; on = 0; r = "" }; /^---/ { flush(); next }; $0 == "kind: " kind { k = 1 }; $0 == "  name: " name { n = 1 }; /^[^ ]/ { on = ($0 == "rules:"); next }; on && NF { r = r $0 "\n" }; END { flush() }'; }; \
+    scoped() { printf '%s\n' "$1" | awk 'function flush() { if (k != "" && !n) print k "/" m; k = ""; n = 0; m = "" }; /^---/ { flush(); next }; /^kind: / { k = substr($0, 7) }; /^[^ #]/ { meta = ($0 == "metadata:") }; meta && /^  namespace: / { n = 1 }; meta && /^  name: / { m = substr($0, 9) }; END { flush() }' | LC_ALL=C sort | paste -sd' ' -; }; \
+    args() { printf '%s\n' "$1" | sed -n '/^ *args:$/,/^ *env:$/p' | sed 's/^ *//'; }; \
+    plus_history() { awk -v days="$1" '$0 == "- --metrics-address" { print "- --history"; print "- --history-days"; print "- \"" days "\"" }; { print }'; }; \
+    history_rule=$(printf '%s\n' '  - apiGroups: ["kausa.fedeam.com"]' '    resources: ["explanations"]' '    verbs: ["list", "create", "patch", "delete"]'); \
+    nothing() { ! printf '%s\n' "$2" | grep -qE 'kausa\.fedeam\.com|CustomResourceDefinition|--history' || fail "$1: renders part of the history"; }; \
+    on_in_cluster() { \
+      name=$1; objects=$2; days=$3; base=$4; extra=$5; \
+      off=$(render $cluster $base); \
+      out=$(render $cluster $base $on $extra); \
+      [ "$(scoped "$out")" = "$objects" ] || fail "$name: the cluster-scoped objects are '$(scoped "$out")', not '$objects'"; \
+      [ "$(rules "$out" ClusterRole kausa)" = "$(rules "$off" ClusterRole kausa; echo "$history_rule")" ] || fail "$name: kausa's rules are not those without the history plus the explanations rule last"; \
+      [ "$(args "$out")" = "$(args "$off" | plus_history "$days")" ] || fail "$name: not --history --history-days \"$days\" before --metrics-address"; \
+    }; \
+    for scope in "$cluster" "$namespaced"; do \
+      for values in "" "$endpoint" "--set dryRun=true"; do \
+        out=$(render $scope $values); nothing "the defaults with $scope $values" "$out"; \
+      done; \
+    done; \
+    on_in_cluster "history on" "ClusterRole/kausa $reader ClusterRoleBinding/kausa $crd" 7 "$endpoint" ""; \
+    printf '%s\n' "$out" | grep -q 'helm.sh/resource-policy' && fail "history on: the CRD has a resource policy"; \
+    has "$out" ' *maxLength: 300' || fail "history on: no 'maxLength: 300' as an integer"; \
+    has "$out" ' *- message: spec is immutable' || fail "history on: no CEL message 'spec is immutable'"; \
+    [ "$(printf '%s\n' "$out" | sed -n 's/^ *jsonPath: //p' | paste -sd' ' -)" = ".spec.target.kind .spec.target.name .spec.rule .status.occurrences .status.lastTime .metadata.creationTimestamp .status.entries[0].confidence .status.entries[0].summary" ] || fail "history on: the printer columns"; \
+    has "$out" '    rbac\.authorization\.k8s\.io/aggregate-to-view: "true"' || fail "history on: the reader is not aggregated to view"; \
+    printf '%s\n' "$out" | grep -qE 'aggregate-to-(edit|admin)' && fail "history on: the reader is aggregated to edit or admin"; \
+    [ "$(rules "$out" ClusterRole kausa-explanation-reader)" = "$(printf '%s\n' '  - apiGroups: ["kausa.fedeam.com"]' '    resources: ["explanations"]' '    verbs: ["get", "list", "watch"]')" ] || fail "history on: the reader's rules are not get, list and watch on explanations"; \
+    on_in_cluster "history.days=30" "ClusterRole/kausa $reader ClusterRoleBinding/kausa $crd" 30 "$endpoint" "--set history.days=30"; \
+    on_in_cluster "history.installCRD=false" "ClusterRole/kausa ClusterRoleBinding/kausa" 7 "$endpoint" "--set history.installCRD=false --set history.readers.aggregate=false"; \
+    on_in_cluster "history.readers.aggregate=false" "ClusterRole/kausa ClusterRoleBinding/kausa $crd" 7 "$endpoint" "--set history.readers.aggregate=false"; \
+    on_in_cluster "history with events=false" "ClusterRole/kausa $reader ClusterRoleBinding/kausa $crd" 7 "$no_events" ""; \
+    has "$out" '    verbs: \["create", "patch"\]' && fail "history with events=false: kausa may write Events"; \
+    out=$(render $cluster $endpoint $on --set dryRun=true); nothing "history with dryRun" "$out"; \
+    out=$(render $cluster $on); nothing "history without an endpoint" "$out"; \
+    clusterrules=$(rules "$(render $cluster $endpoint $on)" ClusterRole kausa); \
+    out=$(render $namespaced $endpoint $on); \
+    [ "$(scoped "$out")" = "$reader $crd" ] || fail "namespaced history: the cluster-scoped objects are '$(scoped "$out")'"; \
+    [ "$(rules "$out" Role kausa)" = "$(printf '%s\n%s\n' "$clusterrules" "$clusterrules")" ] || fail "namespaced history: the Roles' rules are not the ClusterRole's"; \
+    [ "$(args "$out")" = "$(args "$(render $namespaced $endpoint)" | plus_history 7)" ] || fail "namespaced history: not --history --history-days \"7\" before --metrics-address"; \
+    out=$(render $namespaced $endpoint $on --set history.installCRD=false); \
+    [ -z "$(scoped "$out")" ] || fail "namespaced history with installCRD=false: renders cluster-scoped objects"; \
+    has "$out" '    verbs: \["list", "create", "patch", "delete"\]' || fail "namespaced history with installCRD=false: no explanations rule"; \
+    cp -R charts/kausa /tmp/nomap; \
+    awk '/^history:/ { skip = 1; next }; skip && /^[^ ]/ { skip = 0 }; !skip' charts/kausa/values.yaml > /tmp/nomap/values.yaml; \
+    grep -q '^history:' /tmp/nomap/values.yaml && fail "the chart copy still has a history map"; \
+    for values in "" "$endpoint" "$endpoint $on"; do \
+      a=$(render $cluster $values); b=$(render_in /tmp/nomap $cluster $values); \
+      [ "$a" = "$b" ] || fail "a chart without the history map renders unlike the chart with $values"; \
+    done; \
+    rm -rf /tmp/nomap; \
+    for scope in "$cluster" "$namespaced"; do \
+      helm lint --strict charts/kausa $scope $endpoint $on > /tmp/lint 2>&1 || { cat /tmp/lint >&2; fail "helm lint --strict with $scope fails with the history on"; }; \
+    done; \
+    rm -f /tmp/lint
+# The refusals of kausa.validate: helm template fails with the exact message (helm lint does not
+# fail on a template's fail). The default values and rbac=null (a v0.1 release's stored values have
+# no rbac map) must reach the rbac.scope message, never a nil-pointer error. history.days, checked
+# last, is refused with the history on and off.
 RUN set -eu; \
     long=$(printf '%064d' 0 | tr 0 a); \
     names33=$(seq -f 'n%g' 1 33 | paste -sd, -); \
@@ -227,6 +302,10 @@ RUN set -eu; \
     refuse "rbac.namespaces: '-a' $not_a_name" --set rbac.scope=namespaced --set 'rbac.namespaces={-a}'; \
     refuse "rbac.namespaces: 'a' is listed twice" --set rbac.scope=namespaced --set 'rbac.namespaces={a,a}'; \
     refuse "rbac.namespaces lists 33 namespaces; kausa watches at most 32 (use rbac.scope=cluster instead)" --set rbac.scope=namespaced --set "rbac.namespaces={$names33}"; \
+    for days in 0 31 abc 7.5; do \
+      refuse "history.days must be a whole number of days from 1 to 30, not '$days'" --set rbac.scope=cluster --set "history.days=$days"; \
+      refuse "history.days must be a whole number of days from 1 to 30, not '$days'" --set rbac.scope=cluster --set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k --set history.enabled=true --set "history.days=$days"; \
+    done; \
     rm -f /tmp/refusal
 RUN cargo clippy --locked --all-targets --all-features -- -D warnings
 RUN cargo test --locked --all-features

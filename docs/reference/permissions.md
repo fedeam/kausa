@@ -4,8 +4,9 @@ The Kubernetes API permissions kausa's chart grants, and the ones it never asks 
 
 Status as of 2026-10-28: the chart in `charts/kausa` grants this table, `pods/log` only when
 kausa explains incidents (an endpoint or dry-run) with log collection on, and the Event writes
-only with an endpoint, outside dry-run, unless they are turned off ([Helm
-chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
+only with an endpoint, outside dry-run, unless they are turned off, and the `explanations` row only
+while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; not in a release yet)
+([Helm chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
 namespaces only (`namespaced`, not in a release yet; see [Where the permissions
 apply](#where-the-permissions-apply)). Why it is this list: [0009. Run with read-only permissions
 that never include Secrets](../adr/0009-least-privilege-rbac.md); why there are two scopes: [0013.
@@ -31,6 +32,11 @@ model](../how-to/try-with-a-local-model.md)).
 | `events.k8s.io` | `events` | `create`, `patch` | Write the explanation, and update its series count when the incident repeats |
 | `apps` | `replicasets` | `get` | Follow a ReplicaSet's owner reference to its Deployment |
 | `batch` | `jobs` | `get` | Follow a Job's owner reference to its CronJob |
+| `kausa.fedeam.com` | `explanations` | `list`, `create`, `patch`, `delete` | Only while kausa writes history. `list`: read one object by name (a `metadata.name` field selector) before a write, and the sweep; `create`: an incident's first explanation; `patch`: append to its history (`status` and `resourceVersion` only; `spec` is immutable); `delete`: retention by age and by count ([Explanation resource](explanation-resource.md)) |
+
+The `explanations` rule comes last in the rules and only with the history on; why kausa may write
+its own resource: [0014. Keep each incident's full explanations in a namespaced Explanation
+resource, off by default](../adr/0014-explanation-history.md).
 
 ## Where the permissions apply
 
@@ -45,6 +51,7 @@ without it. It changes where the rows above apply, never which rows there are:
 | `events.k8s.io` `events`: `create`, `patch` (Event writes on) | every namespace | the listed namespaces only |
 | `apps` `replicasets`: `get` | every namespace | the listed namespaces only |
 | `batch` `jobs`: `get` | every namespace | the listed namespaces only |
+| `kausa.fedeam.com` `explanations`: `list`, `create`, `patch`, `delete` (history on) | every namespace | the listed namespaces only |
 | ClusterRole and ClusterRoleBinding | created | not created |
 
 - **`cluster`**: one ClusterRole and one ClusterRoleBinding, as in v0.1, and kausa watches every
@@ -65,25 +72,43 @@ without it. It changes where the rows above apply, never which rows there are:
   namespaces only. Inside a listed namespace, RBAC still cannot limit them to kausa's own Events
   (see the [Security policy](../../SECURITY.md)).
 
+## Who reads the history
+
+With the history on and `history.installCRD`, the chart also installs a ClusterRole
+`<full name>-explanation-reader` with `get`, `list` and `watch` on `explanations`, labelled
+`rbac.authorization.k8s.io/aggregate-to-view: "true"`. Kubernetes aggregates it into the built-in
+`view` role, so whoever has `view`, `edit` or `admin` in a namespace reads its Explanations as they
+read its Events. No write is aggregated: only kausa and cluster administrators write Explanations.
+`history.readers.aggregate: false` leaves the reader role out, and reading to cluster
+administrators and to whatever the operator binds. The reader role is bound to nobody and grants
+kausa nothing.
+
 What the kind test asks `kubectl auth can-i`, as kausa's service account
 (`system:serviceaccount:<release namespace>:<full name>`):
 
 - **`cluster`**: every row above `yes` with `-A`, and its list of what must be refused (`get` and
   `list` on Secrets and ConfigMaps, `create` and `delete` on Pods, `pods/exec`, `update` and
   `delete` on Events, `list` on nodes, service account tokens, impersonation, and `list` on
-  ReplicaSets and Jobs) `no` with `-A`.
+  ReplicaSets and Jobs; with the history, `get`, `watch`, `update` and `deletecollection` on
+  `explanations`, and `create` and `patch` on `customresourcedefinitions`) `no` with `-A`.
 - **`namespaced`**: every row above `yes` with `-n` of each listed namespace, and `no` with `-n`
   of a namespace that is not listed, `-n` of kausa's own namespace, and `-A`; the list of what must
   be refused `no` in a listed namespace. `kubectl get clusterroles,clusterrolebindings -l
-  app.kubernetes.io/instance=<release>` lists nothing.
+  app.kubernetes.io/instance=<release>` lists nothing but the reader role, which the history
+  adds, and nothing at all once the history is off.
+- **The readers**, in both scopes: service accounts bound to `view` and to `edit` in a watched
+  namespace can `list` Explanations and cannot `create` or `delete` them.
 
 ## Never granted
 
 - `secrets` and `configmaps`, in any verb. `list` on Secrets would return their data.
-- Any write verb other than `create` and `patch` on Events.
+- Any write verb other than `create` and `patch` on Events and, with the history, `create`,
+  `patch` and `delete` on `explanations`.
 - `pods/exec`, `pods/attach`, `pods/portforward`, `pods/eviction`, `nodes`, `nodes/proxy`,
   `serviceaccounts/token`, impersonation, and wildcards (`*`) in groups, resources or verbs.
-- Custom resources, in v0.1.
+- Any custom resource but kausa's own Explanations, and on those never `get`, `watch`, `update`,
+  `deletecollection` or a subresource (there is none).
+- Any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never does.
 
 ## The pod that runs kausa
 

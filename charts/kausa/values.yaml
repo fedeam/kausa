@@ -47,6 +47,19 @@ logs: true
 # Write each explanation as an Event on the failing workload. false also removes the Event writes
 # from the ClusterRole or the Roles.
 events: true
+history:
+  # Keep the full explanations of each incident in an Explanation object in its namespace.
+  # Needs an endpoint and dryRun false. false, no endpoint or dryRun true deletes the
+  # CustomResourceDefinition, and with it every Explanation in the cluster.
+  enabled: false
+  # Delete history older than this many days (1-30).
+  days: 7
+  # Install the CustomResourceDefinition (and the reader role below). Set false when another
+  # release or a cluster administrator installs it, for example in a namespaced install.
+  installCRD: true
+  readers:
+    # Let the built-in view, edit and admin roles read Explanations, as they read Events.
+    aggregate: true
 # How long a failure must persist before it is an incident, in seconds (0-3600).
 settleSeconds: 60
 # The call and token budget, and how long an explanation is reused for a repeated incident.

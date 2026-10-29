@@ -68,5 +68,8 @@ estimate of the request, before it is sent. The model gets no tools and no funct
 - A short version of the explanation, up to the 1024-byte limit of an Event note, in an Event
   about the failing workload, with real names, visible to whoever can read Events in that
   namespace (unless `--no-events`).
+- With `--history`, the whole explanation, with real names, in an Explanation object in the
+  failing workload's namespace ([Explanation resource](explanation-resource.md)). Nothing stored
+  there is sent to the provider or read back into a request, the cache, an Event or the log.
 - The pseudonym mapping and the deduplication cache, in kausa's memory only (fingerprints also
   appear in the log and in the Events' names); nothing is written to disk.

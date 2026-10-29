@@ -20,6 +20,7 @@ use crate::budget::{Budget, Dedup};
 use crate::context::{self, Gathered};
 use crate::detect::Detection;
 use crate::events::{Outcome, Writer};
+use crate::history::History;
 use crate::log;
 use crate::metrics::Metrics;
 use crate::model::ModelClient;
@@ -47,6 +48,8 @@ pub struct Settings {
     pub max_input_tokens: usize,
     /// Whether explanations are written as Events (not in dry-run).
     pub events: bool,
+    /// With `--history`, the `--history-days`: explanations are also kept in Explanation objects.
+    pub history_days: Option<u32>,
     /// Model calls allowed per hour and per day.
     pub calls_per_hour: usize,
     pub calls_per_day: usize,
@@ -57,11 +60,13 @@ pub struct Settings {
 }
 
 /// What the explanations share across incidents: the budget, the deduplication cache, the Event
-/// writer and the metrics. Borrowed only between awaits.
+/// writer, the history writer and the metrics. Borrowed only between awaits.
 pub struct Shared<'a> {
     pub budget: RefCell<Budget>,
     pub dedup: RefCell<Dedup>,
     pub writer: Option<Writer>,
+    /// The history writer, with `--history` and an endpoint.
+    pub history: Option<History>,
     pub metrics: &'a Metrics,
 }
 
@@ -98,10 +103,10 @@ pub fn reads_logs(detection: Detection) -> bool {
 /// Explains one incident and logs the outcome: from the deduplication cache when the same failure
 /// was explained recently; otherwise reads the log tail, builds and fits the request, and logs it
 /// (dry-run) or sends it within the budget and validates the answer. Explanations and skipped
-/// explanations are written as Events when that is on. A first call that fails with a transient
-/// error (a timeout, a failed connection, `429` or a `5xx` status) returns the job, to be tried
-/// once more after `RETRY_DELAY`; a call that never reached the endpoint is given back to the
-/// budget.
+/// explanations are written as Events when that is on, and explanations, fresh or cached, into
+/// the history with `--history`. A first call that fails with a transient error (a timeout, a
+/// failed connection, `429` or a `5xx` status) returns the job, to be tried once more after
+/// `RETRY_DELAY`; a call that never reached the endpoint is given back to the budget.
 pub async fn run(
     job: Work,
     client: Client,
@@ -344,21 +349,42 @@ async fn skip(
     emit(settings, shared, gathered, Outcome::Skipped(why)).await
 }
 
+/// Writes an outcome: as an Event when Events are on, then, for an explanation, into the history
+/// when it is on. Each step stands alone: a failure of one is logged and does not stop the other.
 async fn emit(
     settings: &Settings,
     shared: &Shared<'_>,
     gathered: &Gathered,
     outcome: Outcome<'_>,
 ) -> io::Result<()> {
-    let Some(writer) = shared.writer.as_ref().filter(|_| settings.events) else {
-        return Ok(());
-    };
+    if let Some(writer) = shared.writer.as_ref().filter(|_| settings.events) {
+        write_event(writer, shared, gathered, &outcome).await?;
+    }
+    if let (Some(history), Outcome::Explained(explanation)) = (shared.history.as_ref(), &outcome) {
+        history
+            .write(
+                &gathered.incident,
+                explanation,
+                &settings.model_name,
+                shared.metrics,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn write_event(
+    writer: &Writer,
+    shared: &Shared<'_>,
+    gathered: &Gathered,
+    outcome: &Outcome<'_>,
+) -> io::Result<()> {
     let reason = match outcome {
         Outcome::Explained(_) => "Explained",
         Outcome::Skipped(_) => "ExplanationSkipped",
     };
     match writer
-        .emit(&gathered.incident, &outcome, Timestamp::now())
+        .emit(&gathered.incident, outcome, Timestamp::now())
         .await
     {
         Ok(()) => {

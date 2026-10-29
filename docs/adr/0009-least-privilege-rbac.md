@@ -75,3 +75,11 @@ cluster-wide](0013-namespaced-install-mode.md): the chart's required `rbac.scope
 ADR's rules in every namespace (`cluster`, a ClusterRole as above) or in the listed namespaces only
 (`namespaced`, a Role and a RoleBinding per namespace and nothing cluster-scoped). The rules
 themselves do not change, and the caveat on Event writes narrows to the listed namespaces.
+
+Update 2026-10-28: [0014. Keep each incident's full explanations in a namespaced Explanation
+resource, off by default](0014-explanation-history.md) amends "the only write is Events": with
+`--history`, kausa also writes its own Explanations (`list`, `create`, `patch` and `delete` on
+`explanations` in `kausa.fedeam.com`, only while it writes history, through the same rules in
+either scope). Under Never granted in [Permissions](../reference/permissions.md), "Custom
+resources, in v0.1" becomes "any custom resource but kausa's own Explanations", and any verb on
+CustomResourceDefinitions is never granted. Secrets and ConfigMaps stay out in every verb.

@@ -2,15 +2,19 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-28: what the code of v0.2.0 does, with the namespaced mode planned for v0.3
-(`--namespace`, not in a release yet). `kausa
+Status as of 2026-10-28: what the code of v0.2.0 does, with the namespaced mode and the
+explanation history planned for v0.3 (`--namespace`, `--history` and `--history-days`, not in a
+release yet). `kausa
 run` detects and groups failures and logs incidents; with `--endpoint` it explains each one within
 a call budget, reuses explanations of repeated incidents, and writes the explanation as an Event
 on the failing workload; with `--dry-run` it logs the request instead; with `--metrics-address` it
 serves Prometheus metrics ([0001. Build a small, read-only explainer that writes one redacted
 explanation per incident](../adr/0001-scope-and-positioning.md)); with `--namespace` it watches
 only the namespaces given ([0013. Offer a namespaced install mode: one watch pair and one Role per
-listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)).
+listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)); with
+`--history` it also keeps each explained incident's full explanations in an Explanation object in
+its namespace ([0014. Keep each incident's full explanations in a namespaced Explanation resource,
+off by default](../adr/0014-explanation-history.md)).
 
 ## Commands
 
@@ -34,6 +38,8 @@ Options of `kausa run`:
 | `--no-logs` | Do not read container logs (the request has no `log_tail`) |
 | `--no-json-schema` | Do not send `response_format`, for servers without structured output; the answer is validated all the same |
 | `--no-events` | Do not write Events; the explanations are only logged. Events are never written in dry-run |
+| `--history` | Keep each explained incident's explanations (fresh or from the deduplication cache) in an Explanation object named `kausa.<fingerprint>` in its namespace, after the Event and independent of it, and delete old ones: needs the CustomResourceDefinition `explanations.kausa.fedeam.com` ([Explanation resource](explanation-resource.md)). Needs `--endpoint`; not with `--dry-run`. With `--no-events`, kausa writes the history only |
+| `--history-days <N>` | Delete Explanations, and drop entries, last written more than `N` days ago, from `1` to `30`; `7` by default. Needs `--history` |
 | `--max-calls-per-hour <N>` | Model calls allowed in any hour, `30` by default; `0` allows none |
 | `--max-calls-per-day <N>` | Model calls allowed in any 24 hours, `200` by default |
 | `--max-input-tokens <N>` | Cap on a request's estimated input tokens (a quarter of its bytes), `6000` by default: the context is cut to fit, and an incident that still does not fit is skipped |
@@ -54,6 +60,18 @@ first as a name, then against the earlier ones; the count last):
 | Not a namespace name (a DNS-1123 label: 1 to 63 lowercase letters, digits and `-`, starting and ending with a letter or digit) | `--namespace takes a namespace name (lowercase letters, digits and '-', starting and ending with a letter or digit, at most 63 characters), not '<value>'` |
 | A name given twice | `--namespace '<name>' is given twice` |
 | More than 32 | `--namespace is given <n> times; kausa watches at most 32 namespaces (watch the whole cluster instead)` |
+
+The usage errors of the history, after those of `--namespace` and before those of `--endpoint`
+and `--model` (so `--history --endpoint <URL>` without `--model` still says `--endpoint needs
+--model`):
+
+| Case | Message after `error: ` |
+|---|---|
+| `--history-days` without a value | `--history-days needs a value` |
+| `--history-days` with a value that is not a whole number from 1 to 30 (`0`, `31`, `abc`, `-1`, `7.5`), checked when the flag is read | `--history-days takes a whole number of days from 1 to 30, not '<value>'` |
+| `--history-days` without `--history` | `--history-days needs --history` |
+| `--history` with `--dry-run`, with or without `--endpoint` | `--history is not used with --dry-run: no explanation is written` |
+| `--history` without `--endpoint` | `--history needs --endpoint` |
 
 kausa does not check that a listed namespace exists: that would need `get` on `namespaces`, a
 cluster-wide permission. With broad credentials, a missing namespace is watched as an empty one
@@ -96,6 +114,10 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `explanation skipped` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`: the call budget is spent, the context does not fit `--max-input-tokens`, the endpoint failed or answered an error status, or the answer did not validate |
 | `event write failed` | warn | `fingerprint`, `error`: the Event could not be created or patched |
 | `explanation dropped` | warn | `fingerprint`, `reason`: the queue of 16 incidents waiting for an explanation was full |
+| `history write failed` | warn | `fingerprint`, `namespace`, `error`: the Explanation could not be written. `error` is `the CustomResourceDefinition explanations.kausa.fedeam.com is not installed (chart value history.installCRD)` when the list answered `404`, `no answer within 10 seconds` on the timeout, `409 Conflict: the Explanation was created or changed by another writer since it was read; not retried`, the code and reason only (for example `422 Invalid`) when the API server refused the list, create or patch, since its message can quote the stored object, and kube-rs's text otherwise |
+| `history write refused` | warn | `fingerprint`, `namespace`, `reason`: an object of that name exists and is not kausa's to append to: `the Explanation kausa.<fingerprint> does not carry the label app.kubernetes.io/managed-by=kausa` or `the Explanation kausa.<fingerprint> is about another rule or target` |
+| `history sweep failed` | warn | `namespace` (the listed namespace whose list or delete failed, or `null` in cluster scope), `error` (the same `404` text when the CRD is missing; otherwise, when the API server refused the list or a delete, its code and reason only, since its message can quote an object or name a listed namespace, and kube-rs's text for any other failure). A failed list ends that namespace's part of the sweep; the next namespace goes on |
+| `history swept` | info | `deleted_by_age`, `deleted_by_cap`: what one sweep deleted, only when it deleted something |
 | `log read failed` | warn | `namespace`, `pod`, `container`, `error`; the request is built without the log |
 | `stopped on an error`, `cannot start the runtime` | error | `error` |
 
@@ -133,6 +155,9 @@ namespaces, with invented values:
   redaction rules](rules.md)).
 - `sample`: the first failing container or event, in a fixed order.
 
+Nothing read back from a stored Explanation appears in a log line: the history lines carry only
+kausa's own fingerprint and namespace, fixed texts and the API server's error codes.
+
 The log carries real names and messages from the cluster, as [Data sent to the
 provider](data-sent-to-the-provider.md) says under "What stays in the cluster": who can read
 kausa's log sees them.
@@ -160,5 +185,8 @@ and any other method `405`. The counters live in memory and start over when kaus
 | `kausa_redactions_total` | `rule` | Values replaced by redaction |
 | `kausa_events_written_total` | `reason` (`Explained`, `ExplanationSkipped`) | Events created or updated |
 | `kausa_event_write_errors_total` | | Events that could not be written |
+| `kausa_history_writes_total` | `outcome` (`created`, `updated`, `refused`, `conflict`, `error`) | Explanation objects written, by outcome |
+| `kausa_history_deleted_total` | `reason` (`age`, `cap`) | Explanation objects deleted by the sweep, by reason |
+| `kausa_history_sweep_errors_total` | | Failed list or delete calls of the history sweep (a delete answered `404` or `409` is not one) |
 | `kausa_watch_errors_total` | `watch` (`pods`, `events`) | Errors of the Pod watches and of the event watches (every namespace's together; the namespace is in the log line), which retry with backoff; a steady rise with no incidents means kausa is not seeing the cluster |
 

@@ -195,3 +195,12 @@ never changes a workload and never acts on the model's answer."
   `resourceVersion` as a patch precondition; the `view` aggregation. Also: etcd's 1.5 MiB limit;
   Helm refusing a second release's CRD and creating CRDs first (a missing CRD is only a warning);
   RBAC escalation as in 0013.
+
+Update 2026-10-28: the sweep lists pages of 2, not 50, and its memory is bounded by the page, not
+by about 150 KB. The schema bounds an object's `spec` and `status` but not its `metadata`, so an
+object anyone allowed to create Explanations makes with kausa's label can reach etcd's limit,
+about 1.5 MiB, and kube buffers and parses a whole page: one such object took about 12 MiB once
+parsed, and a page of 50 would pass the chart's 128Mi limit and crash-loop kausa at every start.
+A page of 2 stays under about 30 MiB, and the sweep drops the `metadata` it does not read before
+it reduces each object. The 55 KB per object holds for objects kausa writes only
+([Explanation resource](../reference/explanation-resource.md)).

@@ -1,0 +1,60 @@
+{{- /*
+The Explanation resource of the history (docs/adr/0014-explanation-history.md). Rendered only while
+this release's kausa writes the history and history.installCRD is true, so it exists exactly while
+kausa sweeps it. A template, not crds/, so that Helm upgrades it with the release; and without
+helm.sh/resource-policy: keep, so that uninstalling, or turning the history off, deletes it and
+every Explanation. The schema is charts/kausa/files/explanation-schema.json, which the Rust tests
+also read.
+*/}}
+{{- if include "kausa.installsCRD" . }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: explanations.kausa.fedeam.com
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+spec:
+  group: kausa.fedeam.com
+  scope: Namespaced
+  names:
+    kind: Explanation
+    listKind: ExplanationList
+    plural: explanations
+    singular: explanation
+  conversion:
+    strategy: None
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          {{- .Files.Get "files/explanation-schema.json" | fromJson | toYaml | nindent 10 }}
+      additionalPrinterColumns:
+        - name: Kind
+          type: string
+          jsonPath: .spec.target.kind
+        - name: Target
+          type: string
+          jsonPath: .spec.target.name
+        - name: Rule
+          type: string
+          jsonPath: .spec.rule
+        - name: Count
+          type: integer
+          jsonPath: .status.occurrences
+        - name: Last
+          type: date
+          jsonPath: .status.lastTime
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+        - name: Confidence
+          type: string
+          jsonPath: .status.entries[0].confidence
+          priority: 1
+        - name: Summary
+          type: string
+          jsonPath: .status.entries[0].summary
+          priority: 1
+{{- end }}

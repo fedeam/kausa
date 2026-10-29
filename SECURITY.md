@@ -25,7 +25,13 @@ These are vulnerabilities, not ordinary bugs:
 - a value that a redaction rule should catch reaching a request, an Event or kausa's log in clear;
 - any request to a host other than the Kubernetes API server and the configured endpoint;
 - kausa reading, or asking for permission to read, Secrets or ConfigMaps, or writing anything but
-  Events;
+  Events and, with `--history`, its own Explanations;
+- kausa patching or deleting an Explanation that is not kausa-shaped (labelled
+  `app.kubernetes.io/managed-by: kausa`, named `kausa.` and 16 lowercase hexadecimal digits, with
+  a `spec` that parses), patching one whose `spec` is not the incident's, or writing one in a
+  namespace other than the incident's;
+- text read back from an Explanation reaching a request to the model, an Event, kausa's log or
+  its deduplication cache, or a stored Explanation that makes kausa crash;
 - input from the cluster (an event message, a log line, a name) that changes what kausa does
   beyond the text of one explanation: making it call the model more often than its budget, write
   or patch Events about other objects, or Events kausa did not create, skip its own validation, or
@@ -47,7 +53,11 @@ logs it with `--dry-run`; it logs incidents and explanations with real names to 
 Calls to the model are capped per hour and per day, explanations of repeated incidents are
 reused, and the queue in front of the model holds 16. It writes the explanation as an Event in the
 failing workload's namespace (`create` and `patch` on Events only), and serves metrics only with
-`--metrics-address`. Each of these is implemented: the redaction, the prompt's validation, the
+`--metrics-address`. With `--history` (off by default; the chart's `history.enabled`), it also
+keeps each explained incident's full explanations in an Explanation object in that namespace and
+deletes old ones ([0014. Keep each incident's full explanations in a namespaced Explanation
+resource, off by default](docs/adr/0014-explanation-history.md)); this is in the code and the
+chart, not in a release yet. Each of these is implemented: the redaction, the prompt's validation, the
 budget, the Event writes and the metrics responder have unit tests, and the permissions are
 checked by the kind test (`kubectl auth can-i`, what is allowed and what must be refused) in both
 `rbac.scope`s: every namespace with `cluster`, or the listed namespaces only with `namespaced`
@@ -74,8 +84,10 @@ controls the answers. kausa treats both as untrusted.
 kausa must:
 
 - **Never read what it does not need.** Its permissions are a fixed list: read Pods, read and
-  write Events, `get` on ReplicaSets and Jobs, and `get` on `pods/log` only while log collection
-  is on. Never Secrets, never ConfigMaps, no other write verb, no `exec`, no wildcards
+  write Events, `get` on ReplicaSets and Jobs, `get` on `pods/log` only while log collection
+  is on, and `list`, `create`, `patch` and `delete` on its own `explanations` only while it writes
+  history. Never any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never
+  does. Never Secrets, never ConfigMaps, no other write verb, no `exec`, no wildcards
   ([Permissions](docs/reference/permissions.md), [0009. Run with read-only permissions that never
   include Secrets](docs/adr/0009-least-privilege-rbac.md)), in every namespace with
   `rbac.scope=cluster`, or only in the namespaces of `rbac.namespaces` with
@@ -142,6 +154,39 @@ kausa must:
   their failures then get an `ExplanationSkipped` Event or none. It protects the bill, not
   fairness between namespaces; separate releases with disjoint `rbac.namespaces` have separate
   budgets.
+- **The history can be rewritten or deleted by a compromised kausa** (with `--history`). RBAC
+  cannot narrow `patch` and `delete` on `explanations` to kausa's own objects, so a stolen kausa
+  token can rewrite or delete any Explanation, or add `finalizers` that stall its deletion (and,
+  as a hypothesis not checked, the deletion of the CRD on uninstall), in the namespaces it covers,
+  and nothing more: no other
+  resource, and no verb on CustomResourceDefinitions. kausa itself patches only an object that
+  carries its label and the incident's `spec`, sends only `status` and `metadata.resourceVersion`,
+  and deletes only kausa-shaped objects, each delete with a `resourceVersion` precondition.
+- **The label and the name are a convention, not proof of authorship.** Whoever can create
+  Explanations in a covered namespace (a cluster administrator, or anyone granted it) can forge
+  kausa-shaped objects. kausa then appends to or deletes them like its own, but never writes
+  their text back: a stored entry is untrusted, and one that is malformed, future-dated, oversized
+  or changed by kausa's cleaning is dropped, and nothing read back is logged or sent.
+- **A forged Explanation is bounded by etcd, not by the schema.** The schema bounds `spec` and
+  `status` but not `metadata`, so an object created with kausa's label can carry labels,
+  annotations or finalizers up to etcd's object limit, about 1.5 MiB. The sweep lists 2 objects
+  per page, which kube buffers and parses whole, so a page of such objects stays under about
+  30 MiB, within the chart's 128Mi memory limit (measured on 2026-10-28), and it drops the
+  `metadata` it does not read before it reduces each object. The 55 KB of the [Explanation
+  resource](docs/reference/explanation-resource.md) holds for the objects kausa writes only.
+- **The history's object cap is shared.** `MAX_OBJECTS` (500) counts every kausa-shaped object in
+  the namespaces one kausa covers, so a tenant that makes many workloads fail, or that creates
+  kausa-shaped objects, can push other namespaces' older history out. It protects etcd, not
+  fairness. A ResourceQuota on `count/explanations.kausa.fedeam.com` bounds the count in a
+  namespace.
+- **The history keeps text with real names readable for days.** An Explanation holds the whole
+  explanation, with real names mapped back, and the `--model` value, readable for up to
+  `--history-days` (7 by default, at most 30) by whoever reads Events there: the chart aggregates
+  `get`, `list` and `watch` on Explanations to `view` unless `history.readers.aggregate` is false.
+  Nothing prunes it while kausa is not running, or runs without `--history`; in the chart the CRD,
+  and with it every Explanation, exists only while kausa writes history. Backups of etcd or of the
+  cluster's objects copy the Explanations, with their real names (hypothesis: it depends on the
+  backup tool).
 - **The hard cost limit is the provider's.** kausa's budget starts over when kausa restarts, and a
   kausa that restarts often can spend more than its daily cap. Operators should set a spending cap
   or rate limit on the provider key.

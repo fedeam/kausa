@@ -97,6 +97,11 @@ spec:
             {{- if not .Values.events }}
             - --no-events
             {{- end }}
+            {{- if include "kausa.writesHistory" . }}
+            - --history
+            - --history-days
+            - {{ include "kausa.historyDays" . | quote }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-address
             - {{ printf "%s:%d" .Values.metrics.bindAddress (int .Values.metrics.port) | quote }}

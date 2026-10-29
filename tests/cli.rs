@@ -375,3 +375,239 @@ fn help_lists_the_namespace_flag_under_the_options_of_run() {
     );
     assert!(help.lines().all(|l| l.len() <= 84), "{help}");
 }
+
+// `kausa run --history` and `--history-days` (docs/adr/0014-explanation-history.md): usage errors
+// with the exact message, in the order of the checks, before anything connects; the accepted
+// forms get past the flags and fail only on the missing cluster.
+
+const ENDPOINT: &str = "https://api.example.com/v1";
+const HISTORY_NEEDS_ENDPOINT: &str = "--history needs --endpoint";
+const HISTORY_NOT_IN_DRY_RUN: &str =
+    "--history is not used with --dry-run: no explanation is written";
+const DAYS_NEED_HISTORY: &str = "--history-days needs --history";
+
+fn not_a_number_of_days(value: &str) -> String {
+    format!("--history-days takes a whole number of days from 1 to 30, not '{value}'")
+}
+
+#[test]
+fn history_needs_an_endpoint() {
+    for args in [
+        &["run", "--history"][..],
+        &["run", "--history", "--model", "m"][..],
+        &["run", "--history", "--history-days", "7"][..],
+        &["run", "--history", "--no-events"][..],
+        &["run", "--history", "--namespace", "shop"][..],
+    ] {
+        assert_usage_error(&kausa(args), HISTORY_NEEDS_ENDPOINT, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn history_is_not_used_with_dry_run() {
+    for args in [
+        &["run", "--history", "--dry-run"][..],
+        &["run", "--dry-run", "--history"][..],
+        &["run", "--history", "--endpoint", ENDPOINT, "--dry-run"][..],
+        &[
+            "run",
+            "--history",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+            "--dry-run",
+        ][..],
+        &["run", "--history", "--history-days", "3", "--dry-run"][..],
+    ] {
+        assert_usage_error(&kausa(args), HISTORY_NOT_IN_DRY_RUN, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn history_days_need_history() {
+    for args in [
+        &["run", "--history-days", "7"][..],
+        &[
+            "run",
+            "--history-days",
+            "30",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+        ][..],
+        // Before the dry-run check.
+        &["run", "--history-days", "7", "--dry-run"][..],
+    ] {
+        assert_usage_error(&kausa(args), DAYS_NEED_HISTORY, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn history_days_need_a_value() {
+    for args in [
+        &["run", "--history-days"][..],
+        &["run", "--history-days", ""][..],
+        &["run", "--history", "--endpoint", ENDPOINT, "--history-days"][..],
+    ] {
+        assert_usage_error(
+            &kausa(args),
+            "--history-days needs a value",
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn history_days_take_a_whole_number_from_1_to_30() {
+    for value in [
+        "0", "31", "abc", "-1", "7.5", "100", "1e1", " 7", "7 ", "seven",
+    ] {
+        let message = not_a_number_of_days(value);
+        // Checked as the flag is read: before every other check.
+        for args in [
+            &["run", "--history-days", value][..],
+            &[
+                "run",
+                "--history",
+                "--endpoint",
+                ENDPOINT,
+                "--history-days",
+                value,
+            ][..],
+            &["run", "--history-days", value, "--namespace", "Shop"][..],
+            &["run", "--history-days", value, "--dry-run"][..],
+        ] {
+            assert_usage_error(&kausa(args), &message, &format!("{args:?}"));
+        }
+    }
+}
+
+#[test]
+fn the_history_checks_come_in_order() {
+    // --namespace first, as today.
+    assert_usage_error(
+        &kausa(&["run", "--namespace", "Shop", "--history"]),
+        &not_a_namespace_name("Shop"),
+        "a bad namespace and --history",
+    );
+    // Then --history-days without --history, then --dry-run, then the endpoint.
+    assert_usage_error(
+        &kausa(&["run", "--history-days", "7", "--dry-run", "--model", "m"]),
+        DAYS_NEED_HISTORY,
+        "--history-days, --dry-run",
+    );
+    assert_usage_error(
+        &kausa(&["run", "--history", "--dry-run", "--model", "m"]),
+        HISTORY_NOT_IN_DRY_RUN,
+        "--history, --dry-run, no endpoint",
+    );
+    // Then the explanation settings, as today.
+    assert_usage_error(
+        &kausa(&["run", "--history", "--endpoint", ENDPOINT]),
+        "--endpoint needs --model",
+        "--history --endpoint without --model",
+    );
+    let output = kausa(&[
+        "run",
+        "--history",
+        "--endpoint",
+        "http://127.0.0.1:11434/v1",
+        "--model",
+        "m",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        !stderr(&output).contains("--history"),
+        "a plain http endpoint is refused by the endpoint check: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn run_accepts_the_history_flags_and_fails_only_on_the_missing_cluster() {
+    let cases: [&[&str]; 6] = [
+        &["run", "--history", "--endpoint", ENDPOINT, "--model", "m"],
+        &[
+            "run",
+            "--history",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+            "--history-days",
+            "30",
+        ],
+        &[
+            "run",
+            "--history",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+            "--history-days",
+            "30",
+            "--no-events",
+        ],
+        &[
+            "run",
+            "--history-days",
+            "1",
+            "--model",
+            "m",
+            "--history",
+            "--endpoint",
+            ENDPOINT,
+        ],
+        &[
+            "run",
+            "--history",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+            "--history-days",
+            "7",
+            "--namespace",
+            "shop",
+        ],
+        &[
+            "run",
+            "--history",
+            "--endpoint",
+            "http://127.0.0.1:11434/v1",
+            "--allow-http",
+            "--model",
+            "m",
+        ],
+    ];
+    for args in cases {
+        assert_gets_past_the_flags(&kausa(args), &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn help_lists_the_history_flags_and_what_kausa_writes() {
+    let output = kausa(&["--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = stdout(&output);
+    let lines: Vec<&str> = help.lines().collect();
+    let expected = [
+        "  --no-events            Do not write Events (log the explanations only)",
+        "  --history              Keep each incident's explanations in an Explanation",
+        "                         object in its namespace (needs the CRD)",
+        "  --history-days <N>     Delete history older than N days (1-30, default 7)",
+    ];
+    assert!(
+        lines.windows(expected.len()).any(|w| w == expected),
+        "the history lines do not follow --no-events: {help}"
+    );
+    let collapsed = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        collapsed
+            .contains("writes nothing but Events and, with --history, its own Explanation objects"),
+        "{help}"
+    );
+    assert!(help.lines().all(|l| l.len() <= 84), "{help}");
+}

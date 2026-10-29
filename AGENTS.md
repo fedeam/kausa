@@ -12,14 +12,14 @@ clone and remotes are described apart, under [Remotes, merges and CI](#remotes-m
 
 ## What this repo is
 
-kausa: a small Kubernetes controller in Rust (kube-rs), read-only except for its own Events, that
-watches Warning events and
-Pod status, groups the failures of one workload into one incident with deterministic rules, sends
+kausa: a small Kubernetes controller in Rust (kube-rs), read-only except for its own Events and,
+with `--history`, its own Explanations, that watches Warning events and Pod status, groups the failures of one workload into one incident with deterministic rules, sends
 a redacted context to one OpenAI-compatible model endpoint within a call and token budget, and
 writes the explanation as a Kubernetes Event on the failing object. Open source,
 `MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents, redacts their
 context, explains them with a model within a call budget (or logs the request with `--dry-run`),
-reuses explanations of repeated incidents, writes them as Events and serves metrics. The image and the Helm
+reuses explanations of repeated incidents, writes them as Events (and, with `--history`, keeps
+them in an Explanation object per incident, off by default) and serves metrics. The image and the Helm
 chart are in the repository (not published); the kind test passes locally and waits for GitHub
 Actions.
 Maintainer: FedeAM (GitHub: `fedeam`).
@@ -86,10 +86,10 @@ checkout. `kausa run` connects to the current context of the kubeconfig: before 
 read-only proxy that keeps it to its own reads. Tests never reach a cluster: `tests/cli.rs` runs
 the binary with a nonexistent kubeconfig, and a new test that starts `kausa run` must do the same.
 The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`,
-`src/record.rs`, `src/redact.rs`, `src/context.rs`, `src/prompt.rs`) is pure and tested without a
-cluster, and so are `src/budget.rs`, `src/metrics.rs` (except its listener) and the building of
-Events in `src/events.rs`; `src/run.rs`, `src/explain.rs` and `src/events.rs` talk to the API
-server and `src/model.rs` to the model endpoint.
+`src/record.rs`, `src/redact.rs`, `src/context.rs`, `src/prompt.rs`, `src/history/pure.rs`) is pure
+and tested without a cluster, and so are `src/budget.rs`, `src/metrics.rs` (except its listener)
+and the building of Events in `src/events.rs`; `src/run.rs`, `src/explain.rs`, `src/events.rs` and
+`src/history.rs` talk to the API server and `src/model.rs` to the model endpoint.
 
 ## Verification (same as CI)
 
@@ -134,7 +134,8 @@ after each sync, is linux/arm64.
 - **Pin by digest or SHA:** container images by `@sha256:` digest, Actions by full commit SHA,
   crates through `Cargo.lock` and `--locked`. Take digests and SHAs from the registry or the forge
   API and verify them; never type them from memory.
-- **kausa never reads Secrets or ConfigMaps, never writes anything but Events, sends nothing
+- **kausa never reads Secrets or ConfigMaps, never writes anything but Events and, with
+  `--history`, its own Explanations (invariant 2 of [ARCHITECTURE.md](ARCHITECTURE.md)), sends nothing
   unredacted and nothing to any host but the API server and the configured endpoint, treats
   cluster text and model answers as untrusted, never acts on an answer, and bounds its cost and
   its resource use.** A change that weakens any of these is a security bug. Threat model:

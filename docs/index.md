@@ -5,7 +5,7 @@ fails: it watches Warning events and Pod status, groups the failures of one work
 incident, sends a redacted context to one OpenAI-compatible model endpoint within a call and token
 budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
 ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
-`--no-events`).
+`--no-events`) and, with `--history` (off by default), its own Explanation objects.
 
 Status as of 2026-10-28: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
@@ -24,7 +24,9 @@ public, on 2026-10-27: the checks, both images and the kind test passed on their
 The namespaced install mode planned for v0.3 (`kausa run --namespace`, the chart's required
 `rbac.scope`) is in the code, not in a release yet; the kind test passed in both scopes on 2026-10-28
 ([2026-10-28 — First release](journal/2026-10-28-first-release.md), "the namespaced install
-mode").
+mode"). The explanation history of 0014 (`kausa run --history`, the chart's `history` values and
+the Explanation resource) is in the code too, off by default and not in a release yet; the kind
+test passed in both scopes with it on 2026-10-28 (same journal, "explanation history").
 
 ## Key facts
 
@@ -90,6 +92,8 @@ checks](how-to/develop.md).
   controls, the Event output and the safety model.
 - [Data sent to the provider](reference/data-sent-to-the-provider.md) and
   [Permissions](reference/permissions.md): what leaves the cluster and what kausa may read.
+- [Explanation resource](reference/explanation-resource.md): what the history keeps, for how
+  long, and what it never stores.
 - [Try kausa against a cluster with a local model](how-to/try-with-a-local-model.md): a
   read-only run with Ollama.
 - [Add a detection or redaction rule](how-to/add-a-rule.md): the files, tests and docs to change.

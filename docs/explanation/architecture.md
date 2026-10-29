@@ -207,8 +207,16 @@ produces the same incident, the same fingerprint and the same request bytes.
   2026-10-23), and the API server keeps Events for one hour by default (`--event-ttl`). The note
   is the summary, `Likely cause:` and the numbered steps, cut at a UTF-8 character boundary with an
   ellipsis when it does not fit.
-- **The full explanation** goes to kausa's own log, with real names mapped back. Longer text and
-  history in a custom resource are planned for v0.2.
+- **The full explanation** goes to kausa's own log, with real names mapped back.
+- **An Explanation beside the Event**, with `--history` (off by default; in the code and the
+  chart, not in a release yet): the whole text, not cut to 1024 bytes and not deleted after an
+  hour, in an `Explanation` object named `kausa.<fingerprint>` in the failing workload's namespace,
+  so the Event's name leads to it. It keeps up to five distinct texts with their counts and times,
+  is written after the Event and independently of it (a failure of one never stops the other),
+  and is deleted by kausa's own sweep after `--history-days` or beyond 500 objects. The writer
+  reads its object back as untrusted input and never logs or sends what it read ([Explanation
+  resource](../reference/explanation-resource.md), [0014. Keep each incident's full explanations
+  in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md)).
 
 ## Configuration and modes
 

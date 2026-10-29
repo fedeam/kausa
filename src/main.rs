@@ -1,9 +1,11 @@
 //! kausa: a tiny Kubernetes controller that explains failing workloads with an LLM. It reads the
-//! cluster and writes nothing but its own Events.
+//! cluster and writes nothing but its own Events and, with `--history`, its own Explanation
+//! objects.
 //!
 //! Pre-alpha. `kausa run` watches the cluster and logs incidents and, with `--endpoint` or
 //! `--dry-run`, sends or logs a redacted request for each; with `--endpoint`, the explanation is
-//! also an Event on the failing object unless `--no-events`.
+//! also an Event on the failing object unless `--no-events`, and, with `--history`, kept in an
+//! Explanation object in its namespace.
 
 mod budget;
 mod context;
@@ -11,6 +13,7 @@ mod detect;
 mod events;
 mod explain;
 mod fingerprint;
+mod history;
 mod incident;
 mod log;
 mod metrics;
@@ -32,6 +35,10 @@ const VERSION_LINE: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_
 
 /// The default settle window: a failure has to persist this long to be an incident.
 const DEFAULT_SETTLE_SECONDS: u32 = 60;
+
+/// How many days `kausa run --history` keeps an explanation without `--history-days`
+/// (docs/adr/0014-explanation-history.md).
+const DEFAULT_HISTORY_DAYS: u32 = 7;
 
 /// The most namespaces `kausa run --namespace` watches (docs/adr/0013-namespaced-install-mode.md).
 /// The help line spells the number out, so the two must change together.
@@ -66,6 +73,9 @@ const HELP: &str = concat!(
     "  --no-logs              Do not read container logs\n",
     "  --no-json-schema       Do not ask for structured output (response_format)\n",
     "  --no-events            Do not write Events (log the explanations only)\n",
+    "  --history              Keep each incident's explanations in an Explanation\n",
+    "                         object in its namespace (needs the CRD)\n",
+    "  --history-days <N>     Delete history older than N days (1-30, default 7)\n",
     "  --max-calls-per-hour <N>  Model calls allowed per hour (default 30)\n",
     "  --max-calls-per-day <N>   Model calls allowed per day (default 200)\n",
     "  --max-input-tokens <N>    Cap on a request's estimated tokens (default 6000)\n",
@@ -80,7 +90,8 @@ const HELP: &str = concat!(
     "  stdout. It stops on SIGTERM or Ctrl-C.\n",
     "\n",
     "By design, kausa never reads Secrets or ConfigMaps, writes nothing but Events\n",
-    "and sends nothing outside the cluster that has not been redacted first.\n",
+    "and, with --history, its own Explanation objects, and sends nothing outside the\n",
+    "cluster that has not been redacted first.\n",
     "\n",
     "Exit status: 0 on success or a clean stop, 1 when it cannot start or a watch\n",
     "ends (watch errors are logged and retried), 2 on a usage error or when stdout\n",
@@ -124,6 +135,8 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let (mut allow_http, mut dry_run, mut no_logs, mut no_json_schema) =
         (false, false, false, false);
     let mut no_events = false;
+    let mut history = false;
+    let mut history_days: Option<u32> = None;
     let mut metrics_address: Option<String> = None;
     let mut namespaces: Vec<String> = Vec::new();
     let mut limits = Limits::default();
@@ -192,6 +205,18 @@ fn run_command(args: &[OsString]) -> ExitCode {
                 }
                 Err(code) => return code,
             },
+            "--history-days" => match value() {
+                Ok(v) => match v.parse::<u32>() {
+                    Ok(n) if (1..=30).contains(&n) => history_days = Some(n),
+                    _ => {
+                        return usage_error(&format!(
+                            "--history-days takes a whole number of days from 1 to 30, not '{v}'"
+                        ));
+                    }
+                },
+                Err(code) => return code,
+            },
+            "--history" => history = true,
             "--no-events" => no_events = true,
             "--allow-http" => allow_http = true,
             "--dry-run" => dry_run = true,
@@ -203,6 +228,9 @@ fn run_command(args: &[OsString]) -> ExitCode {
     if let Err(message) = check_namespaces(&namespaces) {
         return usage_error(&message);
     }
+    if let Err(message) = check_history(history, history_days, dry_run, endpoint.is_some()) {
+        return usage_error(message);
+    }
     let explain = match explain_settings(
         endpoint,
         model,
@@ -212,6 +240,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
         no_logs,
         no_json_schema,
         no_events,
+        history.then(|| history_days.unwrap_or(DEFAULT_HISTORY_DAYS)),
         &limits,
     ) {
         Ok(settings) => settings,
@@ -278,6 +307,26 @@ fn check_namespaces(namespaces: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Checks `--history` and `--history-days` against the other flags, in this order: the days need
+/// `--history`, which is not used with `--dry-run` and needs `--endpoint`.
+fn check_history(
+    history: bool,
+    days: Option<u32>,
+    dry_run: bool,
+    endpoint: bool,
+) -> Result<(), &'static str> {
+    if days.is_some() && !history {
+        return Err("--history-days needs --history");
+    }
+    if history && dry_run {
+        return Err("--history is not used with --dry-run: no explanation is written");
+    }
+    if history && !endpoint {
+        return Err("--history needs --endpoint");
+    }
+    Ok(())
+}
+
 /// A DNS-1123 label, what Kubernetes takes as a namespace name: 1 to 63 characters out of
 /// `[a-z0-9-]`, starting and ending with a letter or digit.
 fn is_dns_label(name: &str) -> bool {
@@ -321,6 +370,7 @@ fn explain_settings(
     no_logs: bool,
     no_json_schema: bool,
     no_events: bool,
+    history_days: Option<u32>,
     limits: &Limits,
 ) -> Result<Option<explain::Settings>, String> {
     if endpoint.is_none() && !dry_run {
@@ -369,6 +419,7 @@ fn explain_settings(
         max_tokens: 800,
         max_input_tokens: limits.input_tokens,
         events: !no_events && !dry_run,
+        history_days,
         calls_per_hour: limits.per_hour,
         calls_per_day: limits.per_day,
         dedup_ttl: std::time::Duration::from_secs(limits.dedup_hours as u64 * 3600),

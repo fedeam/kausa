@@ -1,0 +1,22 @@
+{{- /*
+Lets the built-in view role, and so edit and admin, read Explanations, as they read Events
+(docs/adr/0014-explanation-history.md). Only with the CRD and history.readers.aggregate. No write
+is aggregated: only kausa and cluster administrators write Explanations.
+*/}}
+{{- $h := .Values.history | default dict }}
+{{- $readers := $h.readers | default dict }}
+{{- $aggregate := true }}
+{{- if hasKey $readers "aggregate" }}{{ $aggregate = $readers.aggregate }}{{ end }}
+{{- if and (include "kausa.installsCRD" .) $aggregate }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kausa.fullname" . }}-explanation-reader
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["kausa.fedeam.com"]
+    resources: ["explanations"]
+    verbs: ["get", "list", "watch"]
+{{- end }}

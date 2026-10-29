@@ -20,7 +20,11 @@ API server ──watch──▶ run.rs ──▶ record.rs ──▶ detect.rs �
      prompt.rs ──▶ budget.rs ──▶ model.rs ──▶ prompt::validate ──▶ restore names ──▶ events.rs
      (request,      (calls per    (one POST,     (schema, caps,                       (an Event on
      untrusted      hour/day,     HTTPS, no      cleaning)                            the owner)
-     wrapper)       dedup cache)  redirects)
+     wrapper)       dedup cache)  redirects)                                              │
+                                                                                          ▼
+                                                    history.rs (with --history: the Explanation
+                                                    in the incident's namespace; the sweep takes
+                                                    the explanation slot at start and hourly)
 ```
 
 Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa's own log,
@@ -44,14 +48,18 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `src/budget.rs` | Call budget per hour and per day, the deduplication cache | Cost controls change |
 | `src/model.rs` | The client of the one OpenAI-compatible endpoint | The HTTP call changes |
 | `src/events.rs` | The `Explained` / `ExplanationSkipped` Event; a repeat patches only its series | The output changes |
+| `src/history.rs` | With `--history`: the writer of the Explanation of an explained incident (`list` by name, then `create` or a merge patch of `status`, under one 10-second timeout) and the sweep (age, then `MAX_OBJECTS`, with `resourceVersion` preconditions), over `Api<DynamicObject>` | What kausa keeps of an explanation, or its retention, changes |
+| `src/history/pure.rs` | The pure, fuzzed part of the history: the name, the create and patch bodies, the reading of a stored (untrusted) object, the identity check, the merge and the sweep's plan | The Explanation's content or the merge changes |
 | `src/metrics.rs` | The counters, `/metrics`, `/healthz`, `/readyz` | A counter is added |
 | `src/log.rs` | One JSON object per line, through a serializer | Only to keep it safe |
 | `charts/kausa/` | The Helm chart: RBAC by `rbac.scope` (`templates/rbac.yaml`: a ClusterRole, or a Role per listed namespace, both from `kausa.rules`), the refusals of `kausa.validate`, Deployment, Service, NetworkPolicy | Install, permissions or a flag change |
+| `charts/kausa/files/explanation-schema.json` | The Explanation's `openAPIV3Schema`, with every cap; read by the CRD template and by the schema test in `src/history/pure.rs` | The Explanation's fields or limits change (a CHANGELOG line) |
+| `charts/kausa/templates/explanation-crd.yaml`, `explanation-reader.yaml` | The CustomResourceDefinition `explanations.kausa.fedeam.com` and the reader ClusterRole aggregated to `view`, only while the release writes history with `history.installCRD` (the reader also with `history.readers.aggregate`) | The CRD's columns or its readers change |
 | `Dockerfile` | The `ci` target (every check) and the `runtime` image | A check, a pinned tool or the image changes |
 | `tests/cli.rs` | Command-line behaviour and exit codes | A flag or exit code changes |
 | `tests/chart/render.sh` | Chart checks with helm alone: both scopes, the rules against the v0.1.0 chart, `NOTES.txt`, every refusal | The chart changes |
 | `tests/e2e/` | The kind test, once per `rbac.scope` (`KAUSA_E2E_SCOPE`): chart, Events, what leaves the cluster, the ClusterRole or the Roles and what they grant, an unlisted and a refusing namespace, metrics | The chart or what kausa writes changes |
-| `fuzz/`, `.clusterfuzzlite/` | Fuzz targets for redaction and answer validation, run by ClusterFuzzLite | A parser of untrusted text changes, or a new one is added |
+| `fuzz/`, `.clusterfuzzlite/` | Fuzz targets for redaction, answer validation and the history's merge, run by ClusterFuzzLite | A parser of untrusted text changes, or a new one is added |
 | `tests/bench/` | Seeded failures and the token-counting proxy of the benchmarks | A benchmark is repeated |
 
 Unit tests live next to the code, in each file's `tests` module.
@@ -66,8 +74,12 @@ accepted ADR, and most should never change.
    In namespaced scope it is granted those only in the listed namespaces, and nothing
    cluster-scoped; the watch and the grant come from one list
    ([0013](docs/adr/0013-namespaced-install-mode.md)).
-2. **The only write is Events**: `create`, and a `patch` of the series of an Event kausa wrote.
-   kausa never changes a workload and never acts on the model's answer.
+2. **The only writes are Events** (`create`, and a `patch` of the series of an Event kausa wrote)
+   and, with `--history`, Explanations (`create`, a `patch` of the `status` and `resourceVersion`
+   of one that carries kausa's label and the incident's `spec`, and, for retention, a `delete` of
+   one that carries kausa's label, a `kausa.<fingerprint>` name and a `spec`). kausa never changes
+   a workload and never acts on the model's answer. Amended by
+   [0014](docs/adr/0014-explanation-history.md).
 3. **Nothing reaches the model without passing `context.rs` and `redact.rs`**: only the fields of
    [Data sent to the provider](docs/reference/data-sent-to-the-provider.md), every name replaced
    and every free text redacted ([0008](docs/adr/0008-data-leaving-the-cluster.md)).
@@ -75,13 +87,14 @@ accepted ADR, and most should never change.
    needs an ADR.
 5. **Cluster text is data, never instructions**: the model gets no tools, and its answer must
    match the schema and is cleaned before it is logged or written. Code that parses untrusted text
-   (cluster text, the model's answer) never panics on any input; the fuzz targets check it.
+   (cluster text, the model's answer, an Explanation read back) never panics on any input; the
+   fuzz targets check it. Nothing read back from an Explanation is logged, sent or reused.
 6. **One call per incident, within the budget**, and one explanation at a time; nothing the
    cluster or the endpoint does may stop the watches. A namespace that refuses kausa (`403`) is
    logged and retried; it never stops the other namespaces, and kausa never widens its scope.
-7. **Rules are pure**: `detect.rs`, `incident.rs`, `fingerprint.rs` and `redact.rs` do no I/O and
-   read no clock of their own, so the same state gives the same incidents, fingerprints and
-   redactions.
+7. **Rules are pure**: `detect.rs`, `incident.rs`, `fingerprint.rs`, `redact.rs` and
+   `history/pure.rs` do no I/O and read no clock of their own (the history's `now` comes in as a
+   string), so the same state gives the same incidents, fingerprints, redactions and merges.
 8. **No cache of whole objects**: watch events are reduced to records at once, and objects are
    never logged.
 9. **kausa's log goes through `log.rs`**, so a value from the cluster cannot break a line.
@@ -110,6 +123,10 @@ feature that is not a rule starts with an issue and an ADR.
   the `kubectl auth can-i` lists in `tests/e2e/run.sh` and [SECURITY.md](SECURITY.md).
 - **The chart** → [Helm chart](docs/reference/helm-chart.md), and `tests/e2e/run.sh` if what it
   installs changes.
+- **The Explanation's schema** (`charts/kausa/files/explanation-schema.json`) → additive only
+  within `v1alpha1`, the constants in `src/history/pure.rs` and `src/prompt.rs` that its test
+  ties it to, [Explanation resource](docs/reference/explanation-resource.md), and a line in the
+  [Changelog](CHANGELOG.md), always ([0014](docs/adr/0014-explanation-history.md)).
 - **A dependency** → its reason in the pull request, and `cargo deny --locked check` green.
 - **A pinned tool, image or action** → [Maintain the repository](docs/how-to/maintain.md).
 

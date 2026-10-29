@@ -10,13 +10,17 @@ Pi 4 node, and installed with an endpoint by the kind test (`tests/e2e/run.sh`, 
 2026-10-27). The chart in the repository adds the required `rbac.scope` and the namespaced scope,
 which no release has yet; both scopes passed the kind test on 2026-10-28 ([0013. Offer a
 namespaced install mode: one watch pair and one Role per listed namespace, and nothing
-cluster-wide](../adr/0013-namespaced-install-mode.md)).
+cluster-wide](../adr/0013-namespaced-install-mode.md)). It also adds the explanation history
+(`history.enabled`, off by default), which no release has yet either; the kind test installed it
+in both scopes on 2026-10-28 ([Keep the history of explanations](#keep-the-history-of-explanations)).
 
 ## Before you start
 
 - A cluster where you may create a namespace and, for `rbac.scope=cluster`, a ClusterRole and a
   ClusterRoleBinding (for `rbac.scope=namespaced`, a Role and a RoleBinding in each listed
-  namespace instead: [Watch only some namespaces](#watch-only-some-namespaces)), and `kubectl` and
+  namespace instead: [Watch only some namespaces](#watch-only-some-namespaces)); with the history
+  on, also a CustomResourceDefinition and a ClusterRole, unless an administrator installs them
+  ([Keep the history of explanations](#keep-the-history-of-explanations)); and `kubectl` and
   Helm (CI uses 4.3.1; the chart was also rendered and installed with 3.16) pointed at it: check
   `kubectl config current-context`.
 - Nodes on linux/amd64 or linux/arm64 that can pull from `ghcr.io` (or your own build, below).
@@ -157,6 +161,72 @@ and the v0.2.0 chart ignores `rbac` and creates a ClusterRole.
 - **A namespace deleted later** takes kausa's Role there with it; recreated, it gets no access
   until the next `helm upgrade`. Remove it from the list to stop the retries.
 
+## Keep the history of explanations
+
+An Event keeps a short version of the explanation, cut to 1024 bytes, and the API server deletes
+it after an hour by default. With `history.enabled=true`, kausa also keeps each incident's whole
+explanations in an Explanation object in its namespace, for `history.days` days (7 by default, 1
+to 30) ([Explanation resource](../reference/explanation-resource.md)). Status as of 2026-10-28,
+no release has it: it needs the chart and the image of the same commit ([Run your own
+build](#run-your-own-build)).
+
+1. **Turn it on** with an endpoint and without `dryRun`; the history is written for explained
+   incidents only:
+
+   ```sh
+   helm upgrade kausa <chart> -n kausa --reuse-values --set history.enabled=true
+   ```
+
+   The chart installs the CustomResourceDefinition `explanations.kausa.fedeam.com` and a reader
+   ClusterRole aggregated to `view`, adds `--history --history-days "7"` to kausa's arguments and
+   `list`, `create`, `patch` and `delete` on `explanations` to its rules
+   ([Permissions](../reference/permissions.md)). A release installed with an earlier chart has no
+   `history` values; upgraded with `--reuse-values`, it renders with the history off.
+
+2. **Read it** with `kubectl`, as you read Events: whoever has `view`, `edit` or `admin` in the
+   namespace can, unless `history.readers.aggregate=false`:
+
+   ```sh
+   kubectl get explanations -A -o wide
+   kubectl get explanation -n <namespace> kausa.<fingerprint> -o yaml
+   ```
+
+   The name is the Event's name without its last part: the Event `kausa.<fingerprint>.<hash>`
+   leads to `kausa.<fingerprint>`.
+
+- **Turning it off deletes all history.** `helm uninstall`, `history.enabled=false`, an empty
+  `model.endpoint` or `dryRun=true` deletes the CustomResourceDefinition and, with it, every
+  Explanation in the cluster, every release's included. This is on purpose: once kausa stops
+  writing, nothing would prune text with real names. Seen in kind on 2026-10-28: `helm upgrade
+  --reuse-values --set history.enabled=false`, and `--set dryRun=true`, left no rule, reader role,
+  CustomResourceDefinition or Explanation.
+- **A namespaced install without cluster rights** sets `history.installCRD=false`: the release
+  then creates nothing cluster-scoped, and a cluster administrator installs the
+  CustomResourceDefinition and the reader role from the same values:
+
+  ```sh
+  helm template kausa <chart> --kube-version 1.36.0 -f kausa-values.yaml \
+    --set history.enabled=true --set history.installCRD=true \
+    --show-only templates/explanation-crd.yaml --show-only templates/explanation-reader.yaml |
+    kubectl apply -f -
+  ```
+
+  Their lifetime is then the administrator's: uninstalling the release does not delete them, and
+  nothing prunes the Explanations while no kausa runs with `--history`. Until the
+  CustomResourceDefinition exists, kausa logs `history write failed` and `history sweep failed`
+  naming it, and keeps working. Granting the release's Role may also need the installer to hold
+  `list`, `create`, `patch` and `delete` on `explanations` in each listed namespace (RBAC's
+  escalation check; hypothesis, as in [0013. Offer a namespaced install mode: one watch pair and
+  one Role per listed namespace, and nothing
+  cluster-wide](../adr/0013-namespaced-install-mode.md)).
+- **A second release** in the same cluster sets `history.installCRD=false`: exactly one release
+  installs the CustomResourceDefinition, and Helm refuses a second one that renders it
+  (`invalid ownership metadata`, seen in kind on 2026-10-28). Uninstalling the release that
+  installs it, or turning its history off, deletes the other releases' history too.
+- **Bound the count** in a namespace with a ResourceQuota on
+  `count/explanations.kausa.fedeam.com`, if tenants there can create Explanations
+  ([Security policy](../../SECURITY.md)).
+
 ## Verify
 
 - `kubectl -n kausa get pods`: one Pod, ready once every watch has listed (two, or two per listed
@@ -164,6 +234,7 @@ and the v0.2.0 chart ignores `rbac` and creates a ClusterRole.
 - When a workload has been failing for a minute:
   `kubectl get events.events.k8s.io -A --field-selector reportingController=kausa` (or `-n
   <namespace>` for each listed namespace) lists kausa's Events, and `kubectl describe deployment -n <namespace> <name>` shows the explanation.
+- With the history on: `kubectl get explanations -A` lists one object per explained incident.
 - `kubectl get --raw /api/v1/namespaces/kausa/services/kausa-metrics:9090/proxy/metrics` shows
   the counters.
 
@@ -190,6 +261,12 @@ and the v0.2.0 chart ignores `rbac` and creates a ClusterRole.
   seconds in kind on 2026-10-28.
 - **The Pod restarts with exit code 2** → kausa refused its arguments → `kubectl -n kausa logs
   deploy/kausa --previous` says which.
+- **`history write failed`** with `the CustomResourceDefinition explanations.kausa.fedeam.com is
+  not installed` → the history is on but its CustomResourceDefinition is missing (for example
+  `history.installCRD=false` and no administrator installed it) → install it as above; kausa
+  picks it up without a restart.
+- **`history write refused`** → an Explanation of that name exists without kausa's label, or
+  about another rule or target → kausa leaves it alone; delete it if it is not yours.
 - **`explanation skipped`** in the log → the budget, the endpoint or the validation stopped it;
   the reason is in the line and in the `ExplanationSkipped` Event.
 
@@ -200,4 +277,7 @@ helm uninstall kausa -n kausa
 kubectl delete namespace kausa
 ```
 
-kausa's Events expire with the API server's event TTL (one hour by default).
+kausa's Events expire with the API server's event TTL (one hour by default). With the history on
+and `history.installCRD=true`, `helm uninstall` also deletes the CustomResourceDefinition and every
+Explanation in the cluster; with `history.installCRD=false`, the administrator who installed it
+deletes it (`kubectl delete crd explanations.kausa.fedeam.com`), which deletes every Explanation.
