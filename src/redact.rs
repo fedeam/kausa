@@ -79,6 +79,7 @@ pub fn object_kind(kind: &str) -> &'static str {
         "Job" => "Job",
         "CronJob" => "CronJob",
         "Pod" => "Pod",
+        "PersistentVolumeClaim" => "PersistentVolumeClaim",
         _ => "Object",
     }
 }
@@ -618,9 +619,12 @@ static IPV4: LazyLock<Regex> = LazyLock::new(|| {
 });
 static IPV6_CANDIDATE: LazyLock<Regex> =
     LazyLock::new(|| regex(r"[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}"));
+/// The quoted names after a kind (`secret "<name>"`, `StorageClass "<name>"`) or after a resource
+/// qualified by its API group, as the API server's `NotFound` error writes it
+/// (`storageclass.storage.k8s.io "<name>" not found`, `deployments.apps "<name>" not found`).
 static KUBERNETES_NAME: LazyLock<Regex> = LazyLock::new(|| {
     regex(
-        r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?|pods?|containers?) (["'][^"']+["'](?:, ["'][^"']+["'])*)"#,
+        r#"(?i)\b(secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?|pods?|containers?|storageclass(?:es)?|[a-z0-9-]+(?:\.[a-z0-9-]+)+) (["'][^"']+["'](?:, ["'][^"']+["'])*)"#,
     )
 });
 /// One quoted name of a `KUBERNETES_NAME` list.

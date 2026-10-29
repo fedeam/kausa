@@ -33,6 +33,9 @@ pub enum Detection {
     /// `D011`: a workload controller cannot create its Pods, because the API server refuses them
     /// (a quota, an admission webhook or Pod Security admission).
     PodCreate,
+    /// `D012`: a PersistentVolumeClaim cannot be provisioned (a StorageClass that does not exist,
+    /// or a request the provisioner refuses).
+    ClaimProvisioning,
 }
 
 impl Detection {
@@ -49,6 +52,7 @@ impl Detection {
             Detection::PodEvicted => "D009",
             Detection::SandboxCreate => "D010",
             Detection::PodCreate => "D011",
+            Detection::ClaimProvisioning => "D012",
         }
     }
 
@@ -65,6 +69,7 @@ impl Detection {
             Detection::PodEvicted => "pod evicted",
             Detection::SandboxCreate => "pod sandbox cannot be created",
             Detection::PodCreate => "workload cannot create pods",
+            Detection::ClaimProvisioning => "volume claim cannot be provisioned",
         }
     }
 
@@ -183,6 +188,12 @@ pub fn detect_event(event: &EventRecord) -> Option<Detection> {
         ("ReplicaSet" | "Job" | "StatefulSet" | "DaemonSet", "FailedCreate") => {
             Some(Detection::PodCreate)
         }
+        // The PersistentVolume controller (`provisionClaim` in
+        // pkg/controller/volume/persistentvolume/pv_controller.go) and external provisioners
+        // (sig-storage-lib-external-provisioner) emit it on the claim when they cannot provision
+        // its volume (seen on kind, Kubernetes 1.37, with a StorageClass that does not exist and
+        // with an access mode the provisioner refuses, on 2026-10-28).
+        ("PersistentVolumeClaim", "ProvisioningFailed") => Some(Detection::ClaimProvisioning),
         _ => None,
     }
 }
@@ -234,13 +245,14 @@ mod tests {
             Detection::PodEvicted,
             Detection::SandboxCreate,
             Detection::PodCreate,
+            Detection::ClaimProvisioning,
         ];
         let ids: Vec<_> = all.iter().map(|d| d.id()).collect();
         assert_eq!(
             ids,
             [
                 "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008", "D009", "D010",
-                "D011"
+                "D011", "D012"
             ]
         );
     }

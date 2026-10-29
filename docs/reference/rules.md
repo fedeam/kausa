@@ -161,7 +161,8 @@ Warning `ProvisioningFailed` on the claim (`provisionClaim` in
 `pkg/controller/volume/events/event.go`; Kubernetes v1.37.0 and `master`, checked on 2026-10-29),
 and so do external provisioners built on `sig-storage-lib-external-provisioner`, with the note
 `failed to provision volume with StorageClass "<name>": <error>` (`controller/controller.go`,
-v11.0.1, the version kind's `local-path-provisioner` uses; checked on 2026-10-29). The claim is the
+v11.0.1, the version of `local-path-provisioner` v0.0.34, which kind v0.33.0 builds; checked on
+2026-10-29). The claim is the
 incident's object, whether a Pod uses it or not. On kind (2026-10-28) the in-tree event for a
 missing StorageClass kept being updated about every 15 seconds, while the external provisioner's
 stopped after 16 minutes with the claim still `Pending`, so that incident clears and comes back
