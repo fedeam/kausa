@@ -1,9 +1,10 @@
-//! The detection rules: which container states and Warning events are failures kausa explains.
+//! The detection rules: which container states, Warning events and Deployment `Progressing`
+//! conditions are failures kausa explains.
 //!
 //! The catalogue, with ids and triggers, is docs/reference/rules.md. Rules are pure functions of a
 //! record: no I/O, no clock, no state.
 
-use crate::record::{ContainerRecord, EventRecord, PodRecord};
+use crate::record::{ContainerRecord, DeploymentRecord, EventRecord, PodRecord};
 
 /// A detection rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -39,6 +40,10 @@ pub enum Detection {
     /// `D013`: a HorizontalPodAutoscaler cannot get its metrics, compute a replica count from
     /// them, or read its target's scale (no metrics API, a target that does not exist).
     AutoscalerMetrics,
+    /// `D014`: a Deployment's rollout passed its progress deadline (`Progressing` is `False` with
+    /// reason `ProgressDeadlineExceeded`). It yields to a Pod or event incident of the same
+    /// Deployment (docs/adr/0018-stuck-rollouts.md). The last variant, so it sorts last.
+    RolloutStalled,
 }
 
 impl Detection {
@@ -57,6 +62,7 @@ impl Detection {
             Detection::PodCreate => "D011",
             Detection::ClaimProvisioning => "D012",
             Detection::AutoscalerMetrics => "D013",
+            Detection::RolloutStalled => "D014",
         }
     }
 
@@ -75,6 +81,7 @@ impl Detection {
             Detection::PodCreate => "workload cannot create pods",
             Detection::ClaimProvisioning => "volume claim cannot be provisioned",
             Detection::AutoscalerMetrics => "autoscaler cannot get metrics",
+            Detection::RolloutStalled => "rollout does not progress",
         }
     }
 
@@ -84,8 +91,9 @@ impl Detection {
         self != Detection::JobFailed
     }
 
-    /// Whether the signal is a state that kausa reads from the Pod at every check (container
-    /// states, the Pod's scheduling condition, its eviction), rather than an event.
+    /// Whether the signal is a state that kausa reads at every check (from the Pod: container
+    /// states, the Pod's scheduling condition, its eviction; from the Deployment: its `Progressing`
+    /// condition), rather than an event.
     pub fn is_state(self) -> bool {
         matches!(
             self,
@@ -95,6 +103,7 @@ impl Detection {
                 | Detection::ContainerCreate
                 | Detection::Unschedulable
                 | Detection::PodEvicted
+                | Detection::RolloutStalled
         )
     }
 }
@@ -122,6 +131,23 @@ pub fn detect_evicted(pod: &PodRecord) -> bool {
             .message
             .as_deref()
             .is_some_and(|message| message.starts_with("Pod was rejected:"))
+}
+
+/// Whether the Deployment's rollout passed its progress deadline: its `Progressing` condition is
+/// `False` with reason `ProgressDeadlineExceeded` (exact comparisons), it is not paused, and its
+/// `status.observedGeneration` is at least its `metadata.generation`, both present. The deployment
+/// controller emits no Event for the timeout; the condition is the only signal. It keeps the
+/// reason on a Deployment paused after the timeout (`checkPausedConditions`), which waits on
+/// purpose, and a condition older than the last edit of the spec does not count (deployment
+/// controller source, pkg/controller/deployment, read on 2026-10-29).
+pub fn detect_rollout(d: &DeploymentRecord) -> bool {
+    d.progressing_status.as_deref() == Some("False")
+        && d.progressing_reason.as_deref() == Some("ProgressDeadlineExceeded")
+        && !d.paused
+        && matches!(
+            (d.generation, d.observed_generation),
+            (Some(generation), Some(observed)) if observed >= generation
+        )
 }
 
 /// The detection that a container's state matches, if any. A container matches at most one: an
@@ -267,15 +293,20 @@ mod tests {
             Detection::PodCreate,
             Detection::ClaimProvisioning,
             Detection::AutoscalerMetrics,
+            Detection::RolloutStalled,
         ];
         let ids: Vec<_> = all.iter().map(|d| d.id()).collect();
         assert_eq!(
             ids,
             [
                 "D001", "D002", "D003", "D004", "D005", "D006", "D007", "D008", "D009", "D010",
-                "D011", "D012", "D013"
+                "D011", "D012", "D013", "D014"
             ]
         );
+        // The last variant sorts last, so the tracker's second pass sees every other key.
+        let mut sorted = all;
+        sorted.sort();
+        assert_eq!(sorted, all);
     }
 
     #[test]
@@ -570,5 +601,112 @@ mod tests {
         ] {
             assert_eq!(detect_event(&event(kind, reason)), None, "{kind} {reason}");
         }
+    }
+
+    // Acceptance tests for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code: a
+    // Deployment whose `Progressing` condition says that its rollout passed its progress deadline.
+    // The condition values are the deployment controller's (pkg/controller/deployment, read on
+    // 2026-10-29); names are invented.
+
+    /// A Deployment record with the `Progressing` condition `(status, reason)`, generation 3 and
+    /// observed generation 3, not paused.
+    fn rollout(condition: Option<(&str, &str)>) -> crate::record::DeploymentRecord {
+        crate::record::DeploymentRecord {
+            namespace: "shop".into(),
+            name: "checkout".into(),
+            uid: "uid-checkout".into(),
+            generation: Some(3),
+            observed_generation: Some(3),
+            paused: false,
+            revision: Some(7),
+            replicas: Some(3),
+            progress_deadline_seconds: Some(600),
+            min_ready_seconds: Some(0),
+            updated_replicas: 1,
+            ready_replicas: 2,
+            available_replicas: 2,
+            unavailable_replicas: 1,
+            progressing_status: condition.map(|(status, _)| status.to_owned()),
+            progressing_reason: condition.map(|(_, reason)| reason.to_owned()),
+        }
+    }
+
+    const TIMED_OUT: Option<(&str, &str)> = Some(("False", "ProgressDeadlineExceeded"));
+
+    #[test]
+    fn a_rollout_past_its_progress_deadline_is_d014() {
+        assert!(detect_rollout(&rollout(TIMED_OUT)));
+        // A status written for a newer generation than the spec's still counts.
+        let mut ahead = rollout(TIMED_OUT);
+        ahead.observed_generation = Some(4);
+        assert!(detect_rollout(&ahead));
+
+        let detection = Detection::RolloutStalled;
+        assert_eq!(detection.id(), "D014");
+        assert_eq!(detection.name(), "rollout does not progress");
+        assert!(detection.settles());
+        assert!(detection.is_state());
+        assert!(!reads_logs(detection));
+    }
+
+    #[test]
+    fn other_progressing_conditions_are_not_d014() {
+        for condition in [
+            ("True", "ReplicaSetUpdated"),
+            ("True", "NewReplicaSetAvailable"),
+            ("True", "NewReplicaSetCreated"),
+            ("True", "FoundNewReplicaSet"),
+            ("Unknown", "DeploymentPaused"),
+            ("Unknown", "DeploymentResumed"),
+            ("False", "ReplicaSetCreateError"),
+            // The comparisons are exact.
+            ("false", "progressdeadlineexceeded"),
+            ("False", "progressdeadlineexceeded"),
+            ("false", "ProgressDeadlineExceeded"),
+            ("False", "ProgressDeadlineExceeded "),
+            ("True", "ProgressDeadlineExceeded"),
+            ("Unknown", "ProgressDeadlineExceeded"),
+        ] {
+            assert!(!detect_rollout(&rollout(Some(condition))), "{condition:?}");
+        }
+        // No deadline: the controller removes the condition.
+        assert!(!detect_rollout(&rollout(None)));
+    }
+
+    #[test]
+    fn a_paused_or_unobserved_rollout_is_not_d014() {
+        // `checkPausedConditions` keeps `ProgressDeadlineExceeded` on a Deployment paused after
+        // its timeout: a paused Deployment waits on purpose.
+        let mut paused = rollout(TIMED_OUT);
+        paused.paused = true;
+        assert!(!detect_rollout(&paused));
+        // The condition is older than the last edit of the spec.
+        let mut stale = rollout(TIMED_OUT);
+        stale.observed_generation = Some(2);
+        assert!(!detect_rollout(&stale));
+        let mut unobserved = rollout(TIMED_OUT);
+        unobserved.observed_generation = None;
+        assert!(!detect_rollout(&unobserved));
+        let mut no_generation = rollout(TIMED_OUT);
+        no_generation.generation = None;
+        assert!(!detect_rollout(&no_generation));
+        let mut neither = rollout(TIMED_OUT);
+        (neither.generation, neither.observed_generation) = (None, None);
+        assert!(!detect_rollout(&neither));
+    }
+
+    #[test]
+    fn the_counts_and_the_revision_play_no_part_in_d014() {
+        let mut healthy_counts = rollout(TIMED_OUT);
+        (
+            healthy_counts.updated_replicas,
+            healthy_counts.ready_replicas,
+            healthy_counts.available_replicas,
+            healthy_counts.unavailable_replicas,
+        ) = (3, 3, 3, 0);
+        healthy_counts.revision = None;
+        healthy_counts.progress_deadline_seconds = None;
+        healthy_counts.replicas = None;
+        assert!(detect_rollout(&healthy_counts));
     }
 }

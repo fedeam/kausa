@@ -1,6 +1,14 @@
-# Seeded failures for the end-to-end test. All three use kausa's own image, already loaded into
-# the kind cluster, with an argument it refuses (exit code 2), so the test pulls no other image:
-# crasher crash-loops (D001), failing-job fails (D008) and stranded cannot be scheduled (D005).
+# Seeded failures for the end-to-end test. They use kausa's own image, already loaded into the
+# kind cluster, so the test pulls no other image.
+# - crasher: a Deployment whose container refuses an argument (exit code 2) and crash-loops (D001).
+#   A readiness gate nobody sets keeps its Pod from being Ready, so its rollout also passes a 20 s
+#   progress deadline, which D001 explains first: no D014.
+# - failing-job: a Job whose only Pod fails with the same argument (D008).
+# - stranded: a Deployment whose Pod cannot be scheduled (D005).
+# - stalled: a Deployment whose Pod is held by a scheduling gate nobody removes, so it is never
+#   scheduled and nothing fails. Only its rollout, past a 20 s deadline, explains it (D014).
+# - refused: a Deployment whose Pods are refused for a PriorityClass that does not exist, so its
+#   ReplicaSet records FailedCreate (D011) and its rollout passes a 20 s deadline: no D014.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -13,12 +21,18 @@ metadata:
   namespace: e2e-shop
 spec:
   replicas: 1
+  progressDeadlineSeconds: 20
   selector:
     matchLabels: {app: crasher}
   template:
     metadata:
       labels: {app: crasher}
     spec:
+      # Nobody sets this condition, so the Pod is never Ready, not even for the instant its
+      # container runs. Without it, one Ready instant completes the rollout, which then never
+      # passes its deadline.
+      readinessGates:
+        - conditionType: example.com/e2e-never-ready
       containers:
         - name: app
           image: kausa:e2e
@@ -76,3 +90,46 @@ spec:
           image: kausa:e2e
           imagePullPolicy: Never
           args: ["--no-such-flag"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stalled
+  namespace: e2e-shop
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 20
+  selector:
+    matchLabels: {app: stalled}
+  template:
+    metadata:
+      labels: {app: stalled}
+    spec:
+      # Nobody removes this gate: the Pod stays SchedulingGated, which no Pod rule reads.
+      schedulingGates:
+        - name: example.com/e2e-hold
+      containers:
+        - name: app
+          image: kausa:e2e
+          imagePullPolicy: Never
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: refused
+  namespace: e2e-shop
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 20
+  selector:
+    matchLabels: {app: refused}
+  template:
+    metadata:
+      labels: {app: refused}
+    spec:
+      # No such PriorityClass: the API refuses every Pod of the ReplicaSet.
+      priorityClassName: e2e-no-such-class
+      containers:
+        - name: app
+          image: kausa:e2e
+          imagePullPolicy: Never

@@ -1,4 +1,6 @@
 //! From detections to incidents: signals, grouping by top-level owner, and the settle window.
+//! The signals come from Pods and Warning events, and from Deployments past their progress
+//! deadline.
 //!
 //! Everything here is a pure function of its inputs and of the time it is given, so the same
 //! cluster state always produces the same incidents and fingerprints.
@@ -8,10 +10,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
 
 use crate::detect::{
-    Detection, detect_event, detect_evicted, detect_pod_container, detect_unschedulable,
+    Detection, detect_event, detect_evicted, detect_pod_container, detect_rollout,
+    detect_unschedulable,
 };
 use crate::fingerprint::{fingerprint, normalize};
-use crate::record::{EventRecord, OwnerRef, PodRecord};
+use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord};
 
 /// How long a state signal (a container state, a Pod that cannot be scheduled or was evicted) may
 /// be missing
@@ -197,6 +200,40 @@ pub fn collect_signals(
     signals
 }
 
+/// One state signal per Deployment past its progress deadline (`D014`), about the Deployment
+/// itself, observed `now`. A record that `detect_rollout` does not match gives none. The message is
+/// `revision <n>` when the revision annotation parsed, and empty otherwise: it is the fingerprint's
+/// text, one per rollout.
+pub fn rollout_signals(rollouts: &[&DeploymentRecord], now: Timestamp) -> Vec<Signal> {
+    rollouts
+        .iter()
+        .filter(|record| detect_rollout(record))
+        .map(|record| {
+            let owner = OwnerRef {
+                api_version: "apps/v1".to_owned(),
+                kind: "Deployment".to_owned(),
+                name: record.name.clone(),
+                uid: record.uid.clone(),
+            };
+            Signal {
+                key: key(&record.namespace, &owner, Detection::RolloutStalled),
+                owner,
+                observed_at: now,
+                event: None,
+                pod: None,
+                container: None,
+                image: None,
+                reason: "ProgressDeadlineExceeded".to_owned(),
+                message: record
+                    .revision
+                    .map(|revision| format!("revision {revision}"))
+                    .unwrap_or_default(),
+                exit_code: None,
+            }
+        })
+        .collect()
+}
+
 fn key(namespace: &str, owner: &OwnerRef, detection: Detection) -> IncidentKey {
     IncidentKey {
         namespace: namespace.to_owned(),
@@ -232,6 +269,23 @@ struct Pending {
     emitted: bool,
 }
 
+/// A pending entry as one check left it.
+struct Seen {
+    first_seen: Timestamp,
+    last_seen: Timestamp,
+    emitted: bool,
+    pods: BTreeSet<String>,
+}
+
+/// The namespace, owner kind and owner name of a key: the workload it is about.
+fn owner_of(key: &IncidentKey) -> (String, String, String) {
+    (
+        key.namespace.clone(),
+        key.owner_kind.clone(),
+        key.owner_name.clone(),
+    )
+}
+
 /// Tracks failures from one check to the next and says when one becomes an incident.
 #[derive(Debug)]
 pub struct Tracker {
@@ -260,6 +314,19 @@ impl Tracker {
     ///   was first seen, by kausa or in its own series. Events of different Pods never add up.
     ///   It is forgotten as soon as no recent event remains.
     /// - A failed Job settles at once.
+    ///
+    /// A stalled rollout (`D014`) yields to an explained incident of the same Deployment. Every
+    /// other key is decided first, so the order of the keys does not matter; then a `D014` that
+    /// was not emitted yet, with another pending key of the same namespace, owner kind and owner
+    /// name, is:
+    ///
+    /// - handled, with no incident, when one of those keys was emitted, on this tick or before. It
+    ///   stays silent while its signal lasts, and `STATE_GRACE` after.
+    /// - deferred, when none of them was: its settle window keeps running, and it is emitted on
+    ///   the first tick the others are gone, so a signal that never settles delays it but does
+    ///   not silence it.
+    ///
+    /// A key that starts after `D014` was emitted is still an incident.
     pub fn tick(&mut self, now: Timestamp, signals: Vec<Signal>) -> Vec<Incident> {
         let mut groups: BTreeMap<IncidentKey, Vec<Signal>> = BTreeMap::new();
         let mut live_events = HashSet::new();
@@ -280,55 +347,109 @@ impl Tracker {
                     && now.duration_since(pending.last_signal_at) <= STATE_GRACE)
         });
 
+        let (rollouts, others): (Vec<_>, Vec<_>) = groups
+            .into_iter()
+            .partition(|(key, _)| key.detection == Detection::RolloutStalled);
         let mut incidents = Vec::new();
-        for (key, mut group) in groups {
-            let first = group.iter().map(|s| s.observed_at).min();
-            let last = group.iter().map(|s| s.observed_at).max();
-            let (Some(first), Some(last)) = (first, last) else {
+        for (key, group) in others {
+            let Some(seen) = self.observe(now, &key, &group) else {
                 continue;
             };
-            let entry = self.pending.entry(key.clone()).or_insert(Pending {
-                first_seen: first,
-                last_seen: last,
-                last_signal_at: now,
-                pods: BTreeSet::new(),
-                emitted: false,
-            });
-            entry.first_seen = entry.first_seen.min(first);
-            entry.last_seen = entry.last_seen.max(last);
-            entry.last_signal_at = now;
-            entry
-                .pods
-                .extend(group.iter().filter_map(|s| s.pod.clone()));
-            let (first_seen, last_seen, emitted) =
-                (entry.first_seen, entry.last_seen, entry.emitted);
-            let pods = entry.pods.clone();
-            if emitted || !self.settled(&key, first_seen, last_seen, &group) {
+            if !seen.emitted {
+                incidents.extend(self.emit(key, group, seen));
+            }
+        }
+
+        // The owners of the other keys, after the first pass: explained when one of their keys
+        // was emitted, waiting when one is pending and not emitted.
+        let mut explained = HashSet::new();
+        let mut waiting = HashSet::new();
+        for (key, pending) in &self.pending {
+            if key.detection == Detection::RolloutStalled {
                 continue;
             }
-            if let Some(entry) = self.pending.get_mut(&key) {
-                entry.emitted = true;
+            let owner = owner_of(key);
+            if pending.emitted {
+                explained.insert(owner);
+            } else {
+                waiting.insert(owner);
             }
-            group.sort_by(|a, b| {
-                (&a.pod, &a.container, &a.reason, &a.message).cmp(&(
-                    &b.pod,
-                    &b.container,
-                    &b.reason,
-                    &b.message,
-                ))
-            });
-            let sample = group.swap_remove(0);
-            incidents.push(Incident {
-                fingerprint: incident_fingerprint(&key, &sample, &pods),
-                owner: sample.owner.clone(),
-                key,
-                first_seen,
-                last_seen,
-                pods,
-                sample,
-            });
+        }
+        for (key, group) in rollouts {
+            let Some(seen) = self.observe(now, &key, &group) else {
+                continue;
+            };
+            if seen.emitted {
+                continue;
+            }
+            let owner = owner_of(&key);
+            if explained.contains(&owner) {
+                // Handled: another incident about the Deployment was explained.
+                if let Some(entry) = self.pending.get_mut(&key) {
+                    entry.emitted = true;
+                }
+                continue;
+            }
+            if waiting.contains(&owner) {
+                continue; // deferred
+            }
+            incidents.extend(self.emit(key, group, seen));
         }
         incidents
+    }
+
+    /// Records the signals of `key` seen `now` in its pending entry, and returns the entry as it
+    /// now is. `None` for an empty group.
+    fn observe(&mut self, now: Timestamp, key: &IncidentKey, group: &[Signal]) -> Option<Seen> {
+        let first = group.iter().map(|s| s.observed_at).min()?;
+        let last = group.iter().map(|s| s.observed_at).max()?;
+        let entry = self.pending.entry(key.clone()).or_insert(Pending {
+            first_seen: first,
+            last_seen: last,
+            last_signal_at: now,
+            pods: BTreeSet::new(),
+            emitted: false,
+        });
+        entry.first_seen = entry.first_seen.min(first);
+        entry.last_seen = entry.last_seen.max(last);
+        entry.last_signal_at = now;
+        entry
+            .pods
+            .extend(group.iter().filter_map(|s| s.pod.clone()));
+        Some(Seen {
+            first_seen: entry.first_seen,
+            last_seen: entry.last_seen,
+            emitted: entry.emitted,
+            pods: entry.pods.clone(),
+        })
+    }
+
+    /// The incident of `key`, marked as emitted, when it settled; `None` otherwise.
+    fn emit(&mut self, key: IncidentKey, mut group: Vec<Signal>, seen: Seen) -> Option<Incident> {
+        if group.is_empty() || !self.settled(&key, seen.first_seen, seen.last_seen, &group) {
+            return None;
+        }
+        if let Some(entry) = self.pending.get_mut(&key) {
+            entry.emitted = true;
+        }
+        group.sort_by(|a, b| {
+            (&a.pod, &a.container, &a.reason, &a.message).cmp(&(
+                &b.pod,
+                &b.container,
+                &b.reason,
+                &b.message,
+            ))
+        });
+        let sample = group.swap_remove(0);
+        Some(Incident {
+            fingerprint: incident_fingerprint(&key, &sample, &seen.pods),
+            owner: sample.owner.clone(),
+            key,
+            first_seen: seen.first_seen,
+            last_seen: seen.last_seen,
+            pods: seen.pods,
+            sample,
+        })
     }
 
     fn settled(
@@ -363,7 +484,8 @@ impl Tracker {
 /// `ImagePullBackOff`: there it is the image reference. A crash loop or an out-of-memory kill
 /// alternates too, between waiting in `CrashLoopBackOff` (with the back-off message) and
 /// terminated (with none), so which one the sample is depends on when kausa looked: there the
-/// text is the container's name. For a workload that cannot create Pods, the names of the Pods
+/// text is the container's name. For a stalled rollout it is the message as it is, `revision <n>`
+/// or empty, since `normalize` would turn every revision into the same text. For a workload that cannot create Pods, the names of the Pods
 /// its controller tried to create count as the incident's Pods too.
 fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<String>) -> String {
     let mut names: Vec<&str> = pods.iter().map(String::as_str).collect();
@@ -375,6 +497,7 @@ fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<Stri
         Detection::CrashLoop | Detection::OutOfMemory => {
             sample.container.clone().unwrap_or_default()
         }
+        Detection::RolloutStalled => sample.message.clone(),
         _ => normalize(&sample.message, &names),
     };
     fingerprint(
@@ -1670,6 +1793,505 @@ mod tests {
         assert_ne!(
             fingerprint(&refusal("compute-budget")),
             fingerprint(&refusal("team-pods"))
+        );
+    }
+
+    // Acceptance tests for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code. A
+    // Deployment past its progress deadline is a state signal about the Deployment itself, from
+    // `rollout_signals`, keyed like the Pod rules and `D011` of the same Deployment. It yields only
+    // to an incident of the same owner that was emitted (it is then handled, and silent for the
+    // whole stall), waits while one is pending but not emitted (deferred), and is emitted
+    // otherwise. Names and numbers are invented.
+
+    /// The Deployment `name` in `namespace`, past its progress deadline at `revision`.
+    fn stalled(
+        namespace: &str,
+        name: &str,
+        revision: Option<u64>,
+    ) -> crate::record::DeploymentRecord {
+        crate::record::DeploymentRecord {
+            namespace: namespace.into(),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+            generation: Some(3),
+            observed_generation: Some(3),
+            paused: false,
+            revision,
+            replicas: Some(3),
+            progress_deadline_seconds: Some(600),
+            min_ready_seconds: Some(0),
+            updated_replicas: 1,
+            ready_replicas: 2,
+            available_replicas: 2,
+            unavailable_replicas: 1,
+            progressing_status: Some("False".into()),
+            progressing_reason: Some("ProgressDeadlineExceeded".into()),
+        }
+    }
+
+    fn rollout_key(namespace: &str, name: &str) -> IncidentKey {
+        IncidentKey {
+            namespace: namespace.into(),
+            owner_kind: "Deployment".into(),
+            owner_name: name.into(),
+            detection: Detection::RolloutStalled,
+        }
+    }
+
+    /// One check at `t(at)`, with the signals `State::tick` gathers: those of `collect_signals`,
+    /// then those of `rollout_signals`.
+    fn rollout_check(
+        tracker: &mut Tracker,
+        at: i64,
+        pods: &[PodView<'_>],
+        events: &[EventView<'_>],
+        rollouts: &[&crate::record::DeploymentRecord],
+    ) -> Vec<Incident> {
+        let mut signals = collect_signals(pods, events, t(at), FRESH);
+        signals.extend(rollout_signals(rollouts, t(at)));
+        tracker.tick(t(at), signals)
+    }
+
+    /// What one check sees: the Pods with their top-level owner, the events with the owner
+    /// `run.rs` resolved for an object that is not a Pod, and the stalled Deployments.
+    #[derive(Default)]
+    struct Seen {
+        pods: Vec<(PodRecord, OwnerRef)>,
+        events: Vec<(EventRecord, Option<OwnerRef>)>,
+        rollouts: Vec<crate::record::DeploymentRecord>,
+    }
+
+    /// Runs a check every 5 seconds from `from` to `to`, both included, with what `seen` gives at
+    /// each time, and returns each time that produced incidents with their ids, in order.
+    fn timeline(
+        tracker: &mut Tracker,
+        (from, to): (i64, i64),
+        seen: impl Fn(i64) -> Seen,
+    ) -> Vec<(i64, Vec<&'static str>)> {
+        let mut produced = Vec::new();
+        for at in (from..=to).step_by(5) {
+            let seen = seen(at);
+            let pods: Vec<_> = seen
+                .pods
+                .iter()
+                .map(|(record, owner)| PodView { record, owner })
+                .collect();
+            let rollouts: Vec<_> = seen.rollouts.iter().collect();
+            let incidents = rollout_check(tracker, at, &pods, &views(&seen.events), &rollouts);
+            if !incidents.is_empty() {
+                produced.push((at, incidents.iter().map(|i| i.key.detection.id()).collect()));
+            }
+        }
+        produced
+    }
+
+    /// Whether the tracker holds `key` and has emitted it (or handled it, for `D014`).
+    fn emitted(tracker: &Tracker, key: &IncidentKey) -> Option<bool> {
+        tracker.pending.get(key).map(|pending| pending.emitted)
+    }
+
+    const CHECKOUT_POD: &str = "checkout-7fffb9bf5c-d98v6";
+
+    /// The Pod of `checkout` in `shop`, crash-looping or healthy, grouped under `owner`.
+    fn checkout_pod(crashing: bool, owner: &OwnerRef) -> (PodRecord, OwnerRef) {
+        let waiting = crashing.then_some("CrashLoopBackOff");
+        (pod(CHECKOUT_POD, "Running", waiting), owner.clone())
+    }
+
+    #[test]
+    fn a_stalled_rollout_alone_is_one_incident_about_the_deployment() {
+        let record = stalled("shop", "checkout", Some(7));
+        let mut tracker = Tracker::new(SETTLE);
+        assert!(rollout_check(&mut tracker, 0, &[], &[], &[&record]).is_empty());
+        assert!(rollout_check(&mut tracker, 30, &[], &[], &[&record]).is_empty());
+        let incidents = rollout_check(&mut tracker, 60, &[], &[], &[&record]);
+        assert_eq!(incidents.len(), 1);
+        let incident = &incidents[0];
+        assert_eq!(incident.key, rollout_key("shop", "checkout"));
+        assert_eq!(
+            incident.owner,
+            OwnerRef {
+                api_version: "apps/v1".into(),
+                kind: "Deployment".into(),
+                name: "checkout".into(),
+                uid: "uid-checkout".into(),
+            }
+        );
+        assert!(incident.pods.is_empty());
+        assert_eq!((incident.first_seen, incident.last_seen), (t(0), t(60)));
+        let sample = &incident.sample;
+        assert_eq!(sample.key, incident.key);
+        assert_eq!(sample.owner, incident.owner);
+        assert_eq!(sample.observed_at, t(60));
+        assert_eq!(sample.reason, "ProgressDeadlineExceeded");
+        assert_eq!(sample.message, "revision 7");
+        assert_eq!(
+            (
+                &sample.event,
+                &sample.pod,
+                &sample.container,
+                &sample.image,
+                sample.exit_code
+            ),
+            (&None, &None, &None, &None, None)
+        );
+        // Once, while the stall lasts.
+        assert!(rollout_check(&mut tracker, 65, &[], &[], &[&record]).is_empty());
+
+        // A state: forgotten `STATE_GRACE` after it is gone, and an incident again after that.
+        let mut tracker = Tracker::new(SETTLE);
+        let produced = timeline(&mut tracker, (0, 600), |at| Seen {
+            rollouts: if at <= 60 || at >= 400 {
+                vec![record.clone()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        });
+        assert_eq!(produced, [(60, vec!["D014"]), (460, vec!["D014"])]);
+    }
+
+    #[test]
+    fn rollout_signals_are_the_matching_records_only() {
+        let revision_7 = stalled("shop", "checkout", Some(7));
+        let unknown = stalled("shop", "cart", None);
+        let mut paused = stalled("shop", "search", Some(2));
+        paused.paused = true;
+        let mut progressing = stalled("shop", "web", Some(4));
+        progressing.progressing_status = Some("True".into());
+        progressing.progressing_reason = Some("ReplicaSetUpdated".into());
+        let mut stale = stalled("shop", "api", Some(9));
+        stale.observed_generation = Some(2);
+        assert!(rollout_signals(&[], t(10)).is_empty());
+        assert!(rollout_signals(&[&paused, &progressing, &stale], t(10)).is_empty());
+
+        let signals = rollout_signals(
+            &[&paused, &revision_7, &progressing, &unknown, &stale],
+            t(10),
+        );
+        assert_eq!(signals.len(), 2);
+        let signal = |name: &str| {
+            signals
+                .iter()
+                .find(|s| s.key.owner_name == name)
+                .expect("a signal for the Deployment")
+        };
+        assert_eq!(
+            *signal("checkout"),
+            Signal {
+                key: rollout_key("shop", "checkout"),
+                owner: OwnerRef {
+                    api_version: "apps/v1".into(),
+                    kind: "Deployment".into(),
+                    name: "checkout".into(),
+                    uid: "uid-checkout".into(),
+                },
+                observed_at: t(10),
+                event: None,
+                pod: None,
+                container: None,
+                image: None,
+                reason: "ProgressDeadlineExceeded".into(),
+                message: "revision 7".into(),
+                exit_code: None,
+            }
+        );
+        // No revision that parsed: no text.
+        assert_eq!(signal("cart").message, "");
+        assert_eq!(signal("cart").key, rollout_key("shop", "cart"));
+    }
+
+    #[test]
+    fn an_emitted_crash_loop_of_the_deployment_handles_d014_for_the_whole_stall() {
+        let deploy = owner("Deployment", "checkout");
+        let record = stalled("shop", "checkout", Some(7));
+        let crash_key = IncidentKey {
+            detection: Detection::CrashLoop,
+            ..rollout_key("shop", "checkout")
+        };
+        // The crash loop clears at 200 and is forgotten `STATE_GRACE` later; the stall lasts until
+        // 1200, then returns, alone, once its own entry is forgotten.
+        let seen = |at: i64| Seen {
+            pods: vec![checkout_pod(at < 200, &deploy)],
+            rollouts: if at <= 1200 || at >= 1600 {
+                vec![record.clone()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        };
+
+        // Both settle on the same tick: only the crash loop is an incident.
+        let mut tracker = Tracker::new(SETTLE);
+        assert_eq!(
+            timeline(&mut tracker, (0, 1200), seen),
+            [(60, vec!["D001"])]
+        );
+        assert_eq!(
+            emitted(&tracker, &rollout_key("shop", "checkout")),
+            Some(true),
+            "handled"
+        );
+        assert_eq!(
+            emitted(&tracker, &crash_key),
+            None,
+            "the crash loop is forgotten"
+        );
+        assert_eq!(
+            timeline(&mut tracker, (1205, 1700), seen),
+            [(1660, vec!["D014"])],
+            "a new stall after the handled one was forgotten"
+        );
+
+        // The crash loop is new on the tick where both settle (no settle window): it is decided
+        // first, whatever the order of the keys.
+        let mut tracker = Tracker::new(SignedDuration::ZERO);
+        assert_eq!(timeline(&mut tracker, (0, 1200), seen), [(0, vec!["D001"])]);
+
+        // The crash loop was explained before the stall began.
+        let mut tracker = Tracker::new(SETTLE);
+        let later = |at: i64| Seen {
+            pods: vec![checkout_pod(at < 200, &deploy)],
+            rollouts: if at >= 100 {
+                vec![record.clone()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            timeline(&mut tracker, (0, 1200), later),
+            [(60, vec!["D001"])]
+        );
+    }
+
+    #[test]
+    fn an_emitted_d011_of_the_deployment_handles_d014_for_the_whole_stall() {
+        let deploy = owner("Deployment", "checkout");
+        let record = stalled("shop", "checkout", Some(7));
+        // The ReplicaSet's `FailedCreate` event is first seen at 60, its own series already
+        // spanning the settle window, so `D011` is new on the tick where `D014` settles. The event
+        // stops being updated at 120 while the refusal lasts, and is stale after 720.
+        let seen = |at: i64| Seen {
+            events: if at >= 60 {
+                let note = quota_refusal("checkout-7fffb9bf5c-b6n3s");
+                let series = (t(0), t(at.min(120)), 9);
+                let event = event_about("e-fc", REPLICASET, "FailedCreate", &note, series);
+                vec![(event, Some(deploy.clone()))]
+            } else {
+                vec![]
+            },
+            rollouts: vec![record.clone()],
+            ..Default::default()
+        };
+        let mut tracker = Tracker::new(SETTLE);
+        assert_eq!(
+            timeline(&mut tracker, (0, 1500), seen),
+            [(60, vec!["D011"])]
+        );
+        let refused_key = IncidentKey {
+            detection: Detection::PodCreate,
+            ..rollout_key("shop", "checkout")
+        };
+        assert_eq!(
+            emitted(&tracker, &refused_key),
+            None,
+            "the stale event is gone"
+        );
+        assert_eq!(
+            emitted(&tracker, &rollout_key("shop", "checkout")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn one_fresh_probe_failure_defers_d014_until_it_is_stale() {
+        // One Warning `Unhealthy` event (count 1) about a Pod of the Deployment: a `D006` signal
+        // while fresh, which never settles. It must not silence the stall.
+        let deploy = owner("Deployment", "checkout");
+        let record = stalled("shop", "checkout", Some(7));
+        let probe = event("e-probe", "Unhealthy", "Pod", CHECKOUT_POD, t(0));
+        let seen = |_: i64| Seen {
+            pods: vec![checkout_pod(false, &deploy)],
+            events: vec![(probe.clone(), None)],
+            rollouts: vec![record.clone()],
+        };
+        let probe_key = IncidentKey {
+            detection: Detection::ProbeFailure,
+            ..rollout_key("shop", "checkout")
+        };
+        let mut tracker = Tracker::new(SETTLE);
+        // Fresh until 600 (`FRESH` after it happened): deferred, neither emitted nor handled.
+        assert_eq!(timeline(&mut tracker, (0, 600), seen), []);
+        assert_eq!(emitted(&tracker, &probe_key), Some(false));
+        assert_eq!(
+            emitted(&tracker, &rollout_key("shop", "checkout")),
+            Some(false),
+            "deferred, not handled"
+        );
+        // The first check after the event is stale.
+        assert_eq!(
+            timeline(&mut tracker, (605, 1500), seen),
+            [(605, vec!["D014"])]
+        );
+    }
+
+    #[test]
+    fn a_short_unschedulable_spell_defers_d014_until_it_is_forgotten() {
+        let deploy = owner("Deployment", "checkout");
+        let record = stalled("shop", "checkout", Some(7));
+        let mut unschedulable = pod(CHECKOUT_POD, "Pending", None);
+        unschedulable.unschedulable =
+            Some("0/3 nodes are available: 3 Insufficient memory.".into());
+        let scheduled = pod(CHECKOUT_POD, "Running", None);
+        // `D005` from 0 to 30, shorter than the settle window, then gone: forgotten once more
+        // than `STATE_GRACE` has passed since 30.
+        let seen = |at: i64| Seen {
+            pods: vec![(
+                if at <= 30 {
+                    unschedulable.clone()
+                } else {
+                    scheduled.clone()
+                },
+                deploy.clone(),
+            )],
+            rollouts: vec![record.clone()],
+            ..Default::default()
+        };
+        let mut tracker = Tracker::new(SETTLE);
+        assert_eq!(
+            timeline(&mut tracker, (0, 1000), seen),
+            [(365, vec!["D014"])]
+        );
+    }
+
+    #[test]
+    fn a_crash_loop_that_settles_later_is_explained_instead_of_d014() {
+        // The stall could settle at 60, but the crash loop that began at 30 is still pending:
+        // `D014` waits, and is handled once the crash loop is emitted at 90.
+        let deploy = owner("Deployment", "checkout");
+        let record = stalled("shop", "checkout", Some(7));
+        let seen = |at: i64| Seen {
+            pods: vec![checkout_pod((30..400).contains(&at), &deploy)],
+            rollouts: vec![record.clone()],
+            ..Default::default()
+        };
+        let mut tracker = Tracker::new(SETTLE);
+        assert_eq!(timeline(&mut tracker, (0, 85), seen), []);
+        assert_eq!(
+            emitted(&tracker, &rollout_key("shop", "checkout")),
+            Some(false),
+            "deferred"
+        );
+        assert_eq!(
+            timeline(&mut tracker, (90, 1200), seen),
+            [(90, vec!["D001"])]
+        );
+    }
+
+    #[test]
+    fn a_crash_loop_between_back_offs_still_defers_d014() {
+        // The container crashes from 0 to 25, runs from 30 to 115 (a back-off ended), and waits
+        // in back-off again from 120: the crash loop stays pending in between, and settles at 120.
+        let deploy = owner("Deployment", "checkout");
+        let record = stalled("shop", "checkout", Some(7));
+        let seen = |at: i64| Seen {
+            pods: vec![checkout_pod(at < 30 || (120..400).contains(&at), &deploy)],
+            rollouts: vec![record.clone()],
+            ..Default::default()
+        };
+        let mut tracker = Tracker::new(SETTLE);
+        assert_eq!(
+            timeline(&mut tracker, (0, 1200), seen),
+            [(120, vec!["D001"])]
+        );
+    }
+
+    #[test]
+    fn d014_is_not_held_by_another_owner() {
+        let record = stalled("shop", "checkout", Some(7));
+        let in_tenant = {
+            let (mut record, deploy) = checkout_pod(true, &owner("Deployment", "checkout"));
+            record.namespace = "tenant".into();
+            (record, deploy)
+        };
+        for (case, crashing) in [
+            ("the same name in another namespace", in_tenant),
+            (
+                "a StatefulSet of the same name",
+                checkout_pod(true, &owner("StatefulSet", "checkout")),
+            ),
+            (
+                "a Pod grouped under its ReplicaSet (a failed lookup)",
+                checkout_pod(true, &owner("ReplicaSet", "checkout-7fffb9bf5c")),
+            ),
+        ] {
+            let seen = |_: i64| Seen {
+                pods: vec![crashing.clone()],
+                rollouts: vec![record.clone()],
+                ..Default::default()
+            };
+            let mut tracker = Tracker::new(SETTLE);
+            assert_eq!(
+                timeline(&mut tracker, (0, 600), seen),
+                [(60, vec!["D001", "D014"])],
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pod_rule_after_an_emitted_d014_is_still_an_incident() {
+        let deploy = owner("Deployment", "checkout");
+        let record = stalled("shop", "checkout", Some(7));
+        let seen = |at: i64| Seen {
+            pods: vec![checkout_pod(at >= 100, &deploy)],
+            rollouts: vec![record.clone()],
+            ..Default::default()
+        };
+        let mut tracker = Tracker::new(SETTLE);
+        assert_eq!(
+            timeline(&mut tracker, (0, 600), seen),
+            [(60, vec!["D014"]), (160, vec!["D001"])]
+        );
+    }
+
+    #[test]
+    fn the_d014_fingerprint_is_one_per_revision_and_not_normalized() {
+        let fingerprint_of = |record: &crate::record::DeploymentRecord, at: i64| {
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            rollout_check(&mut tracker, at, &[], &[], &[record])
+                .first()
+                .expect("a D014 incident")
+                .fingerprint
+                .clone()
+        };
+        let revision_7 = stalled("shop", "checkout", Some(7));
+        let mut later_7 = revision_7.clone();
+        (later_7.ready_replicas, later_7.unavailable_replicas) = (0, 3);
+        let revision_8 = stalled("shop", "checkout", Some(8));
+        // The same rollout, seen at another time or after a restart, with other counts.
+        assert_eq!(
+            fingerprint_of(&revision_7, 0),
+            fingerprint_of(&later_7, 5000)
+        );
+        // The next stalled rollout is another failure.
+        assert_ne!(
+            fingerprint_of(&revision_7, 0),
+            fingerprint_of(&revision_8, 0)
+        );
+        // The text is hashed as it is: `normalize` would turn both into `revision #`.
+        assert_eq!(
+            fingerprint_of(&revision_7, 0),
+            fingerprint("D014", "shop", "Deployment", "checkout", "revision 7")
+        );
+        assert_ne!(
+            fingerprint_of(&revision_7, 0),
+            fingerprint("D014", "shop", "Deployment", "checkout", "revision #")
+        );
+        assert_eq!(
+            fingerprint_of(&stalled("shop", "checkout", None), 0),
+            fingerprint("D014", "shop", "Deployment", "checkout", "")
         );
     }
 }

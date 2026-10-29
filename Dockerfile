@@ -378,6 +378,36 @@ RUN set -euf; \
       done; \
     done; \
     rm -f /tmp/lint /tmp/notify-args /tmp/telegram.yaml
+# Stuck rollouts (docs/adr/0018-stuck-rollouts.md), on by default. With rollouts on (any value but
+# false, null included), kausa's ClusterRole or each Role has list and watch on apps deployments
+# right after the replicasets rule, and the args have no --no-rollouts. rollouts=false removes that
+# rule and adds one --no-rollouts arg, and changes nothing else. rollouts=null renders byte for
+# byte like the default. tests/chart/render.sh checks the same renders in more detail, the v0.1.0
+# rules and NOTES.txt.
+RUN set -euf; \
+    endpoint="--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k"; \
+    cluster="--set rbac.scope=cluster"; \
+    namespaced="--set rbac.scope=namespaced --set rbac.namespaces={e2e-a,e2e-b}"; \
+    fail() { echo "rollouts: $*" >&2; exit 1; }; \
+    render() { helm template kausa charts/kausa --kube-version 1.36.0 --namespace kausa-system "$@" || fail "does not render with $*"; }; \
+    count() { printf '%s\n' "$1" | grep -cx -- "$2" || true; }; \
+    plus_rule() { awk '{ print }; rs { p = substr($0, 1, ind - 2); print p "- apiGroups: [\"apps\"]"; print p "  resources: [\"deployments\"]"; print p "  verbs: [\"list\", \"watch\"]"; rs = 0 }; /^ *resources: \["replicasets"\]$/ { match($0, /^ */); ind = RLENGTH; rs = 1 }'; }; \
+    for scope in cluster namespaced; do \
+      if [ "$scope" = cluster ]; then rbac=$cluster; roles=1; else rbac=$namespaced; roles=2; fi; \
+      for values in "" "$endpoint" "--set dryRun=true --set logs=false"; do \
+        what="rbac.scope=$scope${values:+ $values}"; \
+        on=$(render $rbac $values); \
+        off=$(render $rbac $values --set rollouts=false); \
+        [ "$(count "$on" ' *resources: \["deployments"\]')" -eq "$roles" ] || fail "$what: not one deployments rule in the ClusterRole or in each Role"; \
+        [ "$(count "$on" ' *- --no-rollouts')" -eq 0 ] || fail "$what: passes --no-rollouts"; \
+        [ "$(count "$off" ' *resources: \["deployments"\]')" -eq 0 ] || fail "$what with rollouts=false: a deployments rule"; \
+        [ "$(count "$off" ' *- --no-rollouts')" -eq 1 ] || fail "$what with rollouts=false: not exactly one --no-rollouts arg"; \
+        [ "$(printf '%s\n' "$off" | grep -vx ' *- --no-rollouts' | plus_rule)" = "$on" ] || fail "$what: the default is not rollouts=false without --no-rollouts and with list and watch on deployments right after each replicasets rule"; \
+        [ "$(render $rbac $values --set rollouts=null)" = "$on" ] || fail "$what: rollouts=null renders unlike the default"; \
+      done; \
+      helm lint --strict charts/kausa $rbac --set rollouts=false > /tmp/lint 2>&1 || { cat /tmp/lint >&2; fail "helm lint --strict with rbac.scope=$scope fails with rollouts=false"; }; \
+    done; \
+    rm -f /tmp/lint
 # The refusals of kausa.validate: helm template fails with the exact message (helm lint does not
 # fail on a template's fail). The default values and rbac=null (a v0.1 release's stored values have
 # no rbac map) must reach the rbac.scope message, never a nil-pointer error. history.days comes

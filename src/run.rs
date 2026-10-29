@@ -1,11 +1,12 @@
-//! `kausa run`: the controller loop. It watches Pods and Warning events, keeps small records,
-//! correlates owners and logs each incident when it settles.
+//! `kausa run`: the controller loop. It watches Pods, Warning events and, unless `--no-rollouts`,
+//! Deployments, keeps small records, correlates owners and logs each incident when it settles.
 //!
 //! Status as of 2026-10-29 (v0.3.0, with the namespaced mode): incidents are
 //! written to kausa's log and, with `--endpoint` or `--dry-run`, explained by the model or their
 //! request logged (`explain.rs`); with `--endpoint` and without `--no-events`, the explanation is also an
-//! Event (`events.rs`). The API calls are the watches (one of Pods and one of Warning events on
-//! the whole cluster, or one of each per watched namespace), the metadata reads of ReplicaSets and
+//! Event (`events.rs`). The API calls are the watches (one of Pods, one of Warning events and,
+//! unless `--no-rollouts`, one of Deployments on the whole cluster, or one of each per watched
+//! namespace; docs/adr/0018-stuck-rollouts.md), the metadata reads of ReplicaSets and
 //! Jobs, `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`, the Event writes and, with
 //! `--history`, the Explanation writes and their sweep, at start and hourly in the explanation
 //! slot (docs/reference/permissions.md, docs/adr/0014-explanation-history.md).
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use futures::stream::{self, BoxStream, FuturesUnordered, SelectAll};
 use futures::{Stream, StreamExt};
-use k8s_openapi::api::apps::v1::ReplicaSet;
+use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::events::v1::Event;
@@ -40,16 +41,16 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::budget::{Budget, Dedup};
 use crate::context::Gathered;
-use crate::detect::detect_event;
+use crate::detect::{Detection, detect_event, detect_rollout};
 use crate::events::Writer;
 use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Shared, Work};
 use crate::history::{self, History};
-use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals};
+use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals, rollout_signals};
 use crate::log;
 use crate::metrics::{self, Metrics};
 use crate::notify::{self, Notifier};
 use crate::owner::{Hop, OwnerLookup, top_owner};
-use crate::record::{EventRecord, OwnerRef, PodRecord, controller_of};
+use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
 
 /// The reporting controller of the Events kausa writes, excluded from its own watch.
 pub const REPORTING_CONTROLLER: &str = "kausa";
@@ -79,6 +80,9 @@ pub struct Options {
     pub metrics_address: Option<String>,
     /// The namespaces to watch, in the order given; empty watches the whole cluster.
     pub namespaces: Vec<String>,
+    /// Whether to watch Deployments for stalled rollouts (`D014`); `--no-rollouts` turns it off
+    /// (docs/adr/0018-stuck-rollouts.md).
+    pub rollouts: bool,
 }
 
 /// Which watch an item comes from: `None` is the cluster-wide watch, `Some(n)` the watch of
@@ -90,6 +94,7 @@ pub type WatchKey = Option<String>;
 pub enum Kind {
     Pods,
     Events,
+    Deployments,
 }
 
 /// Whether a record in `namespace` comes from `watch`: every record does for the cluster-wide
@@ -109,19 +114,20 @@ fn forbidden(error: &watcher::Error) -> bool {
     }
 }
 
-/// Which watches have sent `InitDone` at least once. kausa is ready once every watch has: 2 on
-/// the whole cluster, or 2 per namespace (docs/adr/0013-namespaced-install-mode.md).
+/// Which watches have sent `InitDone` at least once. kausa is ready once every watch has: 3 on
+/// the whole cluster, or 3 per namespace, and 2 for each with `--no-rollouts`
+/// (docs/adr/0013-namespaced-install-mode.md, docs/adr/0018-stuck-rollouts.md).
 struct Readiness {
     total: usize,
     listed: HashSet<(Kind, WatchKey)>,
 }
 
 impl Readiness {
-    /// The watches `run` starts for `namespaces`: one Pod and one event watch per namespace, or
-    /// one of each on the whole cluster when the list is empty.
-    fn new(namespaces: &[String]) -> Self {
+    /// The watches `run` starts for `namespaces`: one Pod, one event and, with `rollouts`, one
+    /// Deployment watch per namespace, or one of each on the whole cluster when the list is empty.
+    fn new(namespaces: &[String], rollouts: bool) -> Self {
         Readiness {
-            total: 2 * namespaces.len().max(1),
+            total: (2 + usize::from(rollouts)) * namespaces.len().max(1),
             listed: HashSet::new(),
         }
     }
@@ -140,6 +146,7 @@ fn ended(kind: Kind, watch: &WatchKey) -> RunError {
     let kind = match kind {
         Kind::Pods => "pod",
         Kind::Events => "event",
+        Kind::Deployments => "deployment",
     };
     RunError::Failure(match watch {
         None => format!("the {kind} watch ended"),
@@ -307,6 +314,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             "server": version.git_version,
             "settle_seconds": options.settle.as_secs(),
             "namespaces": watched(&options.namespaces),
+            "rollouts": options.rollouts,
             "notifications": notifications(
                 options.explain.as_ref().and_then(|s| s.notify.as_ref())
             ),
@@ -344,7 +352,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         metrics: &metrics,
         notifications: RefCell::new(VecDeque::new()),
     });
-    let mut readiness = Readiness::new(&options.namespaces);
+    let mut readiness = Readiness::new(&options.namespaces, options.rollouts);
     let mut pods = watches::<Pod>(&client, &options.namespaces, &watcher::Config::default());
     let selector = format!("type=Warning,reportingController!={REPORTING_CONTROLLER}");
     let mut events = watches::<Event>(
@@ -352,6 +360,11 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         &options.namespaces,
         &watcher::Config::default().fields(&selector),
     );
+    // Only Deployments past their progress deadline are kept, as records
+    // (docs/adr/0018-stuck-rollouts.md).
+    let mut deployments = options
+        .rollouts
+        .then(|| watches::<Deployment>(&client, &options.namespaces, &watcher::Config::default()));
     let mut state = State::default();
     let mut tracker = Tracker::new(options.settle);
     let mut ticker = tokio::time::interval(TICK);
@@ -474,6 +487,26 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 Some((watch, None)) => return Err(ended(Kind::Events, &watch)),
                 None => return Err(ended(Kind::Events, &None)),
             },
+            item = async { deployments.as_mut().expect("guarded by the condition").next().await },
+                if deployments.is_some() => match item {
+                Some((watch, Some(Ok(event)))) => {
+                    let listed = matches!(event, watcher::Event::InitDone);
+                    state.on_deployment(&watch, event);
+                    if listed && readiness.listed(Kind::Deployments, &watch) {
+                        metrics.set_ready();
+                    }
+                }
+                Some((watch, Some(Err(e)))) => {
+                    metrics.inc("kausa_watch_errors_total", &[("watch", "deployments")]);
+                    log::warn(
+                        "deployment watch error",
+                        json!({"namespace": watch, "error": e.to_string()}),
+                    )?;
+                    state.on_watch_error(Kind::Deployments, &watch, &e);
+                }
+                Some((watch, None)) => return Err(ended(Kind::Deployments, &watch)),
+                None => return Err(ended(Kind::Deployments, &None)),
+            },
             _ = ticker.tick() => {
                 let now = Timestamp::now();
                 state.prune_events(now);
@@ -553,6 +586,10 @@ struct State {
     /// from that watch.
     pod_relist: HashMap<WatchKey, HashSet<String>>,
     event_relist: HashMap<WatchKey, HashSet<String>>,
+    /// Only Deployments that `detect_rollout` matches (`D014`), by UID: a rollout that moves on,
+    /// completes or is paused drops its record (docs/adr/0018-stuck-rollouts.md).
+    deployments: HashMap<String, DeploymentRecord>,
+    deployment_relist: HashMap<WatchKey, HashSet<String>>,
 }
 
 impl State {
@@ -697,6 +734,42 @@ impl State {
         Ok(())
     }
 
+    /// Applies an item of the Deployment watch `watch`. Each Deployment is reduced to its record at
+    /// once (invariant 8), kept only while `detect_rollout` matches it and removed otherwise; a
+    /// relist drops only the records inside that watch that it did not see.
+    fn on_deployment(&mut self, watch: &WatchKey, event: watcher::Event<Deployment>) {
+        match event {
+            watcher::Event::Init => {
+                self.deployment_relist.insert(watch.clone(), HashSet::new());
+            }
+            watcher::Event::InitDone => {
+                if let Some(seen) = self.deployment_relist.remove(watch) {
+                    self.deployments.retain(|uid, record| {
+                        !inside(watch, &record.namespace) || seen.contains(uid)
+                    });
+                }
+            }
+            watcher::Event::Apply(deployment) | watcher::Event::InitApply(deployment) => {
+                let Some(record) = DeploymentRecord::from_deployment(&deployment) else {
+                    return;
+                };
+                if let Some(seen) = self.deployment_relist.get_mut(watch) {
+                    seen.insert(record.uid.clone());
+                }
+                if detect_rollout(&record) {
+                    self.deployments.insert(record.uid.clone(), record);
+                } else {
+                    self.deployments.remove(&record.uid);
+                }
+            }
+            watcher::Event::Delete(deployment) => {
+                if let Some(uid) = deployment.metadata.uid {
+                    self.deployments.remove(&uid);
+                }
+            }
+        }
+    }
+
     /// Forgets what a watch had shown when the API server refuses it (`403`): that kind's records
     /// inside the watch and its open relist, so that a revoked namespace stops giving signals.
     /// `Restarting` then starts a new watcher, whose relist brings them back once access is.
@@ -715,6 +788,11 @@ impl State {
                 self.event_relist.remove(watch);
                 self.events
                     .retain(|_, (record, _)| !inside(watch, &record.regarding.namespace));
+            }
+            Kind::Deployments => {
+                self.deployment_relist.remove(watch);
+                self.deployments
+                    .retain(|_, record| !inside(watch, &record.namespace));
             }
         }
     }
@@ -743,11 +821,15 @@ impl State {
                 job_owner: job_owner.as_ref(),
             })
             .collect();
-        tracker.tick(now, collect_signals(&pods, &events, now, EVENT_FRESHNESS))
+        let mut signals = collect_signals(&pods, &events, now, EVENT_FRESHNESS);
+        let rollouts: Vec<_> = self.deployments.values().collect();
+        signals.extend(rollout_signals(&rollouts, now));
+        tracker.tick(now, signals)
     }
 
     /// What an explanation needs about an incident, copied out of the state: the incident's Pods
-    /// (sample first), their events, and which log to read.
+    /// (sample first), their events, which log to read and, for `D014`, the Deployment's record
+    /// if kausa still keeps it.
     fn job(&self, incident: Incident) -> Work {
         let namespace = incident.key.namespace.clone();
         let sample = incident.sample.pod.clone();
@@ -776,6 +858,9 @@ impl State {
             .collect();
         events.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.uid.cmp(&b.uid)));
         let log = self.log_source(&incident, &pods);
+        let rollout = (incident.key.detection == Detection::RolloutStalled)
+            .then(|| self.deployments.get(&incident.owner.uid).cloned())
+            .flatten();
         Work {
             gathered: Gathered {
                 pods_total: self.pods_of(&incident.owner),
@@ -783,6 +868,7 @@ impl State {
                 pods,
                 events,
                 log_tail: None,
+                rollout,
             },
             log,
             attempt: 0,
@@ -1566,7 +1652,7 @@ mod tests {
     #[test]
     fn readiness_waits_for_every_watch_of_every_namespace() {
         let namespaces = vec!["a".to_owned(), "b".to_owned()];
-        let mut readiness = Readiness::new(&namespaces);
+        let mut readiness = Readiness::new(&namespaces, false);
         assert!(!readiness.listed(Kind::Pods, &ns("a")));
         assert!(
             !readiness.listed(Kind::Pods, &ns("a")),
@@ -1592,7 +1678,7 @@ mod tests {
 
     #[test]
     fn readiness_in_cluster_mode_waits_for_both_watches() {
-        let mut readiness = Readiness::new(&[]);
+        let mut readiness = Readiness::new(&[], false);
         assert!(!readiness.listed(Kind::Events, &CLUSTER));
         assert!(!readiness.listed(Kind::Events, &CLUSTER));
         assert!(readiness.listed(Kind::Pods, &CLUSTER));
@@ -1601,7 +1687,7 @@ mod tests {
 
     #[test]
     fn readiness_with_one_namespace_needs_its_two_watches() {
-        let mut readiness = Readiness::new(&["shop".to_owned()]);
+        let mut readiness = Readiness::new(&["shop".to_owned()], false);
         assert!(!readiness.listed(Kind::Pods, &ns("shop")));
         assert!(readiness.listed(Kind::Events, &ns("shop")));
     }
@@ -1999,5 +2085,468 @@ mod tests {
             ("ReplicaSet", "orphan-5d4c3b2a1")
         );
         assert_eq!(incident.owner.uid, "uid-orphan-5d4c3b2a1");
+    }
+
+    // Acceptance tests for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code: the
+    // Deployment watch, on unless `--no-rollouts`. `State` keeps a Deployment's record only while
+    // `detect_rollout` matches it, by UID; relists and `403`s work per watch as for Pods and
+    // events (docs/adr/0013-namespaced-install-mode.md), and readiness counts the third watch.
+
+    fn deployment_uid(namespace: &str, name: &str) -> String {
+        format!("deployment-{namespace}-{name}")
+    }
+
+    /// A Deployment past its progress deadline (`stalled`), or one whose rollout completed.
+    // Invented values only: no real cluster output (AGENTS.md, Security rules).
+    fn deployment(
+        namespace: &str,
+        name: &str,
+        stalled: bool,
+    ) -> k8s_openapi::api::apps::v1::Deployment {
+        let (status, reason) = if stalled {
+            ("False", "ProgressDeadlineExceeded")
+        } else {
+            ("True", "NewReplicaSetAvailable")
+        };
+        serde_json::from_value(json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": name, "namespace": namespace,
+                         "uid": deployment_uid(namespace, name), "generation": 2,
+                         "annotations": {"deployment.kubernetes.io/revision": "3"}},
+            "spec": {
+                "replicas": 2,
+                "progressDeadlineSeconds": 20,
+                "selector": {"matchLabels": {"app": name}},
+                "template": {
+                    "metadata": {"labels": {"app": name}},
+                    "spec": {"containers": [{"name": "app",
+                                             "image": "registry.example.com/app:1"}]}
+                }
+            },
+            "status": {
+                "observedGeneration": 2,
+                "replicas": 2,
+                "updatedReplicas": 1,
+                "readyReplicas": 1,
+                "availableReplicas": 1,
+                "unavailableReplicas": 1,
+                "conditions": [{"type": "Progressing", "status": status, "reason": reason}]
+            }
+        }))
+        .expect("the fixture is a valid Deployment")
+    }
+
+    fn on_deployment(
+        state: &mut State,
+        watch: &WatchKey,
+        event: watcher::Event<k8s_openapi::api::apps::v1::Deployment>,
+    ) {
+        state.on_deployment(watch, event);
+    }
+
+    fn has_deployment(state: &State, namespace: &str, name: &str) -> bool {
+        state
+            .deployments
+            .contains_key(&deployment_uid(namespace, name))
+    }
+
+    /// `two_namespaces`, plus stalled Deployments `d1` and `d2` in `a` and `b`, each applied by
+    /// the watch of its namespace.
+    fn two_namespaces_with_rollouts() -> State {
+        let mut state = two_namespaces();
+        for namespace in ["a", "b"] {
+            for name in ["d1", "d2"] {
+                on_deployment(
+                    &mut state,
+                    &ns(namespace),
+                    watcher::Event::Apply(deployment(namespace, name, true)),
+                );
+            }
+        }
+        assert_eq!(state.deployments.len(), 4);
+        state
+    }
+
+    /// The same records, applied by the cluster-wide watches.
+    fn whole_cluster_with_rollouts() -> State {
+        let mut state = whole_cluster();
+        for namespace in ["a", "b"] {
+            for name in ["d1", "d2"] {
+                on_deployment(
+                    &mut state,
+                    &CLUSTER,
+                    watcher::Event::Apply(deployment(namespace, name, true)),
+                );
+            }
+        }
+        assert_eq!(state.deployments.len(), 4);
+        state
+    }
+
+    #[test]
+    fn a_stalled_deployment_is_kept_as_its_record_by_uid() {
+        let mut state = State::default();
+        let stalled = deployment("shop", "checkout", true);
+        on_deployment(&mut state, &CLUSTER, watcher::Event::Apply(stalled.clone()));
+        let expected = crate::record::DeploymentRecord::from_deployment(&stalled)
+            .expect("a complete Deployment");
+        assert_eq!(
+            state.deployments.get(&deployment_uid("shop", "checkout")),
+            Some(&expected)
+        );
+        assert_eq!(state.deployments.len(), 1);
+    }
+
+    #[test]
+    fn a_deployment_relist_of_one_namespace_drops_only_its_unseen_records() {
+        let mut state = two_namespaces_with_rollouts();
+        on_deployment(&mut state, &ns("a"), watcher::Event::Init);
+        on_deployment(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(deployment("a", "d1", true)),
+        );
+        on_deployment(&mut state, &ns("a"), watcher::Event::InitDone);
+        assert!(has_deployment(&state, "a", "d1"));
+        assert!(!has_deployment(&state, "a", "d2"), "unseen by a's relist");
+        assert!(has_deployment(&state, "b", "d1") && has_deployment(&state, "b", "d2"));
+        assert_eq!(
+            (state.pods.len(), state.events.len()),
+            (4, 4),
+            "a Deployment relist leaves the Pods and the Events"
+        );
+        // And a Pod relist leaves the Deployments.
+        on_pod(&mut state, &ns("b"), watcher::Event::Init);
+        on_pod(&mut state, &ns("b"), watcher::Event::InitDone);
+        assert_eq!(state.deployments.len(), 3);
+    }
+
+    #[test]
+    fn deployment_relists_of_two_namespaces_at_once_do_not_mix() {
+        let mut state = two_namespaces_with_rollouts();
+        // Both watches restart; b finishes first, while a's relist is still open.
+        on_deployment(&mut state, &ns("a"), watcher::Event::Init);
+        on_deployment(&mut state, &ns("b"), watcher::Event::Init);
+        on_deployment(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(deployment("a", "d1", true)),
+        );
+        on_deployment(
+            &mut state,
+            &ns("b"),
+            watcher::Event::InitApply(deployment("b", "d2", true)),
+        );
+        on_deployment(&mut state, &ns("b"), watcher::Event::InitDone);
+        assert!(has_deployment(&state, "a", "d1") && has_deployment(&state, "a", "d2"));
+        assert!(!has_deployment(&state, "b", "d1") && has_deployment(&state, "b", "d2"));
+        on_deployment(
+            &mut state,
+            &ns("a"),
+            watcher::Event::InitApply(deployment("a", "d2", true)),
+        );
+        on_deployment(&mut state, &ns("a"), watcher::Event::InitDone);
+        assert!(has_deployment(&state, "a", "d1") && has_deployment(&state, "a", "d2"));
+        assert_eq!(state.deployments.len(), 3);
+    }
+
+    #[test]
+    fn the_cluster_wide_deployment_watch_relists_every_namespace() {
+        let mut state = whole_cluster_with_rollouts();
+        on_deployment(&mut state, &CLUSTER, watcher::Event::Init);
+        on_deployment(
+            &mut state,
+            &CLUSTER,
+            watcher::Event::InitApply(deployment("b", "d2", true)),
+        );
+        on_deployment(&mut state, &CLUSTER, watcher::Event::InitDone);
+        assert!(has_deployment(&state, "b", "d2"));
+        assert_eq!(
+            state.deployments.len(),
+            1,
+            "every unseen Deployment is dropped"
+        );
+        assert_eq!((state.pods.len(), state.events.len()), (4, 4));
+    }
+
+    #[test]
+    fn a_forbidden_deployment_watch_drops_only_the_deployments_of_its_namespace() {
+        for error in forbidden_errors() {
+            let mut state = two_namespaces_with_rollouts();
+            state.on_watch_error(Kind::Deployments, &ns("a"), &error);
+            assert!(
+                !has_deployment(&state, "a", "d1") && !has_deployment(&state, "a", "d2"),
+                "{error}"
+            );
+            assert!(
+                has_deployment(&state, "b", "d1") && has_deployment(&state, "b", "d2"),
+                "{error}"
+            );
+            assert_eq!(
+                (state.pods.len(), state.events.len()),
+                (4, 4),
+                "{error}: the Pods and the Events stay"
+            );
+            // A refused Pod or event watch leaves the Deployments.
+            state.on_watch_error(Kind::Pods, &ns("b"), &error);
+            state.on_watch_error(Kind::Events, &ns("b"), &error);
+            assert_eq!(state.deployments.len(), 2, "{error}");
+        }
+        for error in forbidden_errors() {
+            let mut state = whole_cluster_with_rollouts();
+            state.on_watch_error(Kind::Deployments, &CLUSTER, &error);
+            assert!(state.deployments.is_empty(), "{error}");
+            assert_eq!((state.pods.len(), state.events.len()), (4, 4), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_forbidden_deployment_watch_drops_its_open_relist_only() {
+        for error in forbidden_errors() {
+            let mut state = two_namespaces_with_rollouts();
+            on_deployment(&mut state, &ns("a"), watcher::Event::Init);
+            on_deployment(&mut state, &ns("b"), watcher::Event::Init);
+            on_deployment(
+                &mut state,
+                &ns("b"),
+                watcher::Event::InitApply(deployment("b", "d1", true)),
+            );
+            state.on_watch_error(Kind::Deployments, &ns("a"), &error);
+            assert!(!state.deployment_relist.contains_key(&ns("a")), "{error}");
+            assert!(state.deployment_relist.contains_key(&ns("b")), "{error}");
+            on_deployment(&mut state, &ns("b"), watcher::Event::InitDone);
+            assert!(
+                !has_deployment(&state, "a", "d1") && !has_deployment(&state, "a", "d2"),
+                "{error}"
+            );
+            assert!(
+                has_deployment(&state, "b", "d1") && !has_deployment(&state, "b", "d2"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_deployment_watch_errors_keep_the_records_and_the_open_relist() {
+        let errors = vec![
+            watcher::Error::InitialListFailed(api_error(500)),
+            watcher::Error::WatchStartFailed(api_error(401)),
+            watcher::Error::WatchStartFailed(api_error(404)),
+            watcher::Error::WatchError(status(410, "Expired")),
+            watcher::Error::WatchError(status(500, "InternalError")),
+            watcher::Error::WatchError(status(0, "Forbidden")),
+            watcher::Error::WatchFailed(kube::Error::LinesCodecMaxLineLengthExceeded),
+            watcher::Error::NoResourceVersion,
+        ];
+        for error in errors {
+            for watch in [ns("a"), CLUSTER] {
+                let mut state = two_namespaces_with_rollouts();
+                state.on_watch_error(Kind::Deployments, &watch, &error);
+                assert_eq!(state.deployments.len(), 4, "{error} on {watch:?}");
+            }
+            let mut state = two_namespaces_with_rollouts();
+            on_deployment(&mut state, &ns("a"), watcher::Event::Init);
+            on_deployment(
+                &mut state,
+                &ns("a"),
+                watcher::Event::InitApply(deployment("a", "d1", true)),
+            );
+            state.on_watch_error(Kind::Deployments, &ns("a"), &error);
+            assert_eq!(state.deployments.len(), 4, "{error}: the records stay");
+            on_deployment(&mut state, &ns("a"), watcher::Event::InitDone);
+            assert!(
+                has_deployment(&state, "a", "d1") && !has_deployment(&state, "a", "d2"),
+                "{error}: the relist went on"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_matching_deployment_is_kept() {
+        let mut state = two_namespaces_with_rollouts();
+        // Progress, a completed rollout or a new one: the next update no longer matches.
+        on_deployment(
+            &mut state,
+            &ns("a"),
+            watcher::Event::Apply(deployment("a", "d1", false)),
+        );
+        assert!(!has_deployment(&state, "a", "d1"));
+        on_deployment(
+            &mut state,
+            &ns("b"),
+            watcher::Event::InitApply(deployment("b", "d1", false)),
+        );
+        assert!(!has_deployment(&state, "b", "d1"));
+        // A delete removes it whatever it says.
+        on_deployment(
+            &mut state,
+            &ns("a"),
+            watcher::Event::Delete(deployment("a", "d2", true)),
+        );
+        assert!(!has_deployment(&state, "a", "d2"));
+        assert_eq!(state.deployments.len(), 1);
+
+        // A Deployment that does not match is never kept.
+        let mut state = State::default();
+        for event in [
+            watcher::Event::Apply(deployment("a", "d1", false)),
+            watcher::Event::InitApply(deployment("a", "d2", false)),
+        ] {
+            on_deployment(&mut state, &ns("a"), event);
+        }
+        // Nor is a stalled one paused, or one whose status is older than its spec.
+        let mut paused = deployment("a", "d3", true);
+        paused.spec.as_mut().expect("a spec").paused = Some(true);
+        let mut edited = deployment("a", "d4", true);
+        edited.metadata.generation = Some(3);
+        for event in [watcher::Event::Apply(paused), watcher::Event::Apply(edited)] {
+            on_deployment(&mut state, &ns("a"), event);
+        }
+        assert!(state.deployments.is_empty());
+
+        // A Deployment without a UID is ignored, and removes nothing.
+        let mut state = two_namespaces_with_rollouts();
+        let mut anonymous = deployment("a", "d1", false);
+        anonymous.metadata.uid = None;
+        on_deployment(
+            &mut state,
+            &ns("a"),
+            watcher::Event::Apply(anonymous.clone()),
+        );
+        on_deployment(&mut state, &ns("a"), watcher::Event::Delete(anonymous));
+        let mut anonymous = deployment("a", "d5", true);
+        anonymous.metadata.uid = None;
+        on_deployment(&mut state, &ns("a"), watcher::Event::Apply(anonymous));
+        assert_eq!(state.deployments.len(), 4);
+    }
+
+    #[test]
+    fn readiness_counts_the_deployment_watches() {
+        // Whole cluster: 3 watches.
+        let mut readiness = Readiness::new(&[], true);
+        assert!(!readiness.listed(Kind::Pods, &CLUSTER));
+        assert!(!readiness.listed(Kind::Events, &CLUSTER));
+        assert!(
+            !readiness.listed(Kind::Events, &CLUSTER),
+            "a repeated InitDone of one watch counts once"
+        );
+        assert!(readiness.listed(Kind::Deployments, &CLUSTER));
+
+        // 3 per namespace.
+        let namespaces = vec!["a".to_owned(), "b".to_owned()];
+        let mut readiness = Readiness::new(&namespaces, true);
+        for (kind, watch) in [
+            (Kind::Pods, ns("a")),
+            (Kind::Events, ns("a")),
+            (Kind::Deployments, ns("a")),
+            (Kind::Deployments, ns("a")),
+            (Kind::Pods, ns("b")),
+            (Kind::Events, ns("b")),
+        ] {
+            assert!(!readiness.listed(kind, &watch), "{kind:?} {watch:?}");
+        }
+        assert!(readiness.listed(Kind::Deployments, &ns("b")));
+
+        // With `--no-rollouts`: 2, or 2 per namespace.
+        let mut readiness = Readiness::new(&[], false);
+        assert!(!readiness.listed(Kind::Pods, &CLUSTER));
+        assert!(readiness.listed(Kind::Events, &CLUSTER));
+        let mut readiness = Readiness::new(&namespaces, false);
+        assert!(!readiness.listed(Kind::Pods, &ns("a")));
+        assert!(!readiness.listed(Kind::Events, &ns("a")));
+        assert!(!readiness.listed(Kind::Pods, &ns("b")));
+        assert!(readiness.listed(Kind::Events, &ns("b")));
+    }
+
+    #[test]
+    fn an_ended_deployment_watch_is_a_failure_that_names_it() {
+        let failure = |watch: &WatchKey| match ended(Kind::Deployments, watch) {
+            RunError::Failure(message) => message,
+            RunError::Output(error) => panic!("not an output error: {error}"),
+        };
+        assert_eq!(failure(&CLUSTER), "the deployment watch ended");
+        assert_eq!(
+            failure(&ns("shop")),
+            "the deployment watch of namespace shop ended"
+        );
+    }
+
+    /// A Pod of the Deployment `checkout` in `shop`, through its ReplicaSet (which `Parents`
+    /// resolves), running and healthy.
+    fn checkout_pod(name: &str) -> Pod {
+        let mut pod = pod("shop", name);
+        pod.metadata.owner_references = Some(vec![
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "checkout-7fffb9bf5c",
+                "uid": "uid-checkout-7fffb9bf5c", "controller": true
+            }))
+            .expect("an owner reference"),
+        ]);
+        pod
+    }
+
+    #[test]
+    fn a_stalled_rollout_is_an_incident_whose_job_carries_the_record_and_no_pod() {
+        let mut state = State::default();
+        for name in ["checkout-7fffb9bf5c-d98v6", "checkout-7fffb9bf5c-7frqt"] {
+            block_on(state.on_pod(
+                &CLUSTER,
+                watcher::Event::Apply(checkout_pod(name)),
+                &Parents,
+            ))
+            .expect("the log is written");
+        }
+        // Another workload's Pod in the same namespace is not counted.
+        on_pod(
+            &mut state,
+            &CLUSTER,
+            watcher::Event::Apply(pod("shop", "web-1")),
+        );
+        let mut stalled = deployment("shop", "checkout", true);
+        stalled.metadata.uid = Some("uid-checkout".into());
+        on_deployment(&mut state, &CLUSTER, watcher::Event::Apply(stalled.clone()));
+        let record = crate::record::DeploymentRecord::from_deployment(&stalled)
+            .expect("a complete Deployment");
+
+        let mut tracker = Tracker::new(SignedDuration::from_secs(60));
+        let now = Timestamp::now();
+        assert!(state.tick(&mut tracker, now).is_empty());
+        let later = now
+            .checked_add(SignedDuration::from_secs(60))
+            .expect("a valid time");
+        let incidents = state.tick(&mut tracker, later);
+        assert_eq!(incidents.len(), 1, "{incidents:?}");
+        let incident = incidents.into_iter().next().expect("an incident");
+        assert_eq!(
+            incident.key.detection,
+            crate::detect::Detection::RolloutStalled
+        );
+        assert_eq!(
+            (
+                incident.owner.api_version.as_str(),
+                incident.owner.kind.as_str(),
+                incident.owner.name.as_str(),
+                incident.owner.uid.as_str()
+            ),
+            ("apps/v1", "Deployment", "checkout", "uid-checkout")
+        );
+        assert!(incident.pods.is_empty());
+
+        let work = state.job(incident.clone());
+        assert_eq!(work.gathered.rollout, Some(record));
+        assert!(work.gathered.pods.is_empty());
+        assert!(work.gathered.events.is_empty());
+        assert_eq!(work.gathered.pods_total, 2);
+        assert!(work.log.is_none());
+
+        // Another incident of the same Deployment carries no rollout.
+        let mut crash = incident.clone();
+        crash.key.detection = crate::detect::Detection::CrashLoop;
+        assert_eq!(state.job(crash).gathered.rollout, None);
+
+        // The record is gone (the rollout progressed): the job says so.
+        on_deployment(&mut state, &CLUSTER, watcher::Event::Delete(stalled));
+        assert_eq!(state.job(incident).gathered.rollout, None);
     }
 }

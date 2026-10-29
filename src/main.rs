@@ -66,6 +66,7 @@ const HELP: &str = concat!(
     "Options of kausa run:\n",
     "  --settle-seconds <N>   How long a failure must persist (0-3600, default 60)\n",
     "  --namespace <NAME>     Watch only this namespace; repeat for more (up to 32)\n",
+    "  --no-rollouts          Do not watch Deployments for stalled rollouts (D014)\n",
     "  --endpoint <URL>       OpenAI-compatible base URL, e.g. https://host/v1;\n",
     "                         each incident's redacted context is sent there\n",
     "  --model <NAME>         The model to ask (needed with --endpoint)\n",
@@ -92,9 +93,9 @@ const HELP: &str = concat!(
     "                            (for example 0.0.0.0:9090)\n",
     "\n",
     "  kausa run uses the in-cluster service account when it runs in a Pod, and the\n",
-    "  current context of the kubeconfig otherwise. It watches Pods and Warning\n",
-    "  events, groups the failures of one workload into one incident once they\n",
-    "  persist for the settle window, and writes one JSON object per line to\n",
+    "  current context of the kubeconfig otherwise. It watches Pods, Warning events\n",
+    "  and Deployments, groups the failures of one workload into one incident once\n",
+    "  they persist for the settle window, and writes one JSON object per line to\n",
     "  stdout. It stops on SIGTERM or Ctrl-C.\n",
     "\n",
     "By design, kausa never reads Secrets or ConfigMaps, writes nothing but Events\n",
@@ -144,6 +145,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let (mut allow_http, mut dry_run, mut no_logs, mut no_json_schema) =
         (false, false, false, false);
     let mut no_events = false;
+    let mut no_rollouts = false;
     let mut history = false;
     let mut history_days: Option<u32> = None;
     let mut metrics_address: Option<String> = None;
@@ -252,6 +254,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
             "--notify-allow-http" => notify_flags.allow_http = true,
             "--history" => history = true,
             "--no-events" => no_events = true,
+            "--no-rollouts" => no_rollouts = true,
             "--allow-http" => allow_http = true,
             "--dry-run" => dry_run = true,
             "--no-logs" => no_logs = true,
@@ -303,6 +306,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
         explain,
         metrics_address,
         namespaces,
+        rollouts: !no_rollouts,
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,

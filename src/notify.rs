@@ -1027,6 +1027,7 @@ mod tests {
             pods_total: 1,
             log_tail: Some("LOG-CANARY panic: unknown flag --colour\n".into()),
             incident,
+            rollout: None,
         }
     }
 

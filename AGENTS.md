@@ -13,7 +13,7 @@ clone and remotes are described apart, under [Remotes, merges and CI](#remotes-m
 ## What this repo is
 
 kausa: a small Kubernetes controller in Rust (kube-rs), read-only except for its own Events and,
-with `--history`, its own Explanations, that watches Warning events and Pod status, groups the failures of one workload into one incident with deterministic rules, sends
+with `--history`, its own Explanations, that watches Warning events, Pod status and Deployments, groups the failures of one workload into one incident with deterministic rules, sends
 a redacted context to one OpenAI-compatible model endpoint within a call and token budget, and
 writes the explanation as a Kubernetes Event on the failing object and, optionally, posts it to one
 webhook. Open source,

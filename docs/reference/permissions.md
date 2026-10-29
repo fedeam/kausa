@@ -5,13 +5,16 @@ The Kubernetes API permissions kausa's chart grants, and the ones it never asks 
 Status as of 2026-10-29: the chart in `charts/kausa` grants this table, `pods/log` only when
 kausa explains incidents (an endpoint or dry-run) with log collection on, and the Event writes
 only with an endpoint, outside dry-run, unless they are turned off, and the `explanations` row only
-while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; since v0.3.0)
-([Helm chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
+while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; since v0.3.0), and the
+`deployments` row while Deployments are watched for stalled rollouts (`rollouts`, on by default;
+added for v0.4 on 2026-10-29) ([Helm chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
 namespaces only (`namespaced`, since v0.3.0; see [Where the permissions
 apply](#where-the-permissions-apply)). Why it is this list: [0009. Run with read-only permissions
 that never include Secrets](../adr/0009-least-privilege-rbac.md); why there are two scopes: [0013.
 Offer a namespaced install mode: one watch pair and one Role per listed namespace, and nothing
-cluster-wide](../adr/0013-namespaced-install-mode.md). The kind test (`tests/e2e/run.sh`) checks
+cluster-wide](../adr/0013-namespaced-install-mode.md); why kausa reads Deployments: [0018. Explain a
+Deployment past its progress deadline (`D014`) from a Deployment watch that is on by default, and
+add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md). The kind test (`tests/e2e/run.sh`) checks
 the installed role against this table with `kubectl auth can-i`, both what it allows and a list
 of what it must refuse, in each scope; both scopes passed on 2026-10-28 on the maintainer's
 machine. As of 2026-10-26,
@@ -37,6 +40,7 @@ The kind test checks that the `kubectl auth can-i` lists stay the same with noti
 | `events.k8s.io` | `events` | `list`, `watch` | Warning events about Pods, Jobs, ReplicaSets, StatefulSets, DaemonSets, PersistentVolumeClaims and HorizontalPodAutoscalers (the objects themselves are never read) |
 | `events.k8s.io` | `events` | `create`, `patch` | Write the explanation, and update its series count when the incident repeats |
 | `apps` | `replicasets` | `get` | Follow a ReplicaSet's owner reference to its Deployment, for a Pod or for an event about the ReplicaSet (`D011`) |
+| `apps` | `deployments` | `list`, `watch` | The Deployment watch: a Deployment's `Progressing` condition, generation, revision and replica counts, for a rollout past its progress deadline (`D014`). Each Deployment is reduced at once to those fields, and kept only while it matches. Only while `rollouts` is on (the default); `rollouts: false` removes the row and passes `--no-rollouts`. No `get` |
 | `batch` | `jobs` | `get` | Follow a Job's owner reference to its CronJob, for a Pod or for an event about the Job (`D008`, `D011`) |
 | `kausa.fedeam.com` | `explanations` | `list`, `create`, `patch`, `delete` | Only while kausa writes history. `list`: read one object by name (a `metadata.name` field selector) before a write, and the sweep; `create`: an incident's first explanation; `patch`: append to its history (`status` and `resourceVersion` only; `spec` is immutable); `delete`: retention by age and by count ([Explanation resource](explanation-resource.md)) |
 
@@ -56,6 +60,7 @@ without it. It changes where the rows above apply, never which rows there are:
 | `events.k8s.io` `events`: `list`, `watch` | every namespace | the listed namespaces only |
 | `events.k8s.io` `events`: `create`, `patch` (Event writes on) | every namespace | the listed namespaces only |
 | `apps` `replicasets`: `get` | every namespace | the listed namespaces only |
+| `apps` `deployments`: `list`, `watch` (`rollouts` on, the default) | every namespace | the listed namespaces only |
 | `batch` `jobs`: `get` | every namespace | the listed namespaces only |
 | `kausa.fedeam.com` `explanations`: `list`, `create`, `patch`, `delete` (history on) | every namespace | the listed namespaces only |
 | ClusterRole and ClusterRoleBinding | created | not created |
@@ -65,8 +70,8 @@ without it. It changes where the rows above apply, never which rows there are:
 - **`namespaced`**: one Role and one RoleBinding in each namespace of `rbac.namespaces`, named
   with the release's full name and bound to kausa's service account in the release namespace;
   kausa is started with one `--namespace` per listed namespace, so the watch and the grant come
-  from the same list. kausa is granted nothing outside the list: no Pod, log, Event, ReplicaSet or
-  Job in `kube-system`, in another tenant's namespace, or in its own namespace unless that is
+  from the same list. kausa is granted nothing outside the list: no Pod, log, Event, ReplicaSet,
+  Deployment or Job in `kube-system`, in another tenant's namespace, or in its own namespace unless that is
   listed, and no list or watch across all namespaces. kausa needs nothing in its own namespace:
   the kubelet mounts its token and the API key.
 - **Nothing on `namespaces`**, in either scope: kausa never checks whether a namespace exists.
@@ -94,14 +99,21 @@ What the kind test asks `kubectl auth can-i`, as kausa's service account
 
 - **`cluster`**: every row above `yes` with `-A`, and its list of what must be refused (`get` and
   `list` on Secrets and ConfigMaps, `create` and `delete` on Pods, `pods/exec`, `update` and
-  `delete` on Events, `list` on nodes, service account tokens, impersonation, and `list` on
-  ReplicaSets and Jobs; with the history, `get`, `watch`, `update` and `deletecollection` on
+  `delete` on Events, `list` on nodes, service account tokens, impersonation, `list` on
+  ReplicaSets and Jobs, `watch` on ReplicaSets, `get`, `update`, `patch` and `delete` on
+  Deployments, `get` on `deployments/scale`, `update` on `deployments/status`, and `list` and
+  `watch` on StatefulSets and DaemonSets; with the history, `get`, `watch`, `update` and `deletecollection` on
   `explanations`, and `create` and `patch` on `customresourcedefinitions`) `no` with `-A`.
 - **`namespaced`**: every row above `yes` with `-n` of each listed namespace, and `no` with `-n`
   of a namespace that is not listed, `-n` of kausa's own namespace, and `-A`; the list of what must
   be refused `no` in a listed namespace. `kubectl get clusterroles,clusterrolebindings -l
   app.kubernetes.io/instance=<release>` lists nothing but the reader role, which the history
   adds, and nothing at all once the history is off.
+- **The Deployment watch**, in both scopes: `list` and `watch` on `deployments.apps` are among
+  the rows, and kausa is Ready while `get` on them is refused. In namespaced scope, a listed
+  namespace whose RoleBinding is removed also gives a `deployment watch error`. With `rollouts:
+  false` (the cluster scope's upgrade in the test), the ClusterRole has no `deployments` rule,
+  `list deployments.apps` is refused, and kausa runs with `--no-rollouts` and is Ready.
 - **The readers**, in both scopes: service accounts bound to `view` and to `edit` in a watched
   namespace can `list` Explanations and cannot `create` or `delete` them.
 
@@ -110,6 +122,10 @@ What the kind test asks `kubectl auth can-i`, as kausa's service account
 - `secrets` and `configmaps`, in any verb. `list` on Secrets would return their data.
 - Any write verb other than `create` and `patch` on Events and, with the history, `create`,
   `patch` and `delete` on `explanations`.
+- On Deployments, anything but `list` and `watch`: no `get`, `create`, `update`, `patch`,
+  `delete` or `deletecollection`, and no `deployments/status`, `deployments/scale` or
+  `deployments/rollback`. No verb on `statefulsets`, `daemonsets` or `cronjobs`, and no `list` or
+  `watch` on `replicasets` (`get` only).
 - `pods/exec`, `pods/attach`, `pods/portforward`, `pods/eviction`, `nodes`, `nodes/proxy`,
   `serviceaccounts/token`, impersonation, and wildcards (`*`) in groups, resources or verbs.
 - Any custom resource but kausa's own Explanations, and on those never `get`, `watch`, `update`,

@@ -8,7 +8,10 @@ Status as of 2026-10-29: the **detection rules, grouping and fingerprint are imp
 implementation weekend, `src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`), and so are the
 redaction rules and the log reading of the "Logs read" column (second weekend); `D009` and `D010`
 and the changes to `D001` and `D005` came on 2026-10-28, and `D011` to `D013` and the new cases of
-`R003` on 2026-10-29, all from failures reproduced in kind. Ids, triggers and
+`R003` on 2026-10-29, all from failures reproduced in kind; `D014`, from a watch on Deployments,
+also on 2026-10-29 ([0018. Explain a Deployment past its progress deadline (`D014`) from a
+Deployment watch that is on by default, and add nothing for StatefulSets or
+DaemonSets](../adr/0018-stuck-rollouts.md)). Ids, triggers and
 defaults may change until v0.1 is released; after that an id is never reused. How the rules fit in
 the pipeline: [Architecture](../explanation/architecture.md). Why redaction works this way: [0008.
 Send only allowlisted, redacted data to one OpenAI-compatible
@@ -17,7 +20,7 @@ endpoint](../adr/0008-data-leaving-the-cluster.md).
 ## Detection rules
 
 A detection matches a signal: a **state** read from a Pod at every check (a container state, the
-Pod's scheduling condition, or its eviction), or a Warning **event** about a Pod, a Job, a workload
+Pod's scheduling condition, or its eviction) or from a Deployment (its `Progressing` condition), or a Warning **event** about a Pod, a Job, a workload
 controller (a ReplicaSet, a StatefulSet or a DaemonSet), a PersistentVolumeClaim or a
 HorizontalPodAutoscaler. The failure must
 persist through the **settle window** (60 seconds by default, `--settle-seconds`) before it becomes
@@ -54,6 +57,7 @@ it was pending, so replicas whose crash loops are out of step all count.
 | `D011` | Workload cannot create Pods | Warning event `FailedCreate` about a ReplicaSet, a Job, a StatefulSet or a DaemonSet (a quota, an admission webhook or Pod Security admission refused the Pod) | No |
 | `D012` | Volume claim cannot be provisioned | Warning event `ProvisioningFailed` about a PersistentVolumeClaim | No |
 | `D013` | Autoscaler cannot get metrics | Warning event `FailedGetResourceMetric`, `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` about a HorizontalPodAutoscaler | No |
+| `D014` | Rollout does not progress | A Deployment whose `Progressing` condition is `False` with reason `ProgressDeadlineExceeded` (exact case), that is not paused, and whose `status.observedGeneration` is at least `metadata.generation` (both present); a state, about the Deployment itself. Yields to an explained incident of the same Deployment (below). Off with `--no-rollouts` | No |
 
 For `D005`, the request carries the unschedulable Pod's node selector, required affinity and
 toleration keys, with no values but the fixed `kubernetes.io/os` and `kubernetes.io/arch` ones: on
@@ -161,7 +165,8 @@ there (hypothesis: the controllers' rate-limited requeue backs off to minutes): 
 10 minutes later and comes back with the next event, with the same fingerprint, so a repeat reuses
 the cached explanation. A refusal that lasts less than the settle window, such as a StatefulSet
 blocked for ten seconds until the quota freed, is no incident. A Deployment's own conditions
-(`ReplicaFailure`) say the same, but reading them needs a new permission. `D011` reads no logs: no
+(`ReplicaFailure`) say the same; kausa watches Deployments for `D014` but does not keep that
+condition, and its message is never sent (the event's note, redacted, is). `D011` reads no logs: no
 container ran.
 
 `D012` covers a PersistentVolumeClaim that cannot be provisioned: a StorageClass that does not
@@ -206,10 +211,45 @@ failure still there; `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetE
 read) is not `D013`. The Pods of the target are unaffected, so nothing else is raised. `D013`
 reads no logs.
 
-**Which Events count.** A Warning Event counts only when its own `metadata.namespace` is non-empty
-and equal to `regarding.namespace`, compared exactly (case-sensitive, no trimming). Events about
-cluster-scoped objects (a Node, whose `regarding` has no namespace) and Events about an object in
-another namespace are ignored: they match no detection and join no incident.
+`D014` covers a Deployment whose rollout stopped progressing while nothing fails: a readiness
+gate nobody sets, a `minReadySeconds` never reached, Pods held by their scheduling gates (`D005`
+ignores `SchedulingGated`), probes that fail too seldom for `D006`. After
+`spec.progressDeadlineSeconds` (600 by default) without progress, the deployment controller sets
+the Deployment's `Progressing` condition to `False` with reason `ProgressDeadlineExceeded`
+(`syncRolloutStatus` in `pkg/controller/deployment/progress.go`) and **emits no Event**, so only a
+watch on Deployments sees it; progress or a new rollout sets the condition back to `True`, and an
+unset deadline removes it. A paused Deployment gets `Unknown` with `DeploymentPaused`, except
+after a timeout: `checkPausedConditions` (`pkg/controller/deployment/sync.go`) does not overwrite
+`ProgressDeadlineExceeded`, so `D014` also checks `spec.paused`. A condition older than the last
+edit of the Deployment does not count: `status.observedGeneration` must be at least
+`metadata.generation`, both present. Kubernetes source read on 2026-10-29. The comparisons are
+exact, and the record kausa keeps of a Deployment holds only what the rule needs ([Data sent to the
+provider](data-sent-to-the-provider.md)). `D014` reads no logs.
+
+**`D014` yields to an explained incident.** Pod rules already explain most stalled Deployments on
+the same key (the top-level owner of a crash-looping or refused rollout is the Deployment), so
+`D014` is decided after every other key of the same check, and a `D014` not yet emitted, with
+another pending key of the same namespace, owner kind and owner name, is:
+
+- **handled**, with no incident, when one of those keys was emitted, on this check or before (a
+  `D001` or a `D011` that settles on the same check counts). A handled `D014` stays silent for the
+  whole stall: while its signal lasts, and 330 seconds after;
+- **deferred** when none of them was emitted: an event detection still fresh, or a state within
+  its settle window or its 330 seconds of grace. Its own settle window keeps running, so it is
+  emitted on the first check the others are gone, once.
+
+The yield goes one way: a Pod rule or `D011` that starts after `D014` was emitted is still
+explained. A Pod whose ReplicaSet lookup failed is grouped under the ReplicaSet, not the
+Deployment, so it does not hold `D014` back, and both are explained. A signal that never settles
+delays `D014` instead of silencing it: one Warning `Unhealthy` event (a `D006` signal for 10
+minutes) until 10 minutes after it, a `D005` that clears within the window until 330 seconds after
+it clears.
+
+**No rule for StatefulSets or DaemonSets.** They have no progress deadline and no failure
+condition: the alpha `Recreate` strategy of StatefulSets sets `Progressing` only to `True` in the
+source read (hypothesis that it never sets `False`), and `OnDelete` and `partition` rollouts wait
+by design. Their stalls are failing Pods (`D001` to `D010`, grouped under the StatefulSet or
+DaemonSet) or refused Pods (`D011`); kausa has no permission on them.
 
 The **fingerprint** hashes the detection id, the namespace, the owner's kind and name, and a text
 that stays the same for the same failure: the example's message without the prefix
@@ -220,8 +260,11 @@ owner's name), UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40
 and other numbers normalized; for `D002`, whose message alternates between `ErrImagePull` and
 `ImagePullBackOff`, the image reference instead; for `D001` and `D003`, whose example is the
 container waiting in `CrashLoopBackOff` (with the back-off message) or terminated between restarts
-(with none) depending on when kausa looks, the container's name. It is computed before
-redaction and never sent to the model; it is in kausa's log, the names of its Events and Explanations and, with
+(with none) depending on when kausa looks, the container's name; for `D014`, the text
+`revision <n>`, `<n>` the Deployment's `deployment.kubernetes.io/revision` annotation when it
+parses as an unsigned integer (the text is empty otherwise), hashed as is, not normalized, so each
+rollout has its own fingerprint, stable across restarts. It is computed before redaction and never
+sent to the model; it is in kausa's log, the names of its Events and Explanations and, with
 notifications on, every notification ([Data sent in
 notifications](data-sent-in-notifications.md#the-fingerprint)). It also keys the deduplication
 cache.
@@ -285,3 +328,14 @@ format, never ones that were issued.
   redacted](../adr/0017-richer-context-for-the-model.md)).
 - Detection covers common workload failures, not every problem: a misbehaving application whose
   Pods stay `Running` and `Ready` produces no incident.
+- `D014` does not see a Deployment with no progress deadline, a paused one (unless it was paused
+  after the timeout), a stall shorter than the deadline plus the settle window and a check (about
+  11 minutes with the defaults; lower the Deployment's `progressDeadlineSeconds` to hear sooner),
+  or a `ReplicaSetCreateError` (set at once on any create error, transient ones included; the
+  refusal is `D011`). StatefulSets and DaemonSets that wait on Pods that neither fail nor are
+  refused raise nothing. With `--no-rollouts`, `D014` is off.
+- A signal of the same Deployment that never settles delays `D014` until it is gone. Whoever can
+  create Warning Events about the Deployment's Pods (or, through `D011`, its ReplicaSets) in its
+  namespace, or make a Pod's probe fail, can delay it for as long as they keep producing fresh,
+  distinct events; it comes 10 minutes after they stop. They cannot silence it for good: only an
+  explained incident of the same Deployment does.

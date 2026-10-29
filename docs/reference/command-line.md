@@ -16,7 +16,10 @@ listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.
 its namespace ([0014. Keep each incident's full explanations in a namespaced Explanation resource,
 off by default](../adr/0014-explanation-history.md)); with `--notify-url-file` it also posts each
 new explanation to one webhook ([0015. Post each new explanation to one optional webhook, as JSON,
-Slack or Telegram](../adr/0015-notifications.md)).
+Slack or Telegram](../adr/0015-notifications.md)). The work for v0.4 adds a watch on Deployments
+for stalled rollouts (`D014`), on unless `--no-rollouts` ([0018. Explain a Deployment past its
+progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
+StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md)).
 
 ## Commands
 
@@ -31,7 +34,8 @@ Options of `kausa run`:
 | Option | What it does |
 |---|---|
 | `--settle-seconds <N>` | How long a failure has to persist before it is an incident, from `0` to `3600`; `60` by default. A failed Job (`D008`) is an incident at once, whatever the value |
-| `--namespace <NAME>` | Watch only this namespace: one Pod watch and one Warning event watch in it. Repeat it for more, one name each time, up to 32; the order does not matter. Without it, kausa watches the whole cluster (one watch of each kind across all namespaces). The scope comes only from this flag, never from the kubeconfig's context or the service account's namespace |
+| `--namespace <NAME>` | Watch only this namespace: one Pod watch, one Warning event watch and, unless `--no-rollouts`, one Deployment watch in it. Repeat it for more, one name each time, up to 32; the order does not matter. Without it, kausa watches the whole cluster (one watch of each kind across all namespaces). The scope comes only from this flag, never from the kubeconfig's context or the service account's namespace |
+| `--no-rollouts` | Do not watch Deployments, so a rollout past its progress deadline (`D014`) is not explained. The watch is on by default and needs `list` and `watch` on `deployments`; turn it off when kausa's role does not grant them. Independent of `--endpoint` and `--dry-run` |
 | `--endpoint <URL>` | The base URL of an OpenAI-compatible endpoint, such as `https://api.example.com/v1` or `http://127.0.0.1:11434/v1` for Ollama. Each incident's redacted context is sent to `<URL>/chat/completions` and the answer is logged as an explanation. Needs `--model` |
 | `--model <NAME>` | The model to ask |
 | `--api-key-file <PATH>` | A file whose content (trimmed) is the API key, sent as `Authorization: Bearer`. Without it, the environment variable `KAUSA_API_KEY`; without both, no key. Never an argument |
@@ -121,7 +125,7 @@ environment cannot make it impersonate anyone or talk to another server.
 | Code | Meaning |
 |---|---|
 | `0` | `--help` or `--version`, or a clean stop after `SIGTERM` or Ctrl-C |
-| `1` | kausa cannot start (no client configuration, the API server is unreachable, it cannot listen on `--metrics-address`) or a watch ended: `the pod watch ended` or `the event watch ended` for the whole cluster, `the pod watch of namespace <name> ended` or `the event watch of namespace <name> ended` with `--namespace`, in the `stopped on an error` line. Watch errors do not end a watch: they are logged and retried |
+| `1` | kausa cannot start (no client configuration, the API server is unreachable, it cannot listen on `--metrics-address`) or a watch ended: `the pod watch ended`, `the event watch ended` or `the deployment watch ended` for the whole cluster, `the pod watch of namespace <name> ended`, `the event watch of namespace <name> ended` or `the deployment watch of namespace <name> ended` with `--namespace`, in the `stopped on an error` line. Watch errors do not end a watch: they are logged and retried |
 | `2` | Usage error (unknown argument, invalid flag value such as a `--metrics-address` that is not an address and port, an `http://` endpoint without `--allow-http`, an unreadable API key file, a notification flag or URL kausa refuses), or stdout cannot be written (also while running: `kausa run` stops when it cannot write its log, and says so on stderr) |
 
 ## Log lines
@@ -133,9 +137,9 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 
 | `msg` | Level | Other fields |
 |---|---|---|
-| `started` | info | `version`, `server` (the API server's version), `settle_seconds`, `namespaces` (the watched namespaces, sorted, or `null` for the whole cluster), `notifications` (`{"format", "host"}`, the webhook's host only, with no port, path or query, or `null` when they are off) |
+| `started` | info | `version`, `server` (the API server's version), `settle_seconds`, `namespaces` (the watched namespaces, sorted, or `null` for the whole cluster), `rollouts` (`true` while Deployments are watched, `false` with `--no-rollouts`), `notifications` (`{"format", "host"}`, the webhook's host only, with no port, path or query, or `null` when they are off) |
 | `incident` | info | See below |
-| `pod watch error`, `event watch error` | warn | `namespace` (the namespace of the failing watch, or `null` for the cluster-wide one), `error` (kube-rs's text); the watch retries with backoff, from 0.8 up to 30 seconds. A refusal (`403`) drops the records that watch brought in, until it lists again |
+| `pod watch error`, `event watch error`, `deployment watch error` | warn | `namespace` (the namespace of the failing watch, or `null` for the cluster-wide one), `error` (kube-rs's text); the watch retries with backoff, from 0.8 up to 30 seconds. A refusal (`403`) drops the records that watch brought in, until it lists again |
 | `owner lookup failed` | warn | `namespace`, `pod`, `job` or `replicaset` (the object a Pod or an event is about), `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's or the event's next update), the incident names the ReplicaSet or Job instead |
 | `stopped` | info | |
 | `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
@@ -174,9 +178,23 @@ namespaces, with invented values:
 
 ```json
 {"ts":"2026-10-28T12:00:00Z","level":"info","msg":"started","namespaces":["payments","shop"],
- "server":"v1.36.4","settle_seconds":60,"version":"0.2.0"}
+ "rollouts":true,"server":"v1.36.4","settle_seconds":60,"version":"0.4.0"}
 {"ts":"2026-10-28T12:00:01Z","level":"warn","msg":"pod watch error","error":"<kube-rs's text>",
  "namespace":"payments"}
+```
+
+An `incident` line of a stalled rollout (`D014`), with invented values: it is about the
+Deployment itself and lists no Pods; `sample.message` is `revision <n>`, the Deployment's revision
+annotation when it is an unsigned integer (empty otherwise), and is never sent to the model.
+
+```json
+{"ts":"2026-10-29T12:00:00Z","level":"info","msg":"incident","detection":"D014",
+ "detection_name":"rollout does not progress","fingerprint":"0b3f6a9c2d7e1f45",
+ "first_seen":"2026-10-29T11:59:00Z","namespace":"shop",
+ "owner":{"apiVersion":"apps/v1","kind":"Deployment","name":"web"},
+ "pods":[],"pods_total":3,
+ "sample":{"container":null,"exit_code":null,"message":"revision 7","pod":null,
+           "reason":"ProgressDeadlineExceeded"}}
 ```
 
 (Wrapped here for reading; kausa writes each line on one line.)
@@ -204,15 +222,16 @@ kausa's log sees them.
 
 With `--metrics-address`, `GET /metrics` returns these counters in the Prometheus text format;
 each is `0` until something counts. `GET /healthz` answers `200` while kausa runs, and `GET
-/readyz` answers `200` with `ready` once every watch has listed at least once (the two of the whole
-cluster, or two per namespace with `--namespace`: 2 × N), and `503` with `starting` before. It
+/readyz` answers `200` with `ready` once every watch has listed at least once (the three of the
+whole cluster, or three per namespace with `--namespace`: 3 × N; two and 2 × N with
+`--no-rollouts`), and `503` with `starting` before. It
 never goes back to `503`; a watch refused before its first list keeps kausa not ready. No path,
 label or body names a namespace. Any other path answers `404`,
 and any other method `405`. The counters live in memory and start over when kausa restarts.
 
 | Counter | Labels | Counts |
 |---|---|---|
-| `kausa_incidents_total` | `detection` | Incidents that settled |
+| `kausa_incidents_total` | `detection` | Incidents that settled (`D014` included; a `D014` handled by another incident is not counted) |
 | `kausa_model_calls_total` | `outcome` (`ok`, `error`, `invalid`) | Calls to the endpoint |
 | `kausa_model_tokens_total` | `direction` (`in`, `out`) | Tokens the endpoint reported |
 | `kausa_explanations_cached_total` | | Incidents explained again from the deduplication cache |
@@ -228,7 +247,7 @@ and any other method `405`. The counters live in memory and start over when kaus
 | `kausa_history_sweep_errors_total` | | Failed list or delete calls of the history sweep (a delete answered `404` or `409` is not one) |
 | `kausa_notifications_total` | `outcome` (`sent`, `failed`, `dropped`) | Notifications by final outcome ([Notifications](#notifications)) |
 | `kausa_notifications_retried_total` | | Notifications tried again after a transient error |
-| `kausa_watch_errors_total` | `watch` (`pods`, `events`) | Errors of the Pod watches and of the event watches (every namespace's together; the namespace is in the log line), which retry with backoff; a steady rise with no incidents means kausa is not seeing the cluster |
+| `kausa_watch_errors_total` | `watch` (`pods`, `events`, `deployments`) | Errors of the Pod, Event and Deployment watches (every namespace's together; the namespace is in the log line), which retry with backoff (the counter's help text: `Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch.`); a steady rise with no incidents means kausa is not seeing the cluster |
 
 ## Notifications
 

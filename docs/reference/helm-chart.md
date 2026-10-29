@@ -13,7 +13,11 @@ that image ([Install kausa with Helm](../how-to/install-with-helm.md)). `rbac.sc
 charts have neither and always create the ClusterRole. The `history` values, the Explanation
 CustomResourceDefinition and its reader role came with v0.3.0 too, and the kind test installs
 them in both scopes. So did the `notifications` values, which the kind test installs in the
-`json` format in both scopes. Why it is built this way: [0010. Ship a static binary
+`json` format in both scopes. The `rollouts` value, the Deployment watch for stalled rollouts
+(`D014`), was added for v0.4 on 2026-10-29 and is checked by the renders and the kind test in both
+scopes ([0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch
+that is on by default, and add nothing for StatefulSets or
+DaemonSets](../adr/0018-stuck-rollouts.md)). Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
 yet](../adr/0010-packaging.md), [0012. Release from a tag: a signed image on GHCR and the
 chart on the GitHub release](../adr/0012-releases.md) and [0013. Offer a namespaced install mode:
@@ -27,7 +31,7 @@ Telegram](../adr/0015-notifications.md).
 | Object | Name | Notes |
 |---|---|---|
 | ServiceAccount | the release's full name | `serviceAccount.name` to override |
-| ClusterRole and ClusterRoleBinding | the release's full name | Only with `rbac.scope=cluster`. The table in [Permissions](permissions.md); `pods/log` only when kausa explains (an endpoint or `dryRun`) and `logs` is true; `create` and `patch` on Events only with an endpoint, `events` true and no `dryRun` |
+| ClusterRole and ClusterRoleBinding | the release's full name | Only with `rbac.scope=cluster`. The table in [Permissions](permissions.md); `pods/log` only when kausa explains (an endpoint or `dryRun`) and `logs` is true; `create` and `patch` on Events only with an endpoint, `events` true and no `dryRun`; `list` and `watch` on `deployments` only while `rollouts` is on |
 | Role and RoleBinding, in each namespace of `rbac.namespaces` | the release's full name | Only with `rbac.scope=namespaced`. The same rules, with the same conditions; the RoleBinding's subject is the ServiceAccount in the release namespace |
 | Deployment | the release's full name | One replica, `Recreate`, the restricted Pod Security settings, a read-only root filesystem, `POD_NAME` from the downward API |
 | Service | `<full name>-metrics` | Only with `metrics.enabled` |
@@ -45,7 +49,9 @@ The RBAC objects come from `templates/rbac.yaml`, and their rules from the `kaus
 `templates/_helpers.tpl`, which the ClusterRole and every Role render: a permission added later
 goes there only, so that both scopes grant the same. The history's rule (`list`, `create`,
 `patch` and `delete` on `explanations` in `kausa.fedeam.com`) is appended last, only while the
-release writes history.
+release writes history. The Deployment watch's rule (`list` and `watch` on `deployments` in
+`apps`) comes right after the `replicasets` rule, only while `rollouts` is on; with `rollouts:
+false` the rules are v0.3.0's, byte for byte.
 
 ## Values
 
@@ -67,6 +73,7 @@ release writes history.
 | `dryRun` | `false` | `--dry-run` |
 | `logs` | `true` | `false` adds `--no-logs` and removes `pods/log` |
 | `events` | `true` | `false` adds `--no-events` and removes the Event writes |
+| `rollouts` | `true` | Watch Deployments and explain rollouts past their progress deadline (`D014`). `false` adds `--no-rollouts` and removes `list` and `watch` on `deployments` from the ClusterRole or the Roles. Only the value `false` turns it off: a missing value (the values of a v0.3 release reused with `--reuse-values`) or `null` means on. Independent of the endpoint and `dryRun`. No refusal |
 | `history.enabled` | `false` | With an endpoint and without `dryRun`: `--history --history-days <days>`, the `explanations` rule, and (with `installCRD`) the CustomResourceDefinition and the reader role. Turning it off, removing the endpoint or setting `dryRun` deletes them, and every Explanation in the cluster |
 | `history.days` | `7` | `--history-days`: Explanations older than this many days are deleted, 1 to 30 |
 | `history.installCRD` | `true` | Whether this release installs the CustomResourceDefinition and the reader role. `false` when another release or a cluster administrator installs them |
@@ -217,8 +224,9 @@ exists, kausa logs `history write failed` and `history sweep failed` naming it, 
 A namespaced install with `installCRD=false` creates nothing cluster-scoped.
 
 `NOTES.txt`, printed after an install or upgrade, names the scope: in cluster scope its first
-lines say that kausa can read Pods and Events (and container logs, when it explains with `logs`
-on) in every namespace; in namespaced scope it lists the namespaces and, when kausa writes Events, prints one `kubectl get
+lines say that kausa can read Pods, Events and, with `rollouts` on, Deployments (and container
+logs, when it explains with `logs` on) in every namespace; in namespaced scope it lists the
+namespaces, names the same kinds, and, when kausa writes Events, prints one `kubectl get
 events.events.k8s.io -n <namespace> --field-selector reportingController=kausa` per namespace
 instead of one with `-A`.
 Both remind that `rbac.scope` must be set on every upgrade. When the release writes history,
@@ -238,10 +246,12 @@ helm template kausa charts/kausa --kube-version 1.36.0 \
 ```
 
 The Dockerfile's `ci` target renders both scopes, the history toggles, each notification format
-with and without the NetworkPolicy, values without a `notifications` map, and every `rbac`,
-`history.days` and notification refusal, and
-`tests/chart/render.sh` runs a longer set of the same checks (helm only, no cluster), including a
-comparison of the cluster-scope rules with the v0.1.0 chart's.
+with and without the NetworkPolicy, values without a `notifications` map, the `rollouts` value
+(the `deployments` rule right after `replicasets` by default, none and one `--no-rollouts` with
+`false`, `null` rendered as the default), and every `rbac`, `history.days` and notification
+refusal, and `tests/chart/render.sh` runs a longer set of the same checks (helm only, no cluster),
+including a comparison of the cluster-scope rules with the v0.1.0 chart's: equal with `rollouts:
+false`, and with only the `deployments` rule more by default.
 
 `helm template` without a cluster needs `--kube-version` (1.32 or later): the chart declares
 `kubeVersion: ">=1.32.0-0"`, and helm's default version can be older.

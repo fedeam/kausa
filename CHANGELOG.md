@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`,
   `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` event about a
   HorizontalPodAutoscaler, an incident about the autoscaler.
+- Detection rule `D014`, rollout does not progress: a Deployment whose `Progressing` condition is
+  `False` with reason `ProgressDeadlineExceeded`, not paused and observed at its current
+  generation, an incident about the Deployment, with one fingerprint per revision. It yields to an
+  explained incident of the same Deployment (a crash loop, a refused Pod), so a stall is explained
+  once, and the request carries only the Deployment's replica counts and deadlines (`rollout`)
+  ([0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch that is
+  on by default, and add nothing for StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)).
+- `kausa run --no-rollouts` turns the Deployment watch, and `D014`, off; the `started` line gains
+  `rollouts`, and the log `deployment watch error`.
+- The chart's `rollouts` value, `true` by default (a missing value means on): `false` passes
+  `--no-rollouts` and removes the `deployments` rule.
 
 ### Changed
 
@@ -39,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second pass after the pattern of 0.3.0, which is unchanged, so they only add redactions.
 - The request names a PersistentVolumeClaim or a HorizontalPodAutoscaler that an incident is about
   by its kind (`persistentvolumeclaim-1`, `horizontalpodautoscaler-1`), not as `Object`.
+- kausa reads Deployments: the chart grants `list` and `watch` on `deployments` (`apps`) in the
+  ClusterRole and in every Role, while `rollouts` is on. No `get`, no write, nothing on
+  StatefulSets or DaemonSets.
+- kausa runs three watches, Pods, Warning events and Deployments, on the whole cluster or in each
+  listed namespace, and `/readyz` answers `200` once all of them have listed (3, or 3 × N; 2 and
+  2 × N with `--no-rollouts`). `kausa_watch_errors_total` gains `watch="deployments"`, and an
+  ended Deployment watch stops kausa with `the deployment watch ended`.
+- Upgrade the chart and the image together: the new image without the `deployments` rule (the
+  previous chart's role, RBAC made outside the chart, a read-only proxy) explains everything else
+  but is never Ready; add the rule or use `--no-rollouts`.
 
 ### Fixed
 

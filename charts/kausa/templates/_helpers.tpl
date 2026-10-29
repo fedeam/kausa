@@ -44,6 +44,10 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- if and .Values.model.endpoint .Values.events (not .Values.dryRun) }}true{{ end }}
 {{- end }}
 
+{{/* kausa watches Deployments for stalled rollouts (D014) unless rollouts is false. A missing
+value, null, or a release's stored v0.3 values (helm upgrade --reuse-values) mean on. */}}
+{{- define "kausa.rollouts" -}}{{- if ne (toString .Values.rollouts) "false" }}true{{- end }}{{- end }}
+
 {{/*
 The history map is read nil-safe: a release made before it (helm upgrade --reuse-values) or
 --set history=null has none. The keys that default to something other than false default with
@@ -123,6 +127,11 @@ only here, so that both scopes grant the same.
 - apiGroups: ["apps"]
   resources: ["replicasets"]
   verbs: ["get"]
+{{- if include "kausa.rollouts" . }}
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["list", "watch"]
+{{- end }}
 - apiGroups: ["batch"]
   resources: ["jobs"]
   verbs: ["get"]

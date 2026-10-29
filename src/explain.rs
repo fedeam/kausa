@@ -709,6 +709,7 @@ mod tests {
                 events: vec![],
                 pods_total: 1,
                 log_tail: Some("LOG-CANARY panic\n".into()),
+                rollout: None,
             },
             log: None,
             attempt: 0,

@@ -10,7 +10,10 @@ Pods' status reason and message, [0016. Send each Pod's status reason and messag
 redacted and bounded](../adr/0016-send-the-pod-status-reason-and-message.md) and, for resource
 requests, probe handlers, image pull settings and scheduling keys, [0017. Send the model resource
 requests, probe handlers, image pull settings and an unschedulable Pod's scheduling keys, reduced
-and redacted](../adr/0017-richer-context-for-the-model.md). Run kausa with
+and redacted](../adr/0017-richer-context-for-the-model.md); for a stalled rollout's replica counts
+(`D014`), [0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch
+that is on by default, and add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md).
+Run kausa with
 `--dry-run` to see the requests it would send ([Try kausa against a cluster with a local
 model](../how-to/try-with-a-local-model.md)).
 
@@ -36,7 +39,7 @@ rules](rules.md):
 | `detection` | `{"id": "D001", "name": "crash loop"}` | The rule id and its name |
 | `workload` | `{"kind": "Deployment", "name": "deployment-1", "namespace": "namespace-1"}` | The top-level owner's kind (a built-in kind as it is, among them `PersistentVolumeClaim` and `HorizontalPodAutoscaler` for `D012` and `D013`; `Object` for a custom resource) and pseudonyms (`R002`) |
 | `pods_affected`, `pods_total` | `2`, `2` | |
-| `pods` | up to three Pods, the example first; none for an incident about a Job, a workload controller, a claim or an autoscaler (`D008`, `D011` to `D013`) | Each with its pseudonym, `phase` and, for `D005`, the scheduler's redacted `unschedulable` message (of the `PodScheduled` condition, for reason `Unschedulable` or `SchedulerError`; the reason itself is not sent) |
+| `pods` | up to three Pods, the example first; none for an incident about a Job, a workload controller, a claim, an autoscaler or a stalled rollout (`D008`, `D011` to `D014`) | Each with its pseudonym, `phase` and, for `D005`, the scheduler's redacted `unschedulable` message (of the `PodScheduled` condition, for reason `Unschedulable` or `SchedulerError`; the reason itself is not sent) |
 | | `reason` `Evicted`, `message` `Pod ephemeral local storage usage exceeds the total limit of containers 50Mi.` | The Pod's `status.reason` and `status.message`, each cut at 1024 bytes and redacted like the other free text (any writer of `pods/status` can set either), when they are set (an eviction, `D009`, or a Pod past its deadline); `null` otherwise. The message names quantities and, for node pressure, a container (pseudonymized, `R002`); for an `emptyDir` limit it names the volume, which kausa does not know and sends as written unless a pattern matches it |
 | `pods[].containers` | `name` `container-1`, `init` `false`, `image` `busybox:1.37` or `registry-1/image-1:tag` | Whether it is an init container; public registries kept, others pseudonymized (`R002`) |
 | | waiting reason and redacted message; terminated and last termination reasons and exit codes; restart count | As Kubernetes reports them |
@@ -47,6 +50,7 @@ rules](rules.md):
 | `pods[].image_pull_secrets` | `1` | Only `D002`: how many entries `spec.imagePullSecrets` has, capped at 16; never a Secret's name, and no Secret is read. Absent for the other rules |
 | `warning_events` | up to ten: reason, redacted message, count | Only events a detection matches, of the incident's Pods or of the object the incident is about (a Job, or for `D011` to `D013` the ReplicaSet, Job, StatefulSet, DaemonSet, claim or autoscaler). Their messages can name other objects: a refused Pod, a quota, a container, a StorageClass, an autoscaler's target; `R003` redacts the formats of [Detection and redaction rules](rules.md#redaction-rules) |
 | `scheduling` | `{"node_selector": [{"key": "example.com/pool", "value": null}], "node_affinity": [{"term": 0, "key": "kubernetes.io/arch", "operator": "In", "values": ["arm64"], "value_count": 1}], "pod_affinity": [], "pod_anti_affinity": [{"topology_key": "topology.kubernetes.io/zone", "namespaces_set": false}], "tolerations": [{"key": "example.com/dedicated", "operator": "Equal", "effect": "NoSchedule"}], "omitted": 0}` | Only `D005`, once, from the first Pod whose `PodScheduled` condition is `Unschedulable` or `SchedulerError` (the example first); `null` when no Pod has one, absent for the other rules. From the Pod spec: `node_selector` (key order), the required `node_affinity` terms (`matchExpressions` then `matchFields`, operators `In`, `NotIn`, `Exists`, `DoesNotExist`, `Gt`, `Lt` or `other`), the required `pod_affinity` and `pod_anti_affinity` terms (`namespaces_set` tells whether namespaces or a namespace selector are set, never which), and `tolerations` (spec order; operator `Exists`, `Equal` (also when absent) or `other`; effect `NoSchedule`, `PreferNoSchedule`, `NoExecute`, `other` or `null`; a `null` key tolerates every taint). At most 8, 8 (across terms), 4, 4 and 8 entries; `omitted` counts the rest. A key longer than 128 bytes drops its entry (counted); a key that is not a qualified name is sent as `invalid`; the others are redacted like free text, so `eks.amazonaws.com/nodegroup` becomes `host-1/nodegroup` (`R013`). Values only for `kubernetes.io/os` (`linux`, `windows`) and `kubernetes.io/arch` (`amd64`, `arm64`, `arm`, `386`, `ppc64le`, `s390x`, `riscv64`), from those fixed lists, each once; `value_count` counts every value listed, duplicates included |
+| `rollout` | `{"replicas": 3, "updated_replicas": 1, "ready_replicas": 2, "available_replicas": 2, "unavailable_replicas": 1, "progress_deadline_seconds": 600, "min_ready_seconds": 0}` | Only for `D014`, and only these seven keys, each an integer or `null` (`replicas`, `progress_deadline_seconds` and `min_ready_seconds` when the Deployment does not set them); the whole value is `null` when kausa no longer holds the Deployment's record. From the Deployment's `spec` and `status`; nothing in it is text, so nothing in it is redacted. No condition message and no `ReplicaFailure`: a refusal reaches the model through `D011`'s redacted event notes. For `D014`, `pods` is empty (`pods_total` counts the Deployment's Pods kausa holds), `warning_events` keeps its filter (no detection matches an event about a Deployment, so it is empty) and `log_tail` is absent |
 | `log_tail` | `connect ECONNREFUSED <redacted:ip>:5432` | Only `D001`, `D003` and `D008`: the previous instance for a container that restarted and runs or waits again, otherwise the terminated one; the last 50 lines asked for, cut to the last 4 KiB after redaction; `--no-logs` turns it off |
 
 The whole body of the request: `model`; two messages, the fixed system message and one user
@@ -72,6 +76,9 @@ estimate of the request, before it is sent. The model gets no tools and no funct
   selector, affinity and toleration keys, which name node labels and taints, are sent redacted,
   see `scheduling`), environment variables, command lines and arguments, volume definitions, UIDs,
   resource versions and managed fields.
+- Of a Deployment: its Pod template, selector, strategy, revision and conditions (the record kausa
+  keeps of it holds the revision and the `Progressing` condition's status and reason only to
+  decide `D014` and name its fingerprint).
 - A probe's command, headers, host and gRPC service, and the query and fragment of its path; a
   port's name.
 - Node selector, node affinity and toleration values, except the fixed `kubernetes.io/os` and

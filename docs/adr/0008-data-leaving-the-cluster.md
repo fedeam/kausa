@@ -115,3 +115,13 @@ an unschedulable Pod's scheduling keys, reduced and redacted](0017-richer-contex
 widens the allowlist: a probe's path (without its query and fragment, for D001 and D006) and the
 node-label and taint keys of an unschedulable Pod are now sent, redacted; their values never are,
 except kubernetes.io/os and kubernetes.io/arch from fixed lists.
+
+Update 2026-10-29: [0018. Explain a Deployment past its progress deadline (`D014`) from a
+Deployment watch that is on by default, and add nothing for StatefulSets or
+DaemonSets](0018-stuck-rollouts.md) adds one field to the allowlist, for `D014` requests only: a
+top-level `rollout` object of seven integers or `null` (`replicas`, `updated_replicas`,
+`ready_replicas`, `available_replicas`, `unavailable_replicas`, `progress_deadline_seconds`,
+`min_ready_seconds`), `null` as a whole when the Deployment's record is gone. No text: no condition
+message and no `ReplicaFailure`, so nothing in it goes through redaction. A `D014` request has no
+Pods and no log tail; other requests do not change ([Data sent to the
+provider](../reference/data-sent-to-the-provider.md)).

@@ -201,3 +201,13 @@ that did not change in between (`D004`, `D005`, `D009`) would never come back. k
 starts a new watcher after any `403`, which lists again, and keeps the default backoff (0.8 to 30
 seconds) across those watchers: the `Init` of each new one does not reset the delay. No new crate;
 `Restarting` in `src/run.rs`, with unit tests over scripted watchers.
+
+Update 2026-10-29: [0018. Explain a Deployment past its progress deadline (`D014`) from a
+Deployment watch that is on by default, and add nothing for StatefulSets or
+DaemonSets](0018-stuck-rollouts.md) adds a third watch, on Deployments, unless `--no-rollouts`:
+one on the whole cluster, or one per listed namespace, with the same per-watch relists, the same
+drop of that watch's records on a `403`, and the same new watcher after it. `/readyz` turns `200`
+once every watch has listed: 3, or 3 × N (2 and 2 × N with `--no-rollouts`), and an ended
+Deployment watch stops kausa with `the deployment watch ended` (`… of namespace <name> ended`).
+The cap of 32 namespaces is kept by the measurement with 96 watches in
+[Ninety-six watches](../research/2026-10-29-96-watches.md).

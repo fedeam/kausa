@@ -188,7 +188,7 @@ its fake model never echoes its input, so it cannot catch a model that does.
 
 The fingerprint is FNV-1a, a non-cryptographic 64-bit hash of the rule, the namespace, the
 owner's kind and name and a normalized message (or the image, for `D002`, and the container's
-name, for `D001` and `D003`), computed before
+name, for `D001` and `D003`, and `revision <n>`, for `D014`), computed before
 redaction ([Detection and redaction rules](rules.md)). It was already in the names of kausa's
 Events and Explanations; notifications take it out of the cluster. It hides nothing: whoever can
 guess the inputs can compute it and confirm a guess. It is an identifier for joining a

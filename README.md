@@ -32,10 +32,10 @@ they usually mean.
 
 ## What kausa does
 
-kausa watches Warning events and Pod status. When a failure persists, it groups the failing Pods of
-one workload into one incident, takes the relevant status, events and last log lines, redacts
-them, and asks one OpenAI-compatible model endpoint for an explanation, within a call and token
-budget. It writes the answer as an Event on the Deployment:
+kausa watches Warning events, Pod status and Deployments. When a failure persists, it groups the
+failing Pods of one workload into one incident, takes the relevant status, events and last log
+lines, redacts them, and asks one OpenAI-compatible model endpoint for an explanation, within a
+call and token budget. It writes the answer as an Event on the Deployment:
 
 ```text
 $ kubectl describe deployment -n shop api
@@ -216,6 +216,13 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   new explanation as JSON, to Slack or to Telegram ([Send notifications to Slack, Telegram or a
   webhook](docs/how-to/send-notifications.md); Telegram posted to for real on 2026-10-29, Slack
   not yet).
+- **v0.4** (in development, not released as of 2026-10-29): the detection rules `D011` (workload
+  cannot create Pods), `D012` (volume claim cannot be provisioned), `D013` (autoscaler cannot get
+  metrics) and `D014` (rollout does not progress: a Deployment past its progress deadline, from a
+  watch on Deployments that is on by default; `kausa run --no-rollouts` and the chart's
+  `rollouts=false` turn it off, and with it the chart's `list` and `watch` on Deployments)
+  ([0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch that is
+  on by default, and add nothing for StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)).
 - **Next:** a test against a hosted provider, and a real post to a Slack workspace (the `slack`
   format is checked only against Slack's documentation so far).
 

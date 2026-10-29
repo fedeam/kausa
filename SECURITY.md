@@ -70,7 +70,11 @@ budget, the Event writes and the metrics responder have unit tests, and the perm
 checked by the kind test (`kubectl auth can-i`, what is allowed and what must be refused) in both
 `rbac.scope`s: every namespace with `cluster`, or the listed namespaces only with `namespaced`
 ([0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace, and
-nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)). Not
+nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)). For v0.4 (in development on
+2026-10-29), kausa also watches Deployments, unless `--no-rollouts` (the chart's `rollouts:
+false`), to explain a rollout past its progress deadline (`D014`) ([0018. Explain a Deployment past
+its progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
+StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)). Not
 tested yet: a hosted provider over HTTPS (the distroless CA bundle with rustls), clusters larger
 than about a hundred Pods, and long runs ([Architecture](docs/explanation/architecture.md)).
 
@@ -94,8 +98,9 @@ controls the answers. kausa treats both as untrusted.
 kausa must:
 
 - **Never read what it does not need.** Its permissions are a fixed list: read Pods, read and
-  write Events, `get` on ReplicaSets and Jobs, `get` on `pods/log` only while log collection
-  is on, and `list`, `create`, `patch` and `delete` on its own `explanations` only while it writes
+  write Events, `get` on ReplicaSets and Jobs, `list` and `watch` on Deployments only while the
+  Deployment watch is on (no `get`, no write, nothing on StatefulSets or DaemonSets), `get` on
+  `pods/log` only while log collection is on, and `list`, `create`, `patch` and `delete` on its own `explanations` only while it writes
   history. Never any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never
   does. Never Secrets, never ConfigMaps, no other write verb, no `exec`, no wildcards
   ([Permissions](docs/reference/permissions.md), [0009. Run with read-only permissions that never
@@ -104,10 +109,11 @@ kausa must:
   `rbac.scope=namespaced`, where the chart creates nothing cluster-scoped. `rbac.scope` has no
   default, so an upgrade that resets the values fails instead of widening a namespaced install to
   the whole cluster: keep the `rbac` values in a values file passed on every upgrade, or upgrade
-  with `--reuse-values`. Pod objects arrive whole from the API
+  with `--reuse-values`. Pod and Deployment objects arrive whole from the API
   server, inline environment values and arguments included; kausa reduces each to the small record
   in [Architecture](docs/explanation/architecture.md) at once, and never logs, formats or returns
-  a raw object.
+  a raw object. A Deployment's record keeps no template, label, other annotation or condition
+  message, and is kept only while the Deployment is stalled.
 - **Never send anything unredacted to the model, and only to the configured places.** A request carries only the fields in
   [Data sent to the provider](docs/reference/data-sent-to-the-provider.md), with names replaced by
   pseudonyms and free text passed through the redaction rules
@@ -231,6 +237,26 @@ kausa must:
   and with it every Explanation, exists only while kausa writes history. Backups of etcd or of the
   cluster's objects copy the Explanations, with their real names (hypothesis: it depends on the
   backup tool).
+- **A stolen token reads whole Deployments** (with the Deployment watch on, the default). In the
+  namespaces kausa covers, its token can list and watch Deployments: their Pod templates with
+  inline environment values and arguments, their annotations (`last-applied-configuration`
+  included, which repeats the whole applied object), and Deployments scaled to zero that no Pod
+  shows. Still no Secret or ConfigMap. `rollouts: false` removes the grant.
+- **Stalls can be provoked or forged.** Whoever can edit a Deployment can make it pass its
+  deadline in seconds (`progressDeadlineSeconds: 1`), and whoever can write `deployments/status`
+  can forge the condition. Each costs one call within the shared budget, as a crash loop does. No
+  Deployment text reaches the model, an Event, the webhook or the log: the request carries only
+  integers, the revision is a parsed integer and the condition's reason is only compared.
+- **Stalls can be delayed.** `D014` yields to an explained incident of the same Deployment and
+  waits while one is pending but not settled. Whoever can create Warning Events about the
+  Deployment's Pods (or its ReplicaSets) in its namespace, or make one Pod's probe fail, can delay
+  it for as long as they keep producing fresh, distinct events that never settle; it comes 10
+  minutes after the last one. They cannot silence it for good: only an explained incident does,
+  and the same writer can already forge explanations with events.
+- **A list page is held whole.** Records are small, but each watch decodes list pages of up to 500
+  whole objects, and no Pod quota bounds Deployments scaled to zero (hypothesis: an object is
+  capped at about 1.5 MiB, annotations at 256 KiB). This holds for the Pod watch already; smaller
+  pages for all three watches are a follow-up.
 - **The hard cost limit is the provider's.** kausa's budget starts over when kausa restarts, and a
   kausa that restarts often can spend more than its daily cap. Operators should set a spending cap
   or rate limit on the provider key.
@@ -255,7 +281,8 @@ kausa must:
     seen and keeps working in the other namespaces. After its next restart it never becomes ready,
     so `helm upgrade --wait` times out and `--atomic` rolls back, security fixes included. The
     way out is to remove the namespace from `rbac.namespaces`, or to restore the binding, then
-    upgrade; the `pod watch error` and `event watch error` lines name the namespace;
+    upgrade; the `pod watch error`, `event watch error` and `deployment watch error` lines name
+    the namespace;
   - **edit the Role**, which gives a stolen kausa token more in that namespace; compare it with
     `helm get manifest`. An upgrade with the same values put an edited Role back in kind on
     2026-10-28 (Helm 3.16.1);

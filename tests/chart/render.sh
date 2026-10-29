@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Chart check: lints and renders charts/kausa in both RBAC scopes
 # (docs/adr/0013-namespaced-install-mode.md), with the explanation history on and off
-# (docs/adr/0014-explanation-history.md) and with notifications on and off
-# (docs/adr/0015-notifications.md), and checks the rendered objects, the rules, the Deployment's
+# (docs/adr/0014-explanation-history.md), with notifications on and off
+# (docs/adr/0015-notifications.md) and with the Deployment watch of D014 on and off
+# (docs/adr/0018-stuck-rollouts.md), and checks the rendered objects, the rules, the Deployment's
 # arguments and volumes, the NetworkPolicy, NOTES.txt, and every refusal of kausa.validate with its
 # exact message.
 # Needs helm, git and coreutils only, and never contacts a cluster (KUBECONFIG points nowhere).
@@ -10,11 +11,14 @@
 # failed.
 #
 # KAUSA_CHART_BASE names a git ref with the v0.1 chart (default v0.1.0); when the ref is in the
-# clone, the ClusterRole rules are also compared with that chart's render. KAUSA_CHART_PREVIOUS
+# clone, the ClusterRole rules are also compared with that chart's render: equal with
+# rollouts=false, and with only the deployments rule added by default. KAUSA_CHART_PREVIOUS
 # names a git ref with the chart before notifications (for example 13cfd4d, the history's merge;
 # unset by default, because the chart's version labels differ after a release); when it is set and
-# in the clone, renders with notifications off are compared with its renders byte for byte. HELM names the
-# binary.
+# in the clone, renders with notifications off are compared with its renders byte for byte (with
+# rollouts=false, its --no-rollouts arg left out). KAUSA_CHART_V03 names a git ref with the v0.3
+# chart (default v0.3.0); when the ref is in the clone, NOTES.txt's scope paragraph with
+# rollouts=false is compared with that chart's. HELM names the binary.
 # No pipefail: grep -q ends a pipe early, and its writer's SIGPIPE is not a failure.
 set -eu
 
@@ -117,9 +121,11 @@ rule_events_read() {
 rule_events_write() {
   printf '%s\n' '-apiGroups:["events.k8s.io"]' 'resources:["events"]' 'verbs:["create","patch"]'
 }
-rule_owners() {
-  printf '%s\n' '-apiGroups:["apps"]' 'resources:["replicasets"]' 'verbs:["get"]' \
-    '-apiGroups:["batch"]' 'resources:["jobs"]' 'verbs:["get"]'
+rule_replicasets() { printf '%s\n' '-apiGroups:["apps"]' 'resources:["replicasets"]' 'verbs:["get"]'; }
+rule_jobs() { printf '%s\n' '-apiGroups:["batch"]' 'resources:["jobs"]' 'verbs:["get"]'; }
+# The Deployment watch of D014 (docs/adr/0018-stuck-rollouts.md), right after replicasets.
+rule_deployments() {
+  printf '%s\n' '-apiGroups:["apps"]' 'resources:["deployments"]' 'verbs:["list","watch"]'
 }
 # The history rule (docs/adr/0014-explanation-history.md), last.
 rule_history() {
@@ -127,32 +133,50 @@ rule_history() {
     'verbs:["list","create","patch","delete"]'
 }
 # expected_rules LOGS WRITES [HISTORY]: the rules for "yes"/"no" pods/log, Event writes and the
-# history.
+# history; with the deployments rule unless ROLLOUTS=no.
 expected_rules() {
   rule_pods
   if [ "$1" = yes ]; then rule_logs; fi
   rule_events_read
   if [ "$2" = yes ]; then rule_events_write; fi
-  rule_owners
+  rule_replicasets
+  if [ "${ROLLOUTS:-yes}" != no ]; then rule_deployments; fi
+  rule_jobs
   if [ "${3-no}" = yes ]; then rule_history; fi
 }
 
+# check_rollouts_arg NAME FILE: with ROLLOUTS=no, exactly one --no-rollouts arg; otherwise none.
+check_rollouts_arg() {
+  local count
+  count=$(args "$2" | grep -cx -- '- --no-rollouts' || true)
+  if [ "${ROLLOUTS:-yes}" = no ]; then
+    [ "$count" = 1 ] || fail "$1: $count --no-rollouts args, not exactly one"
+  else
+    [ "$count" = 0 ] || fail "$1: passes --no-rollouts"
+  fi
+}
+
 # NOTES.txt is not part of helm template's output: a copy of the chart renders it as a string.
+# notes_chart CHART: adds that template to a copy of a chart.
+notes_chart() {
+  {
+    echo '{{- define "kausa.notesCheck" }}'
+    cat "$1/templates/NOTES.txt"
+    echo '{{- end }}'
+    echo 'notes: {{ include "kausa.notesCheck" . | toJson }}'
+  } >"$1/templates/zz-notes-check.yaml"
+}
 NOTES_CHART="$WORK/notes/kausa"
 mkdir -p "$WORK/notes"
 cp -R "$CHART" "$NOTES_CHART"
-{
-  echo '{{- define "kausa.notesCheck" }}'
-  cat "$CHART/templates/NOTES.txt"
-  echo '{{- end }}'
-  echo 'notes: {{ include "kausa.notesCheck" . | toJson }}'
-} >"$NOTES_CHART/templates/zz-notes-check.yaml"
+notes_chart "$NOTES_CHART"
 
-# notes OUT ARGS...: the rendered NOTES.txt, as text.
+# notes OUT ARGS...: the rendered NOTES.txt, as text; NOTES_FROM names another such copy.
 notes() {
   local out=$1
   shift
-  render "$out.raw" "$RELEASE" "$NOTES_CHART" --show-only templates/zz-notes-check.yaml "$@" || {
+  render "$out.raw" "$RELEASE" "${NOTES_FROM:-$NOTES_CHART}" \
+    --show-only templates/zz-notes-check.yaml "$@" || {
     fail "NOTES.txt does not render with $*: $(cat "$out.raw.err")"
     : >"$out"
     return 0
@@ -197,7 +221,8 @@ fi
 
 # check_cluster NAME LOGS WRITES ARGS...: a cluster-scope render with v0.1's objects and rules.
 # HISTORY=yes expects the history rule last and --history in the args; EXTRA lists the other
-# cluster-scoped objects expected (Kind/name, space-separated), none by default.
+# cluster-scoped objects expected (Kind/name, space-separated), none by default. ROLLOUTS=no expects
+# no deployments rule and one --no-rollouts arg.
 check_cluster() {
   local name=$1 logs=$2 writes=$3
   shift 3
@@ -239,6 +264,7 @@ check_cluster() {
   done
   args "$out" | grep -qx -- '- --namespace' && fail "cluster/$name: passes --namespace"
   [ "$(args "$out" | head -n 1)" = '- run' ] || fail "cluster/$name: the first arg is not run"
+  check_rollouts_arg "cluster/$name" "$out"
   passed "$since" "cluster/$name"
 }
 
@@ -248,7 +274,19 @@ check_cluster dry-run-no-logs no no "${DRY_NO_LOGS[@]}"
 check_cluster dry-run yes no "${DRY[@]}"
 check_cluster no-events yes no "${NO_EVENTS[@]}"
 
-# The same rules as the v0.1 chart's render with the same values, when that chart is in the clone.
+# The same value sets with the Deployment watch off (docs/adr/0018-stuck-rollouts.md): no
+# deployments rule and one --no-rollouts arg, whatever else is on.
+ROLLOUTS_OFF=(--set rollouts=false)
+ROLLOUTS=no check_cluster default-no-rollouts no no "${ROLLOUTS_OFF[@]}"
+ROLLOUTS=no check_cluster endpoint-no-rollouts yes yes "${ENDPOINT[@]}" "${ROLLOUTS_OFF[@]}"
+ROLLOUTS=no check_cluster dry-run-no-logs-no-rollouts no no "${DRY_NO_LOGS[@]}" \
+  "${ROLLOUTS_OFF[@]}"
+ROLLOUTS=no check_cluster dry-run-no-rollouts yes no "${DRY[@]}" "${ROLLOUTS_OFF[@]}"
+ROLLOUTS=no check_cluster no-events-no-rollouts yes no "${NO_EVENTS[@]}" "${ROLLOUTS_OFF[@]}"
+
+# The same rules as the v0.1 chart's render with the same values, when that chart is in the clone:
+# exactly, with rollouts=false; and with only the three rows of the deployments rule added right
+# after the replicasets rule, by default.
 if git -C "$ROOT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; then
   mkdir -p "$WORK/base"
   git -C "$ROOT" archive "$BASE" charts/kausa | tar -x -C "$WORK/base"
@@ -263,11 +301,28 @@ if git -C "$ROOT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; t
     out="$WORK/base-$name"
     if render "$out" "$RELEASE" "$WORK/base/charts/kausa" ${values[@]+"${values[@]}"}; then
       docs "$out" ClusterRole | section rules >"$out.rules"
-      if [ -f "$WORK/cluster-$name.rules" ] &&
-        diff -u "$out.rules" "$WORK/cluster-$name.rules" >"$out.diff"; then
-        ok "cluster/$name has the rules of $BASE"
+      if [ -f "$WORK/cluster-$name-no-rollouts.rules" ] &&
+        diff -u "$out.rules" "$WORK/cluster-$name-no-rollouts.rules" >"$out.diff"; then
+        ok "cluster/$name with rollouts=false has the rules of $BASE"
       else
-        fail "cluster/$name: the rules differ from $BASE's: $(cat "$out.diff" 2>/dev/null)"
+        fail "cluster/$name with rollouts=false: the rules differ from $BASE's:" \
+          "$(cat "$out.diff" 2>/dev/null)"
+      fi
+      rule_deployments >"$out.deployments-rows"
+      awk '
+        NR == FNR { rows = rows $0 "\n"; next }
+        { print }
+        after && /^verbs:/ { printf "%s", rows; after = 0 }
+        $0 == "resources:[\"replicasets\"]" { after = 1 }
+      ' "$out.deployments-rows" "$out.rules" >"$out.rollouts-expected"
+      [ "$(grep -cxF 'resources:["deployments"]' "$out.rollouts-expected" || true)" = 1 ] ||
+        fail "$BASE's $name rules: the deployments rows were not added exactly once"
+      if [ -f "$WORK/cluster-$name.rules" ] &&
+        diff -u "$out.rollouts-expected" "$WORK/cluster-$name.rules" >"$out.rollouts-diff"; then
+        ok "cluster/$name has the rules of $BASE and the deployments rule after replicasets"
+      else
+        fail "cluster/$name: the rules are not $BASE's with the deployments rule after" \
+          "replicasets: $(cat "$out.rollouts-diff" 2>/dev/null)"
       fi
     else
       fail "the $BASE chart does not render with $name: $(cat "$out.err")"
@@ -282,7 +337,8 @@ fi
 # check_namespaced NAME LOGS WRITES LIST [ARGS...]: a namespaced render for the comma-separated
 # LIST: nothing cluster-scoped, one Role and one RoleBinding per namespace, the rules of the
 # cluster scope with the same values, and one --namespace per entry right after run.
-# FULLNAME and SUBJECT (the names of the objects and the service account) default to kausa.
+# FULLNAME and SUBJECT (the names of the objects and the service account) default to kausa;
+# HISTORY, EXTRA and ROLLOUTS as in check_cluster.
 check_namespaced() {
   local name=$1 logs=$2 writes=$3 list=$4
   shift 4
@@ -365,6 +421,7 @@ check_namespaced() {
   else
     args "$out" | grep -q -- '^- --history' && fail "namespaced/$name: passes a --history arg"
   fi
+  check_rollouts_arg "namespaced/$name" "$out"
   passed "$since" "namespaced/$name"
 }
 
@@ -392,11 +449,103 @@ for name in endpoint dry-run-no-logs dry-run no-events default; do
   done
 done
 
+# With the Deployment watch off, the Roles lose the deployments rule as the ClusterRole does.
+ROLLOUTS=no check_namespaced default-no-rollouts no no e2e-a "${ROLLOUTS_OFF[@]}"
+ROLLOUTS=no check_namespaced endpoint-no-rollouts yes yes e2e-a,e2e-b "${ENDPOINT[@]}" \
+  "${ROLLOUTS_OFF[@]}"
+ROLLOUTS=no check_namespaced dry-run-no-logs-no-rollouts no no e2e-a,e2e-b "${DRY_NO_LOGS[@]}" \
+  "${ROLLOUTS_OFF[@]}"
+for name in default-no-rollouts endpoint-no-rollouts dry-run-no-logs-no-rollouts; do
+  for rules in "$WORK/namespaced-$name".*.rules; do
+    [ -f "$rules" ] || continue
+    diff -q "$WORK/cluster-$name.rules" "$rules" >/dev/null 2>&1 ||
+      fail "namespaced/$name: a Role's rules differ from the ClusterRole's ($rules)"
+  done
+done
+
 # A namespace that is a number must stay a string in metadata.namespace.
 for kind in Role RoleBinding; do
   docs "$WORK/namespaced-number" "$kind" 123 | grep -Eqx "  namespace: (\"123\"|'123')" ||
     fail "namespaced/number: the $kind's metadata.namespace is not the string \"123\""
 done
+
+# --- Stuck rollouts (docs/adr/0018-stuck-rollouts.md) -------------------------------------------
+
+# One value drives the grant and the watch: rollouts=false removes the rule and passes
+# --no-rollouts (checked above); any other value, the key missing included, is on and renders like
+# the default. There is no refusal.
+check_cluster rollouts-true no no --set rollouts=true
+check_cluster rollouts-null no no --set rollouts=null
+check_cluster rollouts-string no no --set rollouts=no
+ROLLOUTS=no check_cluster rollouts-string-false no no --set-string rollouts=false
+check_namespaced rollouts-true no no e2e-a --set rollouts=true
+check_namespaced rollouts-null no no e2e-a --set rollouts=null
+ROLLOUTS=no check_namespaced rollouts-string-false no no e2e-a --set-string rollouts=false
+for pair in cluster-rollouts-true:cluster-default cluster-rollouts-null:cluster-default \
+  cluster-rollouts-string:cluster-default namespaced-rollouts-true:namespaced-default \
+  namespaced-rollouts-null:namespaced-default; do
+  out="$WORK/${pair%%:*}" compare="$WORK/${pair#*:}"
+  if [ -f "$out" ] && [ -f "$compare" ] && cmp -s "$compare" "$out"; then
+    ok "${pair%%:*} renders like ${pair#*:}"
+  else
+    fail "${pair%%:*} does not render like ${pair#*:}:" \
+      "$(diff "$compare" "$out" 2>&1 | head -20)"
+  fi
+done
+
+# The --no-rollouts arg comes right after where --no-logs goes.
+if [ -f "$WORK/cluster-dry-run-no-logs-no-rollouts" ]; then
+  args "$WORK/cluster-dry-run-no-logs-no-rollouts" | grep -A1 -x -- '- --no-logs' | tail -n 1 |
+    grep -qx -- '- --no-rollouts' ||
+    fail "cluster/dry-run-no-logs-no-rollouts: --no-rollouts does not follow --no-logs"
+fi
+
+# A release made before the Deployment watch (helm upgrade --reuse-values from v0.3) renders with
+# values that have no rollouts key: a copy of the chart without it renders like the chart's
+# defaults, in both scopes, so the watch and its rule come on.
+NOROLLOUTS_CHART="$WORK/norollouts/kausa"
+mkdir -p "$WORK/norollouts"
+cp -R "$CHART" "$NOROLLOUTS_CHART"
+grep -v '^rollouts:' "$CHART/values.yaml" >"$NOROLLOUTS_CHART/values.yaml"
+grep -q '^rollouts:' "$CHART/values.yaml" || fail "values.yaml has no top-level rollouts key"
+for pair in cluster-default:cluster cluster-endpoint:cluster,endpoint \
+  namespaced-default:namespaced namespaced-endpoint:namespaced,endpoint; do
+  name=${pair%%:*} sets=${pair#*:}
+  set_values=()
+  case ",$sets," in
+    *,cluster,*) set_values+=(--set rbac.scope=cluster) ;;
+    *,namespaced,*) set_values+=(--set rbac.scope=namespaced) ;;
+  esac
+  case "$name" in
+    namespaced-default) set_values+=(--set 'rbac.namespaces={e2e-a}') ;;
+    namespaced-endpoint) set_values+=(--set 'rbac.namespaces={e2e-a,e2e-b}') ;;
+  esac
+  case ",$sets," in *,endpoint,*) set_values+=("${ENDPOINT[@]}") ;; esac
+  out="$WORK/norollouts-$name"
+  if ! render "$out" "$RELEASE" "$NOROLLOUTS_CHART" "${set_values[@]}"; then
+    fail "no rollouts key, $name: does not render: $(cat "$out.err")"
+  elif [ ! -f "$WORK/$name" ]; then
+    fail "no rollouts key, $name: no render of the chart to compare with"
+  elif cmp -s "$WORK/$name" "$out"; then
+    ok "no rollouts key, $name: renders like the chart"
+  else
+    fail "no rollouts key, $name: renders unlike the chart: $(diff "$WORK/$name" "$out" | head -20)"
+  fi
+done
+
+# helm lint --strict with the Deployment watch off.
+if "$HELM" lint --strict "$CHART" --set rbac.scope=cluster "${ROLLOUTS_OFF[@]}" \
+  >"$WORK/lint-rollouts" 2>&1; then
+  ok "helm lint --strict with rollouts=false"
+else
+  fail "helm lint --strict with rollouts=false: $(cat "$WORK/lint-rollouts")"
+fi
+if "$HELM" lint --strict "$CHART" --set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a}' \
+  "${ROLLOUTS_OFF[@]}" >"$WORK/lint-rollouts" 2>&1; then
+  ok "helm lint --strict with rollouts=false, namespaced"
+else
+  fail "helm lint --strict with rollouts=false, namespaced: $(cat "$WORK/lint-rollouts")"
+fi
 
 # --- Explanation history (docs/adr/0014-explanation-history.md) ---------------------------------
 
@@ -786,6 +935,69 @@ for file in "$WORK/notes-cluster" "$WORK/notes-namespaced" "$WORK/notes-history-
     fail "NOTES.txt without the history tells how to read Explanations ($file)"
 done
 
+# NOTES.txt names the Deployments kausa reads only while the Deployment watch is on; with
+# rollouts=false it keeps v0.3's sentence (docs/adr/0018-stuck-rollouts.md).
+NS_AB=(--set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a,e2e-b}')
+notes "$WORK/notes-cluster-no-logs" --set rbac.scope=cluster
+notes "$WORK/notes-namespaced-no-logs" "${NS_AB[@]}"
+notes "$WORK/notes-cluster-no-rollouts" --set rbac.scope=cluster "${ENDPOINT[@]}" \
+  "${ROLLOUTS_OFF[@]}"
+notes "$WORK/notes-cluster-no-logs-no-rollouts" --set rbac.scope=cluster "${ROLLOUTS_OFF[@]}"
+notes "$WORK/notes-namespaced-no-rollouts" "${NS_AB[@]}" "${ENDPOINT[@]}" "${ROLLOUTS_OFF[@]}"
+notes "$WORK/notes-namespaced-no-logs-no-rollouts" "${NS_AB[@]}" "${ROLLOUTS_OFF[@]}"
+for pair in \
+  "cluster|kausa can read Pods, Events and Deployments in every namespace of the cluster, and container logs too." \
+  "cluster-no-logs|kausa can read Pods, Events and Deployments in every namespace of the cluster." \
+  "namespaced|can read Pods, Events, Deployments and container logs in them and nowhere else:" \
+  "namespaced-no-logs|can read Pods, Events and Deployments in them and nowhere else:" \
+  "cluster-no-rollouts|kausa can read Pods and Events in every namespace of the cluster, and container logs too." \
+  "cluster-no-logs-no-rollouts|kausa can read Pods and Events in every namespace of the cluster." \
+  "namespaced-no-rollouts|can read Pods, Events and container logs in them and nowhere else:" \
+  "namespaced-no-logs-no-rollouts|can read Pods and Events in them and nowhere else:"; do
+  name=${pair%%|*} sentence=${pair#*|}
+  file="$WORK/notes-$name"
+  [ -s "$file" ] || { fail "NOTES.txt ($name) is empty"; continue; }
+  since=$FAILURES
+  collapsed "$file" | grep -qF -- "$sentence" ||
+    fail "NOTES.txt ($name) lacks '$sentence': $(collapsed "$file" | head -c 300)"
+  case $name in
+    *-no-rollouts)
+      grep -qF 'Deployments' "$file" && fail "NOTES.txt ($name) names Deployments with rollouts=false"
+      ;;
+    *) grep -qF 'Deployments' "$file" || fail "NOTES.txt ($name) does not name Deployments" ;;
+  esac
+  passed "$since" "NOTES.txt ($name) on what kausa reads"
+done
+
+# With rollouts=false, the scope paragraph (up to "kausa is running in") is v0.3's own render with
+# the same values, when that chart is in the clone (KAUSA_CHART_V03, default v0.3.0).
+V03=${KAUSA_CHART_V03:-v0.3.0}
+if git -C "$ROOT" rev-parse --verify --quiet "$V03^{commit}" >/dev/null 2>&1; then
+  mkdir -p "$WORK/v03"
+  git -C "$ROOT" archive "$V03" charts/kausa | tar -x -C "$WORK/v03"
+  notes_chart "$WORK/v03/charts/kausa"
+  scope_paragraph() { awk '/^kausa is running in / { exit } { print }' "$1"; }
+  for name in cluster-no-rollouts cluster-no-logs-no-rollouts namespaced-no-rollouts \
+    namespaced-no-logs-no-rollouts; do
+    case $name in
+      cluster-*) set_values=(--set rbac.scope=cluster) ;;
+      *) set_values=("${NS_AB[@]}") ;;
+    esac
+    case $name in *-no-logs-*) ;; *) set_values+=("${ENDPOINT[@]}") ;; esac
+    NOTES_FROM="$WORK/v03/charts/kausa" notes "$WORK/notes-v03-$name" "${set_values[@]}"
+    if [ -s "$WORK/notes-v03-$name" ] && [ -s "$WORK/notes-$name" ] &&
+      [ "$(scope_paragraph "$WORK/notes-v03-$name")" = \
+        "$(scope_paragraph "$WORK/notes-$name")" ]; then
+      ok "NOTES.txt ($name) has the scope paragraph of $V03"
+    else
+      fail "NOTES.txt ($name): the scope paragraph differs from $V03's:" \
+        "$(diff <(scope_paragraph "$WORK/notes-v03-$name") <(scope_paragraph "$WORK/notes-$name"))"
+    fi
+  done
+else
+  echo "skipped: $V03 is not in this clone; NOTES.txt is checked against v0.3's sentences above"
+fi
+
 # --- Refusals -----------------------------------------------------------------------------------
 
 # refuse NAME MESSAGE ARGS...: helm template fails, and its error contains MESSAGE exactly.
@@ -855,6 +1067,12 @@ refuse order-repeats-before-count "rbac.namespaces: 'team-1' is listed twice" \
   --set rbac.scope=namespaced --set "rbac.namespaces={$NAMES32,team-1}"
 refuse v0.1-checks-stay "model.name is required with model.endpoint" --set rbac.scope=cluster \
   --set model.endpoint=https://api.example.com/v1
+# rollouts adds no refusal and changes none (docs/adr/0018-stuck-rollouts.md).
+refuse rollouts-off-scope-first "$NOT_SET" --set rollouts=false
+refuse rollouts-off-namespaced-no-list "$NEEDS_LIST" --set rbac.scope=namespaced \
+  --set rollouts=false
+refuse rollouts-off-v0.1-checks-stay "model.name is required with model.endpoint" \
+  --set rbac.scope=cluster --set rollouts=false --set model.endpoint=https://api.example.com/v1
 # history.days, the last check, with the history on and off (helm lint does not fail on a
 # template's fail; helm template does).
 not_days() { echo "history.days must be a whole number of days from 1 to 30, not '$1'"; }
@@ -1161,8 +1379,10 @@ if [ -n "$PREVIOUS" ] && git -C "$ROOT" rev-parse --verify --quiet "$PREVIOUS^{c
       now="$WORK/now-$scope-$name"
       if render "$out" "$RELEASE" "$WORK/previous/charts/kausa" "${scope_args[@]}" \
         ${values[@]+"${values[@]}"} && render "$now" "$RELEASE" "$CHART" "${scope_args[@]}" \
-        ${values[@]+"${values[@]}"}; then
-        if cmp -s "$out" "$now"; then
+        ${values[@]+"${values[@]}"} "${ROLLOUTS_OFF[@]}"; then
+        # The chart before notifications had no Deployment watch: compare with it off.
+        grep -vx -- ' *- --no-rollouts' "$now" >"$now.v0.3" || true
+        if cmp -s "$out" "$now.v0.3"; then
           ok "$scope/$name renders like $PREVIOUS"
         else
           fail "$scope/$name renders unlike $PREVIOUS: $(diff "$out" "$now" | head -20)"

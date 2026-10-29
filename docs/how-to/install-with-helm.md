@@ -14,7 +14,10 @@ cluster-wide](../adr/0013-namespaced-install-mode.md)). It also adds the explana
 (`history.enabled`, off by default), which the kind test installed
 in both scopes on 2026-10-28 ([Keep the history of explanations](#keep-the-history-of-explanations)),
 and notifications (`notifications.enabled`, off by default; [Send notifications to Slack, Telegram
-or a webhook](send-notifications.md)).
+or a webhook](send-notifications.md)). The chart in the repository adds, for v0.4 (not released as
+of 2026-10-29), a watch on Deployments for stalled rollouts (`rollouts`, on by default), which the
+kind test installed in both scopes on 2026-10-29 ([Upgrade to the Deployment
+watch](#upgrade-to-the-deployment-watch)).
 
 ## Before you start
 
@@ -107,6 +110,41 @@ helm upgrade kausa <chart> -n kausa --reuse-values --set rbac.scope=cluster
 `--reuse-values` carries the scope on. Without `--reuse-values`, pass the scope every time, best
 from a values file: `helm upgrade --reset-values`, or an upgrade with `--set` and neither
 `--reuse-values` nor a values file, renders the chart's defaults, which have no scope, and fails.
+
+## Upgrade to the Deployment watch
+
+From v0.4, kausa also watches Deployments, to explain a rollout past its progress deadline
+(`D014`), and its role gains `list` and `watch` on `deployments` in both scopes ([0018. Explain a
+Deployment past its progress deadline (`D014`) from a Deployment watch that is on by default, and
+add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md)).
+
+- **Upgrade the chart and the image together.** A v0.4 image with the v0.3 chart's role, RBAC made
+  outside the chart, or the read-only proxy of [Try kausa against a cluster with a local
+  model](try-with-a-local-model.md) without the Deployment paths, gets `403` on the Deployment
+  watch: kausa explains everything else but is never Ready, `helm upgrade --wait` times out, and
+  `deployment watch error` lines whose `error` says `deployments.apps is forbidden` appear at most
+  every 30 seconds. The chart's own upgrade needs nothing more: a missing `rollouts` value, as
+  `--reuse-values` gives from a v0.3 release, means on.
+- **RBAC made outside the chart** adds this rule to the ClusterRole, or to the Role of each
+  watched namespace:
+
+  ```yaml
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["list", "watch"]
+  ```
+
+- **To keep v0.3's permissions**, turn the watch off: `--set rollouts=false` removes the rule and
+  passes `--no-rollouts` (outside the chart, run `kausa run --no-rollouts`). `D014` is then off.
+- **The Deployments' own deadlines decide when `D014` comes:** `spec.progressDeadlineSeconds`
+  (600 seconds by default) after the last progress, plus the settle window and a check of 5
+  seconds. kausa has no setting for it; lower a Deployment's deadline to hear sooner, and a
+  Deployment without one is never explained by `D014`.
+- **The first start explains every Deployment already past its deadline**, one window later,
+  within the call budget and the queue of 16 incidents waiting for an explanation (beyond it, the
+  oldest is dropped and counted in `kausa_explanations_dropped_total`); a restart does it again,
+  as for Pod failures. A stall already explained by a Pod rule or `D011` of the same Deployment
+  gives no `D014`.
 
 ## Watch only some namespaces
 
@@ -229,8 +267,8 @@ v0.3.0 is the first release with it.
 
 ## Verify
 
-- `kubectl -n kausa get pods`: one Pod, ready once every watch has listed (two, or two per listed
-  namespace).
+- `kubectl -n kausa get pods`: one Pod, ready once every watch has listed (three, or three per
+  listed namespace; two, or two per listed namespace, with `rollouts=false`).
 - When a workload has been failing for a minute:
   `kubectl get events.events.k8s.io -A --field-selector reportingController=kausa` (or `-n
   <namespace>` for each listed namespace) lists kausa's Events, and `kubectl describe deployment -n <namespace> <name>` shows the explanation.
@@ -259,6 +297,11 @@ v0.3.0 is the first release with it.
   it), or remove the namespace from the list. The other namespaces keep working meanwhile. A
   binding deleted while kausa runs shows up later, when the open watch ends: after about 290
   seconds in kind on 2026-10-28.
+- **The Pod runs but is not Ready, and the log has `deployment watch error` with `deployments.apps
+  is forbidden`** → kausa's role does not grant `list` and `watch` on Deployments (a v0.4 image on
+  the v0.3 chart's role, or RBAC made outside the chart) → upgrade the chart with the image, add
+  the rule of [Upgrade to the Deployment watch](#upgrade-to-the-deployment-watch), or set
+  `rollouts=false`.
 - **The Pod restarts with exit code 2** → kausa refused its arguments → `kubectl -n kausa logs
   deploy/kausa --previous` says which.
 - **`history write failed`** with `the CustomResourceDefinition explanations.kausa.fedeam.com is

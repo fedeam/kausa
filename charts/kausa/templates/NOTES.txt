@@ -2,12 +2,21 @@
 {{- $scope := $rbac.scope | default "" | toString }}
 {{- $namespaces := $rbac.namespaces | default list }}
 {{- $readsLogs := and .Values.logs (include "kausa.explains" .) }}
+{{- $rollouts := include "kausa.rollouts" . }}
 {{- if eq $scope "namespaced" -}}
+{{- $reads := "Pods and Events" }}
+{{- if and $readsLogs $rollouts }}{{ $reads = "Pods, Events, Deployments and container logs" }}
+{{- else if $readsLogs }}{{ $reads = "Pods, Events and container logs" }}
+{{- else if $rollouts }}{{ $reads = "Pods, Events and Deployments" }}
+{{- end -}}
 Scope: namespaced (rbac.scope=namespaced). kausa watches only these namespaces, and can read
-Pods{{ if $readsLogs }}, Events and container logs{{ else }} and Events{{ end }} in them and nowhere else:
+{{ $reads }} in them and nowhere else:
 {{ range $namespaces }}
   {{ . }}
 {{- end }}
+{{- else if $rollouts -}}
+Scope: cluster (rbac.scope=cluster). kausa can read Pods, Events and Deployments
+in every namespace of the cluster{{ if $readsLogs }}, and container logs too{{ end }}.
 {{- else -}}
 Scope: cluster (rbac.scope=cluster). kausa can read Pods and Events in every namespace of the
 cluster{{ if $readsLogs }}, and container logs too{{ end }}.
