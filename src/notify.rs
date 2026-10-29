@@ -996,6 +996,8 @@ mod tests {
                 failed_at: None,
                 node_name: Some("worker-7".into()),
                 service_account: Some("web-runner".into()),
+                image_pull_secrets: 0,
+                scheduling: None,
                 containers: vec![ContainerRecord {
                     name: "server".into(),
                     image: Some("registry.example.com/team/web:1.4.2".into()),

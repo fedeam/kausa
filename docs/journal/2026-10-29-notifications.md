@@ -214,3 +214,68 @@ runs only when it names a ref.
   pull request. A `D011` request can spend its ten event slots on near-identical events; noted
   for later.
 
+## Later the same day: richer context for the model (0017)
+
+- Request: implement [0017. Send the model resource requests, probe handlers, image pull settings
+  and an unschedulable Pod's scheduling keys, reduced and
+  redacted](../adr/0017-richer-context-for-the-model.md) on top of the accepted v0.4 ADRs.
+- Code track (`src/record.rs`, `src/context.rs`, `src/explain.rs`, `src/prompt.rs`, and the test
+  fixtures of `src/notify.rs` and `src/incident.rs`): acceptance tests first, then the record
+  (requests, quantities checked against the Kubernetes grammar, the probe's handler, resolved
+  port, path without its query and fragment, success threshold, pull policy, pull-secret count, and
+  `SchedulingRecord` for an unschedulable Pod only, with its caps, closed `os` and `arch` values as
+  a fixed-size set, and saturating counts), the context with its rule gates (`path` for `D001` and
+  `D006`, pull settings for `D002`, `scheduling` for `D005`; a gated key is absent, never `null`),
+  a last `fit()` step that sends `scheduling` and paths as `null` before skipping, and
+  `PROMPT_VERSION` `"2"` with the new facts in the system message. `src/run.rs`, `src/redact.rs`,
+  `src/fingerprint.rs`, `Cargo.toml` and `Cargo.lock` did not change.
+- Chart and e2e track: nothing to do in `charts/kausa/`, `tests/chart/render.sh` or
+  `.github/workflows/` (no flag, value, template, permission or workflow changes); `helm lint` and
+  `tests/chart/render.sh` pass unchanged. `tests/e2e/failures.yaml` gives `crasher` a readiness
+  probe with an invented query and adds the Deployment `stranded`, whose invented node selector
+  and toleration no kind node matches (`D005`); `tests/e2e/run.sh` checks that `requests.jsonl`
+  holds the path and the keys and never the query, the values or the Deployment's name, and
+  expects three notifications.
+- Docs: [Data sent to the provider](../reference/data-sent-to-the-provider.md), [Detection and
+  redaction rules](../reference/rules.md), [Data sent in
+  notifications](../reference/data-sent-in-notifications.md),
+  [Architecture](../explanation/architecture.md), [SECURITY.md](../../SECURITY.md) and the
+  [Changelog](../../CHANGELOG.md). `ARCHITECTURE.md` did not change: no invariant's text changes
+  and its codemap rows still hold, as the ADR says.
+
+### Decisions
+
+- The fields, gates and caps are 0017's; where the working spec and the ADR could differ, the ADR
+  won, and no behaviour differed.
+- The e2e readiness probe has `initialDelaySeconds: 3600`, so the kubelet never probes the
+  crashing container: otherwise its `Unhealthy` note for the connection error would quote the full
+  URL, query included (the known gap of 0017's fact 4), into `requests.jsonl`, and could open a
+  `D006` incident and an extra notification.
+
+### How it was checked
+
+`cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D
+warnings` and `cargo test --locked --all-features` (310 unit tests, 43 command-line tests, 1 other
+on macOS) passed after each code commit and on the merged branch; `cargo deny --locked check`,
+`cargo audit`, `gitleaks git --redact`, `helm lint --strict charts/kausa --set rbac.scope=cluster`,
+`tests/chart/render.sh`, `bash -n` and `shellcheck` on `tests/e2e/run.sh` passed too, and the
+relative links of the changed files resolve. The kind test was not run locally: the shared Docker
+disk had 3.8 GB free, under the 4 GB this work requires, so both scopes are left to CI's `kind
+(cluster)` and `kind (namespaced)` jobs on the pull request. For the same reason none of the
+ADR's hypotheses was checked on a live cluster in this session.
+
+### Follow-ups
+
+- The benchmarks the ADR asked for before acceptance, not run here because they need the shared
+  Docker disk and a real provider: `tests/bench/thousands-of-pods.py` with probes and Pods at the
+  worst scheduling record, `seeded-failures.yaml` with an HTTP probe and an unschedulable
+  Deployment, and the tokens measured per rule, in a dated research note. Until then the record
+  size (about 6 KiB per unschedulable Pod at worst) and the token cost are estimates.
+- An issue for a stricter rule on URL queries in free text (the probe URL a kubelet note quotes).
+- The hypotheses the ADR leaves open: that the API validates `matchExpressions` keys and
+  `topologyKey` like label keys and does not cap an affinity requirement's values, that the
+  ServiceAccount admission plugin copies pull secrets into the Pod, that preferred terms never
+  block scheduling, that the `os` and `arch` lists are complete, and that other Kubernetes
+  versions word the scheduler's and kubelet's messages alike.
+- `docs/reference/rules.md` repeats its "Which Events count" paragraph, as it did before this
+  change; left for a separate fix.

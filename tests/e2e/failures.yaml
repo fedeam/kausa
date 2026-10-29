@@ -1,5 +1,6 @@
-# Seeded failures for the end-to-end test. Both use kausa's own image, already loaded into the
-# kind cluster, with an argument it refuses (exit code 2), so the test pulls no other image.
+# Seeded failures for the end-to-end test. All three use kausa's own image, already loaded into
+# the kind cluster, with an argument it refuses (exit code 2), so the test pulls no other image:
+# crasher crash-loops (D001), failing-job fails (D008) and stranded cannot be scheduled (D005).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -23,6 +24,14 @@ spec:
           image: kausa:e2e
           imagePullPolicy: Never
           args: ["--no-such-flag"]
+          # The D001 request must carry the probe path without its query. The one-hour delay means
+          # the kubelet never probes the crashing container, so no Unhealthy note quotes the full
+          # URL and no D006 incident opens.
+          readinessProbe:
+            httpGet:
+              path: "/e2e-ready?e2e-query=e2e-query-value"
+              port: 8080
+            initialDelaySeconds: 3600
 ---
 apiVersion: batch/v1
 kind: Job
@@ -36,6 +45,34 @@ spec:
       restartPolicy: Never
       containers:
         - name: task
+          image: kausa:e2e
+          imagePullPolicy: Never
+          args: ["--no-such-flag"]
+---
+# No node has the label, so the Pod stays Pending and Unschedulable (D005). The D005 request must
+# carry the selector and toleration keys, never their values.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stranded
+  namespace: e2e-shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: stranded}
+  template:
+    metadata:
+      labels: {app: stranded}
+    spec:
+      nodeSelector:
+        example.com/e2e-pool: e2e-pool-value
+      tolerations:
+        - key: example.com/e2e-taint
+          operator: Equal
+          value: e2e-toleration-value
+          effect: NoSchedule
+      containers:
+        - name: app
           image: kausa:e2e
           imagePullPolicy: Never
           args: ["--no-such-flag"]

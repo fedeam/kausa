@@ -436,6 +436,8 @@ mod tests {
             failed_at: None,
             node_name: None,
             service_account: None,
+            image_pull_secrets: 0,
+            scheduling: None,
             containers: vec![ContainerRecord {
                 name: "api".into(),
                 image: Some("registry.example.com/shop/api:1.4.2".into()),

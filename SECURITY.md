@@ -75,8 +75,8 @@ tested yet: a hosted provider over HTTPS (the distroless CA bundle with rustls),
 than about a hundred Pods, and long runs ([Architecture](docs/explanation/architecture.md)).
 
 **Who controls kausa's inputs.** Anyone who can create or change a workload in a watched namespace
-controls event messages, log lines, container and volume names, image references and exit codes,
-and through them the Pod status messages the kubelet writes (an eviction names the container or the
+controls event messages, log lines, container and volume names, image references, exit codes,
+probe paths and node selector, affinity and toleration keys, and through them the Pod status messages the kubelet writes (an eviction names the container or the
 `emptyDir` volume). In a shared
 cluster that includes tenants who are not cluster administrators. The language model endpoint
 controls the answers. kausa treats both as untrusted.
@@ -161,6 +161,14 @@ kausa must:
   encoded, can reach the provider. Every rule ships with a test corpus, and `--dry-run` shows the
   exact requests before a provider is enabled. Where any leak is unacceptable, use a model served
   inside the cluster or the private network: then nothing leaves it.
+- **Paths and keys leave as the workload wrote them.** A probe's path (for `D001` and `D006`)
+  and an unschedulable Pod's node selector, affinity and toleration keys (for `D005`) are sent
+  redacted, but a customer or host name in them that no pattern and no known name matches
+  reaches the provider, and so does a query value in the probe URL that a kubelet `Unhealthy`
+  note quotes on a connection error ([0017. Send the model resource requests, probe handlers,
+  image pull settings and an unschedulable Pod's scheduling keys, reduced and
+  redacted](docs/adr/0017-richer-context-for-the-model.md)). Their values are never sent, except
+  the fixed `kubernetes.io/os` and `kubernetes.io/arch` ones.
 - **A misleading explanation is still possible.** Injected text can shape what the model writes,
   for example a suggested command that does harm. kausa never runs anything, and the explanation
   is advice for a person, who has to read it as such.
@@ -174,8 +182,8 @@ kausa must:
   wrong URL sends explanations to whoever owns it; a leaked one lets anyone post as kausa: rotate
   it at the provider.
 - **A notification can repeat redacted log text.** No field holds a log line, but the explanation
-  is the model's text, which can quote the redacted log and event text it was given, up to the
-  explanation's caps. kausa cannot tell a quote from a summary.
+  is the model's text, which can quote the redacted context it was given (log and event text,
+  probe paths, label keys), up to the explanation's caps. kausa cannot tell a quote from a summary.
 - **A notification can still mention someone or show a link.** The Slack text escapes `&`, `<`
   and `>`, sends no `link_names` and asks for `"parse": "none"`; the Telegram text has no markup
   and carries an invisible word joiner after every `@` and `/`. Both turn previews off. Slack's

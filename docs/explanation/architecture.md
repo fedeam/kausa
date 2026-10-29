@@ -54,8 +54,11 @@ produces the same incident, the same fingerprint and the same request bytes.
   grow a controller's memory with the cluster. kausa reduces each watch event to a small record per
   Pod (namespace, name, owner reference, phase, the status reason and message and, for a failed
   Pod, when it failed, and per container its waiting reason, last
-  termination reason, exit code and restart count, and its image, probe types and timings, and
-  memory and CPU limits) and drops the rest. Memory still grows with the number of Pods and
+  termination reason, exit code and restart count, and its image, memory and CPU requests and
+  limits, pull policy, and each probe's type, handler, port, path and timings; the number of pull
+  secrets; and, for an unschedulable Pod only, its node selector, affinity and toleration keys, at
+  most about 6 KiB whatever the spec holds (a hypothesis until the benchmark is rerun)) and drops
+  the rest. Memory still grows with the number of Pods and
   Warning events, by one small record each; with 96 Pods it was about 2 MiB on a Raspberry Pi 4
   ([Memory and CPU on a Raspberry Pi
   4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)), and 31 MiB with 10,000 Pods in
@@ -118,8 +121,9 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 ## Context and redaction
 
-- **Context.** The incident's Pod records, its Warning events, the relevant probe and resource
-  settings, and for the detections that read logs (`D001`, `D003`, `D008`) the last lines of the
+- **Context.** The incident's Pod records, its Warning events, the resource requests and limits,
+  each probe's handler, port and timings (and its path for `D001` and `D006`), the pull policy and
+  pull-secret count (`D002`), an unschedulable Pod's scheduling keys (`D005`), and for the detections that read logs (`D001`, `D003`, `D008`) the last lines of the
   failed container: the previous instance (`previous=true`) when the container restarted and runs
   or waits again, otherwise the terminated container itself (`previous=false`), as for a Job's Pod
   with `restartPolicy: Never`. kausa asks the API server for the last 50 lines (at most 1 MiB),

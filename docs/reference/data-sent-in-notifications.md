@@ -170,9 +170,9 @@ node finds them in the Event or in kausa's log.
 - The webhook's URL or token, which kausa also never logs.
 
 "Never logs" means that no field holds a log line. The explanation is the model's text, which can
-repeat the redacted log and event text the model was given, up to the explanation's caps (2,400
-characters in all), whether the model is verbose or injected text asks it to. kausa cannot tell a
-quote from a summary. The kind test checks that no body carries a log line of the requests, but
+repeat the redacted context the model was given (log and event text, probe paths, label keys), up
+to the explanation's caps (2,400 characters in all), whether the model is verbose or injected text
+asks it to. kausa cannot tell a quote from a summary. The kind test checks that no body carries a log line of the requests, but
 its fake model never echoes its input, so it cannot catch a model that does.
 
 ## Compatibility
