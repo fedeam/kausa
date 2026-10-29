@@ -1,6 +1,6 @@
 # 0017. Send the model resource requests, probe handlers, image pull settings and an unschedulable Pod's scheduling keys, reduced and redacted
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-29
 - Builds on: [0008. Send only allowlisted, redacted data to one OpenAI-compatible
   endpoint](0008-data-leaving-the-cluster.md) (amends its allowlist: a probe's path and node-label

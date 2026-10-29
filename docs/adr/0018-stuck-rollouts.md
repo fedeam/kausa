@@ -1,6 +1,6 @@
 # 0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for StatefulSets or DaemonSets
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-29
 - Builds on: [0001. Build a small, read-only explainer that writes one redacted explanation per
   incident](0001-scope-and-positioning.md) and [0016. Send each Pod's status reason and message to

@@ -1,6 +1,6 @@
 # 0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by kausa's own code
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-29
 - Builds on: [0009. Run with read-only permissions that never include
   Secrets](0009-least-privilege-rbac.md), [0013. Offer a namespaced install mode: one watch pair

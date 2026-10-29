@@ -109,3 +109,9 @@ redacted context), and its requests do not change. An optional second one, the w
 only the fields of [Data sent in notifications](../reference/data-sent-in-notifications.md), with
 the real names of the namespace and the top-level owner; every other name stays a placeholder.
 Invariants 2, 3 and 4 of ARCHITECTURE.md do not change.
+
+Update 2026-10-29: [0017. Send the model resource requests, probe handlers, image pull settings and
+an unschedulable Pod's scheduling keys, reduced and redacted](0017-richer-context-for-the-model.md)
+widens the allowlist: a probe's path (without its query and fragment, for D001 and D006) and the
+node-label and taint keys of an unschedulable Pod are now sent, redacted; their values never are,
+except kubernetes.io/os and kubernetes.io/arch from fixed lists.

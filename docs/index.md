@@ -124,7 +124,7 @@ checks](how-to/develop.md).
   webhook, as JSON, Slack or Telegram](adr/0015-notifications.md).
   [0016. Send each Pod's status reason and message to the model, redacted and
   bounded](adr/0016-send-the-pod-status-reason-and-message.md) came with v0.2.0's detection rules.
-  Proposed for v0.4: [0017. Send the model resource requests, probe handlers, image pull settings
+  Accepted for v0.4: [0017. Send the model resource requests, probe handlers, image pull settings
   and an unschedulable Pod's scheduling keys, reduced and
   redacted](adr/0017-richer-context-for-the-model.md), [0018. Explain a Deployment past its
   progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
