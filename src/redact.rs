@@ -1083,7 +1083,7 @@ mod tests {
                 "postgres://<redacted:userinfo>@db.example.com:5432/orders?<redacted:query>",
             ),
             (
-                "callback https://example.com/cb?token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+                "callback https://example.com/cb?state=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
                 "callback https://example.com/cb?<redacted:query>",
             ),
             (
