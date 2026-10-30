@@ -166,8 +166,9 @@ local model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 call
 k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)); on a Raspberry Pi 4 it used
 about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
 4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)). Explanations were tested with
-Ollama and small local models; a hosted provider over HTTPS has not been tried yet. What has
-changed so far is in the [Changelog](CHANGELOG.md).
+Ollama and small local models, and on 2026-10-30 with a hosted provider over HTTPS: the released
+v0.4.0 image against the OpenAI-compatible endpoint of Google's Gemini API
+(`gemini-3.5-flash-lite`). What has changed so far is in the [Changelog](CHANGELOG.md).
 
 ## Build from source
 
@@ -238,7 +239,7 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   in kind, a frozen leader was replaced 30 to 35 seconds after its last renewal, within the
   documented 40 seconds ([Standby and failover](docs/research/2026-10-29-standby-and-failover.md)).
   Upgrade the image and the chart together; the chart's default memory limit is now `192Mi`.
-- **Next:** a test against a hosted provider, and a release with the Slack fix: in v0.4.0 a plain
+- **Next:** a release with the Slack fix: in v0.4.0 a plain
   `@here` or `@channel` in a Slack notification notifies the channel; with the word joiner after
   each `@`, a real post showed them as plain text.
 

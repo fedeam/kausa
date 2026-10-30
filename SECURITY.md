@@ -88,9 +88,10 @@ StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)). Also since v0.4.0
 --leader-lease <release namespace>/<full name>-leader`, and only the one that holds that Lease
 watches, explains and writes; the other reads the Lease every 5 s and takes it over if the leader
 stops renewing it ([0019. Offer an optional standby replica that takes over through a
-chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md)). Not
-tested yet: a hosted provider over HTTPS (the distroless CA bundle with rustls), clusters larger
-than about a hundred Pods, and long runs ([Architecture](docs/explanation/architecture.md)).
+chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md)). A hosted
+provider over HTTPS (the distroless CA bundle with rustls) was tried on 2026-10-30. Not tested
+yet: clusters larger than about a hundred Pods, and long runs
+([Architecture](docs/explanation/architecture.md)).
 
 **Who controls kausa's inputs.** Anyone who can create or change a workload in a watched namespace
 controls event messages, log lines, container and volume names, image references, exit codes,
