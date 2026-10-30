@@ -263,8 +263,8 @@ kausa must:
   after every `@`; the Telegram text has no markup and carries one after every `@` and `/`. Both
   turn previews off. A real Slack post on 2026-10-30 showed a URL as plain text but a plain
   `@here` and `@channel` notifying the channel; a second one, with the joiner (after v0.4.0),
-  showed them as plain text. In Telegram, a real post showed the joiners keeping mentions and commands inert
-  and a URL staying a link ([Data sent in
+  showed them as plain text. In Telegram, a real post showed the joiners keeping mentions and
+  commands inert and a URL staying a link ([Data sent in
   notifications](docs/reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
   Injected text can also make a notification misleading, as with an Event.
 - **The budget is shared.** The call budget and the queue are one per release, shared by every
