@@ -20,7 +20,8 @@ release, [v0.1.0](https://github.com/fedeam/kausa/releases/tag/v0.1.0), came out
 [v0.3.0](https://github.com/fedeam/kausa/releases/tag/v0.3.0) ([2026-10-29 —
 Notifications](journal/2026-10-29-notifications.md), "v0.3.0"), and on 2026-10-30 by
 [v0.4.0](https://github.com/fedeam/kausa/releases/tag/v0.4.0) ([2026-10-30 — Release
-v0.4.0](journal/2026-10-30-release-v0-4-0.md)). The
+v0.4.0](journal/2026-10-30-release-v0-4-0.md)), and the same day by
+[v0.4.1](https://github.com/fedeam/kausa/releases/tag/v0.4.1), with the Slack fix and `R014`. The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -38,7 +39,7 @@ v0.3.0 too, off by default; the kind test passed in both scopes with
 the `json` format against a fake receiver on 2026-10-29, the `telegram` format was posted to a
 real Telegram chat the same day, and the `slack` format to a real Slack incoming webhook on
 2026-10-30, where a plain `@here` and `@channel` notified the channel; the fix, a word joiner after
-each `@`, is unreleased ([2026-10-29 — Notifications](journal/2026-10-29-notifications.md),
+each `@`, is in v0.4.1 ([2026-10-29 — Notifications](journal/2026-10-29-notifications.md),
 [2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md)).
 In v0.4.0: the detection rules `D011` to
 `D013`, and `D014`, a Deployment past its progress

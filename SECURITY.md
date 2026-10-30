@@ -7,7 +7,7 @@ and where secrets live.
 
 ## Supported versions
 
-Status as of 2026-10-30: the latest release is v0.4.0. Until 1.0, only the latest release will
+Status as of 2026-10-30: the latest release is v0.4.1. Until 1.0, only the latest release will
 receive security fixes.
 
 ## Reporting a vulnerability
@@ -58,8 +58,9 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-30: v0.4.0 is released, with the Deployment watch of `D014`, the richer
-context for the model and the optional standby replica. `kausa run` reads Pods,
+Status as of 2026-10-30: v0.4.1 is released: v0.4.0's Deployment watch of `D014`, richer
+context for the model and optional standby replica, plus the Slack fix and `R014`. `kausa run`
+reads Pods,
 their logs (crash loops, out-of-memory kills and failed Jobs only), Events, the metadata of
 ReplicaSets and Jobs and, unless `--no-rollouts`, Deployments; it
 redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
@@ -263,7 +264,7 @@ kausa must:
   and `>`, sends no `link_names`, asks for `"parse": "none"` and carries an invisible word joiner
   after every `@`; the Telegram text has no markup and carries one after every `@` and `/`. Both
   turn previews off. A real Slack post on 2026-10-30 showed a URL as plain text but a plain
-  `@here` and `@channel` notifying the channel; a second one, with the joiner (after v0.4.0),
+  `@here` and `@channel` notifying the channel; a second one, with the joiner (v0.4.1),
   showed them as plain text. In Telegram, a real post showed the joiners keeping mentions and
   commands inert and a URL staying a link ([Data sent in
   notifications](docs/reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
