@@ -104,7 +104,9 @@ checks](how-to/develop.md).
   4](research/2026-10-26-resource-use-on-a-raspberry-pi.md); [Thousands of
   Pods](research/2026-10-28-thousands-of-pods.md); [Thirty-two
   namespaces](research/2026-10-28-32-namespaces.md); [Ninety-six
-  watches](research/2026-10-29-96-watches.md); [Slack and Telegram for
+  watches](research/2026-10-29-96-watches.md); [Richer context,
+  measured](research/2026-10-29-richer-context-measured.md); [Standby and
+  failover](research/2026-10-29-standby-and-failover.md); [Slack and Telegram for
   notifications](research/2026-10-28-slack-and-telegram-for-notifications.md).
 - [ARCHITECTURE.md](../ARCHITECTURE.md): the map of the code, its invariants and the path of each
   kind of change.

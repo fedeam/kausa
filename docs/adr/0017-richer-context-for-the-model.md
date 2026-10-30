@@ -209,3 +209,15 @@ k8sgpt](../research/2026-10-26-tokens-compared-with-k8sgpt.md)); the worst fits 
   ServiceAccount admission plugin copies a service account's pull secrets into the Pod; preferred
   terms never block scheduling; the `os` and `arch` lists are complete; other Kubernetes versions
   word facts 3 and 4 alike.
+
+Update 2026-10-29: the benchmarks of "Before acceptance" ran on kind and are in [Richer context,
+measured](../research/2026-10-29-richer-context-measured.md). Against kausa before this ADR, on
+the same cluster: the five workloads of the token benchmark grew from 2,495 to 3,018 input tokens
+(+21%; every request carries 196 more bytes of system prompt), an HTTP probe's `D006` by 73
+tokens, and a `D005` at the largest scheduling record by 1,403 tokens (8,829 bytes), within the
+default `--max-input-tokens`. The record hypothesis of Consequences holds for the size (about
+6.4 KiB per such Pod, 63 MiB for 10,000 in the macOS binary) but not for the margin: with 10,000 such Pods the chart's
+Pod, at its 128 MiB limit, was killed for memory at each start (peak 138.8 MiB with a higher
+limit); with 5,000 it held (peak 85.5 MiB). Probes and requests on ordinary Pods cost nothing
+measurable. The decision above is unchanged; the chart's memory limit goes from 128Mi to 192Mi in
+v0.4.0, and the record's caps stay.

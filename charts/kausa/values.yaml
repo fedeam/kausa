@@ -120,14 +120,15 @@ serviceAccount:
 
 # Room above what was measured on a Raspberry Pi 4 in dry-run (2 MiB, 1m CPU, on a small cluster;
 # docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md), for larger clusters and for the
-# explanation path.
+# explanation path. The memory limit leaves room above the 138.8 MiB peak of 10,000 unschedulable
+# Pods at the largest scheduling record (docs/research/2026-10-29-richer-context-measured.md).
 resources:
   requests:
     cpu: 10m
     memory: 32Mi
   limits:
     cpu: 200m
-    memory: 128Mi
+    memory: 192Mi
 
 # Limit kausa's traffic with a NetworkPolicy: egress to DNS, the API server, the model endpoint
 # and, with notifications, the webhook only, and ingress to the metrics port only. Needs a CNI

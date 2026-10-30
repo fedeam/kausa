@@ -270,7 +270,7 @@ v0.3.0 is the first release with it.
 ## Run a standby replica
 
 With `replicaCount: 2`, a second Pod waits as a standby and takes over when the one that acts
-stops: within about 35 seconds when its node dies or it freezes, and within about 5 seconds when
+stops: within 40 seconds when its node dies or it freezes, and within about 5 seconds when
 it is deleted or drained, then the new leader lists and its incidents settle ([Architecture](../explanation/architecture.md#failover)).
 Without it, a lost node leaves kausa down until its Pod is replaced, about five minutes by default
 (hypothesis: the default `tolerationSeconds` of 300). Status as of 2026-10-29: in the chart in the

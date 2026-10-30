@@ -77,6 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgrade the chart and the image together: the new image without the `deployments` rule (the
   previous chart's role, RBAC made outside the chart, a read-only proxy) explains everything else
   but is never Ready; add the rule or use `--no-rollouts`.
+- The chart's default memory limit is `192Mi` (was `128Mi`): with 10,000 unschedulable Pods at the
+  largest scheduling record kausa peaked at 138.8 MiB ([Richer context,
+  measured](docs/research/2026-10-29-richer-context-measured.md)).
 - An Event write (its create, and on a repeat its list and series patch) gives up after 10 seconds
   and logs `event write failed` with `no answer within 10 seconds`; it had no timeout. Each list
   and delete of the history sweep is bounded to 10 seconds within the sweep's 30. Both hold with

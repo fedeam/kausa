@@ -287,7 +287,7 @@ kausa must:
   `status` but not `metadata`, so an object created with kausa's label can carry labels,
   annotations or finalizers up to etcd's object limit, about 1.5 MiB. The sweep lists 2 objects
   per page, which kube buffers and parses whole, so a page of such objects stays under about
-  30 MiB, within the chart's 128Mi memory limit (measured on 2026-10-28), and it drops the
+  30 MiB, within the chart's 192Mi memory limit (measured on 2026-10-28), and it drops the
   `metadata` it does not read before it reduces each object. The 55 KB of the [Explanation
   resource](docs/reference/explanation-resource.md) holds for the objects kausa writes only.
 - **The history's object cap is shared.** `MAX_OBJECTS` (500) counts every kausa-shaped object in

@@ -314,10 +314,11 @@ assertion keeps `RENEW_DEADLINE + WRITE_BOUND <= LEASE_DURATION`. This rests on 
 the API server does not apply a request after the client gave up on it, and a paused VM's
 monotonic clock advances. There is no fencing token.
 
-So a crashed or partitioned leader is replaced within 35 s of its last renewal (the standby sees
-the change within 5 s, then waits 30 s), and a deleted or drained one in about 5 s, since it
-releases the Lease on `SIGTERM`. Then the new leader lists (from start to Ready, about 0.5 s with
-32 namespaces and 1.6 s with 10,000 Pods in kind: [Thirty-two
+So a crashed or partitioned leader is replaced within 40 s of its last renewal (the standby sees
+the change within 5 s, then waits 30 s, and one more read of 5 s when its check falls just
+short), and a deleted or drained one in about 5 s, since it releases the Lease on `SIGTERM`, or
+less when its replacement Pod takes it first. Then the new leader lists (from start to Ready,
+about 0.5 s with 32 namespaces and 1.6 s with 10,000 Pods in kind: [Thirty-two
 namespaces](../research/2026-10-28-32-namespaces.md), [Thousands of
 Pods](../research/2026-10-28-thousands-of-pods.md)) and its incidents settle (60 s by default). With one replica, a lost node leaves nothing explained until the Pod is replaced, about
 five minutes with the default `tolerationSeconds` of 300 (hypothesis) plus start-up and the settle

@@ -155,7 +155,7 @@ kausa's label (the label selector returns it whether or not it is kausa-shaped) 
 annotations or finalizers up to etcd's object limit, about 1.5 MiB, and kube buffers and parses a
 whole page of the list before kausa sees it. Such an object, filled with thousands of small
 labels, took about 12 MiB of memory once parsed (measured on 2026-10-28), so the sweep asks for 2
-objects per page, which keeps a page under about 30 MiB, within the chart's 128Mi memory limit.
+objects per page, which keeps a page under about 30 MiB, within the chart's 192Mi memory limit.
 It drops the annotations, the other labels, the finalizers, the managed fields and the owner
 references before it reduces each object. A ResourceQuota on
 `count/explanations.kausa.fedeam.com` bounds how many such objects a namespace can hold.

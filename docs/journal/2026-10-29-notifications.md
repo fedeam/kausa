@@ -270,7 +270,9 @@ ADR's hypotheses was checked on a live cluster in this session.
   Docker disk and a real provider: `tests/bench/thousands-of-pods.py` with probes and Pods at the
   worst scheduling record, `seeded-failures.yaml` with an HTTP probe and an unschedulable
   Deployment, and the tokens measured per rule, in a dated research note. Until then the record
-  size (about 6 KiB per unschedulable Pod at worst) and the token cost are estimates.
+  size (about 6 KiB per unschedulable Pod at worst) and the token cost are estimates. **Done**
+  later on 2026-10-29: [Richer context, measured](../research/2026-10-29-richer-context-measured.md)
+  (the record size holds; 10,000 such Pods exceed the chart's 128 MiB limit, 5,000 do not).
 - An issue for a stricter rule on URL queries in free text (the probe URL a kubelet note quotes).
 - The hypotheses the ADR leaves open: that the API validates `matchExpressions` keys and
   `topologyKey` like label keys and does not cap an affinity requirement's values, that the
@@ -442,6 +444,7 @@ Not confirmed or refuted here, since kind did not run; each is to be read from t
   seconds), Lease calls per minute, renewal delays during a relist of thousands of Pods, and,
   under a metrics-port connection flood at the 200m CPU limit, renewal delays and incidents still
   explained. If a time is not met, the constants or the select are revisited in an `Update` to
-  0019 before the release.
+  0019 before the release. **Done** later on 2026-10-29: [Standby and
+  failover](../research/2026-10-29-standby-and-failover.md).
 - Before merging: the pull request of 0018 (#51) merges first, and the `ci` target and the three
   e2e runs pass on GitHub.
