@@ -2,7 +2,7 @@
 //! docs/adr/0008-data-leaving-the-cluster.md).
 //!
 //! A `Redactor` lives for one incident. It gives the names kausa knows stable placeholders, numbered
-//! in order of appearance (`R002`), applies the patterns `R003` to `R013` to free text, counts what
+//! in order of appearance (`R002`), applies the patterns `R003` to `R014` to free text, counts what
 //! each rule replaced, and maps the `R002` placeholders back in the model's answer. Everything is
 //! deterministic: the same incident produces the same request.
 
@@ -128,14 +128,16 @@ impl Redactor {
         }
     }
 
-    /// Redacts free text. First the secrets (`R009`, `R007`, `R008`, `R006`, `R010`, `R011`), so
-    /// that a known name inside a secret's key cannot break the key apart; then the known names
-    /// (`R002`); then addresses, Kubernetes names, hostnames and high-entropy strings (`R005`,
-    /// `R004`, `R003`, `R013`, `R012`). Text that already looks like one of kausa's placeholders is
-    /// neutralized first, so the answer cannot map it to a real name.
+    /// Redacts free text. First the secrets (`R009`, then the query and fragment of URLs, `R014`,
+    /// whatever they hold, then `R007`, `R008`, `R006`, `R010`, `R011`), so that a known name
+    /// inside a secret's key cannot break the key apart; then the known names (`R002`); then
+    /// addresses, Kubernetes names, hostnames and high-entropy strings (`R005`, `R004`, `R003`,
+    /// `R013`, `R012`). Text that already looks like one of kausa's placeholders is neutralized
+    /// first, so the answer cannot map it to a real name.
     pub fn text(&mut self, text: &str) -> String {
         let mut out = self.neutralize_placeholders(text);
         out = self.apply(&PEM, "R009", out, |_| "<redacted:pem>".into());
+        out = self.url_query(out);
         out = self.apply(&AUTHORIZATION_HEADER, "R007", out, |c| {
             format!("{}<redacted:authorization>", &c[1])
         });
@@ -283,6 +285,43 @@ impl Redactor {
             .into_owned();
         if n > 0 {
             *self.counts.entry(rule).or_insert(0) += n;
+        }
+        out
+    }
+
+    /// The query and fragment of a URL (`R014`), whatever they hold: `?<redacted:query>` and
+    /// `#<redacted:fragment>`. Punctuation that ends a sentence after the URL is kept, and a `?` or
+    /// `#` with nothing after it is left alone.
+    fn url_query(&mut self, text: String) -> String {
+        let mut n = 0;
+        let out = URL_QUERY
+            .replace_all(&text, |c: &Captures<'_>| {
+                let tail = &c[2];
+                let kept = tail.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+                let (query, fragment) = match kept.find('#') {
+                    Some(at) => (&kept[..at], &kept[at..]),
+                    None => (kept, ""),
+                };
+                let mut out = c[1].to_string();
+                if query.len() > 1 {
+                    out.push_str("?<redacted:query>");
+                } else {
+                    out.push_str(query);
+                }
+                if fragment.len() > 1 {
+                    out.push_str("#<redacted:fragment>");
+                } else {
+                    out.push_str(fragment);
+                }
+                if query.len() > 1 || fragment.len() > 1 {
+                    n += 1;
+                }
+                out.push_str(&tail[kept.len()..]);
+                out
+            })
+            .into_owned();
+        if n > 0 {
+            *self.counts.entry("R014").or_insert(0) += n;
         }
         out
     }
@@ -599,6 +638,10 @@ static JWT: LazyLock<Regex> =
 static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
     regex(r"(?i)\b([a-z][a-z0-9+.-]*://)(?:[^/\s:@]*:[^\s@]*(?:@[^\s@]*)*|[^/\s:@]+)@")
 });
+/// A URL with a scheme up to its query or fragment (group 1), then the query and fragment (group 2).
+/// Quotes, angle brackets, backticks, backslashes and whitespace end the URL.
+static URL_QUERY: LazyLock<Regex> =
+    LazyLock::new(|| regex(r#"(?i)(\b[a-z][a-z0-9+.-]*://[^\s?#"'<>`\\]*)([?#][^\s"'<>`\\]*)"#));
 static SECRET_KEY_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     regex(&format!(
         r#"(?i)(\b[a-z0-9_.-]*{SECRET_KEYS}\b\\?["']?\s*(?:[:=]|%3[ad])\s*)(\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"',;&}}<\\]+)"#
@@ -955,7 +998,7 @@ mod tests {
             ),
             (
                 "https://acct.blob.storage.net/c?sv=2020&sig=abc%2Bdef%3D",
-                "https://host-1/c?sv=2020&sig=<redacted:value>",
+                "https://host-1/c?<redacted:query>",
             ),
             (
                 "-----begin example key-----\nTm90\n-----end example key-----",
@@ -1009,6 +1052,66 @@ mod tests {
             redact("at main.rs:10 and app.py:42"),
             "at main.rs:10 and app.py:42"
         );
+    }
+
+    #[test]
+    fn the_query_and_fragment_of_urls_are_redacted() {
+        // Issue #48: a kubelet note for a probe that cannot connect quotes the whole URL.
+        let cases = [
+            (
+                r#"Readiness probe failed: Get "http://192.0.2.7:8080/ready?tenant=acme&plan=gold#top": dial tcp 192.0.2.7:8080: connect: connection refused"#,
+                r#"Readiness probe failed: Get "http://<redacted:ip>:8080/ready?<redacted:query>#<redacted:fragment>": dial tcp <redacted:ip>:8080: connect: connection refused"#,
+            ),
+            (
+                "GET https://api.example.com/v1/users?email=someone.else",
+                "GET https://api.example.com/v1/users?<redacted:query>",
+            ),
+            (
+                "open https://docs.example.com/guide#customer-acme-setup now",
+                "open https://docs.example.com/guide#<redacted:fragment> now",
+            ),
+            (
+                "fetched http://api.shop/items?page=2.",
+                "fetched http://host-1/items?<redacted:query>.",
+            ),
+            (
+                "(see https://example.com/a?b=c), then retry",
+                "(see https://example.com/a?<redacted:query>), then retry",
+            ),
+            (
+                "postgres://app:s3cret@db.example.com:5432/orders?sslmode=require",
+                "postgres://<redacted:userinfo>@db.example.com:5432/orders?<redacted:query>",
+            ),
+            (
+                "callback https://example.com/cb?state=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+                "callback https://example.com/cb?<redacted:query>",
+            ),
+            (
+                r#"{\"url\":\"http://example.com/x?id=7\"}"#,
+                r#"{\"url\":\"http://example.com/x?<redacted:query>\"}"#,
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact(input), expected, "{input}");
+        }
+        let mut r = Redactor::new();
+        r.text("a http://example.com/a?x=1#y and https://example.com/b#z");
+        assert_eq!(r.counts().get("R014"), Some(&2));
+    }
+
+    #[test]
+    fn urls_without_a_query_or_fragment_stay() {
+        let lines = [
+            "is it up at https://example.com/health?",
+            "see https://example.com/page# for more",
+            "what? and #hashtag without a URL",
+            "GET /api/v1/orders?page=2 200 12ms",
+        ];
+        for line in lines {
+            let mut r = Redactor::new();
+            assert_eq!(r.text(line), line, "{line}");
+            assert_eq!(r.counts().get("R014"), None, "{line}");
+        }
     }
 
     #[test]
