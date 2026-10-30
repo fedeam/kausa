@@ -219,7 +219,7 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   default: `kausa run --notify-url-file` and the chart's `notifications.enabled=true` post each
   new explanation as JSON, to Slack or to Telegram ([Send notifications to Slack, Telegram or a
   webhook](docs/how-to/send-notifications.md); Telegram posted to for real on 2026-10-29, Slack
-  not yet).
+  on 2026-10-30, where a plain `@here` still notified the channel; fixed after v0.4.0).
 - **v0.4** (released as v0.4.0 on 2026-10-30): the detection rules `D011` (workload
   cannot create Pods), `D012` (volume claim cannot be provisioned), `D013` (autoscaler cannot get
   metrics) and `D014` (rollout does not progress: a Deployment past its progress deadline, from a
@@ -238,8 +238,8 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   in kind, a frozen leader was replaced 30 to 35 seconds after its last renewal, within the
   documented 40 seconds ([Standby and failover](docs/research/2026-10-29-standby-and-failover.md)).
   Upgrade the image and the chart together; the chart's default memory limit is now `192Mi`.
-- **Next:** a test against a hosted provider, and a real post to a Slack workspace (the `slack`
-  format is checked only against Slack's documentation so far).
+- **Next:** a test against a hosted provider; a second real Slack post, to see that the word
+  joiner after each `@` (added after v0.4.0) keeps `@here` and `@channel` from notifying.
 
 ## Documentation
 

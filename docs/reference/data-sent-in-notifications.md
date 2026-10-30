@@ -102,23 +102,26 @@ Confidence: medium · fingerprint 5d0c2b7e9a1f4c38
 - The text is then cut, with no marker, at a character boundary so that it holds at most 4,000
   UTF-16 code units (a character outside the Basic Multilingual Plane, such as most emoji, counts
   two).
-- For `slack` only, and after the cut, `&`, `<` and `>` become `&amp;`, `&lt;` and `&gt;`, and
-  nothing else is escaped. The Slack text is therefore at most 20,000 units, and an entity is
-  never cut in two.
+- For `slack` only, U+2060 (WORD JOINER) follows every `@`, since a real post on 2026-10-30 showed
+  that Slack turns a plain `@here` or `@channel` into a mention that notifies the channel, with
+  `"parse": "none"` too (that the joiner stops it is a hypothesis until the next real post). The
+  joiners are added after the cut, and the cut counts them. Then `&`, `<` and `>` become `&amp;`,
+  `&lt;` and `&gt;`, and nothing else is escaped. The Slack text is therefore at most 20,000
+  units, and an entity is never cut in two.
 - For `telegram` only, U+2060 (WORD JOINER, invisible, one UTF-16 unit) follows every `@` and
   every `/`, so that the text looks the same and Telegram should find no `@username` mention,
   `/command` or `/command@bot` in it (a hypothesis until the first post to a real chat: see [What
   Slack and Telegram do with it](#what-slack-and-telegram-do-with-it)). The joiners are added
   after the cut, and the cut counts them, so the Telegram text, joiners included, is at most
-  4,000 units: with many `@` or `/` it is cut earlier than the Slack text. Taking the joiners out
-  gives a prefix of the Slack text before escaping.
+  4,000 units: with many `/` it is cut earlier than the Slack text. Taking the joiners out of
+  either gives a prefix of the same text.
 
 ## The three bodies
 
 | Format | Body |
 |---|---|
 | `json` | The [`json` body](#the-json-body) above |
-| `slack` | `{"text": <the escaped text>, "mrkdwn": false, "unfurl_links": false, "unfurl_media": false, "parse": "none"}` |
+| `slack` | `{"text": <the text with its joiners, escaped>, "mrkdwn": false, "unfurl_links": false, "unfurl_media": false, "parse": "none"}` |
 | `telegram` | `{"chat_id": <the chat>, "text": <the text with its joiners>, "link_preview_options": {"is_disabled": true}}`, with no `parse_mode`. `chat_id` is a JSON number for an integer chat id (`-1001234567890`) and a string for a channel's username (`"@kausa_alerts"`), from `--notify-telegram-chat-id` |
 
 `mrkdwn: false` turns Slack's formatting off, `unfurl_links` and `unfurl_media` its previews, and
@@ -209,8 +212,8 @@ the Telegram joiners, the 3-second interval for `telegram`, and `"parse": "none"
 | Incoming webhooks honour `unfurl_links` and `unfurl_media` | Verified, for webhooks by name | [Unfurling links in messages](https://docs.slack.dev/messaging/unfurling-links-in-messages/) |
 | Slack escapes `&`, `<` and `>`, and only those | Verified | [Formatting message text](https://docs.slack.dev/messaging/formatting-message-text/) |
 | Slack truncates a text at 40,000 characters | Verified | [chat.postMessage](https://docs.slack.dev/reference/methods/chat.postMessage/) |
-| Plain `@here`, `@channel` or `@everyone` acts in Slack | Refuted for kausa's body: only with `link_names`, which kausa does not send | [Formatting message text](https://docs.slack.dev/messaging/formatting-message-text/), [chat.postMessage](https://docs.slack.dev/reference/methods/chat.postMessage/) |
-| A plain URL is a clickable link in Slack | Verified: escaping does not stop it, `"parse": "none"` does. kausa sends `"parse": "none"` since 2026-10-29; that incoming webhooks honour it is not stated by name | [Formatting message text](https://docs.slack.dev/messaging/formatting-message-text/), [chat.postMessage](https://docs.slack.dev/reference/methods/chat.postMessage/) |
+| Plain `@here`, `@channel` or `@everyone` acts in Slack | Refuted for kausa's body by the documentation: only with `link_names`, which kausa does not send. A real post on 2026-10-30 showed the opposite: a plain `@here` and `@channel` notified the channel. kausa puts a word joiner after every `@` of the Slack text since then | [Formatting message text](https://docs.slack.dev/messaging/formatting-message-text/), [chat.postMessage](https://docs.slack.dev/reference/methods/chat.postMessage/) |
+| A plain URL is a clickable link in Slack | Verified: escaping does not stop it, `"parse": "none"` does. kausa sends `"parse": "none"` since 2026-10-29; that incoming webhooks honour it is not stated by name, but a real post on 2026-10-30 showed the URL as plain text | [Formatting message text](https://docs.slack.dev/messaging/formatting-message-text/), [chat.postMessage](https://docs.slack.dev/reference/methods/chat.postMessage/) |
 | Slack allows about one message per second | Verified for incoming webhooks; above it, `429` | [Rate limits](https://docs.slack.dev/apis/web-api/rate-limits/) |
 | Telegram's field names (`chat_id` as an integer or a string, `text`, `link_preview_options.is_disabled`; `parse_mode` optional) | Verified (`link_preview_options` since Bot API 7.0) | [Bot API](https://core.telegram.org/bots/api), [Bot API changelog](https://core.telegram.org/bots/api-changelog) |
 | Telegram's limit is 4,096 characters, and its unit | The limit is verified; the unit is not documented. The Bot API server's code counts code points, and 4,000 UTF-16 units are at most 4,000 code points, so the cut holds either way | [Bot API](https://core.telegram.org/bots/api), [tdlib/td](https://github.com/tdlib/td) |
@@ -220,9 +223,10 @@ the Telegram joiners, the 3-second interval for `telegram`, and `"parse": "none"
 | Telegram allows about one message per second | Partly refuted: one per second in a chat, but at most 20 messages a minute in a group; above it, `429`. kausa starts `telegram` sends at least 3 seconds apart since 2026-10-29 | [Bots FAQ](https://core.telegram.org/bots/faq) |
 | Telegram bot chats are not end-to-end encrypted | Partly verified: cloud chats use server-client encryption; that bots cannot take part in secret chats is not stated | [Telegram FAQ](https://telegram.org/faq) |
 
-What follows for a reader, as of 2026-10-29, from the documentation only: in Slack, the text of a
-notification should mention nobody, and should show a URL as plain text if the webhook honours
-`parse`; this stays listed under "What kausa cannot promise" in the [Security
-policy](../../SECURITY.md) until a post to a real workspace shows it. In Telegram, a real post on
+What follows for a reader: in Slack, a real post on 2026-10-30 showed a URL as plain text, and the
+escaped `<!everyone>` and `<!channel>` as `!everyone` and `!channel`, but a plain `@here` and
+`@channel` notified the channel. kausa now puts a word joiner after every `@`; that this stops
+the mentions stays listed under "What kausa cannot promise" in the [Security
+policy](../../SECURITY.md) until the next real post. In Telegram, a real post on
 2026-10-29 showed it: with the joiners, Telegram found no mention and no bot command in the text,
 only the URL, which stays a link (without the joiners it found all three).
