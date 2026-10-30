@@ -21,7 +21,10 @@ and one Role per listed namespace, and nothing cluster-wide](../adr/0013-namespa
 For v0.4 (2026-10-29), a third watch, on Deployments, explains rollouts past their progress
 deadline (`D014`) ([0018. Explain a Deployment past its progress deadline (`D014`) from a
 Deployment watch that is on by default, and add nothing for StatefulSets or
-DaemonSets](../adr/0018-stuck-rollouts.md)).
+DaemonSets](../adr/0018-stuck-rollouts.md)), and an optional standby replica takes over through a
+Lease when the one that acts stops ([Failover](#failover); [0019. Offer an optional standby
+replica that takes over through a chart-created Lease, elected by kausa's own
+code](../adr/0019-high-availability.md)).
 
 ## Pipeline
 
@@ -272,6 +275,81 @@ produces the same incident, the same fingerprint and the same request bytes.
 - **Dry-run:** the whole pipeline up to the request, which is logged and not sent. No Event is
   written.
 
+## Failover
+
+Off by default. With the chart's `replicaCount: 2`, two Pods run `kausa run --leader-lease
+<release namespace>/<full name>-leader`, and only the one that holds that Lease runs the pipeline
+above. The other is a standby: it connects, logs `started`, serves its metrics and reads the Lease
+every 5 seconds, and nothing else (no watch, owner lookup, model call or write). Both are Ready,
+the standby answering `standby` on `/readyz` ([Command line and log
+format](../reference/command-line.md#leader-election)).
+
+**One process, one task.** kausa runs on one thread with no spawned task, so the election is not a
+background thread. In the leading phase one top-level `tokio::select!` polls, in this order, the
+signals, the Lease keeper, and then, at random, the controller, the metrics `accept` and the open
+metrics connections (as a single replica shares them). The keeper ends on another holder or on its
+own deadline timer, which a hung call cannot delay, and when it ends, the controller future is
+dropped with everything in flight. A flood on the metrics port therefore takes no more of the
+controller's share than with one replica, and cannot keep a starved leader holding the Lease
+(how much it takes under the 200m CPU limit is not measured yet). Stepping down never exits:
+`Budget` and `Dedup` (with the notified marks) are kept for the next term; the records, the
+tracker, both queues, the delayed retries and the owner cache are dropped.
+
+**Timings,** constants (production values), on each replica's monotonic clock only:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `LEASE_DURATION` | 30 s | A standby takes the Lease once it has seen it unchanged this long |
+| `RENEW_DEADLINE` | 20 s | The leader acts until this long after it *sent* its last good renewal |
+| `RETRY_PERIOD` | 5 s | The leader renews and the standby reads this often |
+| `CALL_TIMEOUT` / `RELEASE_TIMEOUT` | 5 s / 2 s | Each Lease call / the release at a stop |
+| `WRITE_BOUND` | 10 s | The longest an Event write, a history write or sweep call, or a webhook attempt may run |
+
+The arithmetic: let `sent` be when the leader sent its last renewal that succeeded. The API server
+applied it at `a >= sent`; a standby sees the new version at `o >= a` and may take over only at
+`o + 30 s >= sent + 30 s`. The leader starts a write only while `now < sent + 20 s` (the term
+guard, checked before each budget take, Event call, history call, sweep call and webhook attempt),
+and every write ends, or is abandoned by the client, within 10 s: by `sent + 30 s`. A compile-time
+assertion keeps `RENEW_DEADLINE + WRITE_BOUND <= LEASE_DURATION`. This rests on two hypotheses:
+the API server does not apply a request after the client gave up on it, and a paused VM's
+monotonic clock advances. There is no fencing token.
+
+So a crashed or partitioned leader is replaced within 35 s of its last renewal (the standby sees
+the change within 5 s, then waits 30 s), and a deleted or drained one in about 5 s, since it
+releases the Lease on `SIGTERM`. Then the new leader lists (from start to Ready, about 0.5 s with
+32 namespaces and 1.6 s with 10,000 Pods in kind: [Thirty-two
+namespaces](../research/2026-10-28-32-namespaces.md), [Thousands of
+Pods](../research/2026-10-28-thousands-of-pods.md)) and its incidents settle (60 s by default). With one replica, a lost node leaves nothing explained until the Pod is replaced, about
+five minutes with the default `tolerationSeconds` of 300 (hypothesis) plus start-up and the settle
+window. These takeover times are the design's; their measurement in kind is an open item (the
+research note that 0019 makes a condition of shipping).
+
+**What a failover costs:**
+
+| State | On failover | Bound |
+|---|---|---|
+| Records, settle progress (the tracker) | Rebuilt by the new leader's list | A still-failing Pod-state incident is explained `settleSeconds` after the list; an Event-based one as soon as its Warning repeats; a `D014` state settles again |
+| Explanation queue (16), delayed retries | Lost | The incidents come back if they still fail |
+| The explanation in flight | Its call is spent, its answer dropped | One call |
+| Notification queue (16) | Dropped (counted `dropped`) | 16 |
+| `Dedup` and the notified marks | Per process; the new leader's is its own (empty, or from its last term) | One more call, Event series patch or new Event, history merge and notification per still-failing incident |
+| `Budget` | Per process, kept across its terms | At most twice `callsPerHour` and `callsPerDay` per release while both processes live; a restarted container or a new Pod starts over, as with one replica |
+| Owner cache | Rebuilt | One `get` per ReplicaSet or Job |
+| Counters | Per process | Dashboards sum over the Pods |
+
+The history ([Explanation resource](../reference/explanation-resource.md)) keeps an incident's
+record across a failover, in the same object, and is never read back into `Dedup` or `Budget`.
+
+**Failing closed.** kausa never creates its Lease. When nobody can hold it, nobody acts: a Lease
+held under another identity, or whose version changes faster than every 30 s, by whoever can
+write Leases in the release namespace; a deleted Lease or `<full name>-leader` RoleBinding; or
+Lease calls failing for 20 s, as in an API server outage, which also drops the records and settle
+progress a single replica keeps. Each shows as `sum(kausa_leader) != 1` over the Pods ([Install
+kausa with Helm](../how-to/install-with-helm.md#run-a-standby-replica)).
+
+**Cost:** about 0.4 API requests per second (a read and a renewal every 5 s), and a second Pod
+(10m CPU and 32 MiB requested).
+
 ## Packaging
 
 Decided on 2026-10-26: [0010. Ship a static binary on distroless, with a Helm chart, built in CI
@@ -291,7 +369,9 @@ and not published yet](../adr/0010-packaging.md).
   fixtures; the chart linted and rendered in CI; an end-to-end test in kind (`tests/e2e/run.sh`)
   that installs the chart, creates failing workloads, runs kausa against a fake model endpoint,
   and checks the Events, that no real name reached the endpoint, the chart's role against the
-  reference, and the metrics, once per `rbac.scope` (`KAUSA_E2E_SCOPE`).
+  reference, and the metrics, once per `rbac.scope` (`KAUSA_E2E_SCOPE`), and once more in the
+  namespaced scope with a standby (`KAUSA_E2E_REPLICAS=2`): graceful, frozen and fail-closed
+  handovers.
 
 ## Exit codes
 
@@ -305,7 +385,8 @@ Summarised here, and in full in the [Security policy](../../SECURITY.md):
 
 - **Read-only, except Events.** No Secrets, no ConfigMaps, no write verbs but Events
   ([0009. Run with read-only permissions that never include
-  Secrets](../adr/0009-least-privilege-rbac.md)).
+  Secrets](../adr/0009-least-privilege-rbac.md)), kausa's own Explanations with the history, and,
+  with a standby, a merge patch of the `spec` of its one Lease.
 - **Nothing unredacted reaches the model**, and nothing goes anywhere but the configured
   endpoint and, with notifications on, the configured webhook, which gets only the fields of
   [Data sent in notifications](../reference/data-sent-in-notifications.md).

@@ -14,6 +14,8 @@ use kube::{Api, Client};
 use serde_json::{Value, json};
 
 use crate::incident::Incident;
+use crate::leader::Term;
+use crate::leader::pure::WRITE_BOUND;
 use crate::log;
 use crate::metrics::Metrics;
 use crate::prompt::Explanation;
@@ -23,6 +25,8 @@ mod pure;
 /// The most the read-modify-write of one Explanation may take, all of its calls together, so that
 /// a slow API server delays the next explanation by at most this much and never the watches.
 pub(crate) const HISTORY_TIMEOUT: Duration = Duration::from_secs(10);
+// A deposed leader's write ends before a standby may take over (docs/adr/0019-high-availability.md).
+const _: () = assert!(HISTORY_TIMEOUT.as_nanos() <= WRITE_BOUND.as_nanos());
 /// How often the sweep is due: at start, and once this has passed since the last one began.
 pub(crate) const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 /// The most one sweep may hold the explanation slot; what is left waits for the next one.
@@ -61,9 +65,12 @@ enum Written {
     Refused(String),
     Conflict,
     Error(String),
+    /// The lease term ended before a call: nothing more was sent. Neither counted nor logged.
+    Skipped,
 }
 
 impl Written {
+    /// The `outcome` label. A skip has one for completeness, but it is never counted.
     fn label(&self) -> &'static str {
         match self {
             Self::Created => "created",
@@ -71,6 +78,7 @@ impl Written {
             Self::Refused(_) => "refused",
             Self::Conflict => "conflict",
             Self::Error(_) => "error",
+            Self::Skipped => "skipped",
         }
     }
 
@@ -107,18 +115,20 @@ impl History {
     }
 
     /// Writes `explanation` into the Explanation of `incident`, counts the outcome and logs a
-    /// failure or a refusal. Nothing stops on a failure; only an unwritable log is returned.
+    /// failure or a refusal. Each call is made only while `term` holds; past its end the write
+    /// stops silently. Nothing stops on a failure; only an unwritable log is returned.
     pub async fn write(
         &self,
         incident: &Incident,
         explanation: &Explanation,
         model: &str,
         metrics: &Metrics,
+        term: &Term,
     ) -> io::Result<()> {
         let (now, cutoff) = times(Timestamp::now(), self.days);
         let written = tokio::time::timeout(
             HISTORY_TIMEOUT,
-            self.read_modify_write(incident, explanation, model, &now, &cutoff),
+            self.read_modify_write_in(term, incident, explanation, model, &now, &cutoff),
         )
         .await
         .unwrap_or_else(|_| {
@@ -127,10 +137,12 @@ impl History {
                 HISTORY_TIMEOUT.as_secs()
             ))
         });
-        metrics.inc(
-            "kausa_history_writes_total",
-            &[("outcome", written.label())],
-        );
+        if !matches!(written, Written::Skipped) {
+            metrics.inc(
+                "kausa_history_writes_total",
+                &[("outcome", written.label())],
+            );
+        }
         let about = |key: &str, value: &str| {
             json!({
                 "fingerprint": incident.fingerprint,
@@ -139,7 +151,7 @@ impl History {
             })
         };
         match &written {
-            Written::Created | Written::Updated => Ok(()),
+            Written::Created | Written::Updated | Written::Skipped => Ok(()),
             Written::Refused(reason) => log::warn("history write refused", about("reason", reason)),
             Written::Conflict => log::warn("history write failed", about("error", pure::CONFLICT)),
             Written::Error(error) => log::warn("history write failed", about("error", error)),
@@ -147,9 +159,11 @@ impl History {
     }
 
     /// One read-modify-write: a `list` by name; a `create` when there is no object; otherwise the
-    /// identity check and a merge patch of `status` with the `resourceVersion` read.
-    async fn read_modify_write(
+    /// identity check and a merge patch of `status` with the `resourceVersion` read. Each call
+    /// only while `term` holds.
+    async fn read_modify_write_in(
         &self,
+        term: &Term,
         incident: &Incident,
         explanation: &Explanation,
         model: &str,
@@ -168,6 +182,9 @@ impl History {
         let api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), &incident.key.namespace, &self.resource);
         let params = ListParams::default().fields(&format!("metadata.name={name}"));
+        if !term.holds() {
+            return Written::Skipped;
+        }
         let listed = match api.list(&params).await {
             Ok(list) => list.items.into_iter().next(),
             Err(error) => return Written::Error(list_failure(&error)),
@@ -184,6 +201,9 @@ impl History {
                 Ok(object) => object,
                 Err(error) => return Written::Error(error.to_string()),
             };
+            if !term.holds() {
+                return Written::Skipped;
+            }
             return match api.create(&PostParams::default(), &object).await {
                 Ok(_) => Written::Created,
                 Err(error) => Written::failed(&error),
@@ -203,10 +223,35 @@ impl History {
             field_validation: Some(ValidationDirective::Strict),
             ..PatchParams::default()
         };
+        if !term.holds() {
+            return Written::Skipped;
+        }
         match api.patch(&name, &params, &Patch::Merge(&patch)).await {
             Ok(_) => Written::Updated,
             Err(error) => Written::failed(&error),
         }
+    }
+
+    /// `read_modify_write_in` under a term that never ends, as kausa runs without
+    /// `--leader-lease`.
+    #[cfg(test)]
+    async fn read_modify_write(
+        &self,
+        incident: &Incident,
+        explanation: &Explanation,
+        model: &str,
+        now: &str,
+        cutoff: &str,
+    ) -> Written {
+        self.read_modify_write_in(
+            &Term::unbounded(),
+            incident,
+            explanation,
+            model,
+            now,
+            cutoff,
+        )
+        .await
     }
 
     /// One sweep: deletes the Explanations older than `--history-days` and, oldest first, those
@@ -215,9 +260,17 @@ impl History {
     /// arrives, each delete with the `resourceVersion` listed as a precondition, and stops at
     /// `SWEEP_TIME`. A failed list ends its namespace and the sweep goes on with the next; a delete
     /// answered `404` or `409` (gone, or written since the list) is neither an error nor a deletion.
-    /// Nothing stops on a failure; only an unwritable log is returned.
-    pub async fn sweep(&self, namespaces: &[String], metrics: &Metrics) -> io::Result<()> {
+    /// Each call is made only while `term` holds (the sweep ends silently past its end) and ends
+    /// within `WRITE_BOUND`, or at the sweep's deadline if that comes first; a call that does not
+    /// end in time ends the sweep. Nothing stops on a failure; only an unwritable log is returned.
+    pub async fn sweep(
+        &self,
+        namespaces: &[String],
+        metrics: &Metrics,
+        term: &Term,
+    ) -> io::Result<()> {
         let deadline = tokio::time::Instant::now() + SWEEP_TIME;
+        let call_end = || deadline.min(tokio::time::Instant::now() + WRITE_BOUND);
         let (now, cutoff) = times(Timestamp::now(), self.days);
         let mut plan = pure::SweepPlan::new(&now, &cutoff);
         let (mut by_age, mut by_cap) = (0_u64, 0_u64);
@@ -248,7 +301,11 @@ impl History {
                 if let Some(token) = &token {
                     params = params.continue_token(token);
                 }
-                let Ok(listed) = tokio::time::timeout_at(deadline, api.list(&params)).await else {
+                if !term.holds() {
+                    break 'scopes;
+                }
+                let Ok(listed) = tokio::time::timeout_at(call_end(), api.list(&params)).await
+                else {
                     break 'scopes;
                 };
                 let list = match listed {
@@ -280,8 +337,12 @@ impl History {
                         }),
                         ..DeleteParams::default()
                     };
+                    if !term.holds() {
+                        break 'scopes;
+                    }
                     let Ok(answer) =
-                        tokio::time::timeout_at(deadline, api.delete(&delete.name, &params)).await
+                        tokio::time::timeout_at(call_end(), api.delete(&delete.name, &params))
+                            .await
                     else {
                         break 'scopes;
                     };
@@ -365,6 +426,9 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    use crate::leader::Term;
+    use crate::leader::pure::WRITE_BOUND;
 
     fn is_time(time: &str) -> bool {
         regex::Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -563,7 +627,7 @@ mod tests {
                 let config = kube::Config::new(url.parse().expect("a URL"));
                 let client = Client::try_from(config).expect("a client");
                 History::new(client, 7)
-                    .sweep(&namespaces, &metrics)
+                    .sweep(&namespaces, &metrics, &Term::unbounded())
                     .await
                     .expect("a log");
             });
@@ -1137,7 +1201,13 @@ mod tests {
         let metrics = Metrics::default();
         block_on(async {
             history(&url)
-                .write(&incident(), &explanation(), "m", &metrics)
+                .write(
+                    &incident(),
+                    &explanation(),
+                    "m",
+                    &metrics,
+                    &Term::unbounded(),
+                )
                 .await
                 .expect("a log");
         });
@@ -1148,6 +1218,189 @@ mod tests {
         assert_eq!(
             counter(&metrics, "kausa_history_writes_total{outcome=\"error\"}"),
             0
+        );
+    }
+
+    // Acceptance tests for the standby replica (docs/adr/0019-high-availability.md), written before
+    // the code: `History::write` and `History::sweep` take the term (`term: &Term`, last). Past its
+    // end, the write makes no further call and ends as `Written::Skipped`, neither counted nor
+    // logged, and the sweep ends. Each sweep call is bounded by `min(sweep deadline, now +
+    // WRITE_BOUND)`.
+
+    #[test]
+    fn the_history_timeout_is_within_the_write_bound() {
+        assert!(HISTORY_TIMEOUT <= WRITE_BOUND);
+    }
+
+    /// The `kausa_history_writes_total` lines of `/metrics`.
+    fn write_counts(metrics: &Metrics) -> Vec<String> {
+        metrics
+            .render()
+            .lines()
+            .filter(|l| l.starts_with("kausa_history_writes_total"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn a_closed_term_writes_no_explanation_and_counts_nothing() {
+        let (url, requests) = api_server(vec![("200 OK", page(vec![], ""))]);
+        let metrics = Metrics::default();
+        block_on(async {
+            history(&url)
+                .write(&incident(), &explanation(), "m", &metrics, &Term::closed())
+                .await
+                .expect("a log");
+        });
+        assert!(
+            requests.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the API server was called"
+        );
+        assert_eq!(write_counts(&metrics), ["kausa_history_writes_total 0"]);
+    }
+
+    /// A fake API server that answers its first request after `wait`.
+    fn slow_api_server(
+        wait: Duration,
+        status: &'static str,
+        body: Value,
+    ) -> (String, mpsc::Receiver<Sent>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}", listener.local_addr().expect("an address"));
+        let (sent, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut open = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = vec![0; 65536];
+                let n = stream.read(&mut buffer).unwrap_or(0);
+                let text = String::from_utf8_lossy(&buffer[..n]).into_owned();
+                let line = text.lines().next().unwrap_or_default().to_owned();
+                let _ = sent.send(Sent {
+                    line,
+                    head: String::new(),
+                    body: String::new(),
+                });
+                if open.is_empty() {
+                    std::thread::sleep(wait);
+                    let body = body.to_string();
+                    let answer = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: \
+                         {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(answer.as_bytes());
+                }
+                open.push(stream);
+            }
+        });
+        (url, received)
+    }
+
+    #[test]
+    fn a_term_that_ends_during_the_list_makes_no_create() {
+        let (url, requests) =
+            slow_api_server(Duration::from_millis(300), "200 OK", page(vec![], ""));
+        let metrics = Metrics::default();
+        let term = Term::closed();
+        block_on(async {
+            term.extend_to(std::time::Instant::now() + Duration::from_millis(100));
+            history(&url)
+                .write(&incident(), &explanation(), "m", &metrics, &term)
+                .await
+                .expect("a log");
+        });
+        let first = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the list");
+        assert!(first.line.starts_with(LIST), "{}", first.line);
+        assert!(
+            requests.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a call was made after the term ended"
+        );
+        assert_eq!(write_counts(&metrics), ["kausa_history_writes_total 0"]);
+    }
+
+    #[test]
+    fn a_closed_term_sweeps_nothing() {
+        let (url, requests) = api_server(vec![(
+            "200 OK",
+            page(vec![old("shop", "0123456789abcdef", "10")], ""),
+        )]);
+        let metrics = Metrics::default();
+        block_on(async {
+            let config = kube::Config::new(url.parse().expect("a URL"));
+            History::new(Client::try_from(config).expect("a client"), 7)
+                .sweep(&[], &metrics, &Term::closed())
+                .await
+                .expect("a log");
+        });
+        assert!(
+            requests.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the API server was called"
+        );
+        assert_eq!(counter(&metrics, "kausa_history_deleted_total"), 0);
+        assert_eq!(counter(&metrics, "kausa_history_sweep_errors_total"), 0);
+    }
+
+    #[test]
+    fn a_term_that_ends_during_a_sweep_list_makes_no_delete() {
+        // The page lists an old object, but it arrives after the term has ended.
+        let (url, requests) = slow_api_server(
+            Duration::from_millis(300),
+            "200 OK",
+            page(vec![old("shop", "0123456789abcdef", "10")], ""),
+        );
+        let metrics = Metrics::default();
+        let term = Term::closed();
+        block_on(async {
+            term.extend_to(std::time::Instant::now() + Duration::from_millis(100));
+            let config = kube::Config::new(url.parse().expect("a URL"));
+            History::new(Client::try_from(config).expect("a client"), 7)
+                .sweep(&[], &metrics, &term)
+                .await
+                .expect("a log");
+        });
+        let first = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the list");
+        assert!(
+            first
+                .line
+                .starts_with(&format!("GET {PLURAL}/explanations?")),
+            "{}",
+            first.line
+        );
+        assert!(
+            requests.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a delete was sent after the term ended"
+        );
+        assert_eq!(
+            counter(&metrics, "kausa_history_deleted_total{reason=\"age\"}"),
+            0
+        );
+        assert_eq!(counter(&metrics, "kausa_history_sweep_errors_total"), 0);
+    }
+
+    #[test]
+    fn each_sweep_call_ends_within_the_write_bound() {
+        // A list that is never answered ends at WRITE_BOUND, before the sweep's own SWEEP_TIME.
+        assert!(WRITE_BOUND < SWEEP_TIME);
+        let (url, _requests) =
+            slow_api_server(Duration::from_secs(120), "200 OK", page(vec![], ""));
+        let metrics = Metrics::default();
+        let started = std::time::Instant::now();
+        block_on(async {
+            let config = kube::Config::new(url.parse().expect("a URL"));
+            let sweep = History::new(Client::try_from(config).expect("a client"), 7);
+            tokio::time::timeout(SWEEP_TIME, sweep.sweep(&[], &metrics, &Term::unbounded()))
+                .await
+                .expect("the sweep ends before SWEEP_TIME")
+                .expect("a log");
+        });
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= WRITE_BOUND && elapsed < WRITE_BOUND + Duration::from_secs(2),
+            "{elapsed:?}"
         );
     }
 }

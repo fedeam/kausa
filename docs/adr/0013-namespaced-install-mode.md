@@ -211,3 +211,14 @@ once every watch has listed: 3, or 3 × N (2 and 2 × N with `--no-rollouts`), a
 Deployment watch stops kausa with `the deployment watch ended` (`… of namespace <name> ended`).
 The cap of 32 namespaces is kept by the measurement with 96 watches in
 [Ninety-six watches](../research/2026-10-29-96-watches.md).
+
+Update 2026-10-29: [0019. Offer an optional standby replica that takes over through a
+chart-created Lease, elected by kausa's own code](0019-high-availability.md) changes three things here, only with the chart's `replicaCount: 2`. A namespaced release is
+granted one thing in its own namespace even when that namespace is not listed: `get` and `patch`
+on its one Lease, `<fullname>-leader`, and nothing else there. That rule is the exception to
+"later features put every permission they add into `kausa.rules`": it is about kausa's own
+object, not about a watched namespace, so it lives in `templates/leader-election.yaml`, the same
+in both scopes. And Ready means more than "every watch has listed": a standby is Ready after its
+first successful read of the Lease leaves it waiting (`/readyz` answers `standby`), and a promoted
+standby stays Ready while it lists. `/readyz` still never goes back to `503`. With one replica,
+all of this section's rules hold as written.

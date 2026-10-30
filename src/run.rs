@@ -13,13 +13,19 @@
 //! With `--notify-url-file`, each new explanation is also posted to the webhook, one at a time,
 //! from a slot of its own beside the explanation's (`notify.rs`,
 //! docs/adr/0015-notifications.md). `--metrics-address` serves the counters (`metrics.rs`).
+//!
+//! With `--leader-lease`, only the holder of that Lease acts (docs/adr/0019-high-availability.md):
+//! `run` keeps what lives across terms (the metrics and their listener, the term, the budget and
+//! the deduplication cache), a standby reads the Lease and nothing else, and each term of the
+//! leader runs `lead`, whose watches, records, queues and owner cache are dropped when it ends.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::convert::Infallible;
 use std::fmt::Debug;
 use std::future::Future;
 use std::io;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
@@ -37,6 +43,7 @@ use kube::runtime::utils::Backoff;
 use kube::runtime::watcher;
 use kube::{Api, Client, Config, Resource};
 use serde_json::json;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::budget::{Budget, Dedup};
@@ -46,6 +53,8 @@ use crate::events::Writer;
 use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Shared, Work};
 use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals, rollout_signals};
+use crate::leader::pure::{TIMINGS, Timings};
+use crate::leader::{self, KubeLease, LEASE_ERROR_PERIOD, LeaseApi, LeaseErrors, Lost, Term};
 use crate::log;
 use crate::metrics::{self, Metrics};
 use crate::notify::{self, Notifier};
@@ -83,6 +92,24 @@ pub struct Options {
     /// Whether to watch Deployments for stalled rollouts (`D014`); `--no-rollouts` turns it off
     /// (docs/adr/0018-stuck-rollouts.md).
     pub rollouts: bool,
+    /// With `--leader-lease`, the Lease this replica acts under: it acts only while it holds it,
+    /// and waits as a standby otherwise (docs/adr/0019-high-availability.md).
+    pub leader_lease: Option<LeaderLease>,
+}
+
+/// The Lease of `--leader-lease` and this replica's identity in it.
+pub struct LeaderLease {
+    pub namespace: String,
+    pub name: String,
+    /// `POD_NAME`, compared byte for byte with the Lease's holder.
+    pub identity: String,
+}
+
+impl LeaderLease {
+    /// The flag's own `<namespace>/<name>`, the only name of the Lease that kausa logs.
+    fn flag(&self) -> String {
+        format!("{}/{}", self.namespace, self.name)
+    }
 }
 
 /// Which watch an item comes from: `None` is the cluster-wide watch, `Some(n)` the watch of
@@ -298,6 +325,12 @@ fn notifications(notifier: Option<&Notifier>) -> serde_json::Value {
     )
 }
 
+/// The `leader_lease` field of the `started` line: the flag's own `<namespace>/<name>`, or `null`
+/// without `--leader-lease`.
+fn leader_lease(lease: Option<&LeaderLease>) -> serde_json::Value {
+    lease.map_or(serde_json::Value::Null, |l| json!(l.flag()))
+}
+
 /// Runs until `SIGTERM` or `SIGINT`.
 pub async fn run(options: Options) -> Result<(), RunError> {
     let client = client()
@@ -318,6 +351,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             "notifications": notifications(
                 options.explain.as_ref().and_then(|s| s.notify.as_ref())
             ),
+            "leader_lease": leader_lease(options.leader_lease.as_ref()),
         }),
     )?;
 
@@ -326,19 +360,21 @@ pub async fn run(options: Options) -> Result<(), RunError> {
     };
     let mut terminate = listen(SignalKind::terminate(), "SIGTERM")?;
     let mut interrupt = listen(SignalKind::interrupt(), "SIGINT")?;
-    let lookup = KubeLookup {
-        client: client.clone(),
-        cache: RefCell::new(HashMap::new()),
-    };
-    let explainer = client.clone();
     let metrics = Metrics::default();
     let listener = match &options.metrics_address {
         Some(address) => Some(
-            tokio::net::TcpListener::bind(address)
+            TcpListener::bind(address)
                 .await
                 .map_err(|e| RunError::Failure(format!("cannot listen on {address}: {e}")))?,
         ),
         None => None,
+    };
+    // Unbounded without --leader-lease; closed while this replica is a standby
+    // (docs/adr/0019-high-availability.md).
+    let term = if options.leader_lease.is_some() {
+        Term::closed()
+    } else {
+        Term::unbounded()
     };
     let shared = options.explain.as_ref().map(|settings| Shared {
         budget: RefCell::new(Budget::new(settings.calls_per_hour, settings.calls_per_day)),
@@ -351,36 +387,396 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             .map(|days| History::new(client.clone(), days)),
         metrics: &metrics,
         notifications: RefCell::new(VecDeque::new()),
+        term: &term,
     });
+    let lease = options
+        .leader_lease
+        .as_ref()
+        .map(|l| KubeLease::new(client.clone(), &l.namespace, &l.name, TIMINGS.call_timeout));
+    let cluster = KubeCluster { client };
+    // A signal ends the process, so the stop is awaited at most once.
+    let stop = async move {
+        tokio::select! {
+            biased;
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    };
+    Serving {
+        options: &options,
+        lease: lease.as_ref(),
+        cluster: &cluster,
+        shared: shared.as_ref(),
+        metrics: &metrics,
+        term: &term,
+        listener: listener.as_ref(),
+        timings: TIMINGS,
+        tick: TICK,
+    }
+    .serve(stop)
+    .await
+}
+
+/// What a term acts on: its watches, its owner lookups and its explanations. `KubeCluster` in
+/// production; the tests script it.
+trait Cluster {
+    type Lookup: OwnerLookup;
+
+    /// Starts the watches of one term: Pods, Warning events and, with `rollouts`, Deployments, one
+    /// of each per namespace or on the whole cluster (docs/adr/0013-namespaced-install-mode.md,
+    /// docs/adr/0018-stuck-rollouts.md).
+    fn watch(&self, namespaces: &[String], rollouts: bool) -> Watched;
+
+    /// An owner lookup whose cache is empty, for one term.
+    fn lookup(&self) -> Self::Lookup;
+
+    /// The explanation of `job` (`explain::run`).
+    fn explain<'a>(
+        &'a self,
+        job: Work,
+        settings: &'a Settings,
+        shared: &'a Shared<'_>,
+    ) -> Explaining<'a>;
+}
+
+/// The watches of one term.
+struct Watched {
+    pods: Watches<Pod>,
+    events: Watches<Event>,
+    /// `None` with `--no-rollouts`.
+    deployments: Option<Watches<Deployment>>,
+}
+
+/// The cluster through the API server.
+struct KubeCluster {
+    client: Client,
+}
+
+impl Cluster for KubeCluster {
+    type Lookup = KubeLookup;
+
+    fn watch(&self, namespaces: &[String], rollouts: bool) -> Watched {
+        let selector = format!("type=Warning,reportingController!={REPORTING_CONTROLLER}");
+        Watched {
+            pods: watches::<Pod>(&self.client, namespaces, &watcher::Config::default()),
+            events: watches::<Event>(
+                &self.client,
+                namespaces,
+                &watcher::Config::default().fields(&selector),
+            ),
+            // Only Deployments past their progress deadline are kept, as records
+            // (docs/adr/0018-stuck-rollouts.md).
+            deployments: rollouts.then(|| {
+                watches::<Deployment>(&self.client, namespaces, &watcher::Config::default())
+            }),
+        }
+    }
+
+    fn lookup(&self) -> KubeLookup {
+        KubeLookup {
+            client: self.client.clone(),
+            cache: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn explain<'a>(
+        &'a self,
+        job: Work,
+        settings: &'a Settings,
+        shared: &'a Shared<'_>,
+    ) -> Explaining<'a> {
+        Box::pin(explain::run(job, self.client.clone(), settings, shared))
+    }
+}
+
+/// Everything that lives across terms (docs/adr/0019-high-availability.md): the metrics and their
+/// listener, the term, and `Shared` (the budget, the deduplication cache, the writers and the
+/// notification queue). A term's own state lives in `lead`.
+struct Serving<'a, L, C> {
+    options: &'a Options,
+    /// The Lease's API. kausa elects only with `options.leader_lease` too; without the flag, no
+    /// Lease call is ever made.
+    lease: Option<&'a L>,
+    cluster: &'a C,
+    shared: Option<&'a Shared<'a>>,
+    metrics: &'a Metrics,
+    term: &'a Term,
+    listener: Option<&'a TcpListener>,
+    timings: Timings,
+    tick: Duration,
+}
+
+/// The election of this process: the flag, the Lease's API and the `lease error` log.
+struct Election<'a, L> {
+    flag: &'a LeaderLease,
+    api: &'a L,
+    /// The flag's own `<namespace>/<name>`, the only name of the Lease that is logged.
+    name: String,
+    errors: LeaseErrors,
+}
+
+/// Why a leading phase ended.
+enum Ending {
+    /// `SIGTERM` or `SIGINT`.
+    Stop,
+    /// The controller stopped on an error (a watch ended, the log could not be written).
+    Ended(RunError),
+    /// The Lease was lost; the process stays, as a standby.
+    Lost(Lost),
+}
+
+/// What the unbiased arms of a leading phase gave.
+enum Step {
+    Ended(RunError),
+    Accepted(io::Result<TcpStream>),
+    Served,
+}
+
+/// The next metrics connection.
+async fn accept(listener: Option<&TcpListener>) -> io::Result<TcpStream> {
+    let listener = listener.expect("guarded by the condition");
+    listener.accept().await.map(|(stream, _)| stream)
+}
+
+/// After a failed accept (for example, out of file descriptors): logs it and waits a little.
+async fn accept_failed(error: &io::Error) -> io::Result<()> {
+    log::warn("metrics accept error", json!({"error": error.to_string()}))?;
+    tokio::time::sleep(ACCEPT_BACKOFF).await;
+    Ok(())
+}
+
+impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
+    /// Serves the metrics and runs the controller until `stop`. Without `--leader-lease`, one
+    /// leading phase that never ends but on `stop` or an error, as before. With it, a standby
+    /// phase (the Lease read every retry period, and nothing else) and a leading phase in turn: a
+    /// lost Lease drops the term and goes back to standby, never out of the process.
+    ///
+    /// Each phase is one `select!`, `biased` only for `stop` and then the election (the standby's
+    /// reads, the leader's keeper), so that a clean stop wins and a term that ended steps down
+    /// before the controller is polled again. The controller and the metrics arms share the rest
+    /// at random, as in v0.3.0: a flood of metrics connections cannot starve the controller while
+    /// the keeper renews.
+    async fn serve(self, stop: impl Future<Output = ()>) -> Result<(), RunError> {
+        let election = self
+            .options
+            .leader_lease
+            .as_ref()
+            .zip(self.lease)
+            .map(|(flag, api)| {
+                let name = flag.flag();
+                Election {
+                    errors: LeaseErrors::new(&name, LEASE_ERROR_PERIOD),
+                    flag,
+                    api,
+                    name,
+                }
+            });
+        if election.is_some() {
+            // A standby until it holds the Lease: no model call, no write, gauge 0.
+            self.term.close();
+            self.metrics.set_leading(false);
+        }
+        let mut stop = pin!(stop);
+        let mut connections = FuturesUnordered::new();
+        'run: loop {
+            let acquired = match &election {
+                None => None,
+                Some(election) => {
+                    let mut standing = pin!(leader::standby(
+                        election.api,
+                        &election.flag.identity,
+                        &self.timings,
+                        self.metrics,
+                        &election.errors,
+                    ));
+                    let acquired = loop {
+                        tokio::select! {
+                            biased;
+                            () = &mut stop => break 'run,
+                            acquired = &mut standing => break acquired?,
+                            accepted = accept(self.listener),
+                                if self.listener.is_some() && connections.len() < MAX_CONNECTIONS =>
+                                match accepted {
+                                    Ok(stream) => {
+                                        connections.push(metrics::answer(stream, self.metrics));
+                                    }
+                                    Err(e) => accept_failed(&e).await?,
+                                },
+                            Some(()) = connections.next(), if !connections.is_empty() => {}
+                        }
+                    };
+                    log::info("leading", json!({"lease": election.name}))?;
+                    self.metrics
+                        .inc("kausa_leadership_changes_total", &[("to", "leader")]);
+                    self.metrics.set_leading(true);
+                    Some(acquired)
+                }
+            };
+            // The leading phase. Its block drops the controller, with everything in flight, and
+            // the keeper before the term's end is handled.
+            let ending = {
+                let mut leading = pin!(lead(
+                    self.options,
+                    self.cluster,
+                    self.shared,
+                    self.metrics,
+                    self.tick
+                ));
+                let mut holding = pin!(async {
+                    match (acquired, &election) {
+                        (Some(acquired), Some(election)) => {
+                            leader::hold(
+                                election.api,
+                                &election.flag.identity,
+                                acquired,
+                                self.term,
+                                &self.timings,
+                                self.metrics,
+                                &election.errors,
+                            )
+                            .await
+                        }
+                        // Without --leader-lease the term never ends.
+                        _ => std::future::pending().await,
+                    }
+                });
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = &mut stop => break Ending::Stop,
+                        lost = &mut holding => break match lost {
+                            Ok(lost) => Ending::Lost(lost),
+                            Err(error) => Ending::Ended(error.into()),
+                        },
+                        // Not biased: the controller and the metrics arms share at random.
+                        step = async {
+                            tokio::select! {
+                                result = &mut leading => {
+                                    let Err(error) = result;
+                                    Step::Ended(error)
+                                }
+                                accepted = accept(self.listener),
+                                    if self.listener.is_some()
+                                        && connections.len() < MAX_CONNECTIONS =>
+                                    Step::Accepted(accepted),
+                                Some(()) = connections.next(), if !connections.is_empty() => {
+                                    Step::Served
+                                }
+                            }
+                        } => match step {
+                            Step::Ended(error) => break Ending::Ended(error),
+                            Step::Accepted(Ok(stream)) => {
+                                connections.push(metrics::answer(stream, self.metrics));
+                            }
+                            Step::Accepted(Err(e)) => accept_failed(&e).await?,
+                            Step::Served => {}
+                        },
+                    }
+                }
+            };
+            match ending {
+                Ending::Stop => {
+                    self.release(election.as_ref()).await?;
+                    break 'run;
+                }
+                Ending::Ended(error) => {
+                    // kausa exits with the error that ended the term (1, or 2 for its log), even
+                    // if the release cannot be logged.
+                    let _ = self.release(election.as_ref()).await;
+                    return Err(error);
+                }
+                Ending::Lost(lost) => {
+                    if let Some(election) = &election {
+                        self.step_down(election, lost)?;
+                    }
+                }
+            }
+        }
+        log::info("stopped", json!({}))?;
+        Ok(())
+    }
+
+    /// Releases the Lease once the controller has stopped, while the term still holds: once, and
+    /// the term is closed first, so nothing writes after it. Nothing without `--leader-lease`.
+    async fn release(&self, election: Option<&Election<'_, L>>) -> io::Result<()> {
+        let Some(election) = election else {
+            return Ok(());
+        };
+        if !self.term.holds() {
+            return Ok(());
+        }
+        let Some(version) = self.term.version() else {
+            return Ok(());
+        };
+        self.term.close();
+        leader::release(election.api, &version, &election.name, &self.timings).await
+    }
+
+    /// Steps down after a lost Lease, in place: the term is closed (the controller was already
+    /// dropped with its records, queue, retries and owner cache), the notifications waiting for
+    /// the webhook are dropped and counted, and the budget and the deduplication cache are kept
+    /// for the next term.
+    fn step_down(&self, election: &Election<'_, L>, lost: Lost) -> io::Result<()> {
+        self.term.close();
+        let reason = match lost {
+            Lost::NotRenewed => "not renewed in time",
+            Lost::HeldByAnother => "held by another",
+        };
+        log::warn(
+            "leadership lost",
+            json!({"lease": election.name, "reason": reason}),
+        )?;
+        self.metrics
+            .inc("kausa_leadership_changes_total", &[("to", "standby")]);
+        self.metrics.set_leading(false);
+        if let Some(shared) = self.shared {
+            let cleared = shared.notifications.borrow_mut().drain(..).count();
+            if cleared > 0 {
+                self.metrics.add(
+                    "kausa_notifications_total",
+                    &[("outcome", "dropped")],
+                    cleared as u64,
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One term of the controller: the watches (Pods, Warning events and, unless `--no-rollouts`,
+/// Deployments), the records, the tracker, the tick, the explanation queue and slot, the
+/// notification slot, the delayed retries and a fresh owner lookup. All of it is dropped when the
+/// term ends. Returns only on an error: a watch that ended, or a log that cannot be written.
+async fn lead<C: Cluster>(
+    options: &Options,
+    cluster: &C,
+    shared: Option<&Shared<'_>>,
+    metrics: &Metrics,
+    tick: Duration,
+) -> Result<Infallible, RunError> {
+    let lookup = cluster.lookup();
+    let Watched {
+        mut pods,
+        mut events,
+        mut deployments,
+    } = cluster.watch(&options.namespaces, options.rollouts);
     let mut readiness = Readiness::new(&options.namespaces, options.rollouts);
-    let mut pods = watches::<Pod>(&client, &options.namespaces, &watcher::Config::default());
-    let selector = format!("type=Warning,reportingController!={REPORTING_CONTROLLER}");
-    let mut events = watches::<Event>(
-        &client,
-        &options.namespaces,
-        &watcher::Config::default().fields(&selector),
-    );
-    // Only Deployments past their progress deadline are kept, as records
-    // (docs/adr/0018-stuck-rollouts.md).
-    let mut deployments = options
-        .rollouts
-        .then(|| watches::<Deployment>(&client, &options.namespaces, &watcher::Config::default()));
     let mut state = State::default();
     let mut tracker = Tracker::new(options.settle);
-    let mut ticker = tokio::time::interval(TICK);
+    let mut ticker = tokio::time::interval(tick);
     let mut queue: VecDeque<Work> = VecDeque::new();
     let mut running: Option<Explaining<'_>> = None;
     // The notification being sent, beside the explanation slot: a slow webhook never holds it.
     let mut notifying: Option<Notifying<'_>> = None;
     // Jobs whose first call failed with a transient error, and when they may be tried again.
     let mut delayed: Vec<(Instant, Work)> = Vec::new();
-    let mut connections = FuturesUnordered::new();
 
-    // When the last sweep of the history began (docs/adr/0014-explanation-history.md).
+    // When the last sweep of the history began (docs/adr/0014-explanation-history.md): a sweep is
+    // due at once in each term.
     let mut last_sweep: Option<Instant> = None;
 
     loop {
-        if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared.as_ref()) {
+        if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
             let now = Instant::now();
             let history = shared.history.as_ref();
             match next_in_slot(
@@ -396,7 +792,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                         let namespaces = &options.namespaces;
                         running = Some(Box::pin(async move {
                             history
-                                .sweep(namespaces, shared.metrics)
+                                .sweep(namespaces, shared.metrics, shared.term)
                                 .await
                                 .map(|()| None)
                         }));
@@ -404,12 +800,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 }
                 Some(Slot::Explain) => {
                     if let Some(job) = queue.pop_front() {
-                        running = Some(Box::pin(explain::run(
-                            job,
-                            explainer.clone(),
-                            settings,
-                            shared,
-                        )));
+                        running = Some(cluster.explain(job, settings, shared));
                     }
                 }
                 None => {}
@@ -440,15 +831,6 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 // A failed send is only logged and counted; the error is kausa's own log.
                 result?;
             }
-            accepted = async { listener.as_ref().expect("guarded by the condition").accept().await },
-                if listener.is_some() && connections.len() < MAX_CONNECTIONS => match accepted {
-                Ok((stream, _)) => connections.push(metrics::answer(stream, &metrics)),
-                Err(e) => {
-                    log::warn("metrics accept error", json!({"error": e.to_string()}))?;
-                    tokio::time::sleep(ACCEPT_BACKOFF).await;
-                }
-            },
-            Some(()) = connections.next(), if !connections.is_empty() => {}
             item = pods.next() => match item {
                 Some((watch, Some(Ok(event)))) => {
                     let listed = matches!(event, watcher::Event::InitDone);
@@ -534,12 +916,8 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                     }
                 }
             }
-            _ = terminate.recv() => break,
-            _ = interrupt.recv() => break,
         }
     }
-    log::info("stopped", json!({}))?;
-    Ok(())
 }
 
 fn log_incident(incident: &Incident, pods_total: usize) -> io::Result<()> {
@@ -2548,5 +2926,770 @@ mod tests {
         // The record is gone (the rollout progressed): the job says so.
         on_deployment(&mut state, &CLUSTER, watcher::Event::Delete(stalled));
         assert_eq!(state.job(incident).gathered.rollout, None);
+    }
+
+    // Tests of the standby and leading phases (docs/adr/0019-high-availability.md), without a
+    // cluster: `Serving::serve` over a fake Lease that behaves as the API server does (a merge
+    // patch under a `resourceVersion` precondition), scripted watches and scripted explanations,
+    // with short timings and real time on a current-thread runtime. The stop is a script, not a
+    // signal. Values are invented, and no failure message prints a value read from a Lease.
+
+    use std::cell::Cell;
+    use std::io::{Read, Write};
+    use std::net::SocketAddr;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use serde_json::Value;
+
+    use crate::leader::LeaseError;
+    use crate::prompt::{Explanation, OutputMode};
+
+    const ME: &str = "kausa-7d9c8b6f4d-2xkqp";
+    const OTHER: &str = "kausa-7d9c8b6f4d-9wzzt";
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// The production ratios, much faster, with room for a busy test machine.
+    const T: Timings = Timings {
+        lease_duration: Duration::from_millis(900),
+        renew_deadline: Duration::from_millis(600),
+        retry_period: Duration::from_millis(100),
+        call_timeout: Duration::from_millis(100),
+        release_timeout: Duration::from_millis(100),
+    };
+
+    /// The tick of these tests.
+    const TEST_TICK: Duration = Duration::from_millis(50);
+
+    const LEADER: &str = "kausa_leader";
+    const TO_LEADER: &str = "kausa_leadership_changes_total{to=\"leader\"}";
+    const TO_STANDBY: &str = "kausa_leadership_changes_total{to=\"standby\"}";
+    const DROPPED: &str = "kausa_notifications_total{outcome=\"dropped\"}";
+
+    /// The value of one series in `/metrics`, 0 when it was never incremented.
+    fn counter(metrics: &Metrics, series: &str) -> u64 {
+        metrics
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+            .map_or(0, |value| value.parse().expect("a count"))
+    }
+
+    fn readyz(metrics: &Metrics) -> String {
+        metrics::respond("GET /readyz HTTP/1.1", metrics).2
+    }
+
+    /// A Lease that answers as the API server does: `get` returns it, and a merge patch applies
+    /// only with the current `resourceVersion` (otherwise `409`), writes the holder and moves the
+    /// version. It records every call.
+    struct FakeLease {
+        version: Cell<u64>,
+        holder: RefCell<Option<String>>,
+        /// Another replica renews it: every read finds a new version.
+        renewing: Cell<bool>,
+        gets: Cell<usize>,
+        patches: RefCell<Vec<Value>>,
+    }
+
+    impl FakeLease {
+        fn new(holder: Option<&str>) -> Self {
+            Self {
+                version: Cell::new(1),
+                holder: RefCell::new(holder.map(str::to_owned)),
+                renewing: Cell::new(false),
+                gets: Cell::new(0),
+                patches: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn lease(&self) -> Lease {
+            Lease {
+                metadata: ObjectMeta {
+                    name: Some("kausa-leader".into()),
+                    namespace: Some("kausa".into()),
+                    resource_version: Some(self.version.get().to_string()),
+                    ..ObjectMeta::default()
+                },
+                spec: Some(LeaseSpec {
+                    holder_identity: self.holder.borrow().clone(),
+                    ..LeaseSpec::default()
+                }),
+            }
+        }
+
+        /// Another replica writes the Lease, naming `holder`.
+        fn write(&self, holder: Option<&str>) {
+            self.version.set(self.version.get() + 1);
+            self.holder.replace(holder.map(str::to_owned));
+        }
+
+        fn held_by_me(&self) -> bool {
+            self.holder.borrow().as_deref() == Some(ME)
+        }
+
+        fn is_free(&self) -> bool {
+            self.holder.borrow().is_none()
+        }
+
+        fn calls(&self) -> usize {
+            self.gets.get() + self.patches.borrow().len()
+        }
+
+        fn count(&self, kind: fn(&Value) -> bool) -> usize {
+            self.patches.borrow().iter().filter(|b| kind(b)).count()
+        }
+    }
+
+    fn is_acquire(body: &Value) -> bool {
+        body["spec"].get("acquireTime").is_some()
+    }
+
+    fn is_renewal(body: &Value) -> bool {
+        body["spec"]["holderIdentity"] == json!(ME) && !is_acquire(body)
+    }
+
+    fn is_release(body: &Value) -> bool {
+        body["spec"]["holderIdentity"] == json!("")
+    }
+
+    impl LeaseApi for FakeLease {
+        async fn get(&self) -> Result<Lease, LeaseError> {
+            self.gets.set(self.gets.get() + 1);
+            if self.renewing.get() {
+                self.version.set(self.version.get() + 1);
+            }
+            Ok(self.lease())
+        }
+
+        async fn patch(&self, body: &Value) -> Result<Lease, LeaseError> {
+            self.patches.borrow_mut().push(body.clone());
+            if body["metadata"]["resourceVersion"] != json!(self.version.get().to_string()) {
+                return Err(LeaseError::Conflict);
+            }
+            if let Some(holder) = body["spec"]["holderIdentity"].as_str() {
+                self.holder
+                    .replace((!holder.is_empty()).then(|| holder.to_owned()));
+            }
+            self.version.set(self.version.get() + 1);
+            Ok(self.lease())
+        }
+    }
+
+    /// What a scripted explanation does.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Explains {
+        /// Ends at once.
+        Done,
+        /// Queues two notifications, then never ends.
+        Hang,
+        /// Takes a call from the budget and caches its incident, after noting whether a call was
+        /// left and whether the incident was cached already.
+        Remember,
+    }
+
+    /// Counts the explanations dropped while in flight.
+    struct Dropped(Rc<Cell<usize>>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    /// Counts its calls; every lookup fails (the Pods of these tests have no owner).
+    struct CountingLookup(Rc<Cell<usize>>);
+
+    impl OwnerLookup for CountingLookup {
+        async fn controller_of(
+            &self,
+            _hop: Hop,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<Option<OwnerRef>, String> {
+            self.0.set(self.0.get() + 1);
+            Err("no lookup in these tests".into())
+        }
+    }
+
+    /// Scripted watches and explanations. Each term's Pod watch lists `pods`, then, once `gate`
+    /// is open, applies `later`, then waits or, with `ends`, ends. The event and Deployment watches
+    /// list nothing.
+    struct FakeCluster {
+        pods: Vec<Pod>,
+        later: Vec<Pod>,
+        gate: Arc<AtomicBool>,
+        ends: bool,
+        explains: Explains,
+        /// The terms started (calls of `watch`), and what the last asked about rollouts.
+        watches: Cell<usize>,
+        rollouts: Cell<Option<bool>>,
+        /// The owner lookups made (one per term), and their calls.
+        lookups: Cell<usize>,
+        lookup_calls: Rc<Cell<usize>>,
+        /// Each explanation started: its term and its fingerprint.
+        jobs: RefCell<Vec<(usize, String)>>,
+        dropped: Rc<Cell<usize>>,
+        /// What each `Remember` explanation found: a call left, the incident cached.
+        found: RefCell<Vec<(bool, bool)>>,
+        /// The watch items the controller took.
+        yielded: Arc<AtomicUsize>,
+    }
+
+    impl FakeCluster {
+        fn new(pods: Vec<Pod>, explains: Explains) -> Self {
+            Self {
+                pods,
+                later: Vec::new(),
+                gate: Arc::new(AtomicBool::new(true)),
+                ends: false,
+                explains,
+                watches: Cell::new(0),
+                rollouts: Cell::new(None),
+                lookups: Cell::new(0),
+                lookup_calls: Rc::new(Cell::new(0)),
+                jobs: RefCell::new(Vec::new()),
+                dropped: Rc::new(Cell::new(0)),
+                found: RefCell::new(Vec::new()),
+                yielded: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn jobs(&self) -> usize {
+            self.jobs.borrow().len()
+        }
+    }
+
+    /// A watch on the whole cluster that lists `objects`, applies `later` once `gate` is open,
+    /// and then waits or ends. Each item counts in `yielded`.
+    fn scripted<K: Send + 'static>(
+        objects: Vec<K>,
+        later: Vec<K>,
+        gate: &Arc<AtomicBool>,
+        ends: bool,
+        yielded: &Arc<AtomicUsize>,
+    ) -> Watches<K> {
+        let gate = Arc::clone(gate);
+        let yielded = Arc::clone(yielded);
+        let listed: Vec<watcher::Event<K>> = std::iter::once(watcher::Event::Init)
+            .chain(objects.into_iter().map(watcher::Event::InitApply))
+            .chain(std::iter::once(watcher::Event::InitDone))
+            .collect();
+        let later = stream::once(async move {
+            while !gate.load(Ordering::SeqCst) {
+                tokio::time::sleep(ms(5)).await;
+            }
+            stream::iter(later.into_iter().map(watcher::Event::Apply))
+        })
+        .flatten();
+        let tail: BoxStream<'static, Tagged<K>> = if ends {
+            stream::once(async { (None, None) }).boxed()
+        } else {
+            stream::pending().boxed()
+        };
+        let items = stream::iter(listed).chain(later).map(move |event| {
+            yielded.fetch_add(1, Ordering::SeqCst);
+            (None, Some(Ok(event)))
+        });
+        stream::select_all([items.chain(tail).boxed()])
+    }
+
+    fn explanation() -> Explanation {
+        Explanation {
+            summary: "an invented summary".into(),
+            cause: "an invented cause".into(),
+            steps: vec!["an invented step".into()],
+            confidence: "low".into(),
+        }
+    }
+
+    impl Cluster for FakeCluster {
+        type Lookup = CountingLookup;
+
+        fn watch(&self, namespaces: &[String], rollouts: bool) -> Watched {
+            assert!(namespaces.is_empty(), "these tests watch the whole cluster");
+            self.watches.set(self.watches.get() + 1);
+            self.rollouts.set(Some(rollouts));
+            let none = Arc::new(AtomicBool::new(true));
+            Watched {
+                pods: scripted(
+                    self.pods.clone(),
+                    self.later.clone(),
+                    &self.gate,
+                    self.ends,
+                    &self.yielded,
+                ),
+                events: scripted(Vec::<Event>::new(), Vec::new(), &none, false, &self.yielded),
+                deployments: rollouts.then(|| {
+                    scripted(
+                        Vec::<Deployment>::new(),
+                        Vec::new(),
+                        &none,
+                        false,
+                        &self.yielded,
+                    )
+                }),
+            }
+        }
+
+        fn lookup(&self) -> CountingLookup {
+            self.lookups.set(self.lookups.get() + 1);
+            CountingLookup(Rc::clone(&self.lookup_calls))
+        }
+
+        fn explain<'a>(
+            &'a self,
+            job: Work,
+            _settings: &'a Settings,
+            shared: &'a Shared<'_>,
+        ) -> Explaining<'a> {
+            let incident = job.gathered.incident;
+            self.jobs
+                .borrow_mut()
+                .push((self.watches.get(), incident.fingerprint.clone()));
+            Box::pin(async move {
+                match self.explains {
+                    Explains::Done => {}
+                    Explains::Hang => {
+                        let _dropped = Dropped(Rc::clone(&self.dropped));
+                        for _ in 0..2 {
+                            shared
+                                .notifications
+                                .borrow_mut()
+                                .push_back(notify::queued(&incident, explanation()));
+                        }
+                        std::future::pending::<()>().await;
+                    }
+                    Explains::Remember => {
+                        let now = Instant::now();
+                        let left = shared.budget.borrow_mut().take(now).is_ok();
+                        let cached = shared.dedup.borrow().peek(&incident.fingerprint).is_some();
+                        self.found.borrow_mut().push((left, cached));
+                        shared.dedup.borrow_mut().put(
+                            &incident.fingerprint,
+                            explanation(),
+                            None,
+                            now,
+                        );
+                    }
+                }
+                Ok(None)
+            })
+        }
+    }
+
+    // Invented values only: no real cluster output (AGENTS.md, Security rules).
+    fn crashing(name: &str) -> Pod {
+        serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": "shop", "uid": pod_uid("shop", name)},
+            "spec": {"containers": [{"name": "app", "image": "registry.example.com/app:1"}]},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{
+                    "name": "app", "image": "registry.example.com/app:1", "imageID": "",
+                    "ready": false, "restartCount": 6,
+                    "state": {"waiting": {"reason": "CrashLoopBackOff",
+                                          "message": "back-off 2m40s restarting failed container"}},
+                    "lastState": {"terminated": {"reason": "Error", "exitCode": 1}}
+                }]
+            }
+        }))
+        .expect("the fixture is a valid Pod")
+    }
+
+    fn options(lease: bool, calls_per_hour: usize) -> Options {
+        Options {
+            settle: SignedDuration::ZERO,
+            explain: Some(Settings {
+                model: None,
+                model_name: "m".into(),
+                logs: false,
+                mode: OutputMode::JsonSchema,
+                max_tokens: 800,
+                max_input_tokens: 6000,
+                events: false,
+                history_days: None,
+                calls_per_hour,
+                calls_per_day: 200,
+                dedup_ttl: Duration::from_secs(3600),
+                instance: ME.into(),
+                notify: None,
+            }),
+            metrics_address: None,
+            namespaces: Vec::new(),
+            rollouts: true,
+            leader_lease: lease.then(|| LeaderLease {
+                namespace: "kausa".into(),
+                name: "kausa-leader".into(),
+                identity: ME.into(),
+            }),
+        }
+    }
+
+    fn shared_of<'a>(options: &Options, metrics: &'a Metrics, term: &'a Term) -> Shared<'a> {
+        let settings = options.explain.as_ref().expect("settings");
+        Shared {
+            budget: RefCell::new(Budget::new(settings.calls_per_hour, settings.calls_per_day)),
+            dedup: RefCell::new(Dedup::new(settings.dedup_ttl, DEDUP_CAPACITY)),
+            writer: None,
+            history: None,
+            metrics,
+            notifications: RefCell::new(VecDeque::new()),
+            term,
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+    }
+
+    /// Serves until `script` ends, as `run` does after it has connected.
+    async fn serve(
+        options: &Options,
+        lease: &FakeLease,
+        cluster: &FakeCluster,
+        shared: &Shared<'_>,
+        listener: Option<&TcpListener>,
+        script: impl Future<Output = ()>,
+    ) -> Result<(), RunError> {
+        Serving {
+            options,
+            lease: Some(lease),
+            cluster,
+            shared: Some(shared),
+            metrics: shared.metrics,
+            term: shared.term,
+            listener,
+            timings: T,
+            tick: TEST_TICK,
+        }
+        .serve(script)
+        .await
+    }
+
+    /// Waits until `done`, at most `limit`; says whether it happened.
+    async fn until(limit: Duration, done: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while !done() {
+            if start.elapsed() > limit {
+                return false;
+            }
+            tokio::time::sleep(ms(5)).await;
+        }
+        true
+    }
+
+    fn served(result: Result<(), RunError>) {
+        match result {
+            Ok(()) => {}
+            Err(RunError::Failure(error)) => panic!("stopped on an error: {error}"),
+            Err(RunError::Output(error)) => panic!("the log failed: {error}"),
+        }
+    }
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_standby_starts_no_watch_and_no_owner_lookup() {
+        let options = options(true, 10);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(Some(OTHER));
+        lease.renewing.set(true);
+        let cluster = FakeCluster::new(vec![crashing("api-1")], Explains::Done);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(until(WAIT, || lease.gets.get() >= 4).await, "four reads");
+        }));
+        served(result);
+        assert_eq!(cluster.watches.get(), 0, "no watch");
+        assert_eq!(cluster.lookups.get(), 0, "no owner lookup");
+        assert_eq!(cluster.jobs(), 0, "no explanation");
+        assert!(
+            lease.patches.borrow().is_empty(),
+            "no acquire and no release"
+        );
+        assert!(!term.holds());
+        assert!(metrics.is_ready() && !metrics.is_leading());
+        assert_eq!(readyz(&metrics), "standby\n");
+        assert_eq!(counter(&metrics, LEADER), 0);
+        assert_eq!(counter(&metrics, TO_LEADER), 0);
+    }
+
+    #[test]
+    fn acquiring_the_lease_starts_the_watches_of_a_term() {
+        let options = options(true, 10);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(vec![pod("shop", "web-1")], Explains::Done);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || metrics.is_ready() && lease.count(is_renewal) >= 2).await,
+                "listed and renewed"
+            );
+            assert_eq!(cluster.watches.get(), 1, "one term's watches");
+            assert_eq!(
+                cluster.rollouts.get(),
+                Some(true),
+                "with the Deployment watch"
+            );
+            assert_eq!(cluster.lookups.get(), 1, "a fresh owner lookup");
+            assert!(lease.held_by_me() && term.holds());
+            assert!(metrics.is_leading());
+            assert_eq!(readyz(&metrics), "ready\n");
+            assert_eq!(counter(&metrics, LEADER), 1);
+            assert_eq!(counter(&metrics, TO_LEADER), 1);
+        }));
+        served(result);
+        assert_eq!(lease.count(is_acquire), 1, "acquired at the first read");
+        assert_eq!(counter(&metrics, TO_STANDBY), 0);
+    }
+
+    #[test]
+    fn a_stop_while_leading_releases_the_lease_exactly_once() {
+        let options = options(true, 10);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(vec![pod("shop", "web-1")], Explains::Done);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || lease.count(is_renewal) >= 3).await,
+                "renewed three times"
+            );
+        }));
+        served(result);
+        assert_eq!(lease.count(is_release), 1, "one release");
+        let last = lease.patches.borrow().last().cloned().expect("a patch");
+        assert!(is_release(&last), "nothing is sent after the release");
+        // The fake applies a patch only with the current version: the release used the last one.
+        assert!(lease.is_free(), "the release was applied");
+        assert!(!term.holds(), "nothing writes after the release");
+    }
+
+    #[test]
+    fn a_lost_lease_drops_the_explanation_in_flight_and_the_queued_notifications() {
+        let options = options(true, 10);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(vec![crashing("api-1")], Explains::Hang);
+        let dropped_at_step_down = Cell::new(None);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || shared.notifications.borrow().len() == 2).await,
+                "an explanation in flight, two notifications queued"
+            );
+            // Another replica takes the Lease and keeps renewing it.
+            lease.renewing.set(true);
+            lease.write(Some(OTHER));
+            assert!(
+                until(WAIT, || counter(&metrics, TO_STANDBY) == 1).await,
+                "stepped down"
+            );
+            dropped_at_step_down.set(Some(cluster.dropped.get()));
+            let reads = lease.gets.get();
+            assert!(
+                until(WAIT, || lease.gets.get() >= reads + 2).await,
+                "reads as a standby"
+            );
+        }));
+        served(result);
+        assert_eq!(
+            dropped_at_step_down.get(),
+            Some(1),
+            "dropped at the step-down"
+        );
+        assert_eq!(cluster.jobs(), 1, "never started again");
+        assert!(shared.notifications.borrow().is_empty());
+        assert_eq!(counter(&metrics, DROPPED), 2);
+        assert_eq!(cluster.watches.get(), 1, "a standby starts no watch");
+        assert!(!term.holds() && !metrics.is_leading());
+        assert_eq!(counter(&metrics, LEADER), 0);
+        assert_eq!(readyz(&metrics), "standby\n");
+        assert_eq!(lease.count(is_release), 0, "a lost Lease is not released");
+    }
+
+    #[test]
+    fn a_second_term_keeps_the_budget_and_the_dedup_entry() {
+        // One call an hour: the second term finds it spent, and the incident cached.
+        let options = options(true, 1);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(vec![crashing("api-1")], Explains::Remember);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || cluster.found.borrow().len() == 1).await,
+                "explained in the first term"
+            );
+            // Another replica takes the Lease and dies: it is taken back after lease_duration.
+            lease.write(Some(OTHER));
+            assert!(
+                until(WAIT, || cluster.found.borrow().len() == 2).await,
+                "explained again in the second term"
+            );
+        }));
+        served(result);
+        assert_eq!(
+            *cluster.found.borrow(),
+            vec![(true, false), (false, true)],
+            "the second term saw the spent call and the cached incident"
+        );
+        let jobs = cluster.jobs.borrow();
+        assert_eq!((jobs[0].0, jobs[1].0), (1, 2), "one explanation per term");
+        assert_eq!(jobs[0].1, jobs[1].1, "of the same incident");
+        assert_eq!(cluster.lookups.get(), 2, "a fresh owner lookup per term");
+        assert_eq!(counter(&metrics, TO_LEADER), 2);
+        assert_eq!(counter(&metrics, TO_STANDBY), 1);
+    }
+
+    #[test]
+    fn an_ended_watch_while_leading_releases_the_lease_and_fails() {
+        let options = options(true, 10);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let mut cluster = FakeCluster::new(vec![pod("shop", "web-1")], Explains::Done);
+        cluster.ends = true;
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            until(WAIT, || false).await;
+        }));
+        match result {
+            Err(RunError::Failure(error)) => assert_eq!(error, "the pod watch ended"),
+            Err(RunError::Output(error)) => panic!("the log failed: {error}"),
+            Ok(()) => panic!("the ended watch did not stop kausa"),
+        }
+        assert_eq!(lease.count(is_acquire), 1);
+        assert_eq!(lease.count(is_release), 1, "released once");
+        assert!(lease.is_free(), "the release was applied");
+        assert!(!term.holds());
+    }
+
+    #[test]
+    fn without_a_leader_lease_no_lease_call_is_made() {
+        let options = options(false, 10);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(vec![crashing("api-1")], Explains::Done);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || metrics.is_ready() && cluster.jobs() == 1).await,
+                "listed and explained"
+            );
+        }));
+        served(result);
+        assert_eq!(lease.calls(), 0, "no Lease call");
+        assert!(term.holds(), "the term never ends");
+        assert!(metrics.is_leading());
+        assert_eq!(readyz(&metrics), "ready\n");
+        assert_eq!(counter(&metrics, LEADER), 1);
+        assert_eq!(counter(&metrics, TO_LEADER), 0);
+        assert_eq!(cluster.watches.get(), 1);
+    }
+
+    /// Asks for `/metrics` over and over until `stop`, counting the answers.
+    fn flood(address: SocketAddr, stop: &AtomicBool, answered: &AtomicUsize) {
+        while !stop.load(Ordering::SeqCst) {
+            let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, ms(200)) else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(ms(200)));
+            let _ = stream.set_write_timeout(Some(ms(200)));
+            if stream.write_all(b"GET /metrics HTTP/1.1\r\n\r\n").is_err() {
+                continue;
+            }
+            let mut answer = Vec::new();
+            if stream.read_to_end(&mut answer).is_ok() && answer.starts_with(b"HTTP/1.1 200") {
+                answered.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn a_metrics_flood_stops_neither_the_controller_nor_the_keeper() {
+        let options = options(true, 10);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let listed: Vec<Pod> = (0..200).map(|n| pod("shop", &format!("web-{n}"))).collect();
+        let mut cluster = FakeCluster::new(listed, Explains::Done);
+        // After the flood has begun: 100 updates and one crashing Pod.
+        cluster.later = (0..100).map(|n| pod("shop", &format!("web-{n}"))).collect();
+        cluster.later.push(crashing("api-1"));
+        cluster.gate = Arc::new(AtomicBool::new(false));
+        let items = 1 + 200 + 1 + 101 + 2 + 2;
+        let stop = Arc::new(AtomicBool::new(false));
+        let answered = Arc::new(AtomicUsize::new(0));
+        let runtime = runtime();
+        let (result, explained_after) = runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+            let address = listener.local_addr().expect("an address");
+            let clients: Vec<_> = (0..8)
+                .map(|_| {
+                    let (stop, answered) = (Arc::clone(&stop), Arc::clone(&answered));
+                    std::thread::spawn(move || flood(address, &stop, &answered))
+                })
+                .collect();
+            let explained_after = Cell::new(None);
+            let result = serve(
+                &options,
+                &lease,
+                &cluster,
+                &shared,
+                Some(&listener),
+                async {
+                    assert!(
+                        until(WAIT, || answered.load(Ordering::SeqCst) >= 50).await,
+                        "the flood is on"
+                    );
+                    assert!(metrics.is_leading(), "leading under the flood");
+                    let renewals = lease.count(is_renewal);
+                    let opened = Instant::now();
+                    cluster.gate.store(true, Ordering::SeqCst);
+                    assert!(until(WAIT, || cluster.jobs() == 1).await, "explained");
+                    explained_after.set(Some(opened.elapsed()));
+                    assert!(
+                        until(WAIT, || lease.count(is_renewal) >= renewals + 3).await,
+                        "renewed under the flood"
+                    );
+                },
+            )
+            .await;
+            stop.store(true, Ordering::SeqCst);
+            drop(listener);
+            for client in clients {
+                client.join().expect("the client thread");
+            }
+            (result, explained_after.get())
+        });
+        served(result);
+        assert_eq!(
+            cluster.yielded.load(Ordering::SeqCst),
+            items,
+            "every watch item was handled"
+        );
+        let explained_after = explained_after.expect("explained");
+        assert!(
+            explained_after <= TEST_TICK * 10,
+            "explained {explained_after:?} after the incident appeared"
+        );
+        assert_eq!(
+            counter(&metrics, TO_STANDBY),
+            0,
+            "the keeper never lost the Lease"
+        );
+        assert!(answered.load(Ordering::SeqCst) >= 50);
     }
 }

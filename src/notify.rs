@@ -38,6 +38,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const TIMEOUT: Duration = Duration::from_secs(3);
+// An attempt of a deposed leader ends before a standby may take over
+// (docs/adr/0019-high-availability.md); the tests check their own TIMEOUT.
+#[cfg(not(test))]
+const _: () = assert!(TIMEOUT.as_nanos() <= crate::leader::pure::WRITE_BOUND.as_nanos());
 
 /// The wait before the one retry of a transient failure: `explain::RETRY_DELAY`, which the log
 /// line states, and a short one in the tests.
@@ -274,9 +278,15 @@ pub fn take_next(queue: &mut VecDeque<Queued>, dedup: &Dedup) -> Option<Queued> 
 /// `RETRY_DELAY`. Counts and logs the outcome, marks the `Dedup` entry notified after a success
 /// (only if it still stores this text), then waits until the format's least interval
 /// ([`Format::min_interval`]) has passed since the last attempt began. A failure is only logged and counted; the error is the log's.
+/// Each attempt is made only while the lease term holds; past its end the item is dropped, counted
+/// as `dropped` and not logged.
 pub async fn deliver(notifier: &Notifier, item: Queued, shared: &Shared<'_>) -> io::Result<()> {
     let mut attempt: u8 = 1;
     loop {
+        if !shared.term.holds() {
+            count_dropped(shared);
+            return Ok(());
+        }
         let started = Instant::now();
         let result = notifier.send(&item.notice).await;
         match result {
@@ -301,6 +311,11 @@ pub async fn deliver(notifier: &Notifier, item: Queued, shared: &Shared<'_>) -> 
                 )?;
             }
             Err(failure) if failure.transient && attempt == 1 => {
+                // The term ended during the attempt: no retry.
+                if !shared.term.holds() {
+                    count_dropped(shared);
+                    return Ok(());
+                }
                 shared.metrics.inc("kausa_notifications_retried_total", &[]);
                 log::warn(
                     "notification retried",
@@ -329,6 +344,13 @@ pub async fn deliver(notifier: &Notifier, item: Queued, shared: &Shared<'_>) -> 
     }
 }
 
+/// An item dropped because the lease term ended: counted, not logged.
+fn count_dropped(shared: &Shared<'_>) {
+    shared
+        .metrics
+        .inc("kausa_notifications_total", &[("outcome", "dropped")]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +370,7 @@ mod tests {
     use crate::detect::Detection;
     use crate::explain::Shared;
     use crate::incident::{Incident, IncidentKey, Signal};
+    use crate::leader::Term;
     use crate::metrics::Metrics;
     use crate::notification::{self, ChatId, Notice, parse_chat_id};
     use crate::prompt::{self, Explanation};
@@ -426,6 +449,11 @@ mod tests {
     }
 
     fn shared(metrics: &Metrics, ttl: Duration) -> Shared<'_> {
+        // Without --leader-lease the term never ends.
+        shared_in(metrics, ttl, Box::leak(Box::new(Term::unbounded())))
+    }
+
+    fn shared_in<'a>(metrics: &'a Metrics, ttl: Duration, term: &'a Term) -> Shared<'a> {
         Shared {
             budget: RefCell::new(Budget::new(30, 200)),
             dedup: RefCell::new(Dedup::new(ttl, 1024)),
@@ -433,6 +461,7 @@ mod tests {
             history: None,
             metrics,
             notifications: RefCell::new(VecDeque::new()),
+            term,
         }
     }
 
@@ -1394,5 +1423,80 @@ mod tests {
         });
         assert_eq!(outcomes(&metrics), (3, 0, 0, 0));
         assert_eq!(requests.try_iter().count(), 3);
+    }
+
+    // Acceptance tests for the standby replica (docs/adr/0019-high-availability.md), written before
+    // the code: `deliver` checks `shared.term` before each attempt, the first and the retry. Past
+    // the term's end it sends nothing and the item is dropped, counted as
+    // `kausa_notifications_total{outcome="dropped"}`, never as sent or failed.
+
+    #[test]
+    fn the_test_timeout_is_within_the_write_bound() {
+        // The production TIMEOUT (10 s) is checked by a const assertion in the module.
+        assert!(TIMEOUT <= crate::leader::pure::WRITE_BOUND);
+    }
+
+    #[test]
+    fn a_closed_term_sends_nothing_and_drops_the_item() {
+        let (base, requests) = webhook(vec![Answer::Status("200 OK")]);
+        let n = notifier(&base, Format::Json, None);
+        let metrics = Metrics::default();
+        let term = Term::closed();
+        {
+            let shared = shared_in(&metrics, TTL, &term);
+            shared.dedup.borrow_mut().put(
+                FINGERPRINT,
+                explanation("full"),
+                Some(narrow()),
+                Instant::now(),
+            );
+            block_on(deliver(&n, item(), &shared)).expect("the log");
+            let notified = shared.dedup.borrow().peek(FINGERPRINT).map(|c| c.notified);
+            assert_eq!(notified, Some(false), "a dropped item is not notified");
+        }
+        assert!(
+            requests.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the webhook was called"
+        );
+        let (sent, failed, dropped, _) = outcomes(&metrics);
+        assert_eq!((sent, failed, dropped), (0, 0, 1));
+    }
+
+    #[test]
+    fn a_term_that_ends_before_the_retry_drops_the_item() {
+        // The first attempt hangs until the client's timeout, long after the term has ended: the
+        // retry is not sent.
+        let (base, requests) = webhook(vec![Answer::Hang(TIMEOUT + Duration::from_secs(1))]);
+        let n = notifier(&base, Format::Json, None);
+        let metrics = Metrics::default();
+        let term = Term::closed();
+        {
+            let shared = shared_in(&metrics, TTL, &term);
+            block_on(async {
+                term.extend_to(Instant::now() + Duration::from_millis(300));
+                deliver(&n, item(), &shared).await
+            })
+            .expect("the log");
+        }
+        let first = requests.recv_timeout(Duration::from_secs(1));
+        assert!(
+            first.is_ok(),
+            "the first attempt is sent while the term holds"
+        );
+        assert!(
+            requests.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the retry was sent after the term ended"
+        );
+        let (sent, failed, dropped, _) = outcomes(&metrics);
+        assert_eq!((sent, failed, dropped), (0, 0, 1));
+    }
+
+    #[test]
+    fn an_unbounded_term_sends_as_before() {
+        let (metrics, sent, notified, _) =
+            deliver_with(vec![Answer::Status("200 OK")], Some(narrow()), item());
+        assert_eq!(outcomes(&metrics), (1, 0, 0, 0));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(notified, Some(true));
     }
 }

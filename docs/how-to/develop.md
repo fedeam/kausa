@@ -95,14 +95,25 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    workload's Explanation, its columns, who may read and write it, what the
    CustomResourceDefinition refuses, the sweep after a restart, and kausa's own update of an
    Explanation after it; the cluster scope also turns the history off with `dryRun=true` and
-   `history.enabled=false`, and restarts kausa without the CustomResourceDefinition. CI runs
-   both, as the checks `kind (cluster)` and `kind (namespaced)`:
+   `history.enabled=false`, and restarts kausa without the CustomResourceDefinition.
+   `KAUSA_E2E_REPLICAS` picks the chart's `replicaCount`: `1` when unset (the value stays unset,
+   and the test checks that nothing of the standby is installed), or `2`, with
+   `KAUSA_E2E_SCOPE=namespaced` only: a leader and a standby behind the Lease `kausa-leader`,
+   their grants on it (and a real server-side create refused), that only the leader writes, a
+   graceful handover (a deleted leader), a frozen one (`SIGSTOP` from the kind node), a deleted
+   `kausa-leader` RoleBinding (nobody acts until `helm upgrade`), a foreign label change on the
+   Lease, a rollout and an uninstall ([0019. Offer an optional standby replica that takes over
+   through a chart-created Lease, elected by kausa's own code](../adr/0019-high-availability.md)).
+   CI runs the three, as the checks `kind (cluster)`, `kind (namespaced)` and `kind (namespaced,
+   standby)`:
 
    ```sh
    KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the node image pinned in .github/workflows/e2e.yml> \
      tests/e2e/run.sh
    KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the same image> KAUSA_E2E_SCOPE=namespaced \
      tests/e2e/run.sh
+   KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the same image> KAUSA_E2E_SCOPE=namespaced \
+     KAUSA_E2E_REPLICAS=2 tests/e2e/run.sh
    ```
 
    It ends with `e2e: ok`. The fake endpoint runs on your machine. On Linux the cluster reaches it

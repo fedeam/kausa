@@ -124,3 +124,9 @@ explanations in a namespaced Explanation resource, off by default](0014-explanat
 Update 2026-10-28: with 0014, the out-of-scope line "Changing anything in the cluster other than
 writing Events" reads "other than writing Events and, with `--history`, kausa's own Explanation
 objects": kausa still changes no workload, patches nothing else and never remediates.
+
+Update 2026-10-29: [0019. Offer an optional standby replica that takes over through a
+chart-created Lease, elected by kausa's own code](0019-high-availability.md) amends the out-of-scope line again: "other than writing Events and, with `--history`, kausa's own
+Explanation objects, and, with `--leader-lease`, a merge patch of the `spec` of kausa's own Lease".
+That Lease, created by the chart only with `replicaCount: 2`, decides which of two replicas acts;
+kausa still changes no workload, patches nothing else and never remediates.

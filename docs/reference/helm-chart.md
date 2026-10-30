@@ -17,7 +17,10 @@ them in both scopes. So did the `notifications` values, which the kind test inst
 (`D014`), was added for v0.4 on 2026-10-29 and is checked by the renders and the kind test in both
 scopes ([0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch
 that is on by default, and add nothing for StatefulSets or
-DaemonSets](../adr/0018-stuck-rollouts.md)). Why it is built this way: [0010. Ship a static binary
+DaemonSets](../adr/0018-stuck-rollouts.md)). The `replicaCount` value, a standby replica behind a
+Lease, was added for v0.4 on 2026-10-29 and is checked by the renders in both scopes; its kind
+test (namespaced, two replicas) runs on GitHub Actions ([0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by
+kausa's own code](../adr/0019-high-availability.md)). Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
 yet](../adr/0010-packaging.md), [0012. Release from a tag: a signed image on GHCR and the
 chart on the GitHub release](../adr/0012-releases.md) and [0013. Offer a namespaced install mode:
@@ -33,15 +36,18 @@ Telegram](../adr/0015-notifications.md).
 | ServiceAccount | the release's full name | `serviceAccount.name` to override |
 | ClusterRole and ClusterRoleBinding | the release's full name | Only with `rbac.scope=cluster`. The table in [Permissions](permissions.md); `pods/log` only when kausa explains (an endpoint or `dryRun`) and `logs` is true; `create` and `patch` on Events only with an endpoint, `events` true and no `dryRun`; `list` and `watch` on `deployments` only while `rollouts` is on |
 | Role and RoleBinding, in each namespace of `rbac.namespaces` | the release's full name | Only with `rbac.scope=namespaced`. The same rules, with the same conditions; the RoleBinding's subject is the ServiceAccount in the release namespace |
-| Deployment | the release's full name | One replica, `Recreate`, the restricted Pod Security settings, a read-only root filesystem, `POD_NAME` from the downward API |
+| Deployment | the release's full name | `replicaCount` replicas (1 or 2), `Recreate`, the restricted Pod Security settings, a read-only root filesystem, `POD_NAME` from the downward API; with 2, `--leader-lease` and a default pod anti-affinity ([A standby replica](#a-standby-replica)) |
+| Lease | `<full name>-leader` | Only with `replicaCount: 2`, in the release namespace, with the chart's labels and `spec: {}`: Helm owns the object, kausa writes its `spec` |
+| Role and RoleBinding | `<full name>-leader` | Only with `replicaCount: 2`, in the release namespace, in both `rbac.scope`s: `get` and `patch` on that one Lease, bound to the ServiceAccount ([Permissions](permissions.md#in-kausas-own-namespace-with-two-replicas)) |
+| PodDisruptionBudget | the release's full name | Only with `replicaCount: 2`: `maxUnavailable: 1`, `unhealthyPodEvictionPolicy: AlwaysAllow` |
 | Service | `<full name>-metrics` | Only with `metrics.enabled` |
 | NetworkPolicy | the release's full name | Only with `networkPolicy.enabled` |
 | CustomResourceDefinition | `explanations.kausa.fedeam.com` | Only while the release writes history (`kausa.writesHistory`) and `history.installCRD` is true. Cluster-scoped, in both `rbac.scope`s. No `helm.sh/resource-policy: keep` ([Explanation resource](explanation-resource.md)) |
 | ClusterRole | `<full name>-explanation-reader` | Only with the CustomResourceDefinition and `history.readers.aggregate`: `get`, `list` and `watch` on `explanations`, aggregated to `view` ([Permissions](permissions.md)) |
 
 The full name is the release name when it contains `kausa`, and `<release>-kausa` otherwise.
-Every object is in the release namespace, except the Roles and RoleBindings, which are in the
-listed namespaces, and the CustomResourceDefinition and the reader role, which are
+Every object is in the release namespace, except the Roles and RoleBindings of `kausa.rules`, which
+are in the listed namespaces, and the CustomResourceDefinition and the reader role, which are
 cluster-scoped. The chart creates no Namespace: each listed one must exist before `helm
 install` (a chart that owned them would delete their workloads on `helm uninstall`).
 
@@ -51,12 +57,15 @@ goes there only, so that both scopes grant the same. The history's rule (`list`,
 `patch` and `delete` on `explanations` in `kausa.fedeam.com`) is appended last, only while the
 release writes history. The Deployment watch's rule (`list` and `watch` on `deployments` in
 `apps`) comes right after the `replicasets` rule, only while `rollouts` is on; with `rollouts:
-false` the rules are v0.3.0's, byte for byte.
+false` the rules are v0.3.0's, byte for byte. The one exception is the standby's Role
+`<full name>-leader` (`templates/leader-election.yaml`), which is not about the watched namespaces
+but about kausa's own Lease, and is the same in both scopes.
 
 ## Values
 
 | Value | Default | Becomes |
 |---|---|---|
+| `replicaCount` | `1` | `1`: one replica, as before. `2`: a standby ([A standby replica](#a-standby-replica)): `replicas: 2`, `--leader-lease`, the Lease, its Role and RoleBinding, the PodDisruptionBudget and, while `affinity` is empty, a preferred pod anti-affinity. A missing key (the values of a v0.3 release reused with `--reuse-values`) or `null` means `1`. Scale only through this value |
 | `image.repository` | `ghcr.io/fedeam/kausa` | The image, published by each release for linux/amd64 and linux/arm64 |
 | `image.tag` | the chart's `appVersion` | |
 | `image.digest` | `""` | `repository@digest`, which takes precedence over the tag |
@@ -125,6 +134,7 @@ reason, and nothing is applied) in these cases, checked in this order, with thes
 | The NetworkPolicy without the API server's addresses | `networkPolicy.apiServer.cidrs is required with networkPolicy.enabled: without it kausa cannot reach the API server` |
 | The NetworkPolicy with an endpoint (outside `dryRun`) and without its peers | `networkPolicy.endpoint.to is required with networkPolicy.enabled and model.endpoint: without it kausa cannot reach the model` |
 | `history.days` is not a whole number from 1 to 30, whether the history is on or off (for example `0`, `31`, `abc` or `7.5`) | `history.days must be a whole number of days from 1 to 30, not '<value>'` |
+| `replicaCount` is anything but `1` or `2` (for example `0`, `3`, `two`, `-1` or `1.5`); a missing key or `null` is `1` | `replicaCount must be 1 or 2, not '<value>': a second replica is a standby that takes over through a Lease (docs/adr/0019-high-availability.md)` |
 | Notifications without `existingSecret` | `notifications.existingSecret is required with notifications.enabled: the Secret that holds the webhook URL` |
 | Notifications with another format | `notifications.format must be json, slack or telegram, not '<value>'` |
 | `telegram` without a chat id | `notifications.telegramChatId is required with notifications.format=telegram` |
@@ -175,6 +185,50 @@ whose stored values have neither (one installed with an earlier chart and upgrad
 --set notifications.enabled=true ...` turns them on. An unquoted `telegramChatId` in a values file
 (`-1001234567890`) reaches the template as a floating-point number; the chart prints it as a whole
 number, `"-1001234567890"`, not in exponent notation. Quoting it is clearer.
+
+## A standby replica
+
+With `replicaCount: 2` (off by default), two Pods run and only the one that holds the Lease
+`<full name>-leader` watches, explains and writes; the other reads the Lease every 5 seconds and
+takes it over once it has seen it unchanged for 30 seconds, or at once after the leader releases
+it on a graceful stop ([Architecture](../explanation/architecture.md#failover)). The helper
+`kausa.replicas` reads the value with `hasKey`, so a missing key is `1` and a `0` is refused, not
+turned into `1`; a number from a values file is a floating-point number, and `2.0` renders as `2`
+(Helm v3.16.1, checked by `tests/chart/render.sh`; CI renders with Helm v4.3.1). The chart then
+renders:
+
+- **The Deployment**: `replicas: 2`, still `strategy: Recreate` (an upgrade stops both old Pods
+  before the new ones start, so two versions never lead in turn), and the arguments
+  `--leader-lease "<release namespace>/<full name>-leader"` right before `--settle-seconds`.
+  `POD_NAME`, which every Pod already gets from the downward API, is the identity each replica
+  holds the Lease with.
+- **A preferred pod anti-affinity** while `affinity` is empty: weight 100, topology key
+  `kubernetes.io/hostname`, the chart's selector labels, so that the two Pods land on different
+  nodes when they can. It is preferred, not required, because a required one leaves the second
+  Pod `Pending` on a one-node cluster and makes `helm install --wait` time out (seen in kind on
+  2026-10-29). Any `affinity` in the values replaces it entirely, a required anti-affinity
+  included.
+- **`templates/leader-election.yaml`**: the Lease with `spec: {}`, and the Role and RoleBinding
+  `<full name>-leader` with the one rule of [Permissions](permissions.md#in-kausas-own-namespace-with-two-replicas).
+  Helm keeps the `spec` kausa wrote across upgrades, recreates a deleted Lease on the next
+  upgrade and deletes it on uninstall (seen in kind on 2026-10-29 with Helm v3.16.1). Going back
+  to `1` drops the three objects from the release, so Helm deletes them too (expected from how
+  Helm upgrades, not checked in kind).
+- **`templates/poddisruptionbudget.yaml`**: `maxUnavailable: 1`, so a drain never evicts both
+  Pods, and `unhealthyPodEvictionPolicy: AlwaysAllow`, so a Pod that is not Ready never blocks a
+  drain. With one replica there is none: it would block every drain.
+- **A paragraph in `NOTES.txt`** that names the Lease, prints `kubectl -n <namespace> get lease
+  <full name>-leader -o jsonpath='{.spec.holderIdentity}'` to see the holder, and says that each
+  replica keeps its own call budget and that only `replicaCount` should scale kausa.
+
+The Service selects both Pods, so a scrape through it reaches either one; [Install kausa with
+Helm](../how-to/install-with-helm.md#run-a-standby-replica) shows how to scrape each Pod. The
+NetworkPolicy, the probes, the ServiceAccount and the RBAC of `kausa.rules` do not change, and
+with `1` (or no key) the chart renders byte for byte what it rendered before the value existed.
+
+`kubectl scale` bypasses all of this: on a release with `replicaCount: 1` it runs Pods without
+`--leader-lease`, each of which acts, and on one with `2` the next `helm upgrade` puts the count
+back.
 
 ## The history
 
@@ -248,8 +302,10 @@ helm template kausa charts/kausa --kube-version 1.36.0 \
 The Dockerfile's `ci` target renders both scopes, the history toggles, each notification format
 with and without the NetworkPolicy, values without a `notifications` map, the `rollouts` value
 (the `deployments` rule right after `replicasets` by default, none and one `--no-rollouts` with
-`false`, `null` rendered as the default), and every `rbac`, `history.days` and notification
-refusal, and `tests/chart/render.sh` runs a longer set of the same checks (helm only, no cluster),
+`false`, `null` rendered as the default), `replicaCount` (`null` and `1` rendered as the default;
+`2` in both scopes, with only the Deployment changed among the existing objects and the Lease, its
+Role and RoleBinding and the PodDisruptionBudget added, and with a user affinity), and every
+`rbac`, `history.days`, `replicaCount` and notification refusal, and `tests/chart/render.sh` runs a longer set of the same checks (helm only, no cluster),
 including a comparison of the cluster-scope rules with the v0.1.0 chart's: equal with `rollouts:
 false`, and with only the `deployments` rule more by default.
 

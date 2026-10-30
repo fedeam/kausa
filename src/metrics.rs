@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 17] = [
+pub const COUNTERS: [(&str, &str); 19] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -81,12 +81,42 @@ pub const COUNTERS: [(&str, &str); 17] = [
         "kausa_notifications_retried_total",
         "Notifications tried again after a transient error.",
     ),
+    (
+        "kausa_leadership_changes_total",
+        "Times this process became leader or stepped down to standby, by `to` (leader, standby).",
+    ),
+    (
+        "kausa_lease_errors_total",
+        "Failed calls on the Lease, by `call` (get, patch); conflicts are not errors.",
+    ),
 ];
 
-#[derive(Debug, Default)]
+/// The gauges kausa exports, with their help text, rendered after the counters
+/// (docs/adr/0019-high-availability.md).
+pub const GAUGES: [(&str, &str); 1] = [(
+    "kausa_leader",
+    "1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a \
+     standby.",
+)];
+
+#[derive(Debug)]
 pub struct Metrics {
     counters: RefCell<BTreeMap<(&'static str, String), u64>>,
+    /// Set once, never cleared (docs/adr/0013-namespaced-install-mode.md).
     ready: Cell<bool>,
+    /// Whether this process acts: it holds the Lease, or runs without --leader-lease.
+    leading: Cell<bool>,
+}
+
+impl Default for Metrics {
+    /// Ready later, and leading: without --leader-lease, kausa always acts.
+    fn default() -> Self {
+        Self {
+            counters: RefCell::default(),
+            ready: Cell::new(false),
+            leading: Cell::new(true),
+        }
+    }
 }
 
 impl Metrics {
@@ -117,6 +147,16 @@ impl Metrics {
         self.ready.get()
     }
 
+    /// Sets the `kausa_leader` gauge and the `/readyz` body: `true` while this process acts,
+    /// `false` as a standby. It never changes whether kausa is Ready.
+    pub fn set_leading(&self, leading: bool) {
+        self.leading.set(leading);
+    }
+
+    pub fn is_leading(&self) -> bool {
+        self.leading.get()
+    }
+
     /// The text exposition format.
     pub fn render(&self) -> String {
         let counters = self.counters.borrow();
@@ -138,6 +178,15 @@ impl Metrics {
             if !any {
                 out.push_str(&format!("{name} 0\n"));
             }
+        }
+        for (name, help) in GAUGES {
+            let value = match name {
+                "kausa_leader" => u8::from(self.is_leading()),
+                _ => 0,
+            };
+            out.push_str(&format!(
+                "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+            ));
         }
         out
     }
@@ -183,7 +232,10 @@ pub fn respond(request_line: &str, metrics: &Metrics) -> (&'static str, &'static
     match (method, path) {
         ("GET", "/metrics") => ("200 OK", "text/plain; version=0.0.4", metrics.render()),
         ("GET", "/healthz") => ("200 OK", "text/plain", "ok\n".into()),
-        ("GET", "/readyz") if metrics.is_ready() => ("200 OK", "text/plain", "ready\n".into()),
+        ("GET", "/readyz") if metrics.is_ready() && metrics.is_leading() => {
+            ("200 OK", "text/plain", "ready\n".into())
+        }
+        ("GET", "/readyz") if metrics.is_ready() => ("200 OK", "text/plain", "standby\n".into()),
         ("GET", "/readyz") => ("503 Service Unavailable", "text/plain", "starting\n".into()),
         ("GET", _) => ("404 Not Found", "text/plain", "not found\n".into()),
         _ => (
@@ -279,7 +331,8 @@ mod tests {
     // code: two more counters, appended to `COUNTERS`.
     #[test]
     fn the_notification_counters_come_last_with_their_help() {
-        assert_eq!(COUNTERS.len(), 17);
+        // The two counters of docs/adr/0019-high-availability.md come after these.
+        assert_eq!(COUNTERS.len(), 19);
         assert_eq!(
             COUNTERS[15],
             (
@@ -359,7 +412,8 @@ mod tests {
     // `watch="deployments"`, and `D014` incidents under `kausa_incidents_total`.
     #[test]
     fn the_deployment_watch_adds_no_counter() {
-        assert_eq!(COUNTERS.len(), 17, "a counter was added");
+        // 19: the standby's two counters (docs/adr/0019-high-availability.md) came later.
+        assert_eq!(COUNTERS.len(), 19, "a counter was added");
         assert!(COUNTERS.contains(&(
             "kausa_watch_errors_total",
             "Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch."
@@ -376,5 +430,122 @@ mod tests {
             text.contains("kausa_incidents_total{detection=\"D014\"} 1\n"),
             "{text}"
         );
+    }
+
+    // Acceptance tests for the standby replica (docs/adr/0019-high-availability.md), written before
+    // the code: a gauge after the counters, two counters appended, and `/readyz` saying whether
+    // this replica acts. No label names a Pod, a namespace or the Lease.
+
+    const LEADER_HELP: &str = "1 while this process acts (it holds the Lease, or runs without \
+                               --leader-lease), 0 as a standby.";
+
+    #[test]
+    fn the_standby_counters_come_last_with_their_help() {
+        assert_eq!(COUNTERS.len(), 19);
+        assert_eq!(
+            COUNTERS[17],
+            (
+                "kausa_leadership_changes_total",
+                "Times this process became leader or stepped down to standby, by `to` (leader, \
+                 standby)."
+            )
+        );
+        assert_eq!(
+            COUNTERS[18],
+            (
+                "kausa_lease_errors_total",
+                "Failed calls on the Lease, by `call` (get, patch); conflicts are not errors."
+            )
+        );
+        let names: std::collections::BTreeSet<&str> = COUNTERS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), COUNTERS.len(), "a counter is listed twice");
+    }
+
+    #[test]
+    fn the_standby_counters_render_as_zero_when_unused() {
+        let m = Metrics::default();
+        let text = m.render();
+        for name in ["kausa_leadership_changes_total", "kausa_lease_errors_total"] {
+            assert!(
+                text.contains(&format!("# TYPE {name} counter\n{name} 0\n")),
+                "{name}: {text}"
+            );
+        }
+        m.inc("kausa_leadership_changes_total", &[("to", "leader")]);
+        m.inc("kausa_leadership_changes_total", &[("to", "standby")]);
+        m.inc("kausa_lease_errors_total", &[("call", "get")]);
+        m.add("kausa_lease_errors_total", &[("call", "patch")], 2);
+        let text = respond("GET /metrics HTTP/1.1", &m).2;
+        for line in [
+            "kausa_leadership_changes_total{to=\"leader\"} 1\n",
+            "kausa_leadership_changes_total{to=\"standby\"} 1\n",
+            "kausa_lease_errors_total{call=\"get\"} 1\n",
+            "kausa_lease_errors_total{call=\"patch\"} 2\n",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+    }
+
+    #[test]
+    fn the_leader_gauge_comes_after_the_counters_and_is_1_by_default() {
+        assert_eq!(GAUGES.len(), 1);
+        assert_eq!(GAUGES[0], ("kausa_leader", LEADER_HELP));
+        let gauge = |value: u8| {
+            format!(
+                "# HELP kausa_leader {LEADER_HELP}\n# TYPE kausa_leader gauge\nkausa_leader {value}\n"
+            )
+        };
+        let m = Metrics::default();
+        // Without --leader-lease, kausa always acts.
+        let text = m.render();
+        assert!(text.ends_with(&gauge(1)), "{text}");
+        // One sample, with no label.
+        let samples = text
+            .lines()
+            .filter(|l| l.starts_with("kausa_leader ") || l.starts_with("kausa_leader{"))
+            .count();
+        assert_eq!(samples, 1, "{text}");
+        let last_counter = COUNTERS[COUNTERS.len() - 1].0;
+        let counter_at = text
+            .find(&format!("# TYPE {last_counter} counter"))
+            .expect("the counter");
+        let gauge_at = text.find("# TYPE kausa_leader gauge").expect("the gauge");
+        assert!(counter_at < gauge_at, "{text}");
+        m.set_leading(false);
+        assert!(m.render().ends_with(&gauge(0)));
+        m.set_leading(true);
+        assert!(m.render().ends_with(&gauge(1)));
+    }
+
+    #[test]
+    fn readiness_says_whether_this_replica_acts() {
+        let m = Metrics::default();
+        let readyz = |m: &Metrics| {
+            let (status, _, body) = respond("GET /readyz HTTP/1.1", m);
+            (status, body)
+        };
+        assert_eq!(
+            readyz(&m),
+            ("503 Service Unavailable", "starting\n".to_owned())
+        );
+        // A standby before its first successful read of the Lease is still starting.
+        m.set_leading(false);
+        assert_eq!(
+            readyz(&m),
+            ("503 Service Unavailable", "starting\n".to_owned())
+        );
+        m.set_ready();
+        assert_eq!(readyz(&m), ("200 OK", "standby\n".to_owned()));
+        m.set_leading(true);
+        assert_eq!(readyz(&m), ("200 OK", "ready\n".to_owned()));
+        // Once Ready, never 503 again: neither a step-down nor a promotion takes it back.
+        m.set_leading(false);
+        assert_eq!(readyz(&m), ("200 OK", "standby\n".to_owned()));
+        assert!(m.is_ready());
+        assert_eq!(respond("GET /healthz HTTP/1.1", &m).2, "ok\n");
+        // Without --leader-lease: ready once listed, as in v0.3.
+        let single = Metrics::default();
+        single.set_ready();
+        assert_eq!(readyz(&single), ("200 OK", "ready\n".to_owned()));
     }
 }

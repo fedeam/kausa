@@ -360,3 +360,88 @@ the measurement it makes a condition of shipping.
   (hypotheses, not reproduced).
 - Before merging: the pull requests of `D011` to `D013` and of the v0.4 ADRs merge first, and the
   `ci` target and the kind test pass on GitHub.
+
+## Later the same day: a standby replica (0019)
+
+Request: implement [0019. Offer an optional standby replica that takes over through a
+chart-created Lease, elected by kausa's own code](../adr/0019-high-availability.md) on top of
+0017 and 0018 (branch `feat/v0.4-ha`, whose base is `main` plus the Deployment watch of 0018): the
+code, the chart, the kind test and the documentation, with the default (one replica, no
+`--leader-lease`) unchanged.
+
+### What was done
+
+- A code track and a chart track from the same base, each starting with acceptance tests,
+  merged into one branch. Code: the pure core `src/leader/pure.rs` (the timings, `WRITE_BOUND`
+  with its compile-time check, the take-or-wait decision on the monotonic clock,
+  `leaseTransitions`, the exact acquire, renew and release bodies); the driver `src/leader.rs`
+  (`get` and a JSON merge patch with strict field validation, the `Term`, the standby, the keeper
+  with its own deadline timer, the release, the rate-limited `lease error` lines with their
+  hints); the term guard before every budget take, Event call, history call, sweep call and
+  webhook attempt, a 10-second bound on the whole Event write and on each sweep call; the gauge
+  `kausa_leader`, two counters and `/readyz` `standby` (`src/metrics.rs`); `run()` split into the
+  state that lives across terms and `lead()`, one term of the controller, with the standby and
+  leading phases (`src/run.rs`); and `--leader-lease` with its usage errors (`src/main.rs`,
+  `tests/cli.rs`). No new crate, no new tokio feature, nothing spawned.
+- Chart: `replicaCount` (refused unless `1` or `2`, read with `hasKey`), the `--leader-lease`
+  pair, `templates/leader-election.yaml` (the Lease with `spec: {}`, a Role with `get` and
+  `patch` on that one Lease, its RoleBinding), `templates/poddisruptionbudget.yaml`, the default
+  preferred anti-affinity and a `NOTES.txt` paragraph; the renders in `tests/chart/render.sh` and
+  in the `ci` target; a third e2e matrix entry, `kind (namespaced, standby)`, with the two
+  existing job names unchanged, and the HA steps of `tests/e2e/run.sh`.
+- The documentation 0019 lists: Permissions, Helm chart, Command line and log format, the
+  architecture page (a Failover section), Install kausa with Helm (Run a standby replica,
+  per-Pod scraping, two alerts), Set up a development environment, the Security policy,
+  ARCHITECTURE.md (flow, codemap, invariants 1, 2, 5 and 6, the exception in "A new
+  permission"), AGENTS.md, the README, the front page and the changelog; `Update 2026-10-29`
+  paragraphs in 0001, 0009, 0010 and 0013. 0019 itself is unchanged.
+
+### Decisions
+
+- **Where the task and the ADR differ, the ADR won:** the task said "get and update" on the
+  Lease; 0019 grants `get` and `patch` and forbids `update` (a `PUT` sends back metadata read from
+  the cluster), so nobody added `update`.
+- The rendered YAML comment above `replicas` in the Deployment ("One instance: …") was kept as
+  it was, also with two replicas: changing it only for `2` would have been possible, but the
+  default render had to stay byte for byte the same, and the template comment beside it, which
+  does not render, explains both cases.
+- `--leader-lease`'s `POD_NAME` checks run once every argument has been read, so a bad value of
+  the flag is reported before a missing `POD_NAME`.
+
+### How it was checked
+
+- Locally, on the merged branch: `gitleaks git --redact .` (no leaks), `cargo fmt --all --
+  --check`, `cargo deny --locked check`, `cargo audit`, `cargo clippy --locked --all-targets
+  --all-features -- -D warnings`, `cargo test --locked --all-features` (419 unit tests, 55 CLI
+  tests and one more), `helm lint --strict` in both scopes with `replicaCount` unset and `2`,
+  `bash tests/chart/render.sh` with Helm v3.16.1 (every check passed, among them `null` and `1`
+  rendering like the default, `--set-json replicaCount=2.0` accepted, and the refusals of `0`,
+  `3`, `two`, `-1`, `1.5`, `2.5` and `true`), and `shellcheck` on `run.sh` and `render.sh`. The
+  `ci` target was not built locally (the Docker disk is nearly full and shared); CI builds it on
+  the pull request.
+- **The kind test was not run locally.** The Docker disk had 4,156,080 KiB free (3.96 GiB),
+  under the 4 GB this run needs for the image build and the cluster, so the three runs, and the
+  failover check of deleting the leader Pod, are left to GitHub Actions.
+
+### Hypotheses, still open
+
+Not confirmed or refuted here, since kind did not run; each is to be read from the CI runs:
+
+- Helm v4.3.1 (CI) behaves as Helm v3.16.1 did for 0019's checks: `hasKey` with `--set
+  replicaCount=null`, `toString` of `2.0`, the Lease applied after the Deployment, and `--wait`
+  on both replicas of a `Recreate` Deployment. The renders checked locally use v3.16.1 only.
+- A `SIGSTOP`ped container is not restarted by its liveness probe before about 60 seconds.
+- `docker exec` into the kind node, to find and stop the leader's process, works on GitHub's
+  runners.
+
+### Follow-ups
+
+- **Blocking the release:** the research note `docs/research/<date>-standby-and-failover.md` that
+  0019 makes a condition of shipping, not written because nothing was measured: the standby's
+  memory, the graceful and frozen takeover times over five runs each (to be within 5 and 35
+  seconds), Lease calls per minute, renewal delays during a relist of thousands of Pods, and,
+  under a metrics-port connection flood at the 200m CPU limit, renewal delays and incidents still
+  explained. If a time is not met, the constants or the select are revisited in an `Update` to
+  0019 before the release.
+- Before merging: the pull request of 0018 (#51) merges first, and the `ci` target and the three
+  e2e runs pass on GitHub.

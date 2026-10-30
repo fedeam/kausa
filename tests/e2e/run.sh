@@ -36,6 +36,25 @@
 # deployment watch error, and the cluster scope's history.enabled=false upgrade also sets
 # rollouts=false: no deployments rule, --no-rollouts in the args, a Ready Pod whose started line
 # has rollouts false, kept by the later upgrades through --reuse-values.
+#
+# KAUSA_E2E_REPLICAS picks the chart's replicaCount (docs/adr/0019-high-availability.md):
+# - 1 (when unset): replicaCount stays unset. Nothing of the standby is installed (no Lease, no
+#   <release>-leader Role or RoleBinding, no PodDisruptionBudget), the Pod runs without
+#   --leader-lease, nobody may get, patch or create a Lease, and the Pod reports kausa_leader 1,
+#   /readyz ready and a null leader_lease in its started line.
+# - 2, with KAUSA_E2E_SCOPE=namespaced only: two Pods, one holding the Lease <release>-leader. Every
+#   read that depends on the leader (its log, its metrics, its restarts) goes to the holder's Pod,
+#   metrics through the pod proxy: the Service balances across both Ready Pods. It skips the steps
+#   that assume one Pod (the --reset-values refusal, which is scope logic the other namespaced run
+#   covers, and the e2e-denied readiness block) and checks instead: one leader and one standby,
+#   with their gauge, /readyz and log lines; get and patch on that one Lease and nothing else on
+#   Leases, with a real server-side create refused; that only the leader writes Events and the
+#   standby logs no incident; a graceful handover (lease released, takeover within 10 s,
+#   leaseTransitions + 1); a frozen leader (SIGSTOP from the kind node: takeover within 45 s, then
+#   SIGCONT, leadership lost, no restart and no write after the takeover); a deleted Lease
+#   RoleBinding (nobody leads, nothing is written or sent, helm upgrade restores one leader); a
+#   foreign label write that keeps the holder; a rollout that ends with one leader; and an uninstall
+#   that leaves no Lease, Role, RoleBinding or PodDisruptionBudget.
 set -euo pipefail
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -45,6 +64,15 @@ case "$SCOPE" in
   cluster | namespaced) ;;
   *) fail "KAUSA_E2E_SCOPE must be cluster or namespaced" ;;
 esac
+REPLICAS=${KAUSA_E2E_REPLICAS:-1}
+case "$REPLICAS" in
+  1 | 2) ;;
+  *) fail "KAUSA_E2E_REPLICAS must be 1 or 2" ;;
+esac
+# The cluster scope's later steps (its upgrades and restarts) assume one Pod.
+if [ "$REPLICAS" = 2 ] && [ "$SCOPE" != namespaced ]; then
+  fail "KAUSA_E2E_REPLICAS=2 runs with KAUSA_E2E_SCOPE=namespaced only"
+fi
 
 CLUSTER=kausa-e2e
 NAMESPACE=kausa
@@ -69,14 +97,25 @@ READER=$RELEASE-explanation-reader
 HISTORY=on
 # src/history/pure.rs: the error of a list answered 404.
 CRD_MISSING="the CustomResourceDefinition $CRD is not installed (chart value history.installCRD)"
+# With two replicas (docs/adr/0019-high-availability.md): the Lease the chart creates and its Role
+# and RoleBinding, all three named so, in NAMESPACE; the PodDisruptionBudget is named RELEASE.
+LEASE=$RELEASE-leader
+LEASES=leases.coordination.k8s.io
+# src/leader.rs: the hint of a lease error answered 403.
+HINT_403="kausa needs get and patch on this Lease (docs/reference/permissions.md)"
 k() { kubectl --context "$CONTEXT" "$@"; }
 h() { helm --kube-context "$CONTEXT" "$@"; }
 
 cleanup() {
   status=$?
+  [ -n "${LOGS_PID:-}" ] && kill "$LOGS_PID" 2>/dev/null || true
   if [ "$status" -ne 0 ]; then
-    echo "--- kausa's log" >&2
-    k -n "$NAMESPACE" logs deploy/kausa --tail=200 >&2 || true
+    # Every kausa Pod's log: with two replicas, the leader's and the standby's.
+    for p in $(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name 2>/dev/null ||
+      true); do
+      echo "--- kausa's log: $p" >&2
+      k -n "$NAMESPACE" logs "$p" --tail=200 >&2 || true
+    done
     echo "--- Events in $TARGET" >&2
     k -n "$TARGET" get events.events.k8s.io -o wide >&2 || true
     if [ "$SCOPE" = namespaced ]; then
@@ -141,6 +180,8 @@ values=(--set image.repository=kausa --set image.tag=e2e --set image.pullPolicy=
   --set notifications.enabled=true --set notifications.format=json
   --set notifications.existingSecret=kausa-notify --set notifications.tokenKey=token
   --set notifications.allowHttp=true)
+# The other runs leave replicaCount unset: the chart's default.
+[ "$REPLICAS" = 1 ] || values+=(--set replicaCount=2)
 
 # The restricted Pod Security Standard: the chart's Pod must be admitted under it.
 k create namespace "$NAMESPACE"
@@ -209,9 +250,64 @@ for line in sys.stdin:
 sys.exit(1)
 ' "$@"
 }
-# kausa's log, into a file first, so that a failed read is a failure and not an empty log.
+# kausa's log, into a file first, so that a failed read is a failure and not an empty log: of Pod
+# $1 (pod/<name>) if given, else of the one Pod, or with two replicas of the Lease holder's.
 kausa_log() {
-  k -n "$NAMESPACE" logs "${1:-deploy/kausa}" > "$WORK/kausa.log"
+  from=${1:-}
+  if [ -z "$from" ]; then
+    if [ "$REPLICAS" = 1 ]; then from=deploy/kausa; else from=pod/$(holder); fi
+  fi
+  k -n "$NAMESPACE" logs "$from" > "$WORK/kausa.log"
+}
+# The Pod that holds kausa's Lease, as its holderIdentity names it (empty while nobody does). It
+# only picks the Pod to ask, and no failure message prints it.
+holder() {
+  k -n "$NAMESPACE" get lease "$LEASE" -o jsonpath='{.spec.holderIdentity}'
+}
+# kausa's Pods that are not being deleted, one name per line.
+kausa_pods() {
+  k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o json | python3 -c '
+import json, sys
+for pod in json.load(sys.stdin)["items"]:
+    if not pod["metadata"].get("deletionTimestamp"):
+        print(pod["metadata"]["name"])
+'
+}
+# "yes" when exactly $1 kausa Pods are not being deleted and every one of them is Ready.
+pods_ready() {
+  k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o json | python3 -c '
+import json, sys
+want = int(sys.argv[1])
+pods = [p for p in json.load(sys.stdin)["items"] if not p["metadata"].get("deletionTimestamp")]
+ready = [p for p in pods if any(c.get("type") == "Ready" and c.get("status") == "True"
+                                for c in (p.get("status") or {}).get("conditions") or [])]
+print("yes" if len(pods) == want and len(ready) == want else "no")
+' "$1"
+}
+# GET $2 (metrics or readyz) of kausa in Pod $1 (its name), through the API server's pod proxy:
+# with two replicas the Service proxy balances across both Ready Pods.
+pod_get() {
+  k get --raw "/api/v1/namespaces/$NAMESPACE/pods/$1:9090/proxy/$2"
+}
+# The value of series $2, as /metrics prints it before the value, in Pod $1 (empty if absent).
+pod_metric() {
+  pod_get "$1" metrics | awk -v series="$2" '$1 == series { print $2 }'
+}
+# kausa's metrics: through the Service with one replica, from the Lease holder's Pod with two.
+kausa_metrics() {
+  if [ "$REPLICAS" = 1 ]; then
+    k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics"
+  else
+    pod_get "$(holder)" metrics
+  fi
+}
+# The model calls kausa counted, over every Pod: a standby makes none.
+model_calls() {
+  if [ "$REPLICAS" = 1 ]; then
+    kausa_metrics
+  else
+    for p in $(kausa_pods); do pod_get "$p" metrics; done
+  fi | awk '$1 ~ /^kausa_model_calls_total([{]|$)/ { sum += $2 } END { print sum + 0 }'
 }
 # Nothing cluster-scoped with the release's label: a label selector, so an empty result is no
 # error. While the history is on, the reader role and the CustomResourceDefinition are the
@@ -308,11 +404,20 @@ print(json.dumps({
 }
 # The time now, as the Explanation stores it.
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-# Restarts kausa and waits until the rollout is done (the new Pod is Ready); sets pod.
+# Restarts kausa and waits until the rollout is done (the new Pod is Ready); sets pod (pod/<name>),
+# with two replicas to the new Pod that holds the Lease.
 restart_kausa() {
   old=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name)
   k -n "$NAMESPACE" rollout restart deploy/kausa
   k -n "$NAMESPACE" rollout status deploy/kausa --timeout 120s
+  if [ "$REPLICAS" = 2 ]; then
+    wait_pair 60 "no two Ready kausa Pods with one of them holding the Lease after the restart"
+    pod=pod/$leader
+    if printf '%s\n' "$old" | grep -qxF -- "$pod"; then
+      fail "a kausa Pod from before the restart holds the Lease"
+    fi
+    return 0
+  fi
   pod=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name |
     grep -vxF -- "$old" | head -n 1 || true)
   [ -n "$pod" ] || fail "no new kausa Pod after the restart"
@@ -444,6 +549,231 @@ if len(started) != 1:
 print(json.dumps(started[0].get(sys.argv[1], "<missing>")))
 ' "$1" "$WORK"
 }
+# The number of lines of a kausa log on stdin whose msg is one of $1 (separated by "|") and, with
+# $2 and $3, whose field $2 is $3.
+log_count() {
+  python3 -c '
+import json, sys
+msgs = sys.argv[1].split("|")
+field = sys.argv[2:4] if len(sys.argv) > 3 else None
+count = 0
+for line in sys.stdin:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if (isinstance(entry, dict) and entry.get("msg") in msgs
+            and (field is None or entry.get(field[0]) == field[1])):
+        count += 1
+print(count)
+' "$@"
+}
+# The number of kausa's Events in TARGET, about $2 (kind) $3 (name) if given, that another Pod than
+# $1 reported (reportingInstance is the Pod's name).
+others_reported() {
+  k -n "$TARGET" get events.events.k8s.io -o json | python3 -c '
+import json, sys
+me, about = sys.argv[1], sys.argv[2:4]
+count = 0
+for event in json.load(sys.stdin)["items"]:
+    regarding = event.get("regarding") or {}
+    if event.get("reportingController") != "kausa":
+        continue
+    if about and [regarding.get("kind"), regarding.get("name")] != about:
+        continue
+    count += event.get("reportingInstance") != me
+print(count)
+' "$@"
+}
+# Seeds one more failure in TARGET: a Job named $1 whose only Pod fails, as failing-job's (D008).
+seed_failure() {
+  k apply -f - >/dev/null <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $1
+  namespace: $TARGET
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: task
+          image: kausa:e2e
+          imagePullPolicy: Never
+          args: ["--no-such-flag"]
+EOF
+}
+# Waits for an Explained Event about $1 (kind) $2 (name) in TARGET.
+wait_explained() {
+  for _ in $(seq 1 60); do
+    [ -n "$(explained "$1" "$2")" ] && return 0
+    sleep 3
+  done
+  fail "no Explained Event about $1 $2"
+}
+# Waits up to $1 seconds until two kausa Pods are Ready and the Lease names one of them; sets
+# leader and standby to their names. $2 is the failure message.
+wait_pair() {
+  leader="" standby=""
+  deadline=$((SECONDS + $1))
+  while :; do
+    pods=$(kausa_pods)
+    current=$(holder)
+    if [ "$(pods_ready 2)" = yes ] && [ -n "$current" ] &&
+      printf '%s\n' "$pods" | grep -qxF -- "$current"; then
+      leader=$current
+      standby=$(printf '%s\n' "$pods" | grep -vxF -- "$current")
+      return 0
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || fail "$2"
+    sleep 2
+  done
+}
+# Waits at most $2 seconds from now for the Lease to name Pod $1; sets took to the whole seconds it
+# took. Fails (returns 1) otherwise.
+wait_holder() {
+  since=$SECONDS
+  while :; do
+    if [ "$(holder)" = "$1" ]; then
+      took=$((SECONDS - since))
+      return 0
+    fi
+    [ $((SECONDS - since)) -lt "$2" ] || return 1
+    sleep 0.5
+  done
+}
+# Waits up to $2 seconds for a holder other than Pod $1, sets it in new_holder.
+wait_other_holder() {
+  since=$SECONDS
+  while :; do
+    new_holder=$(holder)
+    if [ -n "$new_holder" ] && [ "$new_holder" != "$1" ]; then
+      took=$((SECONDS - since))
+      return 0
+    fi
+    [ $((SECONDS - since)) -lt "$2" ] || return 1
+    sleep 0.5
+  done
+}
+# The sum of kausa_leader over kausa's Pods; "missing" when there is no Pod or a Pod's metrics
+# have no kausa_leader (a failed read must not pass for 0).
+leader_sum() {
+  sum=0 seen=""
+  for p in $(kausa_pods); do
+    value=$(pod_metric "$p" kausa_leader)
+    [ -n "$value" ] || { echo missing; return 0; }
+    sum=$((sum + value)) seen=yes
+  done
+  if [ -n "$seen" ]; then echo "$sum"; else echo missing; fi
+}
+# The sum of kausa_leadership_changes_total over both values of to, in Pod $1; "missing" when
+# its metrics have neither series.
+changes() {
+  pod_get "$1" metrics | awk '$1 ~ /^kausa_leadership_changes_total[{]/ { sum += $2; n++ }
+    END { if (n == 2) print sum; else print "missing" }'
+}
+# The Lease's leaseTransitions, 0 when absent.
+lease_transitions() {
+  value=$(k -n "$NAMESPACE" get lease "$LEASE" -o jsonpath='{.spec.leaseTransitions}')
+  echo "${value:-0}"
+}
+# The restart count of kausa's container in Pod $1 (its name).
+restart_count() {
+  k -n "$NAMESPACE" get pod "$1" -o jsonpath='{.status.containerStatuses[0].restartCount}'
+}
+# The PIDs, on the kind node, of the processes whose environment holds POD_NAME=$1: kausa in Pod
+# $1, which the chart gives its own name through the downward API.
+node_pids() {
+  docker exec "$CLUSTER-control-plane" sh -c '
+for dir in /proc/[0-9]*; do
+  if tr "\0" "\n" < "$dir/environ" 2>/dev/null | grep -qxF "POD_NAME=$1"; then
+    echo "${dir#/proc/}"
+  fi
+done' sh "$1"
+}
+# Sends signal $1 (STOP or CONT) to process $2 on the kind node, with the node shell's kill.
+node_signal() {
+  docker exec "$CLUSTER-control-plane" sh -c 'kill -"$1" "$2"' sh "$1" "$2"
+}
+# A Lease named $1 in NAMESPACE, as a manifest.
+lease_manifest() {
+  cat <<EOF
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: $1
+  namespace: $NAMESPACE
+spec: {}
+EOF
+}
+# kausa's Events and the Explanations in TARGET, each with its resourceVersion: any write by kausa
+# (a create, a series patch, a history write or a sweep) changes it.
+writes_snapshot() {
+  row='{.metadata.name} {.metadata.resourceVersion}{"\n"}'
+  k -n "$TARGET" get events.events.k8s.io \
+    -o jsonpath="{range .items[?(@.reportingController==\"kausa\")]}$row{end}"
+  k -n "$TARGET" get "$EXPLANATIONS" -o jsonpath="{range .items[*]}$row{end}"
+}
+# The number of lines in file $1.
+lines_of() { wc -l < "$1" | tr -d ' '; }
+
+# The standby replica (docs/adr/0019-high-availability.md), before anything else touches the Pods.
+if [ "$REPLICAS" = 1 ]; then
+  # One replica: nothing of the standby is installed, and the one Pod acts.
+  found=$(k get leases,poddisruptionbudgets -A -l "app.kubernetes.io/instance=$RELEASE" -o name)
+  [ -z "$found" ] || fail "with one replica, the release installed: $found"
+  found=$(k -n "$NAMESPACE" get "lease/$LEASE" "role/$LEASE" "rolebinding/$LEASE" \
+    --ignore-not-found -o name)
+  found="$found$(k -n "$NAMESPACE" get poddisruptionbudgets -o name)"
+  [ -z "$found" ] || fail "with one replica, $NAMESPACE holds: $found"
+  pod=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name)
+  # Read once, then searched: with pipefail, a grep -q that stops reading early can fail the pipe.
+  args=$(kausa_args "$pod")
+  if printf '%s\n' "$args" | grep -qxF -- --leader-lease; then
+    fail "the kausa Pod runs with --leader-lease with one replica"
+  fi
+  metrics=$(kausa_metrics)
+  printf '%s\n' "$metrics" | grep -qxF 'kausa_leader 1' ||
+    fail "kausa_leader is not 1 with one replica"
+  readyz=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/readyz")
+  [ "$readyz" = ready ] || fail "/readyz answers '$readyz' with one replica"
+  kausa_log
+  lease=$(started_field leader_lease)
+  [ "$lease" = null ] || fail "the started line has leader_lease $lease with one replica"
+  echo "one replica: no Lease, leader Role or RoleBinding, PodDisruptionBudget or --leader-lease;" \
+    "kausa_leader 1, /readyz ready"
+else
+  # Two Ready Pods, one leader: kausa_leader 1 and /readyz ready on the holder, 0 and standby on
+  # the other; both run with the --leader-lease pair and name the Lease in their started line;
+  # exactly one leading line across both logs, and a standby line in the standby's.
+  wait_pair 60 "no two Ready kausa Pods with one of them holding the Lease after the install"
+  first_leader=$leader first_standby=$standby
+  [ "$(pod_metric "$leader" kausa_leader)" = 1 ] || fail "kausa_leader is not 1 on the Lease holder"
+  [ "$(pod_metric "$standby" kausa_leader)" = 0 ] || fail "kausa_leader is not 0 on the standby"
+  [ "$(pod_get "$leader" readyz)" = ready ] || fail "/readyz of the Lease holder is not 'ready'"
+  [ "$(pod_get "$standby" readyz)" = standby ] || fail "/readyz of the standby is not 'standby'"
+  leading=0
+  for p in "$leader" "$standby"; do
+    args=$(kausa_args "pod/$p")
+    [ "$(printf '%s\n' "$args" | grep -cxF -- --leader-lease)" = 1 ] ||
+      fail "a kausa Pod does not run with exactly one --leader-lease"
+    printf '%s\n' "$args" | awk -v want="$NAMESPACE/$LEASE" '
+      prev == "--leader-lease" && $0 == want { ok = 1 } { prev = $0 } END { exit !ok }' ||
+      fail "a kausa Pod's --leader-lease is not followed by $NAMESPACE/$LEASE"
+    kausa_log "pod/$p"
+    lease=$(started_field leader_lease)
+    [ "$lease" = "\"$NAMESPACE/$LEASE\"" ] || fail "a started line has leader_lease $lease"
+    leading=$((leading + $(log_count leading < "$WORK/kausa.log")))
+  done
+  [ "$leading" = 1 ] || fail "$leading leading lines across both Pods' logs"
+  [ "$(log_count leading < "$WORK/kausa.log")" = 0 ] || fail "the standby logged leading"
+  [ "$(log_count standby < "$WORK/kausa.log")" -ge 1 ] || fail "the standby logged no standby line"
+  k -n "$NAMESPACE" get "poddisruptionbudget/$RELEASE" -o name >/dev/null
+  echo "two replicas: two Ready Pods, one holds the Lease; kausa_leader 1 and 0, /readyz ready" \
+    "and standby, one leading line"
+fi
 
 for _ in $(seq 1 60); do
   deployment_note=$(explained Deployment crasher)
@@ -906,7 +1236,7 @@ print("notifications: %d POSTs, the first answered 503; one v1 body each for cra
 # The counters, once kausa has handled the answers the receiver logged.
 counted=""
 for _ in $(seq 1 10); do
-  metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
+  metrics=$(kausa_metrics)
   if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 5' |
     grep -q . && echo "$metrics" | grep -E '^kausa_notifications_retried_total [1-9]' >/dev/null
   then
@@ -926,7 +1256,9 @@ granted=("list pods" "watch pods" "get pods --subresource=log" "list events.even
   "get replicasets.apps" "get jobs.batch" "list deployments.apps" "watch deployments.apps"
   "list $EXPLANATIONS" "create $EXPLANATIONS" "patch $EXPLANATIONS" "delete $EXPLANATIONS")
 # D014 reads Deployments through a list and a watch only (docs/adr/0018-stuck-rollouts.md): no
-# get, no write, no subresource, and no other workload kind.
+# get, no write, no subresource, and no other workload kind. Leases (docs/adr/0019-high-
+# availability.md): never create, update, delete, list or watch, nor get or patch without a name or
+# on another one, in either scope and with any replicaCount; get and patch on LEASE are below.
 refused=("get secrets" "list secrets" "get configmaps" "list configmaps" "delete pods"
   "create pods" "create pods --subresource=exec" "update events.events.k8s.io"
   "delete events.events.k8s.io" "list nodes" "create serviceaccounts --subresource=token"
@@ -938,7 +1270,10 @@ refused=("get secrets" "list secrets" "get configmaps" "list configmaps" "delete
   "get $EXPLANATIONS" "watch $EXPLANATIONS" "update $EXPLANATIONS"
   "deletecollection $EXPLANATIONS"
   "create customresourcedefinitions.apiextensions.k8s.io"
-  "patch customresourcedefinitions.apiextensions.k8s.io")
+  "patch customresourcedefinitions.apiextensions.k8s.io"
+  "create $LEASES" "create $LEASES/$LEASE" "update $LEASES/$LEASE" "delete $LEASES/$LEASE"
+  "list $LEASES" "watch $LEASES" "deletecollection $LEASES" "get $LEASES" "patch $LEASES"
+  "get $LEASES/e2e-other" "patch $LEASES/e2e-other")
 if [ "$SCOPE" = namespaced ]; then
   for check in "${granted[@]}"; do
     for where in "-n $TARGET" "-n $DENIED"; do
@@ -981,13 +1316,65 @@ fi
 if allowed get deployments.apps "${can_get_deployments[@]}"; then
   fail "kausa can get deployments.apps"
 fi
-ready=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa \
-  -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}')
-[ "$ready" = True ] || fail "kausa is not Ready ($ready) without get on deployments.apps"
+[ "$(pods_ready "$REPLICAS")" = yes ] ||
+  fail "kausa is not Ready ($REPLICAS Pods) without get on deployments.apps"
 echo "can-i: list and watch on deployments.apps granted, get refused, and kausa is Ready"
 
-# The metrics, through the API server's service proxy, which reaches only a Ready Pod.
-metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
+# kausa's own Lease (docs/adr/0019-high-availability.md): with two replicas, get and patch on that
+# one Lease in its own namespace, in either scope; nowhere else, and nothing with one replica.
+for check in "get $LEASES/$LEASE" "patch $LEASES/$LEASE"; do
+  if [ "$REPLICAS" = 2 ]; then
+    # shellcheck disable=SC2086
+    allowed $check -n "$NAMESPACE" || fail "kausa cannot $check -n $NAMESPACE"
+  else
+    # shellcheck disable=SC2086
+    if allowed $check -n "$NAMESPACE"; then fail "kausa can $check with one replica"; fi
+  fi
+  for where in "-n $TARGET" "-n $DENIED" "-n $OTHER" -A; do
+    # shellcheck disable=SC2086
+    if allowed $check $where; then fail "kausa can $check $where"; fi
+  done
+done
+# can-i can be wrong about a create with a name (only when a rule grants create with resourceNames,
+# which kausa's does not), so a real create, dry run on the server, is refused too: a new name and
+# the Lease's own. The same manifest passes as cluster administrator, so the refusal is the grant's.
+lease_manifest e2e-probe | k create --dry-run=server -f - >/dev/null
+for name in e2e-probe "$LEASE"; do
+  if out=$(lease_manifest "$name" | k --as="$sa" create --dry-run=server -f - 2>&1); then
+    fail "kausa can create the Lease $name (server-side dry run)"
+  fi
+  case "$out" in
+    *'cannot create resource "leases"'*) ;;
+    *) fail "the create of the Lease $name was refused for another reason: $out" ;;
+  esac
+done
+echo "can-i: on Leases, get and patch on $LEASE only with two replicas; a real create refused"
+
+if [ "$REPLICAS" = 2 ]; then
+  # Only the leader acts: the holder has not changed, every Event kausa wrote names it as
+  # reportingInstance, and the standby logged no incident, explanation, notification or sweep, and
+  # neither token. It still answers standby.
+  [ "$(holder)" = "$first_leader" ] || fail "the Lease changed holder before any handover"
+  [ "$(kausa_events "$TARGET")" -ge 5 ] || fail "fewer Events in $TARGET than failing workloads"
+  [ "$(others_reported "$first_leader")" = 0 ] ||
+    fail "an Event in $TARGET reported by another Pod than the Lease holder"
+  kausa_log "pod/$first_standby"
+  quiet="incident|explanation|explanation skipped|explanation dropped|explanation retried"
+  quiet="$quiet|notification sent|notification failed|notification retried|notification dropped"
+  quiet="$quiet|history swept|history sweep failed|event write failed|history write failed"
+  [ "$(log_count "$quiet" < "$WORK/kausa.log")" = 0 ] ||
+    fail "the standby logged an incident, an explanation, a notification or a write"
+  for token in "$FAKE_BOT" "$FAKE_BEARER"; do
+    if grep -qF -- "$token" "$WORK/kausa.log"; then fail "the standby logged a fake token"; fi
+  done
+  [ "$(pod_metric "$first_standby" kausa_leader)" = 0 ] ||
+    fail "the standby's kausa_leader is not 0"
+  echo "two replicas: only the Lease holder wrote Events; the standby logged no incident"
+fi
+
+# The metrics, through the API server's service proxy, which reaches only a Ready Pod (with two
+# replicas, from the Lease holder's Pod through the pod proxy).
+metrics=$(kausa_metrics)
 echo "$metrics" | grep -E '^kausa_events_written_total\{reason="Explained"\} [1-9]' >/dev/null ||
   fail "kausa_events_written_total does not count the Events"
 echo "$metrics" | grep -E '^kausa_history_writes_total\{outcome="created"\} [1-9]' >/dev/null ||
@@ -996,14 +1383,15 @@ echo "$metrics" |
   awk '$1 == "kausa_incidents_total{detection=\"D014\"}" && $2 >= 1 { n++ } END { exit !n }' ||
   fail "kausa_incidents_total does not count stalled's D014"
 restarts=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa \
-  -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}')
-[ "$restarts" = 0 ] || fail "kausa restarted $restarts times"
+  -o jsonpath='{.items[*].status.containerStatuses[0].restartCount}')
+if [ -z "$restarts" ] || [ -n "$(printf '%s' "$restarts" | tr -d ' 0')" ]; then
+  fail "kausa restarted ($restarts)"
+fi
 # The history adds no request: each one the endpoint received is a model call kausa counted. A
 # call still in flight is logged by the endpoint before kausa counts it, so this is retried.
 calls="" lines=""
 for _ in $(seq 1 10); do
-  calls=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics" |
-    awk '$1 ~ /^kausa_model_calls_total([{]|$)/ { sum += $2 } END { print sum + 0 }')
+  calls=$(model_calls)
   lines=$(wc -l < "$WORK/requests.jsonl" | tr -d ' ')
   [ "$calls" = "$lines" ] && break
   sleep 2
@@ -1107,7 +1495,7 @@ remaining=$(explanations "$TARGET")
 for name in e2e-old-labelled kausa.0000000000000002; do
   printf '%s\n' "$remaining" | grep -qxF -- "$TARGET/$name" || fail "the sweep deleted $name"
 done
-metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
+metrics=$(kausa_metrics)
 echo "$metrics" | grep -E '^kausa_history_deleted_total\{reason="age"\} [1-9]' >/dev/null ||
   fail "kausa_history_deleted_total does not count the deletion by age"
 echo "the sweep deleted the old kausa-shaped Explanation and kept the other two"
@@ -1119,7 +1507,7 @@ echo "the sweep deleted the old kausa-shaped Explanation and kept the other two"
 # or a later lastTime; the new Pod counts the update and no failed or refused write.
 updated=""
 for _ in $(seq 1 40); do
-  metrics=$(k get --raw "/api/v1/namespaces/$NAMESPACE/services/kausa-metrics:9090/proxy/metrics")
+  metrics=$(kausa_metrics)
   if echo "$metrics" | grep -E '^kausa_history_writes_total\{outcome="updated"\} [1-9]' >/dev/null
   then
     k -n "$TARGET" get "$EXPLANATIONS" -o json > "$WORK/after-restart.json"
@@ -1152,7 +1540,10 @@ for outcome in error refused; do
 done
 echo "kausa updated crasher's Explanation: more occurrences, a higher count or a later lastTime"
 
-if [ "$SCOPE" = namespaced ]; then
+# With two replicas, these two steps are skipped: the --reset-values refusal is scope logic the
+# other namespaced run covers, and the e2e-denied block checks the readiness and restarts of one
+# Pod.
+if [ "$SCOPE" = namespaced ] && [ "$REPLICAS" = 1 ]; then
   # An upgrade that resets the values drops rbac.scope: it fails before it changes anything, so
   # the Roles stay and nothing cluster-scoped appears.
   if out=$(h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --reset-values "${values[@]}" 2>&1)
@@ -1207,11 +1598,238 @@ if [ "$SCOPE" = namespaced ]; then
   [ "$restarts" = 0 ] || fail "the new kausa Pod restarted $restarts times"
   echo "$DENIED refused, its Deployment watch too: kausa is not Ready, did not restart and still" \
     "explains $TARGET"
+fi
 
+if [ "$REPLICAS" = 2 ]; then
+  # A graceful handover. The leader's log is streamed, since its Pod goes with it, and the Pod is
+  # deleted: kausa releases the Lease on SIGTERM, once, and another Pod takes it within 10 s: the
+  # standby, which reads it every 5 s, or the ReplicaSet's replacement, which can start and find it
+  # free first. leaseTransitions goes up by 1 and the new leader counts one change to leader. A new
+  # failure is then explained by the new leader.
+  wait_pair 60 "no two Ready kausa Pods with one of them holding the Lease before the handover"
+  old_leader=$leader
+  transitions=$(lease_transitions)
+  k -n "$NAMESPACE" logs -f "pod/$old_leader" > "$WORK/graceful.log" 2>&1 &
+  LOGS_PID=$!
+  for _ in $(seq 1 20); do
+    [ "$(log_count started < "$WORK/graceful.log")" = 1 ] && break
+    sleep 0.5
+  done
+  [ "$(log_count started < "$WORK/graceful.log")" = 1 ] || fail "the leader's log is not streamed"
+  k -n "$NAMESPACE" delete pod "$old_leader" --wait=false >/dev/null
+  wait_other_holder "$old_leader" 10 ||
+    fail "no other Pod held the Lease within 10 s of the leader's graceful delete"
+  next_leader=$new_holder graceful_took=$took
+  for _ in $(seq 1 60); do
+    kill -0 "$LOGS_PID" 2>/dev/null || break
+    sleep 1
+  done
+  kill "$LOGS_PID" 2>/dev/null || true
+  wait "$LOGS_PID" 2>/dev/null || true
+  LOGS_PID=""
+  [ "$(log_count "lease released" < "$WORK/graceful.log")" = 1 ] ||
+    fail "the deleted leader did not log exactly one 'lease released'"
+  [ "$(lease_transitions)" = $((transitions + 1)) ] ||
+    fail "leaseTransitions did not go up by exactly 1 in the graceful handover"
+  [ "$(pod_metric "$next_leader" 'kausa_leadership_changes_total{to="leader"}')" = 1 ] ||
+    fail "the new leader does not count one change to leader"
+  wait_pair 120 "no two Ready kausa Pods with one holding the Lease after the graceful handover"
+  [ "$leader" = "$next_leader" ] || fail "the Lease changed holder again after the handover"
+  seed_failure e2e-graceful
+  wait_explained Job e2e-graceful
+  [ "$(others_reported "$leader" Job e2e-graceful)" = 0 ] ||
+    fail "e2e-graceful's Event was reported by another Pod than the new leader"
+  echo "graceful handover: lease released, another Pod held the Lease after ${graceful_took} s," \
+    "leaseTransitions + 1, and the new leader explains"
+
+  # A frozen leader. Its process, found on the kind node by its POD_NAME, gets SIGSTOP: it neither
+  # renews nor releases, and the standby takes the Lease once it has seen it unchanged for 30 s,
+  # within 45 s. SIGCONT follows at once: the liveness probe (every 20 s, 3 s timeout, 3 failures)
+  # restarts a frozen container no sooner than about 43 s after it stopped answering, so the
+  # takeover must come first (hypothesis, checked by the restart count). Resumed, the old leader
+  # finds its term over: leadership lost, not renewed in time, then standby; no restart, no Event
+  # created after the takeover, and no explanation, notification or incident after it stepped down.
+  frozen=$leader next_leader=$standby
+  frozen_restarts=$(restart_count "$frozen")
+  pids=$(node_pids "$frozen")
+  [ "$(printf '%s\n' "$pids" | grep -c .)" = 1 ] ||
+    fail "not exactly one process with the leader's POD_NAME on the kind node"
+  node_signal STOP "$pids"
+  if ! wait_holder "$next_leader" 45; then
+    node_signal CONT "$pids" || true
+    fail "the standby did not hold the Lease within 45 s of the leader's SIGSTOP"
+  fi
+  taken_at=$(date +%s)
+  node_signal CONT "$pids"
+  frozen_took=$took
+  seed_failure e2e-frozen
+  wait_explained Job e2e-frozen
+  [ "$(others_reported "$next_leader" Job e2e-frozen)" = 0 ] ||
+    fail "e2e-frozen's Event was reported by another Pod than the new leader"
+  stepped=""
+  for _ in $(seq 1 30); do
+    kausa_log "pod/$frozen"
+    stepped=$(python3 -c '
+import json, sys
+entries = []
+for line in open(sys.argv[1]):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict):
+        entries.append(entry)
+lost = [i for i, e in enumerate(entries) if e.get("msg") == "leadership lost"
+        and e.get("reason") == "not renewed in time"]
+if not lost:
+    print("waiting")
+    sys.exit()
+after = entries[lost[0] + 1:]
+if not any(e.get("msg") == "standby" for e in after):
+    print("waiting")
+    sys.exit()
+writes = [e for e in after
+          if e.get("msg") in ("incident", "explanation", "notification sent", "history swept")]
+print("wrote" if writes else "standby")
+' "$WORK/kausa.log")
+    [ "$stepped" = waiting ] || break
+    sleep 2
+  done
+  [ "$stepped" = standby ] || fail "the resumed leader logged no 'leadership lost' (not renewed" \
+    "in time) then standby, or an incident, explanation, notification or sweep after it ($stepped)"
+  [ "$(restart_count "$frozen")" = "$frozen_restarts" ] || fail "the frozen leader restarted"
+  late=$(k -n "$TARGET" get events.events.k8s.io -o json | python3 -c '
+import datetime, json, sys
+who, since = sys.argv[1], int(sys.argv[2])
+late = 0
+for event in json.load(sys.stdin)["items"]:
+    if event.get("reportingController") != "kausa" or event.get("reportingInstance") != who:
+        continue
+    created = event.get("eventTime")
+    if created and datetime.datetime.fromisoformat(
+            created.replace("Z", "+00:00")).timestamp() > since:
+        late += 1
+print(late)
+' "$frozen" "$taken_at")
+  [ "$late" = 0 ] || fail "the frozen leader created $late Events after the takeover"
+  [ "$(pod_metric "$frozen" kausa_leader)" = 0 ] ||
+    fail "the resumed leader's kausa_leader is not 0"
+  [ "$(pod_get "$frozen" readyz)" = standby ] || fail "/readyz of the resumed leader is not standby"
+  echo "frozen leader: the standby held the Lease after ${frozen_took} s; resumed, the old leader" \
+    "lost it (not renewed in time), did not restart and wrote nothing after"
+
+  # Fail closed. Without the RoleBinding kausa-leader, both replicas get 403 on the Lease: the
+  # leader cannot renew and steps down within 30 s, nobody leads (the sum of kausa_leader is 0),
+  # and both log a lease error with the 403 hint, rate-limited while it lasts but counted every
+  # time. A new failure then gets no Event, no Explanation, no model request and no notification
+  # after a settle window, two ticks and 10 s; no kausa Event or Explanation changes at all.
+  # helm upgrade with the same values restores the RoleBinding, and one Pod leads within 45 s.
+  wait_pair 60 "no two Ready kausa Pods with one holding the Lease before the RoleBinding goes"
+  lost_before=$(k -n "$NAMESPACE" logs "pod/$leader" | log_count "leadership lost")
+  k -n "$NAMESPACE" delete "rolebinding/$LEASE" >/dev/null
+  since=$SECONDS
+  closed=""
+  while [ $((SECONDS - since)) -le 30 ]; do
+    if [ "$(leader_sum)" = 0 ]; then
+      lost=$(k -n "$NAMESPACE" logs "pod/$leader" | log_count "leadership lost")
+      hinted=yes
+      for p in "$leader" "$standby"; do
+        [ "$(k -n "$NAMESPACE" logs "pod/$p" | log_count "lease error" hint "$HINT_403")" -ge 1 ] ||
+          hinted=""
+      done
+      [ "$lost" -gt "$lost_before" ] && [ -n "$hinted" ] && closed=yes && break
+    fi
+    sleep 2
+  done
+  [ -n "$closed" ] || fail "30 s after the RoleBinding $LEASE went, the sum of kausa_leader is" \
+    "not 0, the leader logged no 'leadership lost', or a Pod logged no lease error with the hint"
+  writes_snapshot > "$WORK/writes-before.txt"
+  requests_before=$(lines_of "$WORK/requests.jsonl")
+  hooks_before=$(lines_of "$WORK/hooks.jsonl")
+  seed_failure e2e-closed
+  k -n "$TARGET" wait job/e2e-closed --for=condition=Failed --timeout=120s >/dev/null
+  sleep $((SETTLE + 2 * TICK + 10))
+  [ "$(leader_sum)" = 0 ] || fail "a kausa Pod leads without the RoleBinding $LEASE"
+  [ "$(kausa_events "$TARGET" e2e-closed)" = 0 ] ||
+    fail "an Event about e2e-closed, though nobody leads"
+  writes_snapshot > "$WORK/writes-after.txt"
+  cmp -s "$WORK/writes-before.txt" "$WORK/writes-after.txt" ||
+    fail "kausa wrote an Event or an Explanation in $TARGET while nobody led"
+  [ "$(lines_of "$WORK/requests.jsonl")" = "$requests_before" ] ||
+    fail "the fake model received a request while nobody led"
+  [ "$(lines_of "$WORK/hooks.jsonl")" = "$hooks_before" ] ||
+    fail "the fake webhook received a notification while nobody led"
+  for p in "$leader" "$standby"; do
+    hints=$(k -n "$NAMESPACE" logs "pod/$p" | log_count "lease error" hint "$HINT_403")
+    errors=$(pod_get "$p" metrics |
+      awk '$1 ~ /^kausa_lease_errors_total[{]/ { sum += $2 } END { print sum + 0 }')
+    [ "$hints" -le 4 ] ||
+      fail "a kausa Pod logged $hints lease errors with the hint: not rate-limited"
+    [ "$errors" -gt "$hints" ] ||
+      fail "a kausa Pod counted $errors lease errors for $hints logged: not counted every time"
+  done
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 120s --reuse-values
+  k -n "$NAMESPACE" get "rolebinding/$LEASE" -o name >/dev/null
+  since=$SECONDS
+  restored=""
+  while [ $((SECONDS - since)) -le 45 ]; do
+    current=$(holder)
+    if [ "$(leader_sum)" = 1 ] && [ -n "$current" ] &&
+      [ "$(pod_metric "$current" kausa_leader)" = 1 ]; then
+      restored=yes && break
+    fi
+    sleep 2
+  done
+  [ -n "$restored" ] || fail "no single leader within 45 s of the helm upgrade that restored $LEASE"
+  wait_explained Job e2e-closed
+  echo "fail closed: without the RoleBinding nobody led, wrote or sent anything; helm upgrade" \
+    "restored one leader, which explains e2e-closed"
+
+  # A foreign write that keeps the holder: a label on the Lease, as cluster administrator, moves
+  # its resourceVersion as a Helm label change would. The leader's next renewal gets 409, reads
+  # the Lease, finds itself still named and renews: the holder and both Pods' change counters stay.
+  wait_pair 60 "no two Ready kausa Pods with one holding the Lease before the label write"
+  changes_leader=$(changes "$leader") changes_standby=$(changes "$standby")
+  [ "$changes_leader" != missing ] && [ "$changes_standby" != missing ] ||
+    fail "a kausa Pod's metrics lack kausa_leadership_changes_total"
+  k -n "$NAMESPACE" label lease "$LEASE" e2e=1 >/dev/null
+  sleep 15
+  [ "$(holder)" = "$leader" ] || fail "a label write on the Lease moved it to another holder"
+  if [ "$(changes "$leader")" != "$changes_leader" ] ||
+    [ "$(changes "$standby")" != "$changes_standby" ]; then
+    fail "a label write on the Lease changed kausa_leadership_changes_total"
+  fi
+  [ "$(leader_sum)" = 1 ] || fail "not exactly one leader after a label write on the Lease"
+  echo "a label write on the Lease: the same holder, no leadership change"
+
+  # A rollout (a new settle window changes the Pod template): two new Ready Pods, one leader.
+  old_pods=$(kausa_pods)
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+    --set settleSeconds=$((SETTLE + 1))
+  wait_pair 120 "no two Ready kausa Pods with one of them holding the Lease after the rollout"
+  for p in "$leader" "$standby"; do
+    if printf '%s\n' "$old_pods" | grep -qxF -- "$p"; then
+      fail "a kausa Pod from before the rollout is still running"
+    fi
+  done
+  if [ "$(pod_metric "$leader" kausa_leader)" != 1 ] ||
+    [ "$(pod_metric "$standby" kausa_leader)" != 0 ]; then
+    fail "kausa_leader is not 1 on the holder and 0 on the standby after the rollout"
+  fi
+  echo "rollout: two new Ready Pods, one leader"
+fi
+
+if [ "$SCOPE" = namespaced ]; then
+  # Nothing of the release is left, the Lease, its Role and RoleBinding and the
+  # PodDisruptionBudget of two replicas included.
   h uninstall "$RELEASE" -n "$NAMESPACE"
   left=""
   for _ in $(seq 1 15); do
-    left=$(k get roles,rolebindings -A -l "app.kubernetes.io/instance=$RELEASE" -o name)
+    left=$(k get roles,rolebindings,leases,poddisruptionbudgets -A \
+      -l "app.kubernetes.io/instance=$RELEASE" -o name)
+    left="$left$(k -n "$NAMESPACE" get "lease/$LEASE" "role/$LEASE" "rolebinding/$LEASE" \
+      --ignore-not-found -o name)"
+    left="$left$(k -n "$NAMESPACE" get poddisruptionbudgets -o name)"
     [ -z "$left" ] && break
     sleep 2
   done
@@ -1220,7 +1838,8 @@ if [ "$SCOPE" = namespaced ]; then
   HISTORY=off
   crd_gone
   no_cluster_rbac
-  echo "helm uninstall: no Role, no reader role and no CustomResourceDefinition left"
+  echo "helm uninstall: no Role, Lease, PodDisruptionBudget, reader role or" \
+    "CustomResourceDefinition left"
 else
   # An Event in TARGET about a Job in ELSEWHERE, an empty namespace: kausa must not take TARGET's
   # word for another namespace (docs/adr/0013-namespaced-install-mode.md).

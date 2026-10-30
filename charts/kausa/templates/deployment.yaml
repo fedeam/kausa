@@ -6,6 +6,8 @@
 {{- $apiKey := and (or .Values.model.endpoint .Values.dryRun) .Values.model.apiKey.existingSecret }}
 {{- $notifies := include "kausa.notifies" . }}
 {{- $notify := .Values.notifications | default dict }}
+{{- /* With two replicas, only the holder of the Lease acts (docs/adr/0019-high-availability.md). */}}
+{{- $standby := eq (include "kausa.replicas" .) "2" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,9 +16,15 @@ metadata:
   labels:
     {{- include "kausa.labels" . | nindent 4 }}
 spec:
+  {{- /*
+  One replica, or two with leader election (replicaCount). Recreate stops the old Pods before the
+  new ones start, so a rollout never runs two versions, and with two replicas only the holder of
+  the Lease acts. The YAML comment below is kept as it was: it renders, and the one-replica
+  Deployment renders byte for byte as before.
+  */}}
   # One instance: Recreate stops the old Pod before the new one starts, so a rollout never runs
   # two (docs/reference/permissions.md, "The pod that runs kausa").
-  replicas: 1
+  replicas: {{ include "kausa.replicas" . }}
   strategy:
     type: Recreate
   revisionHistoryLimit: 3
@@ -61,6 +69,10 @@ spec:
             - --namespace
             - {{ . | quote }}
             {{- end }}
+            {{- end }}
+            {{- if $standby }}
+            - --leader-lease
+            - {{ printf "%s/%s" .Release.Namespace (include "kausa.leaderLease" .) | quote }}
             {{- end }}
             - --settle-seconds
             - {{ int .Values.settleSeconds | quote }}
@@ -212,4 +224,19 @@ spec:
       {{- with .Values.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and $standby (not .Values.affinity) }}
+      {{- /*
+      Spreads the two replicas over nodes when it can; preferred, not required, so that a one-node
+      cluster still runs both. Any affinity in the values replaces it.
+      */}}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "kausa.selectorLabels" . | nindent 20 }}
       {{- end }}

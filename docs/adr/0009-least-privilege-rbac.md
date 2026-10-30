@@ -93,3 +93,12 @@ after the `replicasets` rule. Never `get` or a write on Deployments, never their
 or `rollback` subresources, nothing on StatefulSets, DaemonSets or CronJobs, and still only `get`
 on ReplicaSets. With `rollouts: false` the rules are v0.3.0's. Secrets and ConfigMaps stay out in
 every verb ([Permissions](../reference/permissions.md)).
+
+Update 2026-10-29: [0019. Offer an optional standby replica that takes over through a
+chart-created Lease, elected by kausa's own code](0019-high-availability.md) amends "the only write is Events" once more: with the chart's `replicaCount: 2`, kausa also gets
+`get` and `patch` on one Lease, `<fullname>-leader`, in its own namespace, through a Role of its
+own in `templates/leader-election.yaml` (not in `kausa.rules`), the same in both scopes; its only
+write there is a JSON merge patch of the Lease's `spec` under a `resourceVersion` precondition.
+Never granted gains `create`, `update`, `list`, `watch`, `delete` and `deletecollection` on
+Leases, `get` and `patch` on any other Lease or namespace, and any cluster-scoped grant on Leases.
+Secrets and ConfigMaps stay out in every verb ([Permissions](../reference/permissions.md)).

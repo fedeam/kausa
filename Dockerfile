@@ -408,10 +408,67 @@ RUN set -euf; \
       helm lint --strict charts/kausa $rbac --set rollouts=false > /tmp/lint 2>&1 || { cat /tmp/lint >&2; fail "helm lint --strict with rbac.scope=$scope fails with rollouts=false"; }; \
     done; \
     rm -f /tmp/lint
+# The standby replica (docs/adr/0019-high-availability.md), off by default. replicaCount=2 renders
+# replicas: 2 (Recreate kept), the pair --leader-lease "<release namespace>/<fullname>-leader"
+# right before --settle-seconds, a preferred pod anti-affinity while affinity is empty (the user's
+# affinity alone otherwise), and four objects in the release namespace: the Lease <fullname>-leader
+# with spec {}, a Role of that name with get and patch on that one Lease, its RoleBinding, and a
+# PodDisruptionBudget <fullname> (maxUnavailable 1, unhealthyPodEvictionPolicy AlwaysAllow). They
+# are the same in both scopes and outside kausa.rules: every other object, kausa's ClusterRole and
+# Roles included, is unchanged. The default, replicaCount=null and replicaCount=1 render byte for
+# byte the same, with none of it. tests/chart/render.sh checks the same renders in more detail,
+# other release names and NOTES.txt.
+RUN set -euf; \
+    endpoint="--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k"; \
+    cluster="--set rbac.scope=cluster"; \
+    namespaced="--set rbac.scope=namespaced --set rbac.namespaces={e2e-a,e2e-b}"; \
+    user='affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/arch","operator":"In","values":["arm64"]}]}]}}}'; \
+    fail() { echo "replicaCount: $*" >&2; exit 1; }; \
+    render() { helm template kausa charts/kausa --kube-version 1.36.0 --namespace kausa-system "$@" || fail "does not render with $*"; }; \
+    count() { text=$1; shift; printf '%s\n' "$text" | grep -c "$@" || true; }; \
+    args() { printf '%s\n' "$1" | sed -n '/^ *args:$/,/^ *env:$/p' | sed 's/^ *//'; }; \
+    plus_pair() { awk '$0 == "- --settle-seconds" { print "- --leader-lease"; print "- \"kausa-system/kausa-leader\"" }; { print }'; }; \
+    from() { printf '%s\n' "$1" | awk -v src="$2" -v kind="$3" 'function flush() { if (keep) printf "%s", d; d = ""; keep = 0; on = 0 }; /^---/ { flush(); next }; /^# Source: / { on = ($0 == "# Source: kausa/templates/" src); next }; on && $0 == "kind: " kind { keep = 1 }; { d = d $0 "\n" }; END { flush() }'; }; \
+    others() { printf '%s\n' "$1" | awk 'function flush() { if (!skip) printf "%s", d; d = ""; skip = 0 }; /^---/ { flush() }; /^# Source: kausa\/templates\/(deployment|leader-election|poddisruptionbudget)\.yaml$/ { skip = 1 }; { d = d $0 "\n" }; END { flush() }'; }; \
+    affinity() { from "$1" deployment.yaml Deployment | awk '$0 == "      affinity:" { on = 1; print; next }; on && /^       / { print; next }; { on = 0 }'; }; \
+    one_replica() { from "$1" deployment.yaml Deployment | awk '$0 == "      affinity:" { skip = 1; next }; skip && /^       / { next }; { skip = 0 }; $0 == "            - --leader-lease" { drop = 1; next }; drop { drop = 0; next }; $0 == "  replicas: 2" { print "  replicas: 1"; next }; { print }'; }; \
+    meta() { printf '%s\n' "apiVersion: $1" "kind: $2" metadata: "  name: $3" '  namespace: kausa-system' '  labels:' "$labels"; }; \
+    selector() { printf '%s\n' "$1app.kubernetes.io/name: kausa" "$1app.kubernetes.io/instance: kausa"; }; \
+    anti=$(printf '%s\n' '      affinity:' '        podAntiAffinity:' '          preferredDuringSchedulingIgnoredDuringExecution:' '            - weight: 100' '              podAffinityTerm:' '                topologyKey: kubernetes.io/hostname' '                labelSelector:' '                  matchLabels:'; selector '                    '); \
+    for scope in cluster namespaced; do \
+      if [ "$scope" = cluster ]; then rbac=$cluster; else rbac=$namespaced; fi; \
+      for values in "" "$endpoint" "--set dryRun=true --set logs=false"; do \
+        what="rbac.scope=$scope${values:+ $values}"; \
+        one=$(render $rbac $values); \
+        [ "$(render $rbac $values --set replicaCount=null)" = "$one" ] || fail "$what: replicaCount=null renders unlike the default"; \
+        [ "$(render $rbac $values --set replicaCount=1)" = "$one" ] || fail "$what: replicaCount=1 renders unlike the default"; \
+        [ "$(count "$one" -E 'coordination\.k8s\.io|kind: PodDisruptionBudget|-leader|podAntiAffinity')" -eq 0 ] || fail "$what: one replica renders part of the standby"; \
+        [ "$(count "$one" -x '  replicas: 1')" -eq 1 ] && [ "$(count "$one" -x '    type: Recreate')" -eq 1 ] || fail "$what: one replica is not replicas: 1 with Recreate"; \
+        two=$(render $rbac $values --set replicaCount=2); \
+        labels=$(from "$two" serviceaccount.yaml ServiceAccount | sed -n '/^  labels:$/,$p' | sed '1d'); \
+        [ -n "$labels" ] || fail "$what: no ServiceAccount labels"; \
+        [ "$(others "$two")" = "$(others "$one")" ] || fail "$what: replicaCount=2 changes an object besides the Deployment, kausa.rules included"; \
+        [ "$(one_replica "$two")" = "$(from "$one" deployment.yaml Deployment)" ] || fail "$what: the Deployment changes beyond replicas, the --leader-lease pair and the anti-affinity"; \
+        [ "$(count "$two" -x '  replicas: 2')" -eq 1 ] && [ "$(count "$two" -x '    type: Recreate')" -eq 1 ] || fail "$what: replicaCount=2 is not replicas: 2 with Recreate"; \
+        [ "$(args "$two")" = "$(args "$one" | plus_pair)" ] || fail "$what: not --leader-lease \"kausa-system/kausa-leader\" right before --settle-seconds"; \
+        [ "$(affinity "$two")" = "$anti" ] || fail "$what: not the default preferred pod anti-affinity"; \
+        [ "$(count "$two" coordination.k8s.io)" -eq 2 ] || fail "$what: coordination.k8s.io outside the Lease and its Role"; \
+        [ "$(from "$two" leader-election.yaml Lease)" = "$(meta coordination.k8s.io/v1 Lease kausa-leader; echo 'spec: {}')" ] || fail "$what: the Lease"; \
+        [ "$(from "$two" leader-election.yaml Role)" = "$(meta rbac.authorization.k8s.io/v1 Role kausa-leader; printf '%s\n' rules: '  - apiGroups: ["coordination.k8s.io"]' '    resources: ["leases"]' '    resourceNames: ["kausa-leader"]' '    verbs: ["get", "patch"]')" ] || fail "$what: the Role is not get and patch on the Lease kausa-leader alone"; \
+        [ "$(from "$two" leader-election.yaml RoleBinding)" = "$(meta rbac.authorization.k8s.io/v1 RoleBinding kausa-leader; printf '%s\n' roleRef: '  apiGroup: rbac.authorization.k8s.io' '  kind: Role' '  name: kausa-leader' subjects: '  - kind: ServiceAccount' '    name: kausa' '    namespace: kausa-system')" ] || fail "$what: the RoleBinding"; \
+        [ "$(from "$two" poddisruptionbudget.yaml PodDisruptionBudget)" = "$(meta policy/v1 PodDisruptionBudget kausa; printf '%s\n' spec: '  maxUnavailable: 1' '  unhealthyPodEvictionPolicy: AlwaysAllow' '  selector:' '    matchLabels:'; selector '      ')" ] || fail "$what: the PodDisruptionBudget"; \
+        [ "$(count "$two" -x '# Source: kausa/templates/leader-election.yaml')" -eq 3 ] && [ "$(count "$two" -x '# Source: kausa/templates/poddisruptionbudget.yaml')" -eq 1 ] || fail "$what: not exactly the Lease, Role, RoleBinding and PodDisruptionBudget added"; \
+        withuser=$(render $rbac $values --set replicaCount=2 --set-json "$user"); \
+        [ "$(affinity "$withuser")" = "$(affinity "$(render $rbac $values --set-json "$user")")" ] || fail "$what: with a user affinity, replicaCount=2 does not render the user's affinity alone"; \
+        [ "$(count "$withuser" podAntiAffinity)" -eq 0 ] || fail "$what: the default anti-affinity is added to a user affinity"; \
+      done; \
+      lint=$(helm lint --strict charts/kausa $rbac --set replicaCount=2 2>&1) || { printf '%s\n' "$lint" >&2; fail "helm lint --strict with rbac.scope=$scope fails with replicaCount=2"; }; \
+    done
 # The refusals of kausa.validate: helm template fails with the exact message (helm lint does not
 # fail on a template's fail). The default values and rbac=null (a v0.1 release's stored values have
 # no rbac map) must reach the rbac.scope message, never a nil-pointer error. history.days comes
-# next, refused with the history on and off. The notification checks come last, only with
+# next, refused with the history on and off, then replicaCount, allowed only 1 or 2
+# (docs/adr/0019-high-availability.md). The notification checks come last, only with
 # notifications.enabled and in their order: each case below also breaks every later check.
 RUN set -eu; \
     long=$(printf '%064d' 0 | tr 0 a); \
@@ -440,6 +497,9 @@ RUN set -eu; \
     for days in 0 31 abc 7.5; do \
       refuse "history.days must be a whole number of days from 1 to 30, not '$days'" --set rbac.scope=cluster --set "history.days=$days"; \
       refuse "history.days must be a whole number of days from 1 to 30, not '$days'" --set rbac.scope=cluster --set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k --set history.enabled=true --set "history.days=$days"; \
+    done; \
+    for replicas in 0 3 two -1 1.5; do \
+      refuse "replicaCount must be 1 or 2, not '$replicas': a second replica is a standby that takes over through a Lease (docs/adr/0019-high-availability.md)" --set rbac.scope=cluster --set "replicaCount=$replicas"; \
     done; \
     set -f; \
     endpoint="--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k"; \

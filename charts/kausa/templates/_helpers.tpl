@@ -26,6 +26,19 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- default (include "kausa.fullname" .) .Values.serviceAccount.name }}
 {{- end }}
 
+{{/* replicaCount as a string, 1 when missing (a release's stored v0.3 values, helm upgrade
+--reuse-values, or --set replicaCount=null); kausa.validate allows only 1 and 2. hasKey, not
+default, which would turn a 0 into 1. A number from a values file is a float64: toString of 2.0 is
+2. */}}
+{{- define "kausa.replicas" -}}
+{{- if hasKey .Values "replicaCount" }}{{ .Values.replicaCount | toString }}{{ else }}1{{ end }}
+{{- end }}
+
+{{/* The Lease that two replicas elect their leader with (docs/adr/0019-high-availability.md). */}}
+{{- define "kausa.leaderLease" -}}
+{{- printf "%s-leader" (include "kausa.fullname" .) }}
+{{- end }}
+
 {{- define "kausa.image" -}}
 {{- if .Values.image.digest }}
 {{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
@@ -146,8 +159,8 @@ only here, so that both scopes grant the same.
 Refuses to render with a reason. The rbac checks come first, in this order: the scope, the list
 against the scope, every name, the first repeat, and the count. rbac is read nil-safe: a v0.1
 release's stored values and --set rbac=null have no rbac map, and must reach the "not set"
-message, not a nil-pointer error. history.days comes next, with the history on or off, and the
-notification checks last, only with notifications.enabled.
+message, not a nil-pointer error. history.days and replicaCount come next, with the history on
+or off, and the notification checks last, only with notifications.enabled.
 */}}
 {{- define "kausa.validate" -}}
 {{- $rbac := .Values.rbac | default dict }}
@@ -198,6 +211,10 @@ notification checks last, only with notifications.enabled.
 {{- $days := include "kausa.historyDays" . }}
 {{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $days) }}
 {{- fail (printf "history.days must be a whole number of days from 1 to 30, not '%s'" $days) }}
+{{- end }}
+{{- $replicas := include "kausa.replicas" . }}
+{{- if not (has $replicas (list "1" "2")) }}
+{{- fail (printf "replicaCount must be 1 or 2, not '%s': a second replica is a standby that takes over through a Lease (docs/adr/0019-high-availability.md)" $replicas) }}
 {{- end }}
 {{- if include "kausa.notifies" . }}
 {{- $n := .Values.notifications | default dict }}

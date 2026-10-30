@@ -2,10 +2,11 @@
 # Chart check: lints and renders charts/kausa in both RBAC scopes
 # (docs/adr/0013-namespaced-install-mode.md), with the explanation history on and off
 # (docs/adr/0014-explanation-history.md), with notifications on and off
-# (docs/adr/0015-notifications.md) and with the Deployment watch of D014 on and off
-# (docs/adr/0018-stuck-rollouts.md), and checks the rendered objects, the rules, the Deployment's
-# arguments and volumes, the NetworkPolicy, NOTES.txt, and every refusal of kausa.validate with its
-# exact message.
+# (docs/adr/0015-notifications.md), with the Deployment watch of D014 on and off
+# (docs/adr/0018-stuck-rollouts.md) and with one or two replicas
+# (docs/adr/0019-high-availability.md), and checks the rendered objects, the rules, the
+# Deployment's arguments and volumes, the NetworkPolicy, NOTES.txt, and every refusal of
+# kausa.validate with its exact message.
 # Needs helm, git and coreutils only, and never contacts a cluster (KUBECONFIG points nowhere).
 # Run it from anywhere: tests/chart/render.sh. It prints one line per check and exits 1 if any
 # failed.
@@ -18,7 +19,10 @@
 # in the clone, renders with notifications off are compared with its renders byte for byte (with
 # rollouts=false, its --no-rollouts arg left out). KAUSA_CHART_V03 names a git ref with the v0.3
 # chart (default v0.3.0); when the ref is in the clone, NOTES.txt's scope paragraph with
-# rollouts=false is compared with that chart's. HELM names the binary.
+# rollouts=false is compared with that chart's. KAUSA_CHART_PRE_HA names a git ref with the chart
+# before replicaCount (unset by default, for the same reason as KAUSA_CHART_PREVIOUS); when it is
+# set and in the clone, the one-replica renders are compared with its renders byte for byte.
+# HELM names the binary.
 # No pipefail: grep -q ends a pipe early, and its writer's SIGPIPE is not a failure.
 set -eu
 
@@ -1676,6 +1680,489 @@ refuse_in "$NONOTIFY_CHART" notify-nomap-no-secret "$NOTIFY_NO_SECRET" "${CL[@]}
   "${ENDPOINT[@]}" --set notifications.enabled=true
 refuse_in "$NONOTIFY_CHART" notify-nomap-np "$NOTIFY_NEEDS_TO" "${CL[@]}" "${ENDPOINT[@]}" \
   "${NOTIFY_FULL[@]}" "${NP_ON[@]}"
+
+# --- Standby replica (docs/adr/0019-high-availability.md) ---------------------------------------
+
+# replicaCount is 1 (the default) or 2. With 1, null or no key (a release's stored v0.3 values
+# under helm upgrade --reuse-values), the chart renders byte for byte as before. With 2, and in
+# both scopes alike: replicas 2 with Recreate, the --leader-lease pair right before
+# --settle-seconds, a preferred pod anti-affinity while affinity is empty, and, outside kausa.rules,
+# a Lease, a Role and a RoleBinding <fullname>-leader in the release namespace (get and patch on
+# that one Lease) and a PodDisruptionBudget <fullname>. Everything else renders unchanged. Any
+# other value is refused.
+# Written against Helm 3.16.1. CI pins Helm 4.3.1 (HELM_VERSION in the Dockerfile and in
+# .github/workflows/e2e.yml): how hasKey sees --set replicaCount=null and toString a float64 such
+# as 2.0 there is checked by the ci target's renders and the e2e test, or here with HELM pointing
+# at that binary. The line below says which Helm ran these checks.
+HELM_SHORT=$("$HELM" version --short 2>/dev/null) || HELM_SHORT='(unknown version)'
+echo "note: the replicaCount checks run with Helm $HELM_SHORT"
+
+HA=(--set replicaCount=2)
+HA_CL=(--set rbac.scope=cluster)
+HA_NS=(--set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a,e2e-b}')
+HA_NS_OWN=(--set rbac.scope=namespaced --set "rbac.namespaces={e2e-a,$NAMESPACE}")
+HA_NP=(--set networkPolicy.enabled=true --set 'networkPolicy.apiServer.cidrs[0]=192.0.2.1/32'
+  --set 'networkPolicy.endpoint.to[0].ipBlock.cidr=192.0.2.2/32')
+NODE_AFFINITY='affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":'
+NODE_AFFINITY+='{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/arch",'
+NODE_AFFINITY+='"operator":"In","values":["arm64"]}]}]}}}'
+REQUIRED_ANTI_AFFINITY='affinity={"podAntiAffinity":'
+REQUIRED_ANTI_AFFINITY+='{"requiredDuringSchedulingIgnoredDuringExecution":'
+REQUIRED_ANTI_AFFINITY+='[{"topologyKey":"kubernetes.io/hostname","labelSelector":{"matchLabels":'
+REQUIRED_ANTI_AFFINITY+='{"app.kubernetes.io/name":"kausa"}}}]}}'
+
+grep -qx 'replicaCount: 1' "$CHART/values.yaml" ||
+  fail "values.yaml has no top-level 'replicaCount: 1'"
+# A copy of the chart without the key: a release made before it.
+NOREPLICAS_CHART="$WORK/noreplicas/kausa"
+mkdir -p "$WORK/noreplicas"
+cp -R "$CHART" "$NOREPLICAS_CHART"
+grep -v '^replicaCount:' "$CHART/values.yaml" >"$NOREPLICAS_CHART/values.yaml"
+
+# The rule of the Role <fullname>-leader, without spaces.
+rule_leader() {
+  printf '%s\n' '-apiGroups:["coordination.k8s.io"]' 'resources:["leases"]' \
+    "resourceNames:[\"$1\"]" 'verbs:["get","patch"]'
+}
+
+# affinity_of FILE: the Deployment's pod affinity block, spaces removed.
+affinity_of() {
+  docs "$1" Deployment | awk '
+    $0 == "      affinity:" { on = 1; next }
+    on && !/^       / { on = 0 }
+    on' | tr -d ' '
+}
+
+# kinds FILE [EXTRA...]: "Kind count" per kind of FILE's documents, plus the EXTRA kinds.
+kinds() {
+  local file=$1
+  shift
+  { grep -h '^kind: ' "$file" | cut -c7-; if [ "$#" -gt 0 ]; then printf '%s\n' "$@"; fi; } |
+    sort | uniq -c | awk '{ print $2, $1 }'
+}
+
+# without_standby FILE LEASE_ARG STRIP_AFFINITY: the Deployment of a replicaCount=2 render with
+# replicas back to 1, the --leader-lease pair removed and, with STRIP_AFFINITY=yes, the affinity
+# block removed: what is left must be the replicaCount=1 Deployment.
+without_standby() {
+  docs "$1" Deployment | awk -v strip="$3" '
+    $0 == "  replicas: 2" { print "  replicas: 1"; next }
+    skip { skip = 0; next }
+    /^ *- --leader-lease$/ { skip = 1; next }
+    strip == "yes" && $0 == "      affinity:" { aff = 1; next }
+    aff && /^       / { next }
+    { aff = 0; print }'
+}
+
+# check_single NAME FILE: a render with one replica holds nothing of the standby.
+check_single() {
+  local name=$1 out=$2
+  [ "$(count_docs "$out" Lease)" = 0 ] || fail "standby/$name: renders a Lease"
+  [ "$(count_docs "$out" PodDisruptionBudget)" = 0 ] ||
+    fail "standby/$name: renders a PodDisruptionBudget"
+  grep -q -- '-leader$' "$out" && fail "standby/$name: renders an object named *-leader"
+  args "$out" | grep -q -- 'leader-lease' && fail "standby/$name: passes --leader-lease"
+  docs "$out" Deployment | grep -qx '  replicas: 1' || fail "standby/$name: replicas is not 1"
+  docs "$out" Deployment | grep -qx '    type: Recreate' || fail "standby/$name: not Recreate"
+  grep -q 'podAntiAffinity' "$out" && fail "standby/$name: renders a pod anti-affinity"
+  return 0
+}
+
+# check_ha NAME FILE BASE: FILE renders replicaCount=2 with the values that rendered BASE with one
+# replica. FULLNAME and SUBJECT (the objects' and the service account's names) default to kausa;
+# AFFINITY=user expects the given affinity instead of the default one.
+check_ha() {
+  local name=$1 out=$2 base=$3 fullname=${FULLNAME:-kausa} subject=${SUBJECT:-kausa}
+  local lease="${FULLNAME:-kausa}-leader" since=$FAILURES strip=yes
+  [ "${AFFINITY:-default}" = user ] && strip=no
+  docs "$out" Deployment | grep -qx '  replicas: 2' || fail "standby/$name: replicas is not 2"
+  docs "$out" Deployment | grep -qx '    type: Recreate' ||
+    fail "standby/$name: the strategy is not Recreate"
+  # The args: exactly the pair, right before --settle-seconds.
+  [ "$(args "$out" | grep -cx -- '- --leader-lease')" = 1 ] ||
+    fail "standby/$name: not exactly one --leader-lease arg"
+  args "$out" | grep -A2 -x -- '- --leader-lease' >"$out.pair" || true
+  printf '%s\n' '- --leader-lease' "- \"$NAMESPACE/$lease\"" '- --settle-seconds' \
+    >"$out.pair-expected"
+  diff -u "$out.pair-expected" "$out.pair" >"$out.pair-diff" ||
+    fail "standby/$name: the --leader-lease pair: $(cat "$out.pair-diff")"
+  # The Deployment is the one-replica Deployment but for replicas, the pair and the affinity.
+  docs "$base" Deployment >"$out.deployment-expected"
+  without_standby "$out" "$NAMESPACE/$lease" "$strip" >"$out.deployment"
+  diff -u "$out.deployment-expected" "$out.deployment" >"$out.deployment-diff" ||
+    fail "standby/$name: the Deployment changes more than replicas, the arg pair and the" \
+      "affinity: $(head -40 "$out.deployment-diff")"
+  if [ "$strip" = yes ]; then
+    affinity_of "$out" >"$out.affinity"
+    for line in 'podAntiAffinity:' 'preferredDuringSchedulingIgnoredDuringExecution:' \
+      '-weight:100' 'podAffinityTerm:' 'topologyKey:kubernetes.io/hostname' 'labelSelector:' \
+      'matchLabels:' 'app.kubernetes.io/name:kausa' \
+      "app.kubernetes.io/instance:${RELEASE_NAME:-$RELEASE}"; do
+      grep -qx -- "$line" "$out.affinity" || fail "standby/$name: the anti-affinity lacks $line"
+    done
+    [ "$(wc -l <"$out.affinity" | tr -d ' ')" = 9 ] ||
+      fail "standby/$name: the default affinity is not just the preferred anti-affinity:" \
+        "$(cat "$out.affinity")"
+  fi
+  # The Lease, with no spec: Helm owns the object, kausa its spec.
+  [ "$(count_docs "$out" Lease)" = 1 ] || fail "standby/$name: not exactly one Lease"
+  if [ "$(count_docs "$out" Lease "$NAMESPACE" "$lease")" = 1 ]; then
+    docs "$out" Lease "$NAMESPACE" "$lease" >"$out.lease"
+    for line in 'apiVersion: coordination.k8s.io/v1' 'spec: {}' \
+      "    app.kubernetes.io/instance: ${RELEASE_NAME:-$RELEASE}" \
+      '    app.kubernetes.io/name: kausa'; do
+      grep -qx -- "$line" "$out.lease" || fail "standby/$name: the Lease lacks '$line'"
+    done
+  else
+    fail "standby/$name: no Lease $lease in $NAMESPACE"
+  fi
+  # The Role: one rule, get and patch on that one Lease.
+  [ "$(count_docs "$out" Role "" "$lease")" = 1 ] ||
+    fail "standby/$name: not exactly one Role named $lease"
+  if [ "$(count_docs "$out" Role "$NAMESPACE" "$lease")" = 1 ]; then
+    docs "$out" Role "$NAMESPACE" "$lease" | section rules >"$out.leader-rules"
+    rule_leader "$lease" >"$out.leader-rules-expected"
+    diff -u "$out.leader-rules-expected" "$out.leader-rules" >"$out.leader-rules-diff" ||
+      fail "standby/$name: the rules of the Role $lease: $(cat "$out.leader-rules-diff")"
+  else
+    fail "standby/$name: no Role $lease in $NAMESPACE"
+  fi
+  [ "$(count_docs "$out" RoleBinding "" "$lease")" = 1 ] ||
+    fail "standby/$name: not exactly one RoleBinding named $lease"
+  if [ "$(count_docs "$out" RoleBinding "$NAMESPACE" "$lease")" = 1 ]; then
+    docs "$out" RoleBinding "$NAMESPACE" "$lease" | section roleRef >"$out.leader-ref"
+    printf '%s\n' 'apiGroup:rbac.authorization.k8s.io' 'kind:Role' "name:$lease" |
+      sort >"$out.leader-ref-expected"
+    sort "$out.leader-ref" | diff -u "$out.leader-ref-expected" - >"$out.leader-ref-diff" ||
+      fail "standby/$name: the roleRef of $lease: $(cat "$out.leader-ref-diff")"
+    docs "$out" RoleBinding "$NAMESPACE" "$lease" | section subjects >"$out.leader-subjects"
+    [ "$(grep -c '^-' "$out.leader-subjects")" = 1 ] ||
+      fail "standby/$name: the RoleBinding $lease has not exactly one subject"
+    for line in '-kind:ServiceAccount' "name:$subject" "namespace:$NAMESPACE"; do
+      grep -qx -- "$line" "$out.leader-subjects" ||
+        fail "standby/$name: the subject of $lease lacks $line"
+    done
+  else
+    fail "standby/$name: no RoleBinding $lease in $NAMESPACE"
+  fi
+  # Nothing else names the group of Leases: no other grant on them.
+  [ "$(grep -v '^ *#' "$out" | grep -c 'coordination.k8s.io')" = 2 ] ||
+    fail "standby/$name: coordination.k8s.io appears other than in the Lease and its rule"
+  # The PodDisruptionBudget.
+  if [ "$(count_docs "$out" PodDisruptionBudget "$NAMESPACE" "$fullname")" = 1 ] &&
+    [ "$(count_docs "$out" PodDisruptionBudget)" = 1 ]; then
+    docs "$out" PodDisruptionBudget >"$out.pdb"
+    grep -qx 'apiVersion: policy/v1' "$out.pdb" ||
+      fail "standby/$name: the PodDisruptionBudget is not policy/v1"
+    section spec <"$out.pdb" >"$out.pdb-spec"
+    printf '%s\n' 'maxUnavailable:1' 'unhealthyPodEvictionPolicy:AlwaysAllow' 'selector:' \
+      'matchLabels:' 'app.kubernetes.io/name:kausa' \
+      "app.kubernetes.io/instance:${RELEASE_NAME:-$RELEASE}" | sort >"$out.pdb-expected"
+    sort "$out.pdb-spec" | diff -u "$out.pdb-expected" - >"$out.pdb-diff" ||
+      fail "standby/$name: the PodDisruptionBudget's spec: $(cat "$out.pdb-diff")"
+  else
+    fail "standby/$name: not exactly one PodDisruptionBudget, $fullname in $NAMESPACE"
+  fi
+  # Nothing else is added or changed: the same kinds plus the four objects, nothing new that is
+  # cluster-scoped, and the same ClusterRole, Roles (kausa.rules), bindings, ServiceAccount,
+  # Service and NetworkPolicy.
+  kinds "$base" Lease Role RoleBinding PodDisruptionBudget >"$out.kinds-expected"
+  kinds "$out" >"$out.kinds"
+  diff -u "$out.kinds-expected" "$out.kinds" >"$out.kinds-diff" ||
+    fail "standby/$name: the kinds rendered: $(cat "$out.kinds-diff")"
+  cluster_scoped "$base" >"$out.scoped-expected"
+  cluster_scoped "$out" >"$out.scoped"
+  diff -u "$out.scoped-expected" "$out.scoped" >"$out.scoped-diff" ||
+    fail "standby/$name: the cluster-scoped objects: $(cat "$out.scoped-diff")"
+  for kind in ServiceAccount Service NetworkPolicy ClusterRole ClusterRoleBinding; do
+    cmp -s <(docs "$base" "$kind") <(docs "$out" "$kind") ||
+      fail "standby/$name: the ${kind}s differ from the one-replica render"
+  done
+  for kind in Role RoleBinding; do
+    cmp -s <(docs "$base" "$kind" "" "$fullname") <(docs "$out" "$kind" "" "$fullname") ||
+      fail "standby/$name: the ${kind}s $fullname (kausa.rules) differ from the one-replica render"
+  done
+  passed "$since" "standby/$name"
+}
+
+# check_same NAME FILE COMPARE: FILE renders byte for byte like COMPARE.
+check_same() {
+  if [ -f "$2" ] && [ -f "$3" ] && cmp -s "$3" "$2"; then
+    ok "standby/$1"
+  else
+    fail "standby/$1: does not render byte for byte the same: $(diff "$3" "$2" 2>&1 | head -20)"
+  fi
+}
+
+VALUES_TWO="$WORK/values-replicas-2.yaml"
+VALUES_ONE="$WORK/values-replicas-1.yaml"
+echo 'replicaCount: 2' >"$VALUES_TWO"
+echo 'replicaCount: 1' >"$VALUES_ONE"
+for set in cluster cluster-endpoint namespaced namespaced-endpoint namespaced-own; do
+  case $set in
+    cluster*) scope=("${HA_CL[@]}") ;;
+    namespaced-own) scope=("${HA_NS_OWN[@]}") ;;
+    namespaced*) scope=("${HA_NS[@]}") ;;
+  esac
+  case $set in
+    *-endpoint) values=("${ENDPOINT[@]}" "${HA_NP[@]}") ;;
+    *) values=() ;;
+  esac
+  out="$WORK/standby-$set"
+  if ! render "$out-one" "$RELEASE" "$CHART" "${scope[@]}" ${values[@]+"${values[@]}"}; then
+    fail "standby/$set does not render with one replica: $(cat "$out-one.err")"
+    continue
+  fi
+  check_single "$set" "$out-one"
+  # One replica, however it is given, renders byte for byte the same.
+  render "$out-null" "$RELEASE" "$CHART" "${scope[@]}" ${values[@]+"${values[@]}"} \
+    --set replicaCount=null || fail "standby/$set-null does not render: $(cat "$out-null.err")"
+  check_same "$set-null" "$out-null" "$out-one"
+  render "$out-1" "$RELEASE" "$CHART" "${scope[@]}" ${values[@]+"${values[@]}"} \
+    --set replicaCount=1 || fail "standby/$set-1 does not render: $(cat "$out-1.err")"
+  check_same "$set-1" "$out-1" "$out-one"
+  render "$out-file-1" "$RELEASE" "$CHART" "${scope[@]}" ${values[@]+"${values[@]}"} \
+    -f "$VALUES_ONE" || fail "standby/$set-file-1 does not render: $(cat "$out-file-1.err")"
+  check_same "$set-file-1" "$out-file-1" "$out-one"
+  render "$out-nokey" "$RELEASE" "$NOREPLICAS_CHART" "${scope[@]}" ${values[@]+"${values[@]}"} ||
+    fail "standby/$set-nokey does not render: $(cat "$out-nokey.err")"
+  check_same "$set-nokey" "$out-nokey" "$out-one"
+  # Two replicas.
+  if render "$out-two" "$RELEASE" "$CHART" "${scope[@]}" ${values[@]+"${values[@]}"} \
+    "${HA[@]}"; then
+    check_ha "$set" "$out-two" "$out-one"
+  else
+    fail "standby/$set does not render with two replicas: $(cat "$out-two.err")"
+    continue
+  fi
+  # 2 from a values file (a float64), as a string and as 2.0 renders the same.
+  render "$out-file-2" "$RELEASE" "$CHART" "${scope[@]}" ${values[@]+"${values[@]}"} \
+    -f "$VALUES_TWO" || fail "standby/$set-file-2 does not render: $(cat "$out-file-2.err")"
+  check_same "$set-file-2" "$out-file-2" "$out-two"
+  render "$out-string-2" "$RELEASE" "$CHART" "${scope[@]}" ${values[@]+"${values[@]}"} \
+    --set-string replicaCount=2 ||
+    fail "standby/$set-string-2 does not render: $(cat "$out-string-2.err")"
+  check_same "$set-string-2" "$out-string-2" "$out-two"
+  render "$out-float-2" "$RELEASE" "$CHART" "${scope[@]}" ${values[@]+"${values[@]}"} \
+    --set-json replicaCount=2.0 ||
+    fail "standby/$set-float-2 does not render: $(cat "$out-float-2.err")"
+  check_same "$set-float-2" "$out-float-2" "$out-two"
+done
+# The names follow the release and the service account.
+for set in cluster namespaced; do
+  case $set in
+    cluster) scope=("${HA_CL[@]}") ;;
+    *) scope=("${HA_NS[@]}") ;;
+  esac
+  out="$WORK/standby-$set-tenant"
+  if render "$out-one" tenant "$CHART" "${scope[@]}" &&
+    render "$out-two" tenant "$CHART" "${scope[@]}" "${HA[@]}"; then
+    RELEASE_NAME=tenant FULLNAME=tenant-kausa SUBJECT=tenant-kausa \
+      check_ha "$set-tenant" "$out-two" "$out-one"
+  else
+    fail "standby/$set-tenant does not render: $(cat "$out-one.err" "$out-two.err")"
+  fi
+  out="$WORK/standby-$set-reader"
+  if render "$out-one" "$RELEASE" "$CHART" "${scope[@]}" --set serviceAccount.name=reader &&
+    render "$out-two" "$RELEASE" "$CHART" "${scope[@]}" --set serviceAccount.name=reader \
+      "${HA[@]}"; then
+    SUBJECT=reader check_ha "$set-reader" "$out-two" "$out-one"
+  else
+    fail "standby/$set-reader does not render: $(cat "$out-one.err" "$out-two.err")"
+  fi
+  # A user affinity replaces the default one, a required anti-affinity included.
+  for affinity in node required; do
+    case $affinity in
+      node) given=$NODE_AFFINITY ;;
+      *) given=$REQUIRED_ANTI_AFFINITY ;;
+    esac
+    out="$WORK/standby-$set-affinity-$affinity"
+    if render "$out-one" "$RELEASE" "$CHART" "${scope[@]}" --set-json "$given" &&
+      render "$out-two" "$RELEASE" "$CHART" "${scope[@]}" --set-json "$given" "${HA[@]}"; then
+      AFFINITY=user check_ha "$set-affinity-$affinity" "$out-two" "$out-one"
+      grep -q 'preferredDuringSchedulingIgnoredDuringExecution' "$out-two" &&
+        fail "standby/$set-affinity-$affinity: the default anti-affinity is added to the user's"
+      [ -s "$out-one" ] && [ -n "$(affinity_of "$out-one")" ] ||
+        fail "standby/$set-affinity-$affinity: the one-replica render lost the user's affinity"
+    else
+      fail "standby/$set-affinity-$affinity does not render: $(cat "$out-one.err" "$out-two.err")"
+    fi
+  done
+done
+
+# The names follow the release namespace: nothing of the standby names kausa-system when the
+# release is installed elsewhere.
+saved_namespace=$NAMESPACE
+NAMESPACE=shop-ops
+for set in cluster namespaced; do
+  case $set in
+    cluster) scope=("${HA_CL[@]}") ;;
+    *) scope=("${HA_NS[@]}") ;;
+  esac
+  out="$WORK/standby-$set-$NAMESPACE"
+  if render "$out-one" "$RELEASE" "$CHART" "${scope[@]}" &&
+    render "$out-two" "$RELEASE" "$CHART" "${scope[@]}" "${HA[@]}"; then
+    check_ha "$set-in-$NAMESPACE" "$out-two" "$out-one"
+    grep -q "$saved_namespace" "$out-two" &&
+      fail "standby/$set-in-$NAMESPACE: names $saved_namespace, not the release namespace"
+  else
+    fail "standby/$set-in-$NAMESPACE does not render: $(cat "$out-one.err" "$out-two.err")"
+  fi
+done
+NAMESPACE=$saved_namespace
+
+# The Lease, its Role and RoleBinding and the PodDisruptionBudget are outside kausa.rules: byte for
+# byte the same in both scopes, whatever rbac.namespaces lists and with the endpoint's
+# NetworkPolicy on.
+standby_objects() {
+  docs "$1" Lease
+  docs "$1" Role "" "$2-leader"
+  docs "$1" RoleBinding "" "$2-leader"
+  docs "$1" PodDisruptionBudget
+}
+for prefix in standby standby-tenant; do
+  case $prefix in
+    standby)
+      suffix='' fullname=kausa
+      sets="cluster-endpoint namespaced namespaced-endpoint namespaced-own"
+      ;;
+    *) suffix=-tenant fullname=tenant-kausa sets=namespaced ;;
+  esac
+  standby_objects "$WORK/standby-cluster$suffix-two" "$fullname" >"$WORK/$prefix-objects-cluster"
+  if [ "$(grep -c '^%%$' "$WORK/$prefix-objects-cluster")" != 4 ]; then
+    fail "$prefix/objects: the cluster render has not the four standby objects"
+    continue
+  fi
+  for set in $sets; do
+    standby_objects "$WORK/standby-$set$suffix-two" "$fullname" >"$WORK/$prefix-objects-$set"
+    if cmp -s "$WORK/$prefix-objects-cluster" "$WORK/$prefix-objects-$set"; then
+      ok "$prefix/$set renders the standby objects of cluster scope"
+    else
+      fail "$prefix/$set: the standby objects differ from cluster scope:" \
+        "$(diff "$WORK/$prefix-objects-cluster" "$WORK/$prefix-objects-$set" | head -20)"
+    fi
+  done
+done
+
+# A whole number from a JSON or YAML float is that number (toString of a float64): 1.0 renders
+# like the default, and 2.0 like 2 (checked above).
+for set in cluster namespaced; do
+  case $set in
+    cluster) scope=("${HA_CL[@]}") ;;
+    *) scope=("${HA_NS[@]}") ;;
+  esac
+  out="$WORK/standby-$set-float-1"
+  render "$out" "$RELEASE" "$CHART" "${scope[@]}" --set-json replicaCount=1.0 ||
+    fail "standby/$set-float-1 does not render: $(cat "$out.err")"
+  check_same "$set-float-1" "$out" "$WORK/standby-$set-one"
+done
+
+# The default renders are those of the chart before this value, byte for byte, when
+# KAUSA_CHART_PRE_HA names that chart's git ref (unset by default: after a release the chart's
+# version labels differ).
+PRE_HA=${KAUSA_CHART_PRE_HA:-}
+if [ -n "$PRE_HA" ] &&
+  git -C "$ROOT" rev-parse --verify --quiet "$PRE_HA^{commit}" >/dev/null 2>&1; then
+  mkdir -p "$WORK/pre-ha"
+  git -C "$ROOT" archive "$PRE_HA" charts/kausa | tar -x -C "$WORK/pre-ha"
+  for set in cluster cluster-endpoint namespaced namespaced-endpoint namespaced-own; do
+    case $set in
+      cluster*) scope=("${HA_CL[@]}") ;;
+      namespaced-own) scope=("${HA_NS_OWN[@]}") ;;
+      namespaced*) scope=("${HA_NS[@]}") ;;
+    esac
+    case $set in
+      *-endpoint) values=("${ENDPOINT[@]}" "${HA_NP[@]}") ;;
+      *) values=() ;;
+    esac
+    out="$WORK/pre-ha-$set"
+    if render "$out" "$RELEASE" "$WORK/pre-ha/charts/kausa" "${scope[@]}" \
+      ${values[@]+"${values[@]}"}; then
+      check_same "$set-is-$PRE_HA" "$WORK/standby-$set-one" "$out"
+    else
+      fail "the $PRE_HA chart does not render $set: $(cat "$out.err")"
+    fi
+  done
+else
+  echo "skipped: KAUSA_CHART_PRE_HA is unset or not in this clone; the default renders are" \
+    "checked against replicaCount=1, null and a chart without the key above"
+fi
+
+# NOTES.txt names the Lease, how to see its holder, the budget per replica and how to scale, only
+# with two replicas; with one it is unchanged.
+for set in cluster namespaced; do
+  case $set in
+    cluster) scope=("${HA_CL[@]}") ;;
+    *) scope=("${HA_NS[@]}") ;;
+  esac
+  notes "$WORK/notes-standby-$set-one" "${scope[@]}" "${ENDPOINT[@]}"
+  notes "$WORK/notes-standby-$set-1" "${scope[@]}" "${ENDPOINT[@]}" --set replicaCount=1
+  notes "$WORK/notes-standby-$set-null" "${scope[@]}" "${ENDPOINT[@]}" --set replicaCount=null
+  notes "$WORK/notes-standby-$set-two" "${scope[@]}" "${ENDPOINT[@]}" "${HA[@]}"
+  check_same "notes-$set-1" "$WORK/notes-standby-$set-1" "$WORK/notes-standby-$set-one"
+  check_same "notes-$set-null" "$WORK/notes-standby-$set-null" "$WORK/notes-standby-$set-one"
+  file="$WORK/notes-standby-$set-one"
+  if [ -s "$file" ]; then
+    grep -qiwE 'lease|leases|standby|replicaCount' "$file" &&
+      fail "NOTES.txt with one replica ($set) speaks of a Lease, a standby or replicaCount"
+  fi
+  file="$WORK/notes-standby-$set-two"
+  [ -s "$file" ] || { fail "NOTES.txt with two replicas ($set) is empty"; continue; }
+  since=$FAILURES
+  collapsed "$file" | grep -qF "$NAMESPACE/kausa-leader" ||
+    fail "NOTES.txt with two replicas ($set) does not name the Lease $NAMESPACE/kausa-leader"
+  grep -qF "kubectl -n $NAMESPACE get lease kausa-leader -o jsonpath='{.spec.holderIdentity}'" \
+    "$file" || fail "NOTES.txt with two replicas ($set) lacks the command that shows the holder"
+  collapsed "$file" | grep -qi 'budget' ||
+    fail "NOTES.txt with two replicas ($set) does not say each replica has its own budget"
+  collapsed "$file" | grep -qF 'replicaCount' ||
+    fail "NOTES.txt with two replicas ($set) does not say to scale only through replicaCount"
+  # The rest of NOTES.txt is the one-replica text.
+  grep -vxFf "$WORK/notes-standby-$set-two" "$WORK/notes-standby-$set-one" >"$file.lost" || true
+  [ -s "$file.lost" ] &&
+    fail "NOTES.txt with two replicas ($set) drops lines of the one-replica text:" \
+      "$(cat "$file.lost")"
+  passed "$since" "NOTES.txt with two replicas ($set)"
+done
+
+# helm lint --strict with two replicas, in both scopes.
+if "$HELM" lint --strict "$CHART" "${HA_CL[@]}" "${HA[@]}" >"$WORK/lint-standby" 2>&1; then
+  ok "helm lint --strict with replicaCount=2"
+else
+  fail "helm lint --strict with replicaCount=2: $(cat "$WORK/lint-standby")"
+fi
+if "$HELM" lint --strict "$CHART" "${HA_NS[@]}" "${HA[@]}" >"$WORK/lint-standby" 2>&1; then
+  ok "helm lint --strict with replicaCount=2, namespaced"
+else
+  fail "helm lint --strict with replicaCount=2, namespaced: $(cat "$WORK/lint-standby")"
+fi
+
+# Refusals (helm template: helm lint does not fail on a template's fail).
+not_replicas() {
+  echo "replicaCount must be 1 or 2, not '$1': a second replica is a standby that takes over through a Lease (docs/adr/0019-high-availability.md)"
+}
+for value in 0 3 two -1 1.5 10; do
+  refuse "replicas-$value" "$(not_replicas "$value")" "${HA_CL[@]}" --set "replicaCount=$value"
+done
+refuse replicas-empty "$(not_replicas '')" "${HA_CL[@]}" --set replicaCount=
+refuse replicas-string-3 "$(not_replicas 3)" "${HA_CL[@]}" --set-string replicaCount=3
+refuse replicas-namespaced "$(not_replicas 3)" "${HA_NS[@]}" --set replicaCount=3
+refuse replicas-endpoint "$(not_replicas 0)" "${HA_CL[@]}" "${ENDPOINT[@]}" \
+  --set replicaCount=0
+# The same in namespaced scope, the release namespace listed or not.
+for value in 0 3 two -1 1.5; do
+  refuse "replicas-namespaced-$value" "$(not_replicas "$value")" "${HA_NS[@]}" \
+    --set "replicaCount=$value"
+  refuse "replicas-namespaced-own-$value" "$(not_replicas "$value")" "${HA_NS_OWN[@]}" \
+    --set "replicaCount=$value"
+done
+# --set keeps 1.5 a string; a values file and --set-json give a float64 or a bool, refused too.
+VALUES_FLOAT="$WORK/values-replicas-float.yaml"
+echo 'replicaCount: 1.5' >"$VALUES_FLOAT"
+refuse replicas-file-1.5 "$(not_replicas 1.5)" "${HA_CL[@]}" -f "$VALUES_FLOAT"
+refuse replicas-file-1.5-namespaced "$(not_replicas 1.5)" "${HA_NS[@]}" -f "$VALUES_FLOAT"
+refuse replicas-json-2.5 "$(not_replicas 2.5)" "${HA_CL[@]}" --set-json replicaCount=2.5
+refuse replicas-json-true "$(not_replicas true)" "${HA_CL[@]}" --set-json replicaCount=true
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "FAIL: $FAILURES chart checks failed" >&2

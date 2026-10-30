@@ -30,7 +30,15 @@ These are vulnerabilities, not ordinary bugs:
   any part of the request to the model as a field, or a real name other than the namespace's and
   the top-level owner's; or the webhook URL or token in a log line, an error, an Event or a metric;
 - kausa reading, or asking for permission to read, Secrets or ConfigMaps, or writing anything but
-  Events and, with `--history`, its own Explanations;
+  Events, with `--history` its own Explanations and, with `--leader-lease`, the `spec` (and the
+  `resourceVersion` precondition) of its one Lease; or asking for any verb on Leases but `get` and
+  `patch` on that one Lease in its own namespace;
+- a value read from kausa's Lease (its holder, times or labels) reaching kausa's log, a request to
+  the model, an Event, an Explanation, a notification or a metric, or a stored Lease that makes
+  kausa crash;
+- a replica that is not the holder of the Lease calling the model, writing an Event or an
+  Explanation, or posting a notification after its term ended (20 s after its last good renewal,
+  plus the 10 s bound on a write already started);
 - kausa patching or deleting an Explanation that is not kausa-shaped (labelled
   `app.kubernetes.io/managed-by: kausa`, named `kausa.` and 16 lowercase hexadecimal digits, with
   a `spec` that parses), patching one whose `spec` is not the incident's, or writing one in a
@@ -74,7 +82,12 @@ nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)). For v0.4 (in d
 2026-10-29), kausa also watches Deployments, unless `--no-rollouts` (the chart's `rollouts:
 false`), to explain a rollout past its progress deadline (`D014`) ([0018. Explain a Deployment past
 its progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
-StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)). Not
+StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)). Also for v0.4, the chart's
+`replicaCount: 2` (off by default) runs a second replica as a standby: both run `kausa run
+--leader-lease <release namespace>/<full name>-leader`, and only the one that holds that Lease
+watches, explains and writes; the other reads the Lease every 5 s and takes it over if the leader
+stops renewing it ([0019. Offer an optional standby replica that takes over through a
+chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md)). Not
 tested yet: a hosted provider over HTTPS (the distroless CA bundle with rustls), clusters larger
 than about a hundred Pods, and long runs ([Architecture](docs/explanation/architecture.md)).
 
@@ -83,7 +96,15 @@ controls event messages, log lines, container and volume names, image references
 probe paths and node selector, affinity and toleration keys, and through them the Pod status messages the kubelet writes (an eviction names the container or the
 `emptyDir` volume). In a shared
 cluster that includes tenants who are not cluster administrators. The language model endpoint
-controls the answers. kausa treats both as untrusted.
+controls the answers. kausa treats both as untrusted. With `replicaCount: 2`, whoever can write
+Leases in the release namespace (the default `edit` and `admin` roles there, as the reviewer of
+[0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md) found in kind, Kubernetes v1.36.4; not re-run since)
+decides which replica acts, and can stop the watches in every replica: by holding kausa's Lease
+under another identity, by changing its version faster than every 30 s (`LEASE_DURATION`) while
+the leader is dead, so that no standby takes over, or by deleting the Lease or the `<full
+name>-leader` RoleBinding. kausa reads only the holder and the `resourceVersion` of the Lease,
+compares the holder with its own Pod name and echoes the version in its next patch; nothing else
+in it is read, and nothing read from it is logged, sent or reused.
 
 **What kausa protects:**
 
@@ -100,8 +121,10 @@ kausa must:
 - **Never read what it does not need.** Its permissions are a fixed list: read Pods, read and
   write Events, `get` on ReplicaSets and Jobs, `list` and `watch` on Deployments only while the
   Deployment watch is on (no `get`, no write, nothing on StatefulSets or DaemonSets), `get` on
-  `pods/log` only while log collection is on, and `list`, `create`, `patch` and `delete` on its own `explanations` only while it writes
-  history. Never any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never
+  `pods/log` only while log collection is on, `list`, `create`, `patch` and `delete` on its own `explanations` only while it writes
+  history, and `get` and `patch` on its one Lease, `<full name>-leader` in its own namespace,
+  only with `replicaCount: 2` (the same Role in both scopes; never `create`, `update`, `list`,
+  `watch` or `delete` on Leases, and no other Lease). Never any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never
   does. Never Secrets, never ConfigMaps, no other write verb, no `exec`, no wildcards
   ([Permissions](docs/reference/permissions.md), [0009. Run with read-only permissions that never
   include Secrets](docs/adr/0009-least-privilege-rbac.md)), in every namespace with
@@ -136,7 +159,10 @@ kausa must:
   per request and on output tokens, deduplication of repeated incidents, one request at a time
   and a bounded queue, so that a tenant who makes Pods fail on purpose cannot run up the bill or
   the memory. The budget and the deduplication cache live in memory, so they hold per process
-  lifetime: a restart starts them over. Watches keep small records instead of whole objects; log
+  lifetime: a restart starts them over. With two replicas each process keeps its own, across its
+  own terms as leader: a replica that steps down and leads again keeps its count and its cache,
+  so a release spends at most twice `budget.callsPerHour` and `budget.callsPerDay` while both
+  processes live. Watches keep small records instead of whole objects; log
   tails, requests, answers and caches are capped. Hitting a limit is counted in the metrics and
   never crashes kausa.
 - **Never explain itself.** Events with kausa's own reporting controller are ignored, so its
@@ -162,6 +188,46 @@ kausa must:
   an egress proxy to be limited to that host.
 
 **What kausa cannot promise:**
+
+- **A stolen token holds or flips its one Lease** (with `replicaCount: 2`). It can hold kausa's
+  Lease, so that no replica acts, or flip it between identities to force failovers, each of which
+  costs at most the duplicates below; and, since RBAC cannot narrow `patch` to `spec`, change the
+  Lease's labels and annotations (checked in kind, Kubernetes v1.36.4). Nothing more: it cannot
+  create, list, watch or delete Leases, touch another Lease, another namespace or anything
+  cluster-scoped. A flip never resets a budget: each process keeps its own across its terms.
+- **Whoever can write Leases in kausa's namespace can stop it** (with `replicaCount: 2`), in every
+  replica and with no handover, by holding the Lease under another identity or by changing its
+  version faster than `LEASE_DURATION` (30 s) while the leader is dead. The reviewer of
+  [0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md) found that the default `edit` and `admin`
+  ClusterRoles grant every verb on `leases` in kind, Kubernetes v1.36.4 (reported, not re-run
+  here). kausa fails closed, as scaling it to zero would (no explanation, no write, nothing sent),
+  and it shows as `sum(kausa_leader) != 1` over both Pods and as `standby` lines in both logs: the
+  alerts in [Install kausa with Helm](docs/how-to/install-with-helm.md#run-a-standby-replica).
+  The same people can already scale the Deployment to zero.
+- **A deleted Lease or `<full name>-leader` RoleBinding stops kausa until `helm upgrade`**
+  (with `replicaCount: 2`): every replica stays a standby, fails closed and logs `lease error`
+  with a `hint` that names the fix (`helm upgrade` for a missing Lease, the permission for a
+  `403`). kausa never creates the Lease.
+- **An API server outage of 20 s or more steps the leader down** (with `replicaCount: 2`): Lease
+  calls failing for `RENEW_DEADLINE` (20 s) end its term, and it drops the records and settle
+  progress that a single replica keeps across a watch error. After the outage a replica takes the
+  Lease, lists again and settles its incidents again.
+- **A failover may explain an incident once more per process** (with `replicaCount: 2`). The
+  deduplication cache is per process, so a failover, forced or not, can make one more call, one
+  more Event series patch or new Event, one more history merge and one more notification for an
+  incident that still fails. One that ended in the gap is not explained.
+- **A deposed leader is bounded by time, not fenced** (with `replicaCount: 2`). It starts no write
+  after 20 s from its last good renewal, and each write ends within 10 s, so before a standby may
+  take over (30 s). That rests on two hypotheses: the API server does not apply a request after
+  the client gave up on it, and the monotonic clock of a paused VM advances. There is no fencing
+  token; the worst case is the duplicates above, never a change to a workload.
+- **The metrics port gains no new way to stop the watches.** The leader's controller, the
+  metrics `accept` and its connections share the process at random, as with one replica, and the
+  Lease keeper is polled before them only to renew or to step down, so a connection flood from
+  any peer that `networkPolicy.metricsFrom` allows (any, by default) slows the controller no more
+  than with one replica, and cannot keep a starved leader holding the Lease. Measuring this under
+  the 200m CPU limit is an open item before release (the research note that
+  [0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md) requires).
 
 - **Redaction has false negatives.** A secret in a format no rule knows, split across lines or
   encoded, can reach the provider. Every rule ships with a test corpus, and `--dry-run` shows the
@@ -258,7 +324,8 @@ kausa must:
   capped at about 1.5 MiB, annotations at 256 KiB). This holds for the Pod watch already; smaller
   pages for all three watches are a follow-up.
 - **The hard cost limit is the provider's.** kausa's budget starts over when kausa restarts, and a
-  kausa that restarts often can spend more than its daily cap. Operators should set a spending cap
+  kausa that restarts often can spend more than its daily cap; with `replicaCount: 2`, each
+  replica has its own, so a release can spend up to twice its caps while both run. Operators should set a spending cap
   or rate limit on the provider key.
 - **Events are visible to everyone who can read Events** in that namespace. An explanation only
   repeats names already visible on the object, and never a value that redaction removed. It
