@@ -271,18 +271,18 @@ cache.
 
 ## Redaction rules
 
-Implemented in `src/redact.rs` (second implementation weekend). `R001` works on structure: only
-the fields of [Data sent to the provider](data-sent-to-the-provider.md) are ever serialized. The
-others work on every name and free text that goes into a request (event messages, the waiting,
-scheduling and Pod status messages, the Pod status reason, log lines, probe paths, and node
-selector, affinity and toleration keys). First, text from the cluster that already looks like one of
-kausa's placeholders (`pod-1`, `deployment-2`) has its hyphen turned into an underscore, unless it
-is a real name kausa registered, so that the answer cannot map it to a real name. Then the rules
-run in this order: the secrets first (`R009`, `R007`, `R008`, `R006`, `R010`, `R011`), so that a
-known name inside a secret's key cannot break the key apart; then `R002`; then `R005`, `R004`,
-`R003`, `R013` and `R012`. Each match is replaced by a placeholder, such as `<redacted:jwt>`, and
-counted; the counts per rule are in the `request` and `explanation` log lines ([Command line and
-log format](command-line.md)).
+Implemented in `src/redact.rs` (second implementation weekend). `R001` works on structure: only the
+fields of [Data sent to the provider](data-sent-to-the-provider.md) are ever serialized. The others
+work on every name and free text that goes into a request (event messages, the waiting, scheduling
+and Pod status messages, the Pod status reason, log lines, probe paths, and node selector, affinity
+and toleration keys). First, text from the cluster that already looks like one of kausa's
+placeholders (`pod-1`, `deployment-2`) has its hyphen turned into an underscore, unless it is a real
+name kausa registered, so that the answer cannot map it to a real name. Then the rules run in this
+order: the secrets first (`R009`, `R014`, `R007`, `R008`, `R006`, `R010`, `R011`), so that a known
+name inside a secret's key cannot break the key apart; then `R002`; then `R005`, `R004`, `R003`,
+`R013` and `R012`. Each match is replaced by a placeholder, such as `<redacted:jwt>`, and counted;
+the counts per rule are in the `request` and `explanation` log lines ([Command line and log
+format](command-line.md)).
 
 | Id | What | How |
 |---|---|---|
@@ -299,6 +299,7 @@ log format](command-line.md)).
 | `R011` | Known token formats | GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` and 36 characters; `github_pat_`), GitLab (`glpat-`), Slack (`xoxa-`, `xoxb-`, `xoxp-`, `xoxo-`, `xoxs-`, `xoxr-`), AWS access key ids (`AKIA` or `ASIA` and 16 characters), Stripe (`sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`), OpenAI and Anthropic style keys (`sk-`, `sk-proj-`, `sk-ant-` and 20 or more characters), Google API keys (`AIza` and 35 characters). Hypothesis to verify against each issuer's documentation: that these are the current formats; `R012` catches most long tokens anyway |
 | `R012` | High-entropy strings | Runs of 32 or more characters from `[A-Za-z0-9+/_-]` and percent escapes (with `=` padding) that contain a letter and a digit and have a Shannon entropy of at least 4 bits per character, or 3 for a hexadecimal run (whose ceiling is 4). A run with two or more slashes (a path or URL) is judged segment by segment, with segments of 20 or more characters |
 | `R013` | Hostnames | Lowercase dotted names ending in a common top-level domain or an internal suffix (`.com`, `.net`, `.org`, `.io`, `.dev`, `.local`, `.lan`, `.internal`, `.corp`, `.svc`, `.svc.cluster.local`, `.home.arpa` and others); the host of any URL (`http://api.shop/`), whatever its suffix; and `name.other:port` (a Service in another namespace), unless its last label is a file extension (`main.rs:10`). The public registries and a few public hosts (`github.com`, `kubernetes.io`, `k8s.io`, the `example` domains) stay. Replaced by `host-1`, `host-2`…, never mapped back. Lowercase only, so Java packages and class names (`com.example.App`) stay |
+| `R014` | Query and fragment of URLs | Whatever follows the first `?` or `#` of a URL with a scheme (`http://`, `https://`, `postgres://`…), up to a quote, an angle bracket, a backtick, a backslash or whitespace: `http://<redacted:ip>:8080/ready?<redacted:query>#<redacted:fragment>`. The scheme, host (left to `R004` and `R013`) and path stay, and so does punctuation that ends a sentence after the URL. Runs right after `R009`, so a token in a query is counted here, not by `R008` or `R010`. A path without a scheme (`GET /orders?page=2`) keeps its query |
 
 Rules are tested with a corpus of invented lines that must be redacted and lines that must stay
 (ordinary log lines with numbers, timestamps, versions, durations, paths and public URLs), so that
@@ -321,9 +322,10 @@ format, never ones that were issued.
   not list (`karpenter.sh`) or under a subdomain of `kubernetes.io` or `k8s.io` is sent. A cloud
   provider's key (`cloud.google.com/…`, `eks.amazonaws.com/…`) becomes `host-N/…` (`R013`), never
   mapped back in the answer.
-- A kubelet `Unhealthy` note for a probe's connection error quotes the probe URL with its query
-  and fragment, redacted by patterns only, and a note may name a port by its name (hypothesis, not
-  reproduced), which the request's `port` never does; both are sent as event text ([0017. Send the model resource requests, probe handlers, image pull settings and
+- A kubelet `Unhealthy` note for a probe's connection error quotes the probe URL; its query and
+  fragment are redacted (`R014`), its path is not, and a note may name a port by its name
+  (hypothesis, not reproduced), which the request's `port` never does; both are sent as event text
+  ([0017. Send the model resource requests, probe handlers, image pull settings and
   an unschedulable Pod's scheduling keys, reduced and
   redacted](../adr/0017-richer-context-for-the-model.md)).
 - Detection covers common workload failures, not every problem: a misbehaving application whose

@@ -237,8 +237,9 @@ kausa must:
 - **Paths and keys leave as the workload wrote them.** A probe's path (for `D001` and `D006`)
   and an unschedulable Pod's node selector, affinity and toleration keys (for `D005`) are sent
   redacted, but a customer or host name in them that no pattern and no known name matches
-  reaches the provider, and so does a query value in the probe URL that a kubelet `Unhealthy`
-  note quotes on a connection error ([0017. Send the model resource requests, probe handlers,
+  reaches the provider; the query and fragment of a URL in event text or a log, such as the probe
+  URL that a kubelet `Unhealthy` note quotes on a connection error, are redacted (`R014`)
+  ([0017. Send the model resource requests, probe handlers,
   image pull settings and an unschedulable Pod's scheduling keys, reduced and
   redacted](docs/adr/0017-richer-context-for-the-model.md)). Their values are never sent, except
   the fixed `kubernetes.io/os` and `kubernetes.io/arch` ones.

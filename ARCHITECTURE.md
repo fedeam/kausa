@@ -54,7 +54,7 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `src/owner.rs` | ReplicaSet → Deployment and Job → CronJob, metadata only | A new owner hop (needs an ADR: a new permission) |
 | `src/explain.rs` | One incident to one explanation: log tail, fit to the token cap, dry-run or call, retry, validation, Event; the term guard (`Shared.term`) before the budget take, after the model's answer and before each write | The explanation pipeline changes |
 | `src/context.rs` | The context sent to the model: allowlisted fields only (`R001`), all names and text redacted | Anything sent to the model changes (needs an ADR) |
-| `src/redact.rs` | The redaction rules `R002`–`R013`, the mapping back of placeholders, and `restore_only`, which maps back only the names a notification may carry | A redaction rule is added or changed |
+| `src/redact.rs` | The redaction rules `R002`–`R014`, the mapping back of placeholders, and `restore_only`, which maps back only the names a notification may carry | A redaction rule is added or changed |
 | `src/prompt.rs` | The fixed request (system message, untrusted wrapper, answer schema) and the validation of the answer | The request or the answer's format changes |
 | `src/budget.rs` | Call budget per hour and per day, the deduplication cache (with each entry's notification text and whether the webhook acknowledged it) | Cost controls change |
 | `src/model.rs` | The client of the one OpenAI-compatible endpoint | The HTTP call changes |

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Redaction rule `R014`: the query and fragment of any URL with a scheme in event text or a log
+  become `?<redacted:query>` and `#<redacted:fragment>`, whatever they hold. It closes the gap
+  where a kubelet `Unhealthy` note quoted a probe URL's query as written
+  ([#48](https://github.com/fedeam/kausa/issues/48)).
+
 ## [0.4.0] - 2026-10-30
 
 The detection rules `D011` to `D014` (`D014`, a stuck rollout, from a new Deployment watch), a
