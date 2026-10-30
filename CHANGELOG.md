@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-30
+
+The detection rules `D011` to `D014` (`D014`, a stuck rollout, from a new Deployment watch), a
+richer context for the model (0017) and an optional standby replica, off by default (0019).
+Upgrade the image and the chart together, since the new image needs the chart's `deployments` rule
+to become Ready; the fingerprints of `D001` and `D003` change once, and the default memory limit is
+`192Mi`.
+
 ### Added
 
 - Detection rule `D011`, workload cannot create Pods: a Warning `FailedCreate` event about a
@@ -242,7 +250,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/fedeam/kausa/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fedeam/kausa/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fedeam/kausa/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fedeam/kausa/releases/tag/v0.1.0

@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.3.0](https://github.com/fedeam/kausa/releases/tag/v0.3.0),
+> Event on the failing workload. The latest release, [v0.4.0](https://github.com/fedeam/kausa/releases/tag/v0.4.0),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,9 +62,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa https://github.com/fedeam/kausa/releases/download/v0.3.0/kausa-0.3.0.tgz \
+helm install kausa https://github.com/fedeam/kausa/releases/download/v0.4.0/kausa-0.4.0.tgz \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.3.0 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.4.0 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -101,8 +101,9 @@ notifications](docs/reference/data-sent-in-notifications.md)).
 ## Design principles
 
 - **Read-only, except for its Events.** It reads Pods, Events, and the metadata of ReplicaSets
-  and Jobs to follow owners; `pods/log` only for crash loops, out-of-memory kills and failed
-  Jobs, and that can be turned off. It never reads Secrets or ConfigMaps, and the only thing it
+  and Jobs to follow owners, and Deployments for stuck rollouts (`--no-rollouts` turns that off);
+  `pods/log` only for crash loops, out-of-memory kills and failed Jobs, and that can be turned
+  off. It never reads Secrets or ConfigMaps, and the only thing it
   writes is Events and, with `--history`, its own Explanations and, with `--leader-lease` (the
   chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease
   ([Permissions](docs/reference/permissions.md)).
@@ -146,17 +147,18 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.3.0 is released (2026-10-29): `kausa run` watches Pods and Warning events, in the
-whole cluster or in a list of namespaces, groups failures by workload, builds a redacted context
-with the failed container's log, asks the model within a call budget (or logs the request with
-`--dry-run`), reuses explanations of repeated incidents, writes each explanation as an Event on
-the failing workload, and serves Prometheus metrics with `--metrics-address`; with `--history` it
-keeps each incident's explanations in an Explanation object, and with `--notify-url-file` it posts
-each new explanation to one webhook, both off by default; its log lines are JSON ([Command line and log
-format](docs/reference/command-line.md)). The image is published at `ghcr.io/fedeam/kausa`,
-signed with cosign and with SLSA build provenance, and the chart is attached to each [GitHub
-release](https://github.com/fedeam/kausa/releases), next to its signed checksums; how to verify
-them is in the release notes.
+Pre-alpha. v0.4.0 is released (2026-10-30): `kausa run` watches Pods, Warning events and
+Deployments, in the whole cluster or in a list of namespaces, groups failures by workload, builds a
+redacted context with the failed container's log, asks the model within a call budget (or logs the
+request with `--dry-run`), reuses explanations of repeated incidents, writes each explanation as an
+Event on the failing workload, and serves Prometheus metrics with `--metrics-address`; with
+`--history` it keeps each incident's explanations in an Explanation object, and with
+`--notify-url-file` it posts each new explanation to one webhook, both off by default; with the
+chart's `replicaCount: 2`, off by default, a standby replica takes over through a Lease; its log
+lines are JSON ([Command line and log format](docs/reference/command-line.md)). The image is
+published at `ghcr.io/fedeam/kausa`, signed with cosign and with SLSA build provenance, and the
+chart is attached to each [GitHub release](https://github.com/fedeam/kausa/releases), next to its
+signed checksums; how to verify them is in the release notes.
 
 What was measured, once each and on small setups: on five seeded failures with the same small
 local model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 calls and 5,128
@@ -184,8 +186,9 @@ cargo run --locked -- run --endpoint http://127.0.0.1:11434/v1 --model qwen3:0.6
 ```
 
 `kausa run` uses the current context of your kubeconfig and needs read access to Pods, their
-logs, Events, ReplicaSets and Jobs, and, with `--endpoint` and without `--no-events`, permission
-to create and patch Events; it has no flag to pick a context, so check
+logs, Events, ReplicaSets, Jobs and, unless `--no-rollouts`, Deployments, and, with `--endpoint`
+and without `--no-events`, permission to create and patch Events; it has no flag to pick a
+context, so check
 `kubectl config current-context` first, or follow [Try kausa against a cluster with a local
 model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of it.
 
@@ -217,19 +220,24 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   new explanation as JSON, to Slack or to Telegram ([Send notifications to Slack, Telegram or a
   webhook](docs/how-to/send-notifications.md); Telegram posted to for real on 2026-10-29, Slack
   not yet).
-- **v0.4** (in development, not released as of 2026-10-29): the detection rules `D011` (workload
+- **v0.4** (released as v0.4.0 on 2026-10-30): the detection rules `D011` (workload
   cannot create Pods), `D012` (volume claim cannot be provisioned), `D013` (autoscaler cannot get
   metrics) and `D014` (rollout does not progress: a Deployment past its progress deadline, from a
   watch on Deployments that is on by default; `kausa run --no-rollouts` and the chart's
   `rollouts=false` turn it off, and with it the chart's `list` and `watch` on Deployments)
   ([0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch that is
   on by default, and add nothing for StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)).
-  An optional standby replica, off by default: the chart's `replicaCount=2` runs a second Pod that
-  waits and takes over through a Lease when the one that acts stops (`kausa run
-  --leader-lease`), with `get` and `patch` on that one Lease as its only new permission ([0019.
-  Offer an optional standby replica that takes over through a chart-created Lease, elected by
-  kausa's own code](docs/adr/0019-high-availability.md)); its takeover times in kind are still to
-  be measured before the release.
+  A richer context for the model: resource requests, probe handlers, image pull settings and an
+  unschedulable Pod's scheduling keys, reduced and redacted ([0017. Send the model resource
+  requests, probe handlers, image pull settings and an unschedulable Pod's scheduling keys, reduced
+  and redacted](docs/adr/0017-richer-context-for-the-model.md)). An optional standby replica, off
+  by default: the chart's `replicaCount=2` runs a second Pod that waits and takes over through a
+  Lease when the one that acts stops (`kausa run --leader-lease`), with `get` and `patch` on that
+  one Lease as its only new permission ([0019. Offer an optional standby replica that takes over
+  through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md));
+  in kind, a frozen leader was replaced 30 to 35 seconds after its last renewal, within the
+  documented 40 seconds ([Standby and failover](docs/research/2026-10-29-standby-and-failover.md)).
+  Upgrade the image and the chart together; the chart's default memory limit is now `192Mi`.
 - **Next:** a test against a hosted provider, and a real post to a Slack workspace (the `slack`
   format is checked only against Slack's documentation so far).
 

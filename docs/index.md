@@ -9,7 +9,7 @@ ConfigMaps, never changes a workload, and writes nothing but its own Events (non
 `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease. With
 `--notify-url-file` (off by default) it also posts each new explanation to one webhook.
 
-Status as of 2026-10-29: **in development** (pre-alpha). The four implementation weekends of v0.1
+Status as of 2026-10-30: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
@@ -18,7 +18,9 @@ release, [v0.1.0](https://github.com/fedeam/kausa/releases/tag/v0.1.0), came out
 ([2026-10-28 — First release](journal/2026-10-28-first-release.md)), followed the same day by
 [v0.2.0](https://github.com/fedeam/kausa/releases/tag/v0.2.0), and on 2026-10-29 by
 [v0.3.0](https://github.com/fedeam/kausa/releases/tag/v0.3.0) ([2026-10-29 —
-Notifications](journal/2026-10-29-notifications.md), "v0.3.0"). The
+Notifications](journal/2026-10-29-notifications.md), "v0.3.0"), and on 2026-10-30 by
+[v0.4.0](https://github.com/fedeam/kausa/releases/tag/v0.4.0) ([2026-10-30 — Release
+v0.4.0](journal/2026-10-30-release-v0-4-0.md)). The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -36,13 +38,14 @@ v0.3.0 too, off by default; the kind test passed in both scopes with
 the `json` format against a fake receiver on 2026-10-29, the `telegram` format was posted to a
 real Telegram chat the same day, and the `slack` format has not been posted to a real Slack
 workspace yet ([2026-10-29 —
-Notifications](journal/2026-10-29-notifications.md)). In development for v0.4, not released as of
-2026-10-29: the detection rules `D011` to `D013`, and `D014`, a Deployment past its progress
+Notifications](journal/2026-10-29-notifications.md)). In v0.4.0: the detection rules `D011` to
+`D013`, and `D014`, a Deployment past its progress
 deadline, from a watch on Deployments that is on by default (`kausa run --no-rollouts`, the
 chart's `rollouts` value); the kind test passed in both scopes with it on 2026-10-29 (same
-journal, "stuck rollouts"). Also for v0.4, an optional standby replica (the chart's
-`replicaCount=2`, `kausa run --leader-lease`), whose kind test was left to GitHub Actions and whose
-takeover times are still to be measured (same journal, "a standby replica").
+journal, "stuck rollouts"). Also in v0.4.0, the richer context for the model of 0017 and an
+optional standby replica (the chart's `replicaCount=2`, `kausa run --leader-lease`), whose kind
+test was left to GitHub Actions (same journal, "a standby replica") and whose takeover times were
+measured in kind on 2026-10-29 ([Standby and failover](research/2026-10-29-standby-and-failover.md)).
 
 ## Key facts
 
@@ -134,7 +137,7 @@ checks](how-to/develop.md).
   webhook, as JSON, Slack or Telegram](adr/0015-notifications.md).
   [0016. Send each Pod's status reason and message to the model, redacted and
   bounded](adr/0016-send-the-pod-status-reason-and-message.md) came with v0.2.0's detection rules.
-  Accepted for v0.4: [0017. Send the model resource requests, probe handlers, image pull settings
+  Shipped in v0.4.0: [0017. Send the model resource requests, probe handlers, image pull settings
   and an unschedulable Pod's scheduling keys, reduced and
   redacted](adr/0017-richer-context-for-the-model.md), [0018. Explain a Deployment past its
   progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
@@ -149,4 +152,5 @@ checks](how-to/develop.md).
   [2026-10-27 — First run of the kind test](journal/2026-10-27-first-kind-run.md);
   [2026-10-27 — Publication](journal/2026-10-27-publication.md);
   [2026-10-28 — First release](journal/2026-10-28-first-release.md);
-  [2026-10-29 — Notifications](journal/2026-10-29-notifications.md).
+  [2026-10-29 — Notifications](journal/2026-10-29-notifications.md);
+  [2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md).

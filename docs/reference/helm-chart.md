@@ -2,7 +2,7 @@
 
 The values of the chart in `charts/kausa`, what each one turns into, and the objects it creates.
 
-Status as of 2026-10-29: the chart exists and is checked by `helm lint` and renders in CI, by a
+Status as of 2026-10-30: the chart exists and is checked by `helm lint` and renders in CI, by a
 server-side dry run against Kubernetes v1.36 (k3s), by one install in dry-run on that cluster
 (admitted under the restricted Pod Security Standard), and by the kind test, which installs it
 with an endpoint in each `rbac.scope` (both passed on 2026-10-28 on the maintainer's machine).
@@ -14,11 +14,11 @@ charts have neither and always create the ClusterRole. The `history` values, the
 CustomResourceDefinition and its reader role came with v0.3.0 too, and the kind test installs
 them in both scopes. So did the `notifications` values, which the kind test installs in the
 `json` format in both scopes. The `rollouts` value, the Deployment watch for stalled rollouts
-(`D014`), was added for v0.4 on 2026-10-29 and is checked by the renders and the kind test in both
+(`D014`), came with v0.4.0 (2026-10-30) and is checked by the renders and the kind test in both
 scopes ([0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch
 that is on by default, and add nothing for StatefulSets or
 DaemonSets](../adr/0018-stuck-rollouts.md)). The `replicaCount` value, a standby replica behind a
-Lease, was added for v0.4 on 2026-10-29 and is checked by the renders in both scopes; its kind
+Lease, came with v0.4.0 too and is checked by the renders in both scopes; its kind
 test (namespaced, two replicas) runs on GitHub Actions ([0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by
 kausa's own code](../adr/0019-high-availability.md)). Why it is built this way: [0010. Ship a static binary
 on distroless, with a Helm chart, built in CI and not published
