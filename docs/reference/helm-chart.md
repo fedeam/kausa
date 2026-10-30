@@ -106,7 +106,7 @@ but about kausa's own Lease, and is the same in both scopes.
 | `metrics.service.annotations` | `{}` | For example, scrape annotations |
 | `serviceAccount.name` | `""` | |
 | `serviceAccount.annotations` | `{}` | |
-| `resources` | requests `10m` CPU and `32Mi`, limits `200m` and `128Mi` | Room above the 2 MiB and 1m measured on a Raspberry Pi 4 in dry-run ([Memory and CPU on a Raspberry Pi 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)) |
+| `resources` | requests `10m` CPU and `32Mi`, limits `200m` and `192Mi` | Room above the 2 MiB and 1m measured on a Raspberry Pi 4 in dry-run ([Memory and CPU on a Raspberry Pi 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)) and above the 138.8 MiB peak of 10,000 unschedulable Pods at the largest scheduling record ([Richer context, measured](../research/2026-10-29-richer-context-measured.md)) |
 | `networkPolicy.enabled` | `false` | A NetworkPolicy with egress to DNS (port 53), the API server, the model endpoint and, with notifications, the webhook only, and ingress to the metrics port only |
 | `networkPolicy.apiServer.cidrs` | `[]` | The API server's addresses; required with the policy |
 | `networkPolicy.apiServer.port` | `6443` | |

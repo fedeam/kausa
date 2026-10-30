@@ -225,3 +225,17 @@ the same in both `rbac.scope`s, in `templates/leader-election.yaml`, outside `ka
 - **Documentation, in the implementation pull request:** Permissions, Helm chart, Command line and
   log format, Architecture, Install kausa with Helm (per-Pod scraping, alerts), SECURITY.md,
   ARCHITECTURE.md, AGENTS.md, `values.yaml`, `NOTES.txt`, `--help`, README and CHANGELOG.
+
+Update 2026-10-29: the condition of shipping is met in [Standby and
+failover](../research/2026-10-29-standby-and-failover.md), measured on kind. The standby used
+0.6 MiB of working set (4.4 MiB resident) and 0.07m CPU; the two replicas made 23.8 Lease calls a
+minute (0.4 a second). A deleted leader released the Lease within 0.09 s, and on one node its
+replacement Pod, not the standby, took it 0.44 to 0.80 s after the delete in five runs out of five;
+with the replacement held `Pending`, the standby took it in 1.5 to 4.2 s. A frozen leader was
+replaced 27.7 to 32.7 s after `SIGSTOP`, 30.0 to 35.14 s after its last renewal: once 0.14 s past
+the 35 s of Availability above, because the standby's 30-second check fell a millisecond short and
+waited one more read; the worst case is `LEASE_DURATION + 2 × RETRY_PERIOD`, as the unit tests
+assert. Under a metrics-port flood that kept the leader at its 200m limit, renewals were at most
+24 ms late, the standby never took over and failing Jobs were still explained, 4 to 5 s later;
+relisting 10,000 Pods, at most 165 ms late with a flood. The decision is unchanged; the bound
+of Availability above reads 40 s (`LEASE_DURATION + 2 × RETRY_PERIOD`) from here on.

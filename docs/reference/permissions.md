@@ -200,7 +200,7 @@ The chart's defaults:
 - `runAsNonRoot`, a numeric non-root user, `readOnlyRootFilesystem`, all capabilities dropped,
   `allowPrivilegeEscalation: false`, the `RuntimeDefault` seccomp profile.
 - Requests and limits for CPU and memory declared: requests of 10m and 32 MiB, limits of 200m
-  and 128 MiB, well above the 2 MiB and 1m measured on a Raspberry Pi 4 in dry-run ([Memory and
+  and 192 MiB, well above the 2 MiB and 1m measured on a Raspberry Pi 4 in dry-run ([Memory and
   CPU on a Raspberry Pi 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)), to leave
   room for larger clusters and for the explanation path.
 - The service account token is mounted, because kausa talks to the API server; the only other
