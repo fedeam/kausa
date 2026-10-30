@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where a kubelet `Unhealthy` note quoted a probe URL's query as written
   ([#48](https://github.com/fedeam/kausa/issues/48)).
 
+### Fixed
+
+- A `slack` notification could notify a whole channel: a real post on 2026-10-30 showed that Slack
+  turns a plain `@here` or `@channel` in the text into a mention, although kausa sends
+  `"parse": "none"` and no `link_names`. The Slack text now carries a word joiner (U+2060) after
+  every `@`, as the Telegram text does ([#45](https://github.com/fedeam/kausa/issues/45)).
+
 ## [0.4.0] - 2026-10-30
 
 The detection rules `D011` to `D014` (`D014`, a stuck rollout, from a new Deployment watch), a

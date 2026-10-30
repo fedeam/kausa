@@ -36,9 +36,11 @@ test passed in both scopes with it on 2026-10-28 (same journal, "explanation his
 notifications of 0015 (`kausa run --notify-url-file`, the chart's `notifications` values) are in
 v0.3.0 too, off by default; the kind test passed in both scopes with
 the `json` format against a fake receiver on 2026-10-29, the `telegram` format was posted to a
-real Telegram chat the same day, and the `slack` format has not been posted to a real Slack
-workspace yet ([2026-10-29 —
-Notifications](journal/2026-10-29-notifications.md)). In v0.4.0: the detection rules `D011` to
+real Telegram chat the same day, and the `slack` format to a real Slack incoming webhook on
+2026-10-30, where a plain `@here` and `@channel` notified the channel; the fix, a word joiner after
+each `@`, is unreleased ([2026-10-29 — Notifications](journal/2026-10-29-notifications.md),
+[2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md)).
+In v0.4.0: the detection rules `D011` to
 `D013`, and `D014`, a Deployment past its progress
 deadline, from a watch on Deployments that is on by default (`kausa run --no-rollouts`, the
 chart's `rollouts` value); the kind test passed in both scopes with it on 2026-10-29 (same

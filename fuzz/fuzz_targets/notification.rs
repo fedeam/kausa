@@ -1,7 +1,7 @@
 //! The bodies of a notification (src/notification.rs) on any texts a tenant could shape through
 //! the model: rendering them must never panic, the plain text stays within 4,000 UTF-16 units, the
-//! Slack text within 20,000 with no `<` or `>` left, Telegram's text within 4,000 with a word
-//! joiner after every `@` and `/`, and the `json` body parses back
+//! Slack text within 20,000 with no `<` or `>` left and a word joiner after every `@`, Telegram's
+//! text within 4,000 with one after every `@` and `/`, and the `json` body parses back
 //! (docs/adr/0015-notifications.md). Chat ids are parsed from any text too.
 #![no_main]
 
@@ -68,7 +68,23 @@ fuzz_target!(|input: Input| {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&");
-    assert_eq!(unescaped, text, "the Slack text is not the escaped text");
+    // Without the joiner after each '@', a prefix of the shared text.
+    let mut plain = String::with_capacity(unescaped.len());
+    let mut chars = unescaped.chars();
+    while let Some(c) = chars.next() {
+        plain.push(c);
+        if c == '@' {
+            assert_eq!(
+                chars.next(),
+                Some(JOINER),
+                "an '@' without a joiner in Slack's text"
+            );
+        }
+    }
+    assert!(
+        text.starts_with(&plain),
+        "the Slack text is not the escaped shared text"
+    );
 
     let json = notification::json_body(&notice, "0.2.0");
     let parsed: Value = serde_json::from_str(&json.to_string()).expect("the json body parses");

@@ -259,11 +259,12 @@ kausa must:
   is the model's text, which can quote the redacted context it was given (log and event text,
   probe paths, label keys), up to the explanation's caps. kausa cannot tell a quote from a summary.
 - **A notification can still mention someone or show a link.** The Slack text escapes `&`, `<`
-  and `>`, sends no `link_names` and asks for `"parse": "none"`; the Telegram text has no markup
-  and carries an invisible word joiner after every `@` and `/`. Both turn previews off. Slack's
-  and Telegram's documentation say this should stop mentions, commands and links, but nothing has
-  been posted to a real workspace or chat yet, Slack does not say that webhooks honour `parse`, and
-  whether Telegram still links a URL whose slashes carry a joiner was not checked ([Data sent in
+  and `>`, sends no `link_names`, asks for `"parse": "none"` and carries an invisible word joiner
+  after every `@`; the Telegram text has no markup and carries one after every `@` and `/`. Both
+  turn previews off. A real Slack post on 2026-10-30 showed a URL as plain text but a plain
+  `@here` and `@channel` notifying the channel; a second one, with the joiner (after v0.4.0),
+  showed them as plain text. In Telegram, a real post showed the joiners keeping mentions and
+  commands inert and a URL staying a link ([Data sent in
   notifications](docs/reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
   Injected text can also make a notification misleading, as with an Event.
 - **The budget is shared.** The call budget and the queue are one per release, shared by every

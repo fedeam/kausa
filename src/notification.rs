@@ -16,8 +16,8 @@ pub const MAX_TEXT_UNITS: usize = 4000;
 pub const MAX_SLACK_UNITS: usize = 5 * MAX_TEXT_UNITS;
 // Checked when it compiles: the escaped text stays under the length at which Slack truncates.
 const _: () = assert!(MAX_SLACK_UNITS < 40_000);
-/// U+2060, WORD JOINER, which Telegram's text carries after every `@` and `/`: invisible, and one
-/// UTF-16 code unit.
+/// U+2060, WORD JOINER, which Telegram's text carries after every `@` and `/`, and Slack's after
+/// every `@`: invisible, and one UTF-16 code unit.
 pub const JOINER: char = '\u{2060}';
 
 /// What a notification says about one new explanation. The names are the real ones of the
@@ -99,8 +99,9 @@ pub fn json_body(n: &Notice, kausa_version: &str) -> Value {
 }
 
 /// The plain text that `slack` and `telegram` share, cut on a character boundary to at most
-/// `MAX_TEXT_UNITS` UTF-16 code units, with no marker. Telegram's text then gets its joiners
-/// ([`telegram_text`]).
+/// `MAX_TEXT_UNITS` UTF-16 code units, with no marker: what the tests and the fuzz target compare
+/// each one with once its joiners ([`telegram_text`], [`slack_text`]) are taken out.
+#[allow(dead_code)]
 pub fn text(n: &Notice) -> String {
     cut(render(n), char::len_utf16)
 }
@@ -111,8 +112,24 @@ pub fn text(n: &Notice) -> String {
 /// it (seen in a real post on 2026-10-29; a URL stays a link; ADR 0015). A prefix of [`text`] once
 /// each joiner after an `@` or a `/` is taken out.
 pub fn telegram_text(n: &Notice) -> String {
+    joined(n, |c| matches!(c, '@' | '/'))
+}
+
+/// The text Slack gets before its escaping: the rendering cut so that it stays within
+/// `MAX_TEXT_UNITS` UTF-16 code units with its joiners, then a `JOINER` after every `@`. A real
+/// post on 2026-10-30 showed that `"parse": "none"` does not keep Slack from turning a plain
+/// `@here` or `@channel` into a mention that notifies the channel; a second one, with the joiner,
+/// showed `@here`, `@channel` and `@everyone` as plain text (ADR 0015). A prefix of [`text`] once
+/// each joiner after an `@` is taken out.
+pub fn slack_text(n: &Notice) -> String {
+    joined(n, |c| c == '@')
+}
+
+/// The rendering cut so that it stays within `MAX_TEXT_UNITS` UTF-16 code units once a `JOINER`
+/// follows every character `is_joined` picks, with those joiners.
+fn joined(n: &Notice, is_joined: impl Fn(char) -> bool) -> String {
     let cut = cut(render(n), |c| c.len_utf16() + usize::from(is_joined(c)));
-    let mut joined = String::with_capacity(cut.len() + 3 * cut.matches(is_joined).count());
+    let mut joined = String::with_capacity(cut.len() + 3 * cut.matches(&is_joined).count());
     for c in cut.chars() {
         joined.push(c);
         if is_joined(c) {
@@ -120,11 +137,6 @@ pub fn telegram_text(n: &Notice) -> String {
         }
     }
     joined
-}
-
-/// The characters that Telegram's text carries a `JOINER` after.
-fn is_joined(c: char) -> bool {
-    matches!(c, '@' | '/')
 }
 
 /// The whole text, before any cut.
@@ -164,11 +176,11 @@ fn cut(mut text: String, cost: impl Fn(char) -> usize) -> String {
     text
 }
 
-/// The `slack` body: the text, cut first and then escaped, with formatting, previews and the
-/// turning of plain URLs into links (`"parse": "none"`) off.
+/// The `slack` body: the text with its joiners, cut first and then escaped, with formatting,
+/// previews and the turning of plain URLs into links (`"parse": "none"`) off.
 pub fn slack_body(n: &Notice) -> Value {
     json!({
-        "text": escape(&text(n)),
+        "text": escape(&slack_text(n)),
         "mrkdwn": false,
         "unfurl_links": false,
         "unfurl_media": false,
@@ -311,13 +323,13 @@ mod tests {
         })
     }
 
-    /// Telegram's text without the one joiner after each `@` and `/`; a joiner anywhere else stays.
-    fn unjoin(text: &str) -> String {
+    /// The text without the one joiner after each of `joined`; a joiner anywhere else stays.
+    fn unjoin(text: &str, joined: &[char]) -> String {
         let mut plain = String::with_capacity(text.len());
         let mut chars = text.chars().peekable();
         while let Some(c) = chars.next() {
             plain.push(c);
-            if c == '@' || c == '/' {
+            if joined.contains(&c) {
                 assert_eq!(
                     chars.next(),
                     Some(JOINER),
@@ -335,7 +347,7 @@ mod tests {
             .to_owned()
     }
 
-    fn slack_text(n: &Notice) -> String {
+    fn slack_of(n: &Notice) -> String {
         slack_body(n)["text"]
             .as_str()
             .expect("the Slack text is a string")
@@ -350,7 +362,7 @@ mod tests {
             uncut(n).starts_with(&t),
             "{case}: not a prefix of the rendering"
         );
-        let slack = slack_text(n);
+        let slack = slack_of(n);
         assert!(
             units(&slack) <= MAX_SLACK_UNITS,
             "{case}: {}",
@@ -358,7 +370,16 @@ mod tests {
         );
         assert!(!slack.contains('<') && !slack.contains('>'), "{case}");
         assert!(whole_entities(&slack), "{case}: a split entity");
-        assert_eq!(unescape(&slack), t, "{case}: escaped before the cut");
+        // Every '@' carries a joiner, and without them the unescaped text is a prefix of the cut
+        // text, or the cut text itself when it has none.
+        let plain = unjoin(&unescape(&slack), &['@']);
+        assert!(
+            t.starts_with(&plain),
+            "{case}: escaped before the cut, or not a prefix of the cut text"
+        );
+        if !t.contains('@') {
+            assert_eq!(plain, t, "{case}");
+        }
         let telegram = telegram_of(n);
         assert!(
             units(&telegram) <= MAX_TEXT_UNITS,
@@ -367,7 +388,7 @@ mod tests {
         );
         // Every '@' and '/' carries a joiner, and without them the text is a prefix of the cut
         // text, or the cut text itself when it has neither.
-        let plain = unjoin(&telegram);
+        let plain = unjoin(&telegram, &['@', '/']);
         assert!(
             t.starts_with(&plain),
             "{case}: not a prefix of the cut text"
@@ -488,7 +509,7 @@ mod tests {
     fn slack_escapes_ampersands_and_angle_brackets_in_every_field() {
         let hostile = "a&b <redacted:ip> <!channel> <https://evil.example|click> x>y";
         let n = filled(hostile, 2);
-        let slack = slack_text(&n);
+        let slack = slack_of(&n);
         assert!(!slack.contains('<') && !slack.contains('>'), "{slack}");
         assert!(slack.contains("&lt;redacted:ip&gt;"), "{slack}");
         assert!(slack.contains("&lt;!channel&gt;"), "{slack}");
@@ -501,7 +522,7 @@ mod tests {
         // Only those three characters: quotes stay.
         let mut quoted = notice();
         quoted.summary = r#"it's "quoted""#.into();
-        assert!(slack_text(&quoted).contains(r#"it's "quoted""#));
+        assert!(slack_of(&quoted).contains(r#"it's "quoted""#));
         // The other bodies keep the text as it is, but for Telegram's joiners.
         assert!(text(&n).contains("<redacted:ip>"));
         assert_eq!(
@@ -568,7 +589,7 @@ mod tests {
         n.summary = "&".repeat(5000);
         let t = text(&n);
         assert_eq!(units(&t), MAX_TEXT_UNITS);
-        let slack = slack_text(&n);
+        let slack = slack_of(&n);
         let header = "kausa: crash loop (D001) in shop, Deployment web\n";
         assert_eq!(
             units(&slack),
@@ -579,7 +600,7 @@ mod tests {
         for c in ["&", "<", ">"] {
             let n = filled(&c.repeat(MAX_TEXT_UNITS), 5);
             check_bodies(&n, c);
-            assert!(units(&slack_text(&n)) <= MAX_SLACK_UNITS);
+            assert!(units(&slack_of(&n)) <= MAX_SLACK_UNITS);
         }
     }
 
@@ -604,9 +625,15 @@ mod tests {
                 GOLDEN_TEXT.replace("It is started with a flag it does not know.", joined);
             assert_eq!(telegram_of(&n), expected, "{cause}");
             // The same text once the joiners are taken out, and only Telegram's has them.
-            assert_eq!(unjoin(&telegram_of(&n)), text(&n));
+            assert_eq!(unjoin(&telegram_of(&n), &['@', '/']), text(&n));
             assert!(text(&n).contains(cause));
-            assert!(!slack_text(&n).contains(JOINER));
+            // Slack's has them after '@' only.
+            assert_eq!(
+                slack_of(&n).contains(JOINER),
+                cause.contains('@'),
+                "{cause}"
+            );
+            assert!(!slack_of(&n).contains("/\u{2060}"), "{cause}");
             assert_eq!(json_body(&n, "0.2.0")["explanation"]["cause"], cause);
             check_bodies(&n, cause);
         }
@@ -619,6 +646,23 @@ mod tests {
         n.cause = "@\u{2060}x".into();
         assert!(telegram_of(&n).contains("@\u{2060}\u{2060}x"));
         check_bodies(&n, "a joiner in the text");
+    }
+
+    #[test]
+    fn slack_gets_a_word_joiner_after_every_at_sign() {
+        // Slack turned a plain @here and @channel into mentions in a real post on 2026-10-30,
+        // although the body says "parse": "none".
+        let mut n = notice();
+        n.summary = "@here @channel @everyone <!here> and https://example.com/a".into();
+        let slack = slack_of(&n);
+        assert!(
+            slack.contains(
+                "@\u{2060}here @\u{2060}channel @\u{2060}everyone &lt;!here&gt; and https://example.com/a"
+            ),
+            "{slack}"
+        );
+        assert!(!slack.contains("@here") && !slack.contains("@channel"));
+        check_bodies(&n, "slack mentions");
     }
 
     #[test]
@@ -654,10 +698,10 @@ mod tests {
         let room = MAX_TEXT_UNITS - units(&uncut(&n)) + n.summary.len();
         n.summary = "@".repeat(room / 2);
         assert_eq!(units(&uncut(&n)) + room / 2, MAX_TEXT_UNITS - room % 2);
-        assert_eq!(unjoin(&telegram_of(&n)), uncut(&n));
+        assert_eq!(unjoin(&telegram_of(&n), &['@', '/']), uncut(&n));
         n.summary.push('@');
-        assert!(uncut(&n).starts_with(&unjoin(&telegram_of(&n))));
-        assert_ne!(unjoin(&telegram_of(&n)), uncut(&n));
+        assert!(uncut(&n).starts_with(&unjoin(&telegram_of(&n), &['@', '/'])));
+        assert_ne!(unjoin(&telegram_of(&n), &['@', '/']), uncut(&n));
     }
 
     #[test]

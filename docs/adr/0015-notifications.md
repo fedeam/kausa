@@ -225,3 +225,13 @@ Telegram detects: without the joiners, a mention, a bot command and a URL; with 
 The joiners do keep a `@username` from being a mention and a `/command@bot` from being a command; a
 URL whose slashes carry a joiner is still a link (previews stay off). Slack has still not been
 posted to.
+
+Update 2026-10-30: kausa v0.4.0, run the same way, posted one `slack` notification to a real
+incoming webhook: Slack answered `200`. The model's answer carried `@here`, `@channel`,
+`<!everyone>`, `<!channel>` and a URL. The URL was plain text, so the webhook honours `"parse":
+"none"`. The escaped `<!everyone>` and `<!channel>` showed as `!everyone` and `!channel`. But the
+plain `@here` and `@channel` became mentions that notified the channel, although kausa sends no
+`link_names` and asks for `"parse": "none"`: the documentation read on 2026-10-28 did not hold for
+webhooks. The `slack` text therefore gets the Telegram fix: a word joiner after every `@`, added
+after the cut, which the cut counts. A second post the same day, from a build with the joiner,
+showed `@here`, `@channel` and `@everyone` as plain text, not as mentions.
