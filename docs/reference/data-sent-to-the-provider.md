@@ -93,9 +93,9 @@ estimate of the request, before it is sent. The model gets no tools and no funct
   formats, high-entropy strings and hostnames.
 - The cluster's name, its API server address and kausa's configuration.
 
-A known gap, older than 0017: when a probe fails with a connection error, the kubelet's
-`Unhealthy` event quotes the probe's URL with the Pod's address, path, query and fragment, and that
-event message is redacted by patterns only, so a query value leaves unless a rule matches it. A
+When a probe fails with a connection error, the kubelet's `Unhealthy` event quotes the probe's URL
+with the Pod's address, path, query and fragment; the address is redacted (`R004`), and so are the
+query and fragment of any URL in event text or a log (`R014`). A
 path or key leaves as the workload's author wrote it unless a pattern or a known name matches it
 ([Detection and redaction rules](rules.md#limits)).
 
