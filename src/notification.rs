@@ -99,9 +99,9 @@ pub fn json_body(n: &Notice, kausa_version: &str) -> Value {
 }
 
 /// The plain text that `slack` and `telegram` share, cut on a character boundary to at most
-/// `MAX_TEXT_UNITS` UTF-16 code units, with no marker: what the tests compare each one with once
-/// its joiners ([`telegram_text`], [`slack_text`]) are taken out.
-#[cfg(test)]
+/// `MAX_TEXT_UNITS` UTF-16 code units, with no marker: what the tests and the fuzz target compare
+/// each one with once its joiners ([`telegram_text`], [`slack_text`]) are taken out.
+#[allow(dead_code)]
 pub fn text(n: &Notice) -> String {
     cut(render(n), char::len_utf16)
 }
@@ -118,8 +118,9 @@ pub fn telegram_text(n: &Notice) -> String {
 /// The text Slack gets before its escaping: the rendering cut so that it stays within
 /// `MAX_TEXT_UNITS` UTF-16 code units with its joiners, then a `JOINER` after every `@`. A real
 /// post on 2026-10-30 showed that `"parse": "none"` does not keep Slack from turning a plain
-/// `@here` or `@channel` into a mention that notifies the channel; the joiner is meant to (ADR
-/// 0015). A prefix of [`text`] once each joiner after an `@` is taken out.
+/// `@here` or `@channel` into a mention that notifies the channel; a second one, with the joiner,
+/// showed `@here`, `@channel` and `@everyone` as plain text (ADR 0015). A prefix of [`text`] once
+/// each joiner after an `@` is taken out.
 pub fn slack_text(n: &Notice) -> String {
     joined(n, |c| c == '@')
 }

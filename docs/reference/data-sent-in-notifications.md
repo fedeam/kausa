@@ -104,7 +104,7 @@ Confidence: medium · fingerprint 5d0c2b7e9a1f4c38
   two).
 - For `slack` only, U+2060 (WORD JOINER) follows every `@`, since a real post on 2026-10-30 showed
   that Slack turns a plain `@here` or `@channel` into a mention that notifies the channel, with
-  `"parse": "none"` too (that the joiner stops it is a hypothesis until the next real post). The
+  `"parse": "none"` too; a second post, with the joiner, showed them as plain text. The
   joiners are added after the cut, and the cut counts them. Then `&`, `<` and `>` become `&amp;`,
   `&lt;` and `&gt;`, and nothing else is escaped. The Slack text is therefore at most 20,000
   units, and an entity is never cut in two.
@@ -225,8 +225,8 @@ the Telegram joiners, the 3-second interval for `telegram`, and `"parse": "none"
 
 What follows for a reader: in Slack, a real post on 2026-10-30 showed a URL as plain text, and the
 escaped `<!everyone>` and `<!channel>` as `!everyone` and `!channel`, but a plain `@here` and
-`@channel` notified the channel. kausa now puts a word joiner after every `@`; that this stops
-the mentions stays listed under "What kausa cannot promise" in the [Security
-policy](../../SECURITY.md) until the next real post. In Telegram, a real post on
+`@channel` notified the channel. kausa now puts a word joiner after every `@`, and a second real
+post the same day showed `@here`, `@channel` and `@everyone` as plain text ([Security
+policy](../../SECURITY.md), "What kausa cannot promise"). In Telegram, a real post on
 2026-10-29 showed it: with the joiners, Telegram found no mention and no bot command in the text,
 only the URL, which stays a link (without the joiners it found all three).

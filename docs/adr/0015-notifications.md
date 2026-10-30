@@ -233,5 +233,5 @@ incoming webhook: Slack answered `200`. The model's answer carried `@here`, `@ch
 plain `@here` and `@channel` became mentions that notified the channel, although kausa sends no
 `link_names` and asks for `"parse": "none"`: the documentation read on 2026-10-28 did not hold for
 webhooks. The `slack` text therefore gets the Telegram fix: a word joiner after every `@`, added
-after the cut, which the cut counts. That the joiner stops Slack's mentions is a hypothesis until
-the next real post.
+after the cut, which the cut counts. A second post the same day, from a build with the joiner,
+showed `@here`, `@channel` and `@everyone` as plain text, not as mentions.

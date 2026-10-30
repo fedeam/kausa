@@ -262,8 +262,8 @@ kausa must:
   and `>`, sends no `link_names`, asks for `"parse": "none"` and carries an invisible word joiner
   after every `@`; the Telegram text has no markup and carries one after every `@` and `/`. Both
   turn previews off. A real Slack post on 2026-10-30 showed a URL as plain text but a plain
-  `@here` and `@channel` notifying the channel, which the joiner is meant to stop (not yet seen in
-  a real post); in Telegram, a real post showed the joiners keeping mentions and commands inert
+  `@here` and `@channel` notifying the channel; a second one, with the joiner (after v0.4.0),
+  showed them as plain text. In Telegram, a real post showed the joiners keeping mentions and commands inert
   and a URL staying a link ([Data sent in
   notifications](docs/reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
   Injected text can also make a notification misleading, as with an Event.

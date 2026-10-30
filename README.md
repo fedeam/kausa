@@ -238,8 +238,9 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   in kind, a frozen leader was replaced 30 to 35 seconds after its last renewal, within the
   documented 40 seconds ([Standby and failover](docs/research/2026-10-29-standby-and-failover.md)).
   Upgrade the image and the chart together; the chart's default memory limit is now `192Mi`.
-- **Next:** a test against a hosted provider; a second real Slack post, to see that the word
-  joiner after each `@` (added after v0.4.0) keeps `@here` and `@channel` from notifying.
+- **Next:** a test against a hosted provider, and a release with the Slack fix: in v0.4.0 a plain
+  `@here` or `@channel` in a Slack notification notifies the channel; with the word joiner after
+  each `@`, a real post showed them as plain text.
 
 ## Documentation
 
