@@ -2,7 +2,7 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-30: what v0.4.0 does, with the namespaced mode, the explanation history and
+Status as of 2026-10-30: what v0.4.1 does, with the namespaced mode, the explanation history and
 the notifications of v0.3.0 (`--namespace`, `--history`, `--history-days` and the `--notify-*`
 flags) and the Deployment watch and the standby of v0.4.0 (`--no-rollouts` and
 `--leader-lease`). `kausa run` detects and groups failures and logs incidents; with `--endpoint`

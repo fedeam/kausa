@@ -3,8 +3,8 @@ name: kausa
 description: A tiny Kubernetes controller that explains failing workloads with an LLM
 type: application
 # The same version as the binary (Cargo.toml); the release checks that they match.
-version: 0.4.0
-appVersion: 0.4.0
+version: 0.4.1
+appVersion: 0.4.1
 # k8s-openapi is built for the API of Kubernetes 1.32 (Cargo.toml); kausa uses only stable APIs.
 kubeVersion: ">=1.32.0-0"
 home: https://github.com/fedeam/kausa

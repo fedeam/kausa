@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.4.0](https://github.com/fedeam/kausa/releases/tag/v0.4.0),
+> Event on the failing workload. The latest release, [v0.4.1](https://github.com/fedeam/kausa/releases/tag/v0.4.1),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,9 +62,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa https://github.com/fedeam/kausa/releases/download/v0.4.0/kausa-0.4.0.tgz \
+helm install kausa https://github.com/fedeam/kausa/releases/download/v0.4.1/kausa-0.4.1.tgz \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.4.0 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.4.1 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -147,7 +147,7 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.4.0 is released (2026-10-30): `kausa run` watches Pods, Warning events and
+Pre-alpha. v0.4.1 is released (2026-10-30): `kausa run` watches Pods, Warning events and
 Deployments, in the whole cluster or in a list of namespaces, groups failures by workload, builds a
 redacted context with the failed container's log, asks the model within a call budget (or logs the
 request with `--dry-run`), reuses explanations of repeated incidents, writes each explanation as an
@@ -220,7 +220,7 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   default: `kausa run --notify-url-file` and the chart's `notifications.enabled=true` post each
   new explanation as JSON, to Slack or to Telegram ([Send notifications to Slack, Telegram or a
   webhook](docs/how-to/send-notifications.md); Telegram posted to for real on 2026-10-29, Slack
-  on 2026-10-30, where a plain `@here` still notified the channel; fixed after v0.4.0).
+  on 2026-10-30, where a plain `@here` still notified the channel; fixed in v0.4.1).
 - **v0.4** (released as v0.4.0 on 2026-10-30): the detection rules `D011` (workload
   cannot create Pods), `D012` (volume claim cannot be provisioned), `D013` (autoscaler cannot get
   metrics) and `D014` (rollout does not progress: a Deployment past its progress deadline, from a
@@ -239,9 +239,9 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   in kind, a frozen leader was replaced 30 to 35 seconds after its last renewal, within the
   documented 40 seconds ([Standby and failover](docs/research/2026-10-29-standby-and-failover.md)).
   Upgrade the image and the chart together; the chart's default memory limit is now `192Mi`.
-- **Next:** a release with the Slack fix: in v0.4.0 a plain
-  `@here` or `@channel` in a Slack notification notifies the channel; with the word joiner after
-  each `@`, a real post showed them as plain text.
+- **v0.4.1** (2026-10-30): the Slack fix, a word joiner after every `@` of the text, since a
+  real post showed a plain `@here` or `@channel` in v0.4.0's Slack text notifying the channel; and
+  the redaction rule `R014`, which drops the query and fragment of URLs in event text and logs.
 
 ## Documentation
 

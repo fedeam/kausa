@@ -8,7 +8,7 @@ Status as of 2026-10-29: released in v0.3.0, off by default. The
 posted to a real Telegram chat on 2026-10-29 (the joiners kept mentions and bot commands inert;
 URLs stay links). The `slack` format was posted to a real incoming webhook on 2026-10-30: a URL
 stayed plain text, but **a plain `@here` or `@channel` in v0.4.0's Slack text notifies the
-channel**; the next release puts a word joiner after every `@`, and a real post with it showed
+channel**; v0.4.1 puts a word joiner after every `@`, and a real post with it showed
 them as plain text
 ([Data sent in notifications](../reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
 Why it works this way: [0015. Post each new explanation to one optional webhook, as JSON, Slack or

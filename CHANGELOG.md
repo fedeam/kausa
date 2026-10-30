@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-30
+
+A fix for Slack notifications, which in v0.4.0 could notify a whole channel, and a stricter
+redaction of URLs. Nothing to change in values or permissions.
+
 ### Added
 
 - Redaction rule `R014`: the query and fragment of any URL with a scheme in event text or a log
@@ -264,7 +269,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.4.0...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/fedeam/kausa/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/fedeam/kausa/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fedeam/kausa/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fedeam/kausa/compare/v0.1.0...v0.2.0
