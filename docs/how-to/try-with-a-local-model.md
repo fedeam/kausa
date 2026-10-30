@@ -8,7 +8,7 @@ Status as of 2026-10-26: what the code of the third implementation weekend can d
 incident, the redacted request and the model's explanation, and writes the explanation as an Event
 on the failing workload unless `--no-events`. Tested on 2026-10-26
 with Ollama 0.9.2 and the model `qwen3:0.6b` against Kubernetes v1.36.5 (k3s). The Deployment
-watch, added for v0.4 on 2026-10-29, adds a path to the proxy of step 2 (two with
+watch, released in v0.4.0, adds a path to the proxy of step 2 (two with
 `--namespace`); kausa ran through that proxy in kind on 2026-10-29 (below).
 
 ## Before you start

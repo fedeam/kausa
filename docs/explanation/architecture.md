@@ -18,7 +18,7 @@ for v0.1 and is updated as the code lands. Why kausa exists and what it leaves o
 incident](../adr/0001-scope-and-positioning.md). Status as of 2026-10-29, the namespaced mode
 is released in v0.3.0 ([0013. Offer a namespaced install mode: one watch pair
 and one Role per listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)).
-For v0.4 (2026-10-29), a third watch, on Deployments, explains rollouts past their progress
+Since v0.4.0 (2026-10-30), a third watch, on Deployments, explains rollouts past their progress
 deadline (`D014`) ([0018. Explain a Deployment past its progress deadline (`D014`) from a
 Deployment watch that is on by default, and add nothing for StatefulSets or
 DaemonSets](../adr/0018-stuck-rollouts.md)), and an optional standby replica takes over through a

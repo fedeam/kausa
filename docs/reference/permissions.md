@@ -2,14 +2,14 @@
 
 The Kubernetes API permissions kausa's chart grants, and the ones it never asks for.
 
-Status as of 2026-10-29: the chart in `charts/kausa` grants this table, `pods/log` only when
+Status as of 2026-10-30: the chart in `charts/kausa` grants this table, `pods/log` only when
 kausa explains incidents (an endpoint or dry-run) with log collection on, and the Event writes
 only with an endpoint, outside dry-run, unless they are turned off, and the `explanations` row only
 while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; since v0.3.0), and the
 `deployments` row while Deployments are watched for stalled rollouts (`rollouts`, on by default;
-added for v0.4 on 2026-10-29), and, only with `replicaCount: 2`, `get` and `patch` on one Lease in
+since v0.4.0), and, only with `replicaCount: 2`, `get` and `patch` on one Lease in
 kausa's own namespace ([In kausa's own namespace, with two
-replicas](#in-kausas-own-namespace-with-two-replicas); added for v0.4 on 2026-10-29) ([Helm
+replicas](#in-kausas-own-namespace-with-two-replicas); since v0.4.0) ([Helm
 chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
 namespaces only (`namespaced`, since v0.3.0; see [Where the permissions
 apply](#where-the-permissions-apply)). Why it is this list: [0009. Run with read-only permissions
@@ -90,7 +90,7 @@ without it. It changes where the rows above apply, never which rows there are:
 
 ## In kausa's own namespace, with two replicas
 
-With `replicaCount: 2` (since v0.4; off by default), the chart renders
+With `replicaCount: 2` (since v0.4.0; off by default), the chart renders
 `templates/leader-election.yaml`: a Lease `<full name>-leader` in the release namespace, with the
 chart's labels and `spec: {}`, a Role of the same name with one rule, and a RoleBinding of the same
 name to kausa's service account. kausa runs with `--leader-lease <release namespace>/<full

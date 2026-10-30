@@ -3,7 +3,7 @@
 Install the released chart, which runs the published image, first in dry-run and then pointed at
 a model.
 
-Status as of 2026-10-29: the v0.1.0 chart from the GitHub release was installed in dry-run in kind
+Status as of 2026-10-30: the v0.1.0 chart from the GitHub release was installed in dry-run in kind
 (Kubernetes v1.37) with the published image, on 2026-10-28. The chart in the repository was
 checked with a server-side dry run against Kubernetes v1.36, installed in dry-run on a Raspberry
 Pi 4 node, and installed with an endpoint by the kind test (`tests/e2e/run.sh`, passed on
@@ -14,12 +14,11 @@ cluster-wide](../adr/0013-namespaced-install-mode.md)). It also adds the explana
 (`history.enabled`, off by default), which the kind test installed
 in both scopes on 2026-10-28 ([Keep the history of explanations](#keep-the-history-of-explanations)),
 and notifications (`notifications.enabled`, off by default; [Send notifications to Slack, Telegram
-or a webhook](send-notifications.md)). The chart in the repository adds, for v0.4 (not released as
-of 2026-10-29), a watch on Deployments for stalled rollouts (`rollouts`, on by default), which the
-kind test installed in both scopes on 2026-10-29 ([Upgrade to the Deployment
-watch](#upgrade-to-the-deployment-watch)), and an optional standby replica (`replicaCount: 2`,
-off by default), whose renders are checked in both scopes and whose kind test runs on GitHub
-Actions ([Run a standby replica](#run-a-standby-replica)).
+or a webhook](send-notifications.md)). The v0.4.0 chart (2026-10-30) adds a watch on Deployments
+for stalled rollouts (`rollouts`, on by default), which the kind test installed in both scopes on
+2026-10-29 ([Upgrade to the Deployment watch](#upgrade-to-the-deployment-watch)), and an optional
+standby replica (`replicaCount: 2`, off by default), whose renders are checked in both scopes and
+whose kind test runs on GitHub Actions ([Run a standby replica](#run-a-standby-replica)).
 
 ## Before you start
 
@@ -41,7 +40,7 @@ Actions ([Run a standby replica](#run-a-standby-replica)).
    image's signature and provenance and the chart's checksum with cosign and the GitHub CLI.
 
    ```sh
-   CHART=https://github.com/fedeam/kausa/releases/download/v0.3.0/kausa-0.3.0.tgz
+   CHART=https://github.com/fedeam/kausa/releases/download/v0.4.0/kausa-0.4.0.tgz
    ```
 
 2. **Create the namespace and, for a hosted endpoint, the API key's Secret.** kausa never reads it
@@ -115,12 +114,12 @@ from a values file: `helm upgrade --reset-values`, or an upgrade with `--set` an
 
 ## Upgrade to the Deployment watch
 
-From v0.4, kausa also watches Deployments, to explain a rollout past its progress deadline
+From v0.4.0, kausa also watches Deployments, to explain a rollout past its progress deadline
 (`D014`), and its role gains `list` and `watch` on `deployments` in both scopes ([0018. Explain a
 Deployment past its progress deadline (`D014`) from a Deployment watch that is on by default, and
 add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md)).
 
-- **Upgrade the chart and the image together.** A v0.4 image with the v0.3 chart's role, RBAC made
+- **Upgrade the chart and the image together.** A v0.4.0 image with the v0.3 chart's role, RBAC made
   outside the chart, or the read-only proxy of [Try kausa against a cluster with a local
   model](try-with-a-local-model.md) without the Deployment paths, gets `403` on the Deployment
   watch: kausa explains everything else but is never Ready, `helm upgrade --wait` times out, and
@@ -273,10 +272,11 @@ With `replicaCount: 2`, a second Pod waits as a standby and takes over when the 
 stops: within 40 seconds when its node dies or it freezes, and within about 5 seconds when
 it is deleted or drained, then the new leader lists and its incidents settle ([Architecture](../explanation/architecture.md#failover)).
 Without it, a lost node leaves kausa down until its Pod is replaced, about five minutes by default
-(hypothesis: the default `tolerationSeconds` of 300). Status as of 2026-10-29: in the chart in the
-repository, for v0.4, not released; those times are the design's, and their measurement in kind is
-still open ([0019. Offer an optional standby replica that takes over through a chart-created
-Lease, elected by kausa's own code](../adr/0019-high-availability.md)).
+(hypothesis: the default `tolerationSeconds` of 300). Status as of 2026-10-30: v0.4.0 is the
+first release with it, and its takeovers were measured in kind on 2026-10-29 ([Standby and
+failover](../research/2026-10-29-standby-and-failover.md); [0019. Offer an optional standby
+replica that takes over through a chart-created Lease, elected by kausa's own
+code](../adr/0019-high-availability.md)).
 
 1. **Turn it on**, in either scope:
 
@@ -393,7 +393,7 @@ What to expect:
   binding deleted while kausa runs shows up later, when the open watch ends: after about 290
   seconds in kind on 2026-10-28.
 - **The Pod runs but is not Ready, and the log has `deployment watch error` with `deployments.apps
-  is forbidden`** → kausa's role does not grant `list` and `watch` on Deployments (a v0.4 image on
+  is forbidden`** → kausa's role does not grant `list` and `watch` on Deployments (a v0.4.0 image on
   the v0.3 chart's role, or RBAC made outside the chart) → upgrade the chart with the image, add
   the rule of [Upgrade to the Deployment watch](#upgrade-to-the-deployment-watch), or set
   `rollouts=false`.

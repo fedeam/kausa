@@ -7,7 +7,7 @@ and where secrets live.
 
 ## Supported versions
 
-Status as of 2026-10-29: the latest release is v0.3.0. Until 1.0, only the latest release will
+Status as of 2026-10-30: the latest release is v0.4.0. Until 1.0, only the latest release will
 receive security fixes.
 
 ## Reporting a vulnerability
@@ -58,9 +58,10 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-29: v0.3.0 is released, with the namespaced install mode, the explanation
-history and the notifications. `kausa run` reads Pods,
-their logs (crash loops, out-of-memory kills and failed Jobs only), Events and the metadata of ReplicaSets and Jobs; it
+Status as of 2026-10-30: v0.4.0 is released, with the Deployment watch of `D014`, the richer
+context for the model and the optional standby replica. `kausa run` reads Pods,
+their logs (crash loops, out-of-memory kills and failed Jobs only), Events, the metadata of
+ReplicaSets and Jobs and, unless `--no-rollouts`, Deployments; it
 redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
 logs it with `--dry-run`; it logs incidents and explanations with real names to its own stdout.
 Calls to the model are capped per hour and per day, explanations of repeated incidents are
@@ -78,11 +79,11 @@ budget, the Event writes and the metrics responder have unit tests, and the perm
 checked by the kind test (`kubectl auth can-i`, what is allowed and what must be refused) in both
 `rbac.scope`s: every namespace with `cluster`, or the listed namespaces only with `namespaced`
 ([0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace, and
-nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)). For v0.4 (in development on
-2026-10-29), kausa also watches Deployments, unless `--no-rollouts` (the chart's `rollouts:
+nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)). Since v0.4.0, kausa also
+watches Deployments, unless `--no-rollouts` (the chart's `rollouts:
 false`), to explain a rollout past its progress deadline (`D014`) ([0018. Explain a Deployment past
 its progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
-StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)). Also for v0.4, the chart's
+StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)). Also since v0.4.0, the chart's
 `replicaCount: 2` (off by default) runs a second replica as a standby: both run `kausa run
 --leader-lease <release namespace>/<full name>-leader`, and only the one that holds that Lease
 watches, explains and writes; the other reads the Lease every 5 s and takes it over if the leader

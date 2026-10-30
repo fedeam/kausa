@@ -2,11 +2,11 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-10-29: what v0.3.0 does, with the namespaced mode, the
-explanation history and the notifications it added (`--namespace`, `--history`,
-`--history-days` and the `--notify-*` flags). `kausa
-run` detects and groups failures and logs incidents; with `--endpoint` it explains each one within
-a call budget, reuses explanations of repeated incidents, and writes the explanation as an Event
+Status as of 2026-10-30: what v0.4.0 does, with the namespaced mode, the explanation history and
+the notifications of v0.3.0 (`--namespace`, `--history`, `--history-days` and the `--notify-*`
+flags) and the Deployment watch and the standby of v0.4.0 (`--no-rollouts` and
+`--leader-lease`). `kausa run` detects and groups failures and logs incidents; with `--endpoint`
+it explains each one within a call budget, reuses explanations of repeated incidents, and writes the explanation as an Event
 on the failing workload; with `--dry-run` it logs the request instead; with `--metrics-address` it
 serves Prometheus metrics ([0001. Build a small, read-only explainer that writes one redacted
 explanation per incident](../adr/0001-scope-and-positioning.md)); with `--namespace` it watches
@@ -16,7 +16,7 @@ listed namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.
 its namespace ([0014. Keep each incident's full explanations in a namespaced Explanation resource,
 off by default](../adr/0014-explanation-history.md)); with `--notify-url-file` it also posts each
 new explanation to one webhook ([0015. Post each new explanation to one optional webhook, as JSON,
-Slack or Telegram](../adr/0015-notifications.md)). The work for v0.4 adds a watch on Deployments
+Slack or Telegram](../adr/0015-notifications.md)). v0.4.0 adds a watch on Deployments
 for stalled rollouts (`D014`), on unless `--no-rollouts` ([0018. Explain a Deployment past its
 progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
 StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md)), and `--leader-lease`, which makes a
