@@ -40,7 +40,9 @@ an incident, so a container that restarts once and recovers is not explained:
 
 Pods of the same top-level owner with the same detection form one incident, logged once while it
 lasts and again only if it clears and comes back. The incident lists every Pod seen failing while
-it was pending, so replicas whose crash loops are out of step all count.
+it was pending, so replicas whose crash loops are out of step all count. Past 100 such Pods (a
+workload whose Pods keep being replaced), it keeps the first 100 names in sorted order, plus the
+Pods failing when it settles.
 
 | Id | Failure | Signal | Logs read |
 |---|---|---|---|

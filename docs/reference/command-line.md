@@ -228,7 +228,9 @@ annotation when it is an unsigned integer (empty otherwise), and is never sent t
 
 - `detection`, `detection_name`: the rule, from [Detection and redaction rules](rules.md).
 - `owner`: the top-level owner the Pods were correlated to.
-- `pods`: the Pods whose failures make up the incident, sorted; empty for a failed Job.
+- `pods`: the Pods whose failures make up the incident, sorted; empty for a failed Job. Past 100
+  Pods seen while the failure was pending, the first 100 names in sorted order and the Pods failing
+  when it settled ([Detection and redaction rules](rules.md)).
   `pods_total`: the Pods kausa currently knows with that owner.
 - `fingerprint`: 16 hexadecimal digits that stay the same for the same failure of the same
   workload, whichever Pod shows it and however long the back-off has grown ([Detection and
