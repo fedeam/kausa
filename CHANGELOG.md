@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `R011` redacts npm (`npm_`), PyPI (`pypi-`) and Docker (`dckr_pat_`, `dckr_oat_`) tokens and
+  GitLab's other token prefixes (`gldt-`, `glrt-`, `glcbt-` and the rest), each format taken from
+  its issuer's documentation ([#5](https://github.com/fedeam/kausa/issues/5)).
+
+### Changed
+
+- A watch error that repeats with the same text is logged at most once every 5 minutes, with a
+  `folded` field counting the repeats in between; `kausa_watch_errors_total` still counts every
+  one ([#7](https://github.com/fedeam/kausa/issues/7)).
+
+### Fixed
+
+- An incident whose Pods keep being replaced while it is pending no longer keeps a list of Pod
+  names that grows without limit: kausa keeps the first 100 names in sorted order, plus the Pods
+  failing when it settles ([#6](https://github.com/fedeam/kausa/issues/6)).
+
 ## [0.4.1] - 2026-10-30
 
 A fix for Slack notifications, which in v0.4.0 could notify a whole channel, and a stricter
