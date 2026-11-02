@@ -239,3 +239,12 @@ assert. Under a metrics-port flood that kept the leader at its 200m limit, renew
 24 ms late, the standby never took over and failing Jobs were still explained, 4 to 5 s later;
 relisting 10,000 Pods, at most 165 ms late with a flood. The decision is unchanged; the bound
 of Availability above reads 40 s (`LEASE_DURATION + 2 × RETRY_PERIOD`) from here on.
+
+Update 2026-11-02: [0021. Refill the hourly call budget at a steady rate from a start burst of
+three, and let incidents wait for it in the queue, so that a restart does not refill
+it](0021-refill-the-call-budget.md) changes what "kept across terms" means for the budget: its
+windows still are, but the refill bucket is cut to the start burst at each term start, so a
+takeover adds at most three calls. "Restarts reset them" no longer holds for the hourly bucket:
+a restart starts with the burst, not a full hour. [0020. Check the model endpoint on demand with
+`kausa check-endpoint` and `helm test`, and hold calls behind a breaker while it
+fails](0020-check-the-endpoint.md)'s breaker is kept across terms too.

@@ -125,3 +125,13 @@ top-level `rollout` object of seven integers or `null` (`replicas`, `updated_rep
 message and no `ReplicaFailure`, so nothing in it goes through redaction. A `D014` request has no
 Pods and no log tail; other requests do not change ([Data sent to the
 provider](../reference/data-sent-to-the-provider.md)).
+
+Update 2026-11-02: two v0.5 decisions touch this one. [0020. Check the model endpoint on demand
+with `kausa check-endpoint` and `helm test`, and hold calls behind a breaker while it
+fails](0020-check-the-endpoint.md) adds one request that no incident asks for: on demand only, a
+compiled-in, fabricated crash loop sent through the same path, redaction and client, with no
+cluster data. [0022. Pass the model's answer through the pattern redaction rules before it is
+written anywhere, and redact the query of an HTTP request line](0022-redact-the-answer.md) extends
+"Untrusted data stays data" to the answer: its text passes the pattern rules (every rule but
+`R002`) before it reaches an Event, the history, the log or a notification. Nothing new is sent
+to the provider by either.
