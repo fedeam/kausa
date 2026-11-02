@@ -1673,19 +1673,21 @@ mod tests {
 
     #[test]
     fn an_answer_that_arrives_after_the_term_is_dropped() {
-        let (model_url, model_calls) = counted_model(Duration::from_millis(400));
+        // A term long enough for the call to start on a loaded CI runner, and a model slower
+        // than the term, so that the answer always arrives after it.
+        let (model_url, model_calls) = counted_model(Duration::from_millis(3000));
         let (api, api_calls) = counted_api_server();
         let metrics = Metrics::default();
         let left = explain_under(
             model_url,
             &api,
-            Some(Duration::from_millis(150)),
+            Some(Duration::from_millis(1000)),
             false,
             &metrics,
         );
         assert!(!left.retry);
         assert!(
-            model_calls.recv_timeout(Duration::from_secs(1)).is_ok(),
+            model_calls.recv_timeout(Duration::from_secs(5)).is_ok(),
             "the model was asked"
         );
         assert!(!left.cached, "a dropped answer is not cached");
