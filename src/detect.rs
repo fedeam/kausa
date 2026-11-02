@@ -277,25 +277,57 @@ mod tests {
         }
     }
 
+    /// Every detection, in the order of the enum.
+    const ALL: [Detection; 14] = [
+        Detection::CrashLoop,
+        Detection::ImagePull,
+        Detection::OutOfMemory,
+        Detection::ContainerCreate,
+        Detection::Unschedulable,
+        Detection::ProbeFailure,
+        Detection::VolumeFailure,
+        Detection::JobFailed,
+        Detection::PodEvicted,
+        Detection::SandboxCreate,
+        Detection::PodCreate,
+        Detection::ClaimProvisioning,
+        Detection::AutoscalerMetrics,
+        Detection::RolloutStalled,
+    ];
+
+    #[test]
+    fn all_lists_every_detection() {
+        // A new variant breaks this match, so it cannot be left out of `ALL` silently.
+        for detection in ALL {
+            match detection {
+                Detection::CrashLoop
+                | Detection::ImagePull
+                | Detection::OutOfMemory
+                | Detection::ContainerCreate
+                | Detection::Unschedulable
+                | Detection::ProbeFailure
+                | Detection::VolumeFailure
+                | Detection::JobFailed
+                | Detection::PodEvicted
+                | Detection::SandboxCreate
+                | Detection::PodCreate
+                | Detection::ClaimProvisioning
+                | Detection::AutoscalerMetrics
+                | Detection::RolloutStalled => {}
+            }
+        }
+        // `RolloutStalled` is the last variant, so a variant missing from `ALL` shifts its
+        // discriminant.
+        let discriminants: Vec<_> = ALL.iter().map(|&d| d as usize).collect();
+        assert_eq!(
+            discriminants,
+            (0..=Detection::RolloutStalled as usize).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn ids_are_unique_and_in_order() {
-        let all = [
-            Detection::CrashLoop,
-            Detection::ImagePull,
-            Detection::OutOfMemory,
-            Detection::ContainerCreate,
-            Detection::Unschedulable,
-            Detection::ProbeFailure,
-            Detection::VolumeFailure,
-            Detection::JobFailed,
-            Detection::PodEvicted,
-            Detection::SandboxCreate,
-            Detection::PodCreate,
-            Detection::ClaimProvisioning,
-            Detection::AutoscalerMetrics,
-            Detection::RolloutStalled,
-        ];
-        let ids: Vec<_> = all.iter().map(|d| d.id()).collect();
+        let ids: Vec<_> = ALL.iter().map(|d| d.id()).collect();
         assert_eq!(
             ids,
             [
@@ -304,9 +336,22 @@ mod tests {
             ]
         );
         // The last variant sorts last, so the tracker's second pass sees every other key.
-        let mut sorted = all;
+        let mut sorted = ALL;
         sorted.sort();
-        assert_eq!(sorted, all);
+        assert_eq!(sorted, ALL);
+    }
+
+    #[test]
+    fn every_id_is_in_the_rules_reference() {
+        // The id in backquotes at the start of each row of the detection table, in order.
+        let documented: Vec<_> = include_str!("../docs/reference/rules.md")
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `")?.split_once('`'))
+            .map(|(id, _)| id)
+            .filter(|id| id.starts_with('D'))
+            .collect();
+        let ids: Vec<_> = ALL.iter().map(|d| d.id()).collect();
+        assert_eq!(documented, ids);
     }
 
     #[test]

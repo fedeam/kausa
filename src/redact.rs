@@ -1403,4 +1403,27 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn every_counted_id_is_in_the_rules_reference() {
+        // The ids this file counts: its string literals `"R…"` before the tests. `R001` is the
+        // allowlist of context.rs, which no redactor counts.
+        let source = include_str!("redact.rs");
+        let code = &source[..source.find("#[cfg(test)]").unwrap()];
+        let mut ids: std::collections::BTreeSet<_> = code
+            .split('"')
+            .filter(|s| {
+                s.len() == 4 && s.starts_with('R') && s[1..].bytes().all(|b| b.is_ascii_digit())
+            })
+            .collect();
+        ids.insert("R001");
+        // The id in backquotes at the start of each row of the redaction table, in order.
+        let documented: Vec<_> = include_str!("../docs/reference/rules.md")
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `")?.split_once('`'))
+            .map(|(id, _)| id)
+            .filter(|id| id.starts_with('R'))
+            .collect();
+        assert_eq!(documented, ids.into_iter().collect::<Vec<_>>());
+    }
 }
