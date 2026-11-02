@@ -43,6 +43,14 @@
 # rollouts=false: no deployments rule, --no-rollouts in the args, a Ready Pod whose started line
 # has rollouts false, kept by the later upgrades through --reuse-values.
 #
+# The runs install with budget.callsPerHour=3600 (docs/adr/0021-refill-the-call-budget.md): after a
+# start burst of 3, one call a second. Before the dryRun=true upgrade, the cluster scope checks the
+# budget across restarts: callsPerHour=360 and settleSeconds=5, 20 crash-looping Deployments in
+# e2e-budget, and kausa's Pod deleted every 60 s for 10 minutes. The fake endpoint's receive times
+# stay within 3 calls per start plus one per 10 s, in total and in each life; the queue gauge rises
+# above 0, the hour gauge reads at most the burst right after a start, a life logs explanations
+# waiting, and every explanation dropped line says whether it was waiting for the budget.
+#
 # KAUSA_E2E_REPLICAS picks the chart's replicaCount (docs/adr/0019-high-availability.md):
 # - 1 (when unset): replicaCount stays unset. Nothing of the standby is installed (no Lease, no
 #   <release>-leader Role or RoleBinding, no PodDisruptionBudget), the Pod runs without
@@ -158,8 +166,9 @@ fi
 # A free port, and the endpoint answering on it before anything depends on it: a port already
 # in use would otherwise leave another program to answer kausa.
 PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+# The time log holds one receive time per line of the request log, so both always count the same.
 python3 tests/e2e/fake_endpoint.py --port "$PORT" --log "$WORK/requests.jsonl" \
-  --hook-log "$WORK/hooks.jsonl" &
+  --time-log "$WORK/request-times.txt" --hook-log "$WORK/hooks.jsonl" &
 ENDPOINT_PID=$!
 for _ in $(seq 1 20); do
   curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/v1/chat/completions" && break
@@ -169,6 +178,7 @@ done
 curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/v1/chat/completions" ||
   fail "the fake endpoint does not answer on port $PORT"
 : > "$WORK/requests.jsonl"
+: > "$WORK/request-times.txt"
 : > "$WORK/hooks.jsonl"
 # The notifications' webhook: a fake Telegram-shaped bot token in the URL's path, and a fake bearer
 # token, both built here so that no file holds a token-shaped string. Telegram's path is checked
@@ -179,10 +189,13 @@ HOOK_PATH="/hook/bot$FAKE_BOT/sendMessage"
 printf '%s' "http://$gateway:$PORT$HOOK_PATH" > "$WORK/notify-url"
 printf '%s' "$FAKE_BEARER" > "$WORK/notify-token"
 
-# The install's values other than rbac, reused by the upgrade that must fail.
+# The install's values other than rbac, reused by the upgrade that must fail. The hourly budget
+# of 3600 refills one call a second after the start burst of 3, so that incidents wait in the
+# queue for at most a few seconds and the runs below see every explanation in time.
 values=(--set image.repository=kausa --set image.tag=e2e --set image.pullPolicy=Never
   --set model.endpoint="http://$gateway:$PORT/v1" --set model.name=fake
   --set model.allowHttp=true --set settleSeconds="$SETTLE" --set history.enabled=true
+  --set budget.callsPerHour=3600
   --set notifications.enabled=true --set notifications.format=json
   --set notifications.existingSecret=kausa-notify --set notifications.tokenKey=token
   --set notifications.allowHttp=true)
@@ -1956,6 +1969,207 @@ EOF
     echo "$out"
     echo "the API server refused the cross-namespace Event"
   fi
+
+  # Budget across restarts (docs/adr/0021-refill-the-call-budget.md), with the cluster scope's one
+  # replica, the history and rollouts on: 20 crash-looping Deployments, an hourly budget of 360
+  # (one call every 10 s after a start burst of 3) and kausa's Pod deleted every 60 s for 10
+  # minutes. A start refills no more than the burst, so the fake endpoint's receive times stay
+  # within 3 calls per start plus one per 10 s; v0.4.1 sent up to 16 within seconds of a start.
+  BUDGET_NS=e2e-budget
+  # The chart's values below: callsPerHour 360, so I = 3600 / 360 s, and the start burst B.
+  BUDGET_BURST=3
+  BUDGET_INTERVAL=10
+  BUDGET_LIVES=10
+  BUDGET_LIFE=60
+  # The wall-clock time now, in seconds with three decimals, as the fake endpoint logs it.
+  now_s() { python3 -c 'import time; print("%.3f" % time.time())'; }
+  # The 20 Deployments: crasher's container (tests/e2e/failures.yaml), under invented names.
+  budget_deployments() {
+    for i in $(seq -w 0 19); do
+      cat <<EOF
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: budget-$i
+  namespace: $BUDGET_NS
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: budget-$i}
+  template:
+    metadata:
+      labels: {app: budget-$i}
+    spec:
+      containers:
+        - name: app
+          image: kausa:e2e
+          imagePullPolicy: Never
+          args: ["--no-such-flag"]
+EOF
+    done
+  }
+  # Pod $1's status.startTime, in whole seconds since the epoch (empty until it has one).
+  pod_started() {
+    k -n "$NAMESPACE" get pod "$1" -o json | python3 -c '
+import calendar, json, sys, time
+start = (json.load(sys.stdin).get("status") or {}).get("startTime")
+if start:
+    print(calendar.timegm(time.strptime(start, "%Y-%m-%dT%H:%M:%SZ")))
+'
+  }
+  # One scrape of Pod $2 in life $1, appended to scrapes.txt as "life time hour queue", with "-"
+  # for a series the scrape lacks. A Pod not listening yet adds nothing.
+  budget_scrape() {
+    out=$(pod_get "$2" metrics 2>/dev/null) || return 0
+    printf '%s\n' "$out" | awk -v life="$1" -v at="$(now_s)" '
+      $1 == "kausa_budget_calls_remaining{window=\"hour\"}" { hour = $2 }
+      $1 == "kausa_explanation_queue_length" { queue = $2 }
+      END { print life, at, (hour == "" ? "-" : hour), (queue == "" ? "-" : queue) }
+    ' >> "$WORK/budget/scrapes.txt"
+  }
+  # The assertions, on the files in $2 (lives.txt: "pod start restarts" per life, in order;
+  # scrapes.txt; life-N.log) and the fake endpoint's time log $1, with $3 the end of the last life
+  # and $4 and $5 the burst and the interval in seconds. Integer milliseconds throughout, so that
+  # the bounds are exact:
+  # 1. requests in [T0, end] <= floor(B*K + (end - T0) / I), T0 the first start, K the starts;
+  # 2. a request belongs to the life with the latest start at or before it, and the j-th of a life,
+  #    r after its start, has j <= B + floor((r + 1 s) / I) (1 s for startTime's whole seconds);
+  # 3. kausa_explanation_queue_length was above 0 in some scrape;
+  # 4. the first scrape of each life has window="hour" <= B + floor((t - start + 1 s) / I);
+  # 5. some life logged explanations waiting;
+  # 6. every explanation dropped line has a boolean waiting_for_budget.
+  budget_check() {
+    python3 -I - "$@" <<'EOF'
+import bisect, glob, json, sys
+
+times_path, folder, end_text, burst, interval = sys.argv[1:6]
+burst, step = int(burst), int(interval) * 1000
+
+
+def fail(message):
+    sys.exit("FAIL: budget across restarts: " + message)
+
+
+def ms(text):
+    whole, _, fraction = text.strip().partition(".")
+    return int(whole) * 1000 + int((fraction + "000")[:3])
+
+
+lives = []
+for line in open(folder + "/lives.txt"):
+    name, start, restarts = line.split()
+    lives.append((ms(start), int(restarts)))
+if not lives:
+    fail("no start recorded")
+starts = [start for start, _ in lives]
+if any(b <= a for a, b in zip(starts, starts[1:])):
+    fail("the recorded starts do not increase")
+if any(restarts for _, restarts in lives):
+    fail("kausa's container restarted within a life, a start this test does not count")
+first, end, starts_counted = starts[0], ms(end_text), len(starts)
+
+requests = sorted(ms(line) for line in open(times_path) if line.strip())
+requests = [r for r in requests if r >= first]
+total = sum(1 for r in requests if r <= end)
+bound = (burst * starts_counted * step + end - first) // step
+if total > bound:
+    fail("%d requests in %.3f s over %d starts; at most %d may come"
+         % (total, (end - first) / 1000, starts_counted, bound))
+
+counts = [0] * starts_counted
+for r in requests:
+    life = bisect.bisect_right(starts, r) - 1
+    counts[life] += 1
+    allowed = burst + (r - starts[life] + 1000) // step
+    if counts[life] > allowed:
+        fail("life %d: request %d came %.3f s after its start; at most %d may"
+             % (life + 1, counts[life], (r - starts[life]) / 1000, allowed))
+
+scrapes = [line.split() for line in open(folder + "/scrapes.txt") if line.strip()]
+if not any(queue != "-" and float(queue) > 0 for _, _, _, queue in scrapes):
+    fail("kausa_explanation_queue_length was never above 0")
+first_scrape = {}
+for life, at, hour, _ in scrapes:
+    if hour != "-" and int(life) not in first_scrape:
+        first_scrape[int(life)] = (ms(at), float(hour))
+for life in range(1, starts_counted + 1):
+    if life not in first_scrape:
+        fail("no scrape of life %d has the hour series" % life)
+    at, hour = first_scrape[life]
+    allowed = burst + (at - starts[life - 1] + 1000) // step
+    if hour > allowed:
+        fail("life %d: the hour series read %g %.3f s after its start; at most %d may"
+             % (life, hour, (at - starts[life - 1]) / 1000, allowed))
+
+waiting = 0
+for path in sorted(glob.glob(folder + "/life-*.log")):
+    for line in open(path):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("msg") == "explanations waiting":
+            waiting += 1
+        if entry.get("msg") == "explanation dropped" and not isinstance(
+                entry.get("waiting_for_budget"), bool):
+            fail("an explanation dropped line has no boolean waiting_for_budget")
+if not waiting:
+    fail("no life logged explanations waiting")
+print("budget across restarts: %d requests in %.0f s over %d starts, at most %d allowed"
+      % (total, (end - first) / 1000, starts_counted, bound))
+EOF
+  }
+
+  # The cluster scope runs with one replica only (checked at the top); the case needs it.
+  [ "$REPLICAS" = 1 ] || fail "the budget case needs one replica"
+  k create namespace "$BUDGET_NS"
+  budget_deployments | k create -f - >/dev/null
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 120s --reuse-values \
+    --set budget.callsPerHour=360 --set settleSeconds=5
+  mkdir -p "$WORK/budget"
+  : > "$WORK/budget/lives.txt"
+  : > "$WORK/budget/scrapes.txt"
+  life_pod=$(kausa_pods | head -n 1)
+  [ -n "$life_pod" ] || fail "no kausa Pod after the upgrade to callsPerHour=360"
+  life=0
+  while :; do
+    life=$((life + 1))
+    start=$(pod_started "$life_pod")
+    [ -n "$start" ] || fail "kausa's Pod of life $life has no start time"
+    # Polled every 2 s until the life is BUDGET_LIFE seconds old.
+    while [ "$(date +%s)" -lt $((start + BUDGET_LIFE)) ]; do
+      budget_scrape "$life" "$life_pod"
+      sleep 2
+    done
+    # The life's log and restarts, read before its Pod goes.
+    kausa_log "pod/$life_pod"
+    mv "$WORK/kausa.log" "$WORK/budget/life-$life.log"
+    restarts=$(k -n "$NAMESPACE" get pod "$life_pod" \
+      -o jsonpath='{.status.containerStatuses[0].restartCount}')
+    echo "$life_pod $start ${restarts:-0}" >> "$WORK/budget/lives.txt"
+    [ "$life" -lt "$BUDGET_LIVES" ] || break
+    # kubectl waits until the Pod is gone, and kausa stops on SIGTERM, so lives do not overlap
+    # (hypothesis H2 of the decision: the new Pod may be created while the old one terminates).
+    k -n "$NAMESPACE" delete pod "$life_pod" --timeout 120s >/dev/null
+    next_pod=""
+    for _ in $(seq 1 60); do
+      next_pod=$(kausa_pods | grep -vxF -- "$life_pod" | head -n 1 || true)
+      [ -n "$next_pod" ] && [ -n "$(pod_started "$next_pod")" ] && break
+      next_pod=""
+      sleep 1
+    done
+    [ -n "$next_pod" ] || fail "no new kausa Pod after deleting the one of life $life"
+    life_pod=$next_pod
+  done
+  budget_check "$WORK/request-times.txt" "$WORK/budget" "$(now_s)" "$BUDGET_BURST" \
+    "$BUDGET_INTERVAL"
+  k delete namespace "$BUDGET_NS" --timeout 120s >/dev/null
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 120s --reuse-values \
+    --set budget.callsPerHour=3600 --set settleSeconds="$SETTLE"
+  pod=pod/$(kausa_pods | head -n 1)
 
   # dryRun=true turns the history off: the rule, the reader role and the CustomResourceDefinition
   # go, and with it every Explanation, kausa's and the hand-made ones. The chart refuses

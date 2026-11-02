@@ -96,3 +96,77 @@ with its corpus measured once.
 - An example alert on `kausa_answer_redactions_total`, once the benign side shows which rules
   stay quiet.
 - Check in the first `cflite.yml` log that the `redact` and `validate` seed corpora were unpacked.
+## Later the same day: smaller list pages
+
+The request: choose the list page size of the three watches by measuring it, the related work of
+[0021](../adr/0021-refill-the-call-budget.md).
+
+- `tests/bench/measure-start.sh` now reports the peak memory and the list requests, and
+  `tests/bench/thousands-of-pods.py --forged N` writes zero-replica Deployments with a 256,000-byte
+  annotation each.
+- In a throwaway kind cluster with 10,000 Pods at the largest scheduling record and then 500 forged
+  Deployments, pages of 500, 250, 100 and 50 were measured ([List
+  pages](../research/2026-11-02-list-pages.md)). With the forged page, the peak of the macOS
+  binary fell from about 600 MiB with 500 to 161 to 170 MiB with 50, for ten times the list
+  requests and no slower start.
+- Decision (no ADR, by the rule set before measuring): `LIST_PAGE_SIZE` is 50 for the Pod, Event
+  and Deployment watches. No page met the 144 MiB target (75% of the chart's 192Mi), so 50, the
+  lowest peak, was taken and the margin is flagged in the note and in `SECURITY.md`.
+- Follow-up: measure the chart's Pod on Linux (`memory.peak`) with a forged page, to see whether
+  192Mi keeps its margin there.
+
+## Later the same day: refill the call budget
+
+The request: implement [0021. Refill the hourly call budget at a steady rate from a start burst of
+three, and let incidents wait for it in the queue, so that a restart does not refill
+it](../adr/0021-refill-the-call-budget.md), with the smaller list pages above as its related work.
+
+- `src/budget.rs`: the hourly cap is a refill bucket under the 60-minute and 24-hour windows. A
+  process starts with 3 calls (`N` if fewer), gains one every `3600/N` seconds and holds at most
+  `N`; `check` answers `Now`, `Wait { until }` or `Never` and changes nothing, `take` stays the
+  authority, `refund` gives back the call and its credit, and `start_term` cuts the credit to the
+  burst at a takeover. The state is one `Instant`, with checked arithmetic that refuses a call
+  rather than panic. A seeded schedule test checks the stated bound in exact nanoseconds.
+- `src/run.rs`: the explanation slot admits a job through `allowance` and `admit`. While the budget
+  waits, jobs wait in the queue, a repeat the cache answers passes them, and the oldest of a full
+  queue of 16 is skipped with an `ExplanationSkipped` Event. New incidents and delayed retries join
+  through `enqueue`, so the queue never holds more than 16. `explanations waiting` is logged once
+  per waiting period, and `explanation dropped` gains `waiting_for_budget`.
+- `src/explain.rs`: a job the budget refuses is skipped before its log is read.
+- `src/metrics.rs`: `kausa_budget_calls_remaining{window}` and `kausa_explanation_queue_length`,
+  rendered only once set (no budget gauge in dry-run or detect-only).
+- `--help`, the chart's comments and `NOTES.txt` describe the refill; no flag, value or default
+  changed. The e2e test installs with `budget.callsPerHour=3600`, and the cluster scope's run adds
+  a case that deletes kausa's Pod every 60 s for 10 minutes at `callsPerHour=360` and checks the
+  bound from the fake endpoint's receive times. Its arithmetic was checked offline against
+  synthetic schedules (a v0.4.1-like one fails it); the case itself runs only in CI.
+- The documentation (CHANGELOG, Architecture, SECURITY.md, Command line and log format, Helm chart,
+  Install kausa with Helm with two example alerts, ARCHITECTURE.md's codemap) states the bound
+  `c(s) + 3K + T/I` and the advice `callsPerHour <= callsPerDay / 24`. 0019's `Update` paragraph
+  came with the ADR's acceptance. Two stale items were fixed on the way: the takeover times and
+  the metrics flood, measured on 2026-10-29, were still called open items, and SECURITY.md still
+  said clusters over about a hundred Pods were untested.
+
+Decisions, all in 0021: a start burst of 3; one admission function, so that 0020's breaker goes in
+front of the budget in `allowance` and shares the queue rules; drops at the tick stay silent
+(logged and counted, no Event, so no write can hold the loop); delayed retries obey the limit of
+16. The e2e job of the cluster scope took about 7 minutes on `main` on 2026-11-02, so the new case
+(about 11 to 12 minutes) fits its 30-minute timeout, which stays.
+
+Checks: `cargo fmt`, clippy with `-D warnings`, `cargo test` (462 unit tests, 56 command-line
+tests), `cargo deny`, `helm lint --strict` and `tests/chart/render.sh` pass locally. The kind tests
+were not run locally; CI runs them on the pull request.
+
+Hypotheses still open, none checked here:
+
+- H1: kubelet's crash back-off caps at one restart per 5 minutes; only the worked example (66
+  calls an hour at the defaults) uses it.
+- H2: terms do not overlap (0019's timing hypotheses with the Lease, `strategy: Recreate`
+  without it); the bound rests on it. The e2e case deletes the Pod with the default wait, so its
+  lives do not overlap by construction.
+- H3: a start delay of up to 5 s (one tick) and a burst of 3 suit operators: to be sampled from
+  both gauges in the soak planned against the v0.5 release candidate.
+- H4: whether the 2026-10-29 out-of-memory loop ever made a call was not recorded; nothing here
+  depends on it.
+- H5: the `pod` label in the example alert `KausaDailyCallBudgetSpent` depends on the scrape
+  configuration.

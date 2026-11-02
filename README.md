@@ -111,8 +111,9 @@ notifications](docs/reference/data-sent-in-notifications.md)).
   tested like code. One incident is one request.
 - **Cluster text is untrusted.** Logs and event messages are data inside the prompt. The model
   gets no tools, its answer must match a schema, and kausa never acts on it.
-- **Budgeted.** Caps on calls per hour and per day and on tokens per request; repeated incidents
-  reuse the stored explanation.
+- **Budgeted.** Caps on calls per hour and per day and on tokens per request; the hourly budget
+  refills at a steady rate from a start burst of three calls, so a restart does not refill it, and
+  incidents wait in the queue for it; repeated incidents reuse the stored explanation.
 - **Small.** One static binary for linux/amd64 and linux/arm64, a distroless non-root image of
   about 4.5 MB compressed (4.3 MB for arm64, 4.6 MB for amd64), and a small record per Pod and
   per Warning event instead of a cache of whole objects: 2 MiB and 0.67 seconds of CPU in 22

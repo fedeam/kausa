@@ -46,7 +46,7 @@ use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::budget::{Budget, Dedup};
+use crate::budget::{Allowance, Budget, Dedup, HOURLY_SPENT};
 use crate::context::Gathered;
 use crate::detect::{Detection, detect_event, detect_rollout};
 use crate::events::Writer;
@@ -80,6 +80,11 @@ const MAX_CONNECTIONS: usize = 8;
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// How long one owner lookup may take before it counts as failed.
 const OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Objects per list request of the Pod, Event and Deployment watches, instead of kube-runtime's
+/// 500: a watch holds a whole page while it decodes it, and a page of 500 Deployments with large
+/// annotations is about 129 MB. Chosen in docs/research/2026-11-02-list-pages.md: the lowest peak
+/// of 500, 250, 100 and 50 with such a page, for about ten times the list requests.
+const LIST_PAGE_SIZE: u32 = 50;
 
 pub struct Options {
     pub settle: SignedDuration,
@@ -304,6 +309,11 @@ where
     }
 }
 
+/// The watcher settings every watch starts from: lists in pages of [`LIST_PAGE_SIZE`].
+fn watcher_config() -> watcher::Config {
+    watcher::Config::default().page_size(LIST_PAGE_SIZE)
+}
+
 /// Starts one watch of `K` per namespace, or one on the whole cluster when `namespaces` is empty,
 /// each with `config` and kube-runtime's default backoff (0.8 to 30 seconds), started over after
 /// a `403` (`Restarting`). Each watch ends with a `(watch, None)` item, so the loop knows which
@@ -435,7 +445,11 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         Term::unbounded()
     };
     let shared = options.explain.as_ref().map(|settings| Shared {
-        budget: RefCell::new(Budget::new(settings.calls_per_hour, settings.calls_per_day)),
+        budget: RefCell::new(Budget::new(
+            settings.calls_per_hour,
+            settings.calls_per_day,
+            Instant::now(),
+        )),
         dedup: RefCell::new(Dedup::new(settings.dedup_ttl, DEDUP_CAPACITY)),
         writer: (settings.events && settings.model.is_some())
             .then(|| Writer::new(client.clone(), settings.instance.clone())),
@@ -447,6 +461,14 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         notifications: RefCell::new(VecDeque::new()),
         term: &term,
     });
+    // The gauges of docs/adr/0021-refill-the-call-budget.md: the queue whenever kausa explains,
+    // the budget only with a model (a dry run has none to show).
+    if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared.as_ref()) {
+        metrics.set_gauge(QUEUE_GAUGE, &[], 0);
+        if settings.model.is_some() {
+            show_budget(&metrics, &shared.budget.borrow(), Instant::now());
+        }
+    }
     let lease = options
         .leader_lease
         .as_ref()
@@ -516,17 +538,16 @@ impl Cluster for KubeCluster {
     fn watch(&self, namespaces: &[String], rollouts: bool) -> Watched {
         let selector = format!("type=Warning,reportingController!={REPORTING_CONTROLLER}");
         Watched {
-            pods: watches::<Pod>(&self.client, namespaces, &watcher::Config::default()),
+            pods: watches::<Pod>(&self.client, namespaces, &watcher_config()),
             events: watches::<Event>(
                 &self.client,
                 namespaces,
-                &watcher::Config::default().fields(&selector),
+                &watcher_config().fields(&selector),
             ),
             // Only Deployments past their progress deadline are kept, as records
             // (docs/adr/0018-stuck-rollouts.md).
-            deployments: rollouts.then(|| {
-                watches::<Deployment>(&self.client, namespaces, &watcher::Config::default())
-            }),
+            deployments: rollouts
+                .then(|| watches::<Deployment>(&self.client, namespaces, &watcher_config())),
         }
     }
 
@@ -656,6 +677,7 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
                                 if self.listener.is_some() && connections.len() < MAX_CONNECTIONS =>
                                 match accepted {
                                     Ok(stream) => {
+                                        self.refresh_budget();
                                         connections.push(metrics::answer(stream, self.metrics));
                                     }
                                     Err(e) => accept_failed(&e).await?,
@@ -667,6 +689,12 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
                     self.metrics
                         .inc("kausa_leadership_changes_total", &[("to", "leader")]);
                     self.metrics.set_leading(true);
+                    // A takeover brings at most the start burst, whatever credit accrued while a
+                    // standby (docs/adr/0021-refill-the-call-budget.md). Without --leader-lease
+                    // the process start is the term start: `Budget::new` holds the burst.
+                    if let Some(shared) = self.shared {
+                        shared.budget.borrow_mut().start_term(Instant::now());
+                    }
                     Some(acquired)
                 }
             };
@@ -724,6 +752,7 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
                         } => match step {
                             Step::Ended(error) => break Ending::Ended(error),
                             Step::Accepted(Ok(stream)) => {
+                                self.refresh_budget();
                                 connections.push(metrics::answer(stream, self.metrics));
                             }
                             Step::Accepted(Err(e)) => accept_failed(&e).await?,
@@ -770,10 +799,23 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
         leader::release(election.api, &version, &election.name, &self.timings).await
     }
 
+    /// Sets `kausa_budget_calls_remaining` from the budget as it is now, before a metrics
+    /// connection is answered: the bucket refills between scrapes with no pass of the controller
+    /// (a standby runs none). Only when kausa explains with a model.
+    fn refresh_budget(&self) {
+        if let (Some(settings), Some(shared)) = (self.options.explain.as_ref(), self.shared)
+            && settings.model.is_some()
+        {
+            show_budget(self.metrics, &shared.budget.borrow(), Instant::now());
+        }
+    }
+
     /// Steps down after a lost Lease, in place: the term is closed (the controller was already
     /// dropped with its records, queue, retries and owner cache), the notifications waiting for
     /// the webhook are dropped and counted, and the budget and the deduplication cache are kept
-    /// for the next term.
+    /// for the next term: the budget's windows are kept, and its credit is cut to the start burst
+    /// when the next term starts (docs/adr/0021-refill-the-call-budget.md). The queue went with
+    /// the controller, so its gauge reads 0.
     fn step_down(&self, election: &Election<'_, L>, lost: Lost) -> io::Result<()> {
         self.term.close();
         let reason = match lost {
@@ -788,6 +830,7 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
             .inc("kausa_leadership_changes_total", &[("to", "standby")]);
         self.metrics.set_leading(false);
         if let Some(shared) = self.shared {
+            self.metrics.set_gauge(QUEUE_GAUGE, &[], 0);
             let cleared = shared.notifications.borrow_mut().drain(..).count();
             if cleared > 0 {
                 self.metrics.add(
@@ -833,10 +876,18 @@ async fn lead<C: Cluster>(
     // When the last sweep of the history began (docs/adr/0014-explanation-history.md): a sweep is
     // due at once in each term.
     let mut last_sweep: Option<Instant> = None;
+    // Whether the budget made the slot wait the last time it was asked
+    // (docs/adr/0021-refill-the-call-budget.md), and whether `explanations waiting` was logged
+    // since the queue was last empty.
+    let mut waiting = false;
+    let mut announced = false;
 
     loop {
         if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
             let now = Instant::now();
+            let queue_empty = queue.is_empty();
+            // When the next call is due, if the budget holds every queued job on this pass.
+            let mut held: Option<Instant> = None;
             let history = shared.history.as_ref();
             match next_in_slot(
                 running.is_some(),
@@ -858,11 +909,31 @@ async fn lead<C: Cluster>(
                     }
                 }
                 Some(Slot::Explain) => {
-                    if let Some(job) = queue.pop_front() {
-                        running = Some(cluster.explain(job, settings, shared));
+                    let allowance = allowance(settings, shared, now);
+                    waiting = matches!(allowance, Allowance::Wait { .. });
+                    let job = admit(&mut queue, &allowance, &shared.dedup.borrow(), now);
+                    match (job, allowance) {
+                        (Some(job), _) => running = Some(cluster.explain(job, settings, shared)),
+                        (None, Allowance::Wait { until }) => held = Some(until),
+                        (None, _) => {}
                     }
                 }
                 None => {}
+            }
+            metrics.set_gauge(QUEUE_GAUGE, &[], queue.len() as u64);
+            if announce(&mut announced, queue_empty, held.is_some())
+                && let Some(until) = held
+            {
+                let due = until.saturating_duration_since(now);
+                let seconds = due.as_secs() + u64::from(due.subsec_nanos() > 0);
+                log::info(
+                    "explanations waiting",
+                    json!({
+                        "reason": HOURLY_SPENT,
+                        "queued": queue.len(),
+                        "next_call_in_seconds": seconds,
+                    }),
+                )?;
             }
             if let Some(notifier) = settings.notify.as_ref()
                 && notifying.is_none()
@@ -942,32 +1013,35 @@ async fn lead<C: Cluster>(
             _ = ticker.tick() => {
                 let now = Timestamp::now();
                 state.prune_events(now);
-                let (ready, waiting): (Vec<_>, Vec<_>) =
+                let (ready, later): (Vec<_>, Vec<_>) =
                     delayed.drain(..).partition(|(at, _)| *at <= Instant::now());
-                delayed = waiting;
-                queue.extend(ready.into_iter().map(|(_, job)| job));
+                delayed = later;
+                // Retries obey the queue's limit too (docs/adr/0021-refill-the-call-budget.md).
+                for (_, job) in ready {
+                    enqueue(&mut queue, job, metrics, waiting)?;
+                }
                 for incident in state.tick(&mut tracker, now) {
                     metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
                     log_incident(&incident, state.pods_of(&incident.owner))?;
                     if options.explain.is_some() {
-                        if queue.len() >= QUEUE_LIMIT
-                            && let Some(dropped) = queue.pop_front()
-                        {
-                            metrics.inc("kausa_explanations_dropped_total", &[]);
-                            log::warn(
-                                "explanation dropped",
-                                json!({
-                                    "fingerprint": dropped.gathered.incident.fingerprint,
-                                    "reason": "the queue is full",
-                                }),
-                            )?;
-                        }
-                        queue.push_back(state.job(incident));
+                        enqueue(&mut queue, state.job(incident), metrics, waiting)?;
                     }
                 }
             }
         }
     }
+}
+
+/// The gauge of the incidents waiting for an explanation (docs/adr/0021-refill-the-call-budget.md).
+const QUEUE_GAUGE: &str = "kausa_explanation_queue_length";
+
+/// Sets `kausa_budget_calls_remaining` from `budget` at `now`: the hour window is cut to the start
+/// burst while this process does not lead, since a takeover brings no more.
+fn show_budget(metrics: &Metrics, budget: &Budget, now: Instant) {
+    let (hour, day) = budget.remaining(now, metrics.is_leading());
+    let name = "kausa_budget_calls_remaining";
+    metrics.set_gauge(name, &[("window", "hour")], hour);
+    metrics.set_gauge(name, &[("window", "day")], day);
 }
 
 fn log_incident(incident: &Incident, pods_total: usize) -> io::Result<()> {
@@ -1391,6 +1465,94 @@ fn next_in_slot(
     } else {
         queued.then_some(Slot::Explain)
     }
+}
+
+/// Whether the next queued job may make a model call (docs/adr/0021-refill-the-call-budget.md):
+/// the budget's answer, and always `Now` without a model (a dry run spends no budget). The one
+/// gate of the explanation slot: the endpoint breaker of docs/adr/0020-check-the-endpoint.md goes
+/// in front of the budget here, as another gate that holds.
+fn allowance(settings: &Settings, shared: &Shared<'_>, now: Instant) -> Allowance {
+    if settings.model.is_none() {
+        return Allowance::Now;
+    }
+    shared.budget.borrow().check(now)
+}
+
+/// Which queued job takes the free explanation slot (docs/adr/0021-refill-the-call-budget.md):
+/// the oldest while a call may start or never will (skipped at once in `explain::run`); while a
+/// gate holds, the first job the deduplication cache answers, out of order, else the oldest once
+/// the queue holds `QUEUE_LIMIT` (refused in `explain::run` with an Event), else none, and the
+/// queue is left as it was.
+///
+/// A cache entry that expires between `is_fresh` here and `explain::run`'s lookup makes that job a
+/// budget skip, which `explain::run` refuses before reading any log.
+fn admit(
+    queue: &mut VecDeque<Work>,
+    allowance: &Allowance,
+    dedup: &Dedup,
+    now: Instant,
+) -> Option<Work> {
+    match allowance {
+        Allowance::Now | Allowance::Never(_) => queue.pop_front(),
+        Allowance::Wait { .. } => {
+            if let Some(i) = queue
+                .iter()
+                .position(|job| dedup.is_fresh(&job.gathered.incident.fingerprint, now))
+            {
+                return queue.remove(i);
+            }
+            if queue.len() >= QUEUE_LIMIT {
+                queue.pop_front()
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Pushes `job` at the back of the queue, first dropping the oldest when it holds `QUEUE_LIMIT`:
+/// counted and logged, with no Event (a write in the tick arm would hold the watches). For new
+/// incidents and delayed retries alike, so the queue never holds more than `QUEUE_LIMIT`.
+/// `waiting`: whether the budget made the slot wait the last time it was asked.
+fn enqueue(
+    queue: &mut VecDeque<Work>,
+    job: Work,
+    metrics: &Metrics,
+    waiting: bool,
+) -> io::Result<()> {
+    let dropped = if queue.len() >= QUEUE_LIMIT {
+        queue.pop_front()
+    } else {
+        None
+    };
+    queue.push_back(job);
+    if let Some(dropped) = dropped {
+        metrics.inc("kausa_explanations_dropped_total", &[]);
+        log::warn(
+            "explanation dropped",
+            json!({
+                "fingerprint": dropped.gathered.incident.fingerprint,
+                "reason": "the queue is full",
+                "waiting_for_budget": waiting,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether to log `explanations waiting` on this pass: once per waiting period, on the first pass
+/// that `held` the queue (the budget waits and no job took the slot). A pass that starts with the
+/// queue empty ends the period.
+fn announce(announced: &mut bool, queue_empty: bool, held: bool) -> bool {
+    if queue_empty {
+        *announced = false;
+        return false;
+    }
+    if held && !*announced {
+        *announced = true;
+        return true;
+    }
+    false
 }
 
 /// A cached owner lookup: the answer (or the error) and when it was read.
@@ -3169,6 +3331,9 @@ mod tests {
         /// Takes a call from the budget and caches its incident, after noting whether a call was
         /// left and whether the incident was cached already.
         Remember,
+        /// Takes a call from the budget, as `explain::run` does, and notes whether one was left
+        /// (and `false` for cached); caches nothing.
+        Take,
     }
 
     /// Counts the explanations dropped while in flight.
@@ -3213,8 +3378,10 @@ mod tests {
         /// Each explanation started: its term and its fingerprint.
         jobs: RefCell<Vec<(usize, String)>>,
         dropped: Rc<Cell<usize>>,
-        /// What each `Remember` explanation found: a call left, the incident cached.
+        /// What each `Remember` or `Take` explanation found: a call left, the incident cached.
         found: RefCell<Vec<(bool, bool)>>,
+        /// When each explanation started.
+        started: RefCell<Vec<Instant>>,
         /// The watch items the controller took.
         yielded: Arc<AtomicUsize>,
     }
@@ -3234,6 +3401,7 @@ mod tests {
                 jobs: RefCell::new(Vec::new()),
                 dropped: Rc::new(Cell::new(0)),
                 found: RefCell::new(Vec::new()),
+                started: RefCell::new(Vec::new()),
                 yielded: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -3330,6 +3498,7 @@ mod tests {
             self.jobs
                 .borrow_mut()
                 .push((self.watches.get(), incident.fingerprint.clone()));
+            self.started.borrow_mut().push(Instant::now());
             Box::pin(async move {
                 match self.explains {
                     Explains::Done => {}
@@ -3354,6 +3523,10 @@ mod tests {
                             None,
                             now,
                         );
+                    }
+                    Explains::Take => {
+                        let left = shared.budget.borrow_mut().take(Instant::now()).is_ok();
+                        self.found.borrow_mut().push((left, false));
                     }
                 }
                 Ok(None)
@@ -3414,7 +3587,11 @@ mod tests {
     fn shared_of<'a>(options: &Options, metrics: &'a Metrics, term: &'a Term) -> Shared<'a> {
         let settings = options.explain.as_ref().expect("settings");
         Shared {
-            budget: RefCell::new(Budget::new(settings.calls_per_hour, settings.calls_per_day)),
+            budget: RefCell::new(Budget::new(
+                settings.calls_per_hour,
+                settings.calls_per_day,
+                Instant::now(),
+            )),
             dedup: RefCell::new(Dedup::new(settings.dedup_ttl, DEDUP_CAPACITY)),
             writer: None,
             history: None,
@@ -3600,8 +3777,10 @@ mod tests {
 
     #[test]
     fn a_second_term_keeps_the_budget_and_the_dedup_entry() {
-        // One call an hour: the second term finds it spent, and the incident cached.
-        let options = options(true, 1);
+        // One call an hour: the second term finds it spent, and the incident cached. With an
+        // endpoint, the budget gates the slot (docs/adr/0021-refill-the-call-budget.md): the
+        // cached job is still admitted while the budget waits.
+        let options = with_endpoint(options(true, 1));
         let (metrics, term) = (Metrics::default(), Term::closed());
         let shared = shared_of(&options, &metrics, &term);
         let lease = FakeLease::new(None);
@@ -3769,5 +3948,644 @@ mod tests {
             "the keeper never lost the Lease"
         );
         assert!(answered.load(Ordering::SeqCst) >= 50);
+    }
+
+    // Acceptance tests for the refill budget (docs/adr/0021-refill-the-call-budget.md), written
+    // before the code. They use this API, which run.rs does not have yet:
+    //
+    // - `fn allowance(settings: &Settings, shared: &Shared<'_>, now: Instant) -> Allowance`:
+    //   `Allowance::Now` without a model (dry-run), the budget's `check(now)` otherwise;
+    // - `fn admit(queue: &mut VecDeque<Work>, allowance: &Allowance, dedup: &Dedup, now:
+    //   Instant) -> Option<Work>`: the front for `Now` and `Never`; for `Wait`, the first job
+    //   whose fingerprint `dedup.is_fresh`, out of order, else the front once the queue holds
+    //   `QUEUE_LIMIT`, else nothing;
+    // - `fn enqueue(queue: &mut VecDeque<Work>, job: Work, metrics: &Metrics, waiting: bool) ->
+    //   io::Result<()>`: at `QUEUE_LIMIT` it drops the oldest, counted in
+    //   `kausa_explanations_dropped_total` and logged, then pushes `job` at the back; for new
+    //   incidents and delayed retries alike;
+    // - `fn announce(announced: &mut bool, queue_empty: bool, held: bool) -> bool`: whether to log
+    //   `explanations waiting` on this pass (`held`: the budget waits and no job was admitted);
+    //   once per waiting period, which an empty queue ends;
+    // - `lead` admits through `allowance` and `admit`, and sets
+    //   `kausa_explanation_queue_length` once per pass; `serve` calls `Budget::start_term` when
+    //   it takes the Lease, refreshes `kausa_budget_calls_remaining` (with a model) before it
+    //   answers a metrics connection, and `step_down` sets the queue gauge to 0;
+    // - the budget API of budget.rs (`Allowance`, `START_BURST`, `Budget::new(.., now)`,
+    //   `remaining`).
+
+    use crate::budget::{Allowance, START_BURST};
+    use crate::model::ModelClient;
+
+    const QUEUE_LENGTH: &str = "kausa_explanation_queue_length";
+    const DROPPED_JOBS: &str = "kausa_explanations_dropped_total";
+
+    /// The same options with an endpoint, so the budget gates the slot; the fake cluster's
+    /// explanations never call it.
+    fn with_endpoint(mut options: Options) -> Options {
+        options.explain.as_mut().expect("settings").model =
+            Some(ModelClient::new("http://127.0.0.1:9", None, true).expect("a model client"));
+        options
+    }
+
+    /// The jobs of `pods`, in the order one tick queues them (by owner: the Pods' names here).
+    fn jobs_of(pods: &[Pod]) -> Vec<Work> {
+        let mut state = State::default();
+        for pod in pods {
+            on_pod(&mut state, &CLUSTER, watcher::Event::Apply(pod.clone()));
+        }
+        let mut tracker = Tracker::new(SignedDuration::ZERO);
+        let incidents = state.tick(&mut tracker, Timestamp::now());
+        assert_eq!(incidents.len(), pods.len(), "one incident per Pod");
+        incidents.into_iter().map(|i| state.job(i)).collect()
+    }
+
+    fn crashing_pods(names: &[&str]) -> Vec<Pod> {
+        names.iter().map(|name| crashing(name)).collect()
+    }
+
+    fn fingerprint(job: &Work) -> String {
+        job.gathered.incident.fingerprint.clone()
+    }
+
+    fn fingerprints<'a>(jobs: impl IntoIterator<Item = &'a Work>) -> Vec<String> {
+        jobs.into_iter().map(fingerprint).collect()
+    }
+
+    /// The fingerprints of the explanations the fake cluster started, in order.
+    fn started_jobs(cluster: &FakeCluster) -> Vec<String> {
+        cluster
+            .jobs
+            .borrow()
+            .iter()
+            .map(|(_, f)| f.clone())
+            .collect()
+    }
+
+    /// The jobs of `count` invented crashing Pods, `api-00` first.
+    fn many_jobs(count: usize) -> Vec<Work> {
+        let names: Vec<String> = (0..count).map(|n| format!("api-{n:02}")).collect();
+        let pods: Vec<Pod> = names.iter().map(|name| crashing(name)).collect();
+        jobs_of(&pods)
+    }
+
+    #[test]
+    fn admit_takes_the_front_while_a_call_may_start_or_never_will() {
+        let jobs = many_jobs(3);
+        let dedup = Dedup::new(Duration::from_secs(3600), 1024);
+        let now = Instant::now();
+        for allowance in [
+            Allowance::Now,
+            Allowance::Never("the daily call budget is spent"),
+        ] {
+            let mut queue: VecDeque<Work> = jobs.iter().cloned().collect();
+            let job = admit(&mut queue, &allowance, &dedup, now).expect("a job");
+            assert_eq!(fingerprint(&job), fingerprint(&jobs[0]), "{allowance:?}");
+            assert_eq!(
+                fingerprints(&queue),
+                fingerprints(&jobs[1..]),
+                "{allowance:?}"
+            );
+        }
+        let mut queue = VecDeque::new();
+        assert!(admit(&mut queue, &Allowance::Now, &dedup, now).is_none());
+    }
+
+    #[test]
+    fn while_the_budget_waits_admit_takes_the_first_cached_job_out_of_order() {
+        let jobs = many_jobs(4);
+        let now = Instant::now();
+        let wait = Allowance::Wait {
+            until: now + Duration::from_secs(60),
+        };
+        let mut dedup = Dedup::new(Duration::from_secs(3600), 1024);
+        // The third and fourth are cached; the first is too, but its entry expired.
+        dedup.put(&fingerprint(&jobs[2]), explanation(), None, now);
+        dedup.put(&fingerprint(&jobs[3]), explanation(), None, now);
+        let expired = now
+            .checked_sub(Duration::from_secs(7200))
+            .expect("an earlier instant");
+        dedup.put(&fingerprint(&jobs[0]), explanation(), None, expired);
+        let mut queue: VecDeque<Work> = jobs.iter().cloned().collect();
+        let job = admit(&mut queue, &wait, &dedup, now).expect("the cached job");
+        assert_eq!(fingerprint(&job), fingerprint(&jobs[2]));
+        assert_eq!(
+            fingerprints(&queue),
+            fingerprints([&jobs[0], &jobs[1], &jobs[3]])
+        );
+        let job = admit(&mut queue, &wait, &dedup, now).expect("the other cached job");
+        assert_eq!(fingerprint(&job), fingerprint(&jobs[3]));
+        // No cached job left, and fewer than 16 queued: nothing, and the queue is unchanged.
+        assert!(admit(&mut queue, &wait, &dedup, now).is_none());
+        assert_eq!(fingerprints(&queue), fingerprints([&jobs[0], &jobs[1]]));
+        // admit removed no entry: the expired one is still there.
+        assert!(dedup.peek(&fingerprint(&jobs[0])).is_some());
+    }
+
+    #[test]
+    fn while_the_budget_waits_a_full_queue_lets_its_oldest_job_out() {
+        let jobs = many_jobs(QUEUE_LIMIT);
+        let now = Instant::now();
+        let wait = Allowance::Wait {
+            until: now + Duration::from_secs(60),
+        };
+        let dedup = Dedup::new(Duration::from_secs(3600), 1024);
+        let mut queue: VecDeque<Work> = jobs.iter().cloned().collect();
+        let job = admit(&mut queue, &wait, &dedup, now).expect("the oldest job");
+        assert_eq!(fingerprint(&job), fingerprint(&jobs[0]));
+        assert_eq!(fingerprints(&queue), fingerprints(&jobs[1..]));
+        // At 15 the rest wait.
+        assert!(admit(&mut queue, &wait, &dedup, now).is_none());
+        assert_eq!(queue.len(), QUEUE_LIMIT - 1);
+    }
+
+    #[test]
+    fn enqueue_keeps_the_queue_within_its_limit_for_new_incidents_and_retries() {
+        let jobs = many_jobs(QUEUE_LIMIT + 4);
+        let metrics = Metrics::default();
+        let mut queue = VecDeque::new();
+        for job in &jobs[..QUEUE_LIMIT] {
+            enqueue(&mut queue, job.clone(), &metrics, false).expect("the log");
+        }
+        assert_eq!(queue.len(), QUEUE_LIMIT);
+        assert_eq!(counter(&metrics, DROPPED_JOBS), 0);
+        // A new incident at 16 drops the oldest.
+        enqueue(&mut queue, jobs[QUEUE_LIMIT].clone(), &metrics, true).expect("the log");
+        assert_eq!(queue.len(), QUEUE_LIMIT);
+        assert_eq!(counter(&metrics, DROPPED_JOBS), 1);
+        assert_eq!(fingerprints(&queue), fingerprints(&jobs[1..=QUEUE_LIMIT]));
+        // So does a delayed retry: the queue never holds more than 16.
+        for job in &jobs[QUEUE_LIMIT + 1..] {
+            let retry = Work {
+                attempt: 1,
+                ..job.clone()
+            };
+            enqueue(&mut queue, retry, &metrics, false).expect("the log");
+            assert_eq!(queue.len(), QUEUE_LIMIT);
+        }
+        assert_eq!(counter(&metrics, DROPPED_JOBS), 4);
+        assert_eq!(fingerprints(&queue), fingerprints(&jobs[4..]));
+        assert_eq!(queue.back().map(|job| job.attempt), Some(1));
+    }
+
+    #[test]
+    fn explanations_waiting_is_announced_once_per_waiting_period() {
+        let mut announced = false;
+        // A pass that admits a job, or finds nothing to hold, announces nothing.
+        assert!(!announce(&mut announced, false, false));
+        // The first pass that holds the queue announces it, the next ones do not.
+        assert!(announce(&mut announced, false, true));
+        assert!(!announce(&mut announced, false, true));
+        // A job admitted meanwhile (cached, or its call due) does not end the period.
+        assert!(!announce(&mut announced, false, false));
+        assert!(!announce(&mut announced, false, true));
+        // An empty queue ends it; the next hold is announced again.
+        assert!(!announce(&mut announced, true, false));
+        assert!(announce(&mut announced, false, true));
+        assert!(!announce(&mut announced, true, true), "nothing is held");
+        assert!(announce(&mut announced, false, true));
+    }
+
+    #[test]
+    fn the_budget_gates_the_slot_only_with_an_endpoint() {
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        // Dry-run: no budget, whatever the caps.
+        let mut dry = options(false, 0);
+        dry.explain.as_mut().expect("settings").calls_per_day = 0;
+        let shared = shared_of(&dry, &metrics, &term);
+        let settings = dry.explain.as_ref().expect("settings");
+        assert_eq!(allowance(settings, &shared, Instant::now()), Allowance::Now);
+        // With an endpoint, the budget's own answer.
+        let gated = with_endpoint(options(false, 30));
+        let settings = gated.explain.as_ref().expect("settings");
+        let shared = shared_of(&gated, &metrics, &term);
+        let now = Instant::now();
+        for calls in 0..=START_BURST {
+            let answer = allowance(settings, &shared, now);
+            assert_eq!(
+                answer,
+                shared.budget.borrow().check(now),
+                "after {calls} calls"
+            );
+            assert_eq!(
+                matches!(answer, Allowance::Wait { .. }),
+                calls == START_BURST,
+                "after {calls} calls"
+            );
+            if calls < START_BURST {
+                shared
+                    .budget
+                    .borrow_mut()
+                    .take(now)
+                    .expect("a call of the burst");
+            }
+        }
+    }
+
+    /// The value of a series in a metrics text, `None` when it is not rendered.
+    fn gauge(text: &str, series: &str) -> Option<u64> {
+        text.lines()
+            .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+            .map(|value| value.parse().expect("a value"))
+    }
+
+    const HOUR_LEFT: &str = "kausa_budget_calls_remaining{window=\"hour\"}";
+    const DAY_LEFT: &str = "kausa_budget_calls_remaining{window=\"day\"}";
+
+    /// Asks for `/metrics` once and returns the whole answer.
+    fn scrape(address: SocketAddr) -> String {
+        let mut stream =
+            std::net::TcpStream::connect_timeout(&address, ms(1000)).expect("a connection");
+        stream
+            .set_read_timeout(Some(ms(3000)))
+            .expect("a read timeout");
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\n\r\n")
+            .expect("the request");
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).expect("the answer");
+        String::from_utf8(answer).expect("UTF-8")
+    }
+
+    /// Scrapes from another thread while the controller runs.
+    async fn scraped(address: SocketAddr) -> String {
+        let client = std::thread::spawn(move || scrape(address));
+        assert!(until(WAIT, || client.is_finished()).await, "answered");
+        client.join().expect("the client thread")
+    }
+
+    /// The whole calls the budget would let a leader start now.
+    fn hour_left(shared: &Shared<'_>) -> u64 {
+        shared.budget.borrow().remaining(Instant::now(), true).0
+    }
+
+    /// How long after `start` each explanation started.
+    fn started_after(cluster: &FakeCluster, start: Instant) -> Vec<Duration> {
+        cluster
+            .started
+            .borrow()
+            .iter()
+            .map(|at| at.duration_since(start))
+            .collect()
+    }
+
+    #[test]
+    fn a_waiting_job_starts_when_its_call_is_due() {
+        // 3600 calls an hour: a start allows 3 at once, then one a second.
+        let options = with_endpoint(options(false, 3600));
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let built = Instant::now();
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let pods = crashing_pods(&["api-1", "api-2", "api-3", "api-4"]);
+        let order = fingerprints(&jobs_of(&pods));
+        let cluster = FakeCluster::new(pods, Explains::Take);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || cluster.jobs() == 4).await,
+                "four explanations"
+            );
+        }));
+        served(result);
+        assert_eq!(started_jobs(&cluster), order, "in the order they settled");
+        let after = started_after(&cluster, built);
+        assert!(
+            after[2] < ms(900),
+            "the first three did not start at once: {after:?}"
+        );
+        assert!(
+            after[3] >= Duration::from_secs(1),
+            "the fourth did not wait for its call: {after:?}"
+        );
+        assert!(
+            after[3] < Duration::from_secs(3),
+            "the fourth waited too long: {after:?}"
+        );
+        assert_eq!(
+            *cluster.found.borrow(),
+            vec![(true, false); 4],
+            "a job reached the slot without a call left"
+        );
+        assert_eq!(counter(&metrics, DROPPED_JOBS), 0);
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(0));
+    }
+
+    #[test]
+    fn a_cached_job_passes_the_waiting_ones() {
+        let options = with_endpoint(options(false, 3600));
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let built = Instant::now();
+        let shared = shared_of(&options, &metrics, &term);
+        // The start burst is spent: the next call is due a second after the start.
+        for _ in 0..START_BURST {
+            shared
+                .budget
+                .borrow_mut()
+                .take(Instant::now())
+                .expect("a call of the burst");
+        }
+        let pods = crashing_pods(&["api-1", "api-2", "api-3"]);
+        let order = fingerprints(&jobs_of(&pods));
+        // The last to settle was explained recently.
+        shared
+            .dedup
+            .borrow_mut()
+            .put(&order[2], explanation(), None, Instant::now());
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(pods, Explains::Done);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || cluster.jobs() == 3).await,
+                "three explanations"
+            );
+        }));
+        served(result);
+        assert_eq!(
+            started_jobs(&cluster),
+            [order[2].clone(), order[0].clone(), order[1].clone()],
+            "the cached job first, then the others in their order"
+        );
+        let after = started_after(&cluster, built);
+        assert!(after[0] < ms(900), "the cached job waited: {after:?}");
+        assert!(
+            after[1] >= Duration::from_secs(1),
+            "a job started without a call: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_full_waiting_queue_lets_the_oldest_out_through_the_slot() {
+        // One call an hour, already spent: the budget waits for an hour.
+        let options = with_endpoint(options(false, 1));
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        shared
+            .budget
+            .borrow_mut()
+            .take(Instant::now())
+            .expect("the call of the hour");
+        let names: Vec<String> = (0..QUEUE_LIMIT).map(|n| format!("api-{n:02}")).collect();
+        let pods: Vec<Pod> = names.iter().map(|name| crashing(name)).collect();
+        let order = fingerprints(&jobs_of(&pods));
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(pods, Explains::Done);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(until(WAIT, || cluster.jobs() == 1).await, "one explanation");
+            // Ten more passes of the tick: the other fifteen keep waiting.
+            until(TEST_TICK * 10, || false).await;
+        }));
+        served(result);
+        assert_eq!(
+            started_jobs(&cluster),
+            [order[0].clone()],
+            "only the oldest goes out, to be skipped by the slot"
+        );
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(15));
+        assert_eq!(
+            counter(&metrics, DROPPED_JOBS),
+            0,
+            "no job was dropped at the tick"
+        );
+    }
+
+    #[test]
+    fn a_spent_daily_cap_takes_the_front_at_once() {
+        let mut options = with_endpoint(options(false, 30));
+        options.explain.as_mut().expect("settings").calls_per_day = 2;
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let built = Instant::now();
+        let shared = shared_of(&options, &metrics, &term);
+        for _ in 0..2 {
+            shared
+                .budget
+                .borrow_mut()
+                .take(Instant::now())
+                .expect("a call of the day");
+        }
+        let pods = crashing_pods(&["api-1", "api-2", "api-3"]);
+        let order = fingerprints(&jobs_of(&pods));
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(pods, Explains::Take);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || cluster.jobs() == 3).await,
+                "three explanations"
+            );
+        }));
+        served(result);
+        assert_eq!(started_jobs(&cluster), order, "in their order");
+        let after = started_after(&cluster, built);
+        assert!(
+            after[2] < ms(900),
+            "a job waited for a spent day: {after:?}"
+        );
+        assert_eq!(
+            *cluster.found.borrow(),
+            vec![(false, false); 3],
+            "the budget refuses each one, to be skipped at once"
+        );
+    }
+
+    #[test]
+    fn a_step_down_sets_the_queue_gauge_to_zero() {
+        let options = with_endpoint(options(true, 30));
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        // The first job hangs in the slot, the second waits in the queue.
+        let cluster = FakeCluster::new(crashing_pods(&["api-1", "api-2"]), Explains::Hang);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || gauge(&metrics.render(), QUEUE_LENGTH) == Some(1)).await,
+                "one job queued behind the slot"
+            );
+            lease.renewing.set(true);
+            lease.write(Some(OTHER));
+            assert!(
+                until(WAIT, || counter(&metrics, TO_STANDBY) == 1).await,
+                "stepped down"
+            );
+            assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(0));
+        }));
+        served(result);
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(0));
+        assert_eq!(cluster.jobs(), 1);
+    }
+
+    #[test]
+    fn a_takeover_cuts_the_credit_to_the_burst() {
+        // 3600 calls an hour, one a second: ten minutes as a process left 603 calls of credit.
+        let options = with_endpoint(options(true, 3600));
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let earlier = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .expect("an earlier instant");
+        *shared.budget.borrow_mut() = Budget::new(3600, 200, earlier);
+        assert!(hour_left(&shared) > 600, "the credit grew");
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(Vec::new(), Explains::Done);
+        let first_term = Cell::new(None);
+        let standby = Cell::new(None);
+        let second_term = Cell::new(None);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || counter(&metrics, TO_LEADER) == 1).await,
+                "leading"
+            );
+            first_term.set(Some(hour_left(&shared)));
+            // Another replica takes the Lease and keeps it while the credit grows again.
+            lease.renewing.set(true);
+            lease.write(Some(OTHER));
+            assert!(
+                until(WAIT, || counter(&metrics, TO_STANDBY) == 1).await,
+                "stepped down"
+            );
+            assert!(until(WAIT, || hour_left(&shared) >= 5).await, "accrued");
+            standby.set(Some(hour_left(&shared)));
+            // It lets the Lease go, and this replica takes it over.
+            lease.renewing.set(false);
+            lease.write(None);
+            assert!(
+                until(WAIT, || counter(&metrics, TO_LEADER) == 2).await,
+                "leading again"
+            );
+            second_term.set(Some(hour_left(&shared)));
+        }));
+        served(result);
+        let (first, standby, second) = (first_term.get(), standby.get(), second_term.get());
+        assert!(
+            first.is_some_and(|calls| calls <= 3),
+            "the first term start kept {first:?} calls"
+        );
+        assert!(standby.is_some_and(|calls| calls >= 5), "{standby:?}");
+        assert!(
+            second.is_some_and(|calls| calls <= 3),
+            "the takeover kept {second:?} calls"
+        );
+    }
+
+    #[test]
+    fn a_standby_scrape_shows_at_most_the_burst_and_the_day_left() {
+        let options = with_endpoint(options(true, 3600));
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        // Ten minutes of credit, and two calls of the day spent.
+        let earlier = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .expect("an earlier instant");
+        *shared.budget.borrow_mut() = Budget::new(3600, 200, earlier);
+        for _ in 0..2 {
+            shared
+                .budget
+                .borrow_mut()
+                .take(Instant::now())
+                .expect("a call");
+        }
+        let lease = FakeLease::new(Some(OTHER));
+        lease.renewing.set(true);
+        let cluster = FakeCluster::new(Vec::new(), Explains::Done);
+        let text = RefCell::new(String::new());
+        let result = runtime().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+            let address = listener.local_addr().expect("an address");
+            serve(
+                &options,
+                &lease,
+                &cluster,
+                &shared,
+                Some(&listener),
+                async {
+                    assert!(until(WAIT, || lease.gets.get() >= 2).await, "a standby");
+                    text.replace(scraped(address).await);
+                },
+            )
+            .await
+        });
+        served(result);
+        let text = text.into_inner();
+        assert!(!metrics.is_leading());
+        assert_eq!(gauge(&text, HOUR_LEFT), Some(3), "{text}");
+        assert_eq!(gauge(&text, DAY_LEFT), Some(198), "{text}");
+        assert_eq!(cluster.watches.get(), 0, "a standby starts no watch");
+    }
+
+    #[test]
+    fn a_leader_scrape_shows_the_whole_bucket_and_the_queue() {
+        let options = with_endpoint(options(false, 3600));
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        let earlier = Instant::now()
+            .checked_sub(Duration::from_secs(600))
+            .expect("an earlier instant");
+        *shared.budget.borrow_mut() = Budget::new(3600, 200, earlier);
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(Vec::new(), Explains::Done);
+        let text = RefCell::new(String::new());
+        let result = runtime().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+            let address = listener.local_addr().expect("an address");
+            serve(
+                &options,
+                &lease,
+                &cluster,
+                &shared,
+                Some(&listener),
+                async {
+                    assert!(until(WAIT, || metrics.is_ready()).await, "listed");
+                    text.replace(scraped(address).await);
+                },
+            )
+            .await
+        });
+        served(result);
+        let text = text.into_inner();
+        assert!(
+            gauge(&text, HOUR_LEFT).is_some_and(|calls| calls >= 603),
+            "{text}"
+        );
+        assert_eq!(gauge(&text, DAY_LEFT), Some(200), "{text}");
+        assert_eq!(gauge(&text, QUEUE_LENGTH), Some(0), "{text}");
+    }
+
+    #[test]
+    fn a_dry_run_shows_the_queue_and_no_budget() {
+        // No endpoint: the request is logged, and there is no budget to show.
+        let options = options(false, 30);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(crashing_pods(&["api-1"]), Explains::Done);
+        let text = RefCell::new(String::new());
+        let result = runtime().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+            let address = listener.local_addr().expect("an address");
+            serve(
+                &options,
+                &lease,
+                &cluster,
+                &shared,
+                Some(&listener),
+                async {
+                    assert!(until(WAIT, || cluster.jobs() == 1).await, "explained");
+                    text.replace(scraped(address).await);
+                },
+            )
+            .await
+        });
+        served(result);
+        let text = text.into_inner();
+        assert_eq!(gauge(&text, QUEUE_LENGTH), Some(0), "{text}");
+        assert!(!text.contains("kausa_budget_calls_remaining"), "{text}");
+    }
+
+    /// Every watch lists in the pages of the research note, and the Event watch keeps its field
+    /// selector on top (docs/research/2026-11-02-list-pages.md).
+    #[test]
+    fn every_watch_lists_in_small_pages() {
+        assert_eq!(watcher_config().page_size, Some(LIST_PAGE_SIZE));
+        let events = watcher_config().fields("type=Warning");
+        assert_eq!(events.page_size, Some(LIST_PAGE_SIZE));
+        assert_eq!(events.field_selector.as_deref(), Some("type=Warning"));
+        assert!(LIST_PAGE_SIZE < watcher::Config::default().page_size.unwrap_or(u32::MAX));
     }
 }

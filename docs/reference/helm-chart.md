@@ -95,8 +95,8 @@ but about kausa's own Lease, and is the same in both scopes.
 | `notifications.telegramChatId` | `""` | Required with `telegram`, refused with the others: `--notify-telegram-chat-id`, an integer or `@` and a channel's username |
 | `notifications.allowHttp` | `false` | `--notify-allow-http`, for an `http://` webhook in the cluster or on the same private network |
 | `settleSeconds` | `60` | `--settle-seconds` |
-| `budget.callsPerHour` | `30` | `--max-calls-per-hour` |
-| `budget.callsPerDay` | `200` | `--max-calls-per-day` |
+| `budget.callsPerHour` | `30` | `--max-calls-per-hour`: model calls in any hour, per process. Each start (an install, upgrade, restart or takeover) allows 3 at once, then one every `3600/callsPerHour` seconds, up to `callsPerHour`; incidents wait in the queue for their call |
+| `budget.callsPerDay` | `200` | `--max-calls-per-day`: model calls in any 24 hours, per process. For it to hold across restarts, up to the bursts of 3, set `callsPerHour <= callsPerDay / 24` |
 | `budget.maxInputTokens` | `6000` | `--max-input-tokens` |
 | `budget.dedupHours` | `6` | `--dedup-hours` |
 | `metrics.enabled` | `true` | `--metrics-address <bindAddress>:<port>`, the liveness (`/healthz`) and readiness (`/readyz`) probes, and the Service |

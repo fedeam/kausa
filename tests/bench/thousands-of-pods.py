@@ -15,16 +15,39 @@ docs/research/2026-10-29-richer-context-measured.md (0017's larger records):
   required Pod affinity and 4 anti-affinity terms and 8 tolerations, each key 128 bytes long. No
   node has the labels, so the Pods stay Pending. They can be deleted, with their namespaces.
 
+One more, added on 2026-11-02 for the measurement of the list pages
+(docs/research/2026-11-02-list-pages.md):
+
+- --forged N writes only a namespace forged-00 with N Deployments forged-NNN of zero replicas,
+  each with one annotation, bench.example.com/padding, of 256,000 bytes (under the API server's
+  256 KiB limit for all of an object's annotations), so that a list page of Deployments is as
+  large as the API server allows. Create them with `kubectl create -f -`, never `kubectl apply`:
+  apply would add a last-applied-configuration annotation holding the whole object again, which
+  doubles the size and goes over the limit. Run it after the other objects, in the same cluster.
+  The Deployment controller copies the annotation to each Deployment's ReplicaSet, so 500 of
+  them take about 256 MB of etcd; kausa lists Deployments, never ReplicaSets.
+
 Usage: python3 thousands-of-pods.py [--probes] [--unschedulable]
        [namespaces] [deployments per namespace] [replicas]
+       python3 thousands-of-pods.py --forged N
 """
 import sys
 
-flags = {a for a in sys.argv[1:] if a.startswith("--")}
+argv = sys.argv[1:]
+forged = None
+if "--forged" in argv:
+    at = argv.index("--forged")
+    if at + 1 >= len(argv) or not argv[at + 1].isdigit():
+        sys.exit("--forged needs a count")
+    forged = int(argv[at + 1])
+    del argv[at : at + 2]
+flags = {a for a in argv if a.startswith("--")}
 unknown = flags - {"--probes", "--unschedulable"}
 if unknown:
     sys.exit(f"unknown option: {sorted(unknown)[0]}")
-positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+positional = [a for a in argv if not a.startswith("--")]
+if forged is not None and (flags or positional):
+    sys.exit("--forged takes no other option or argument")
 args = positional + ["20", "50", "3"][len(positional) :]
 namespaces, deployments, replicas = (int(a) for a in args)
 probes, unschedulable = "--probes" in flags, "--unschedulable" in flags
@@ -80,6 +103,28 @@ def scheduling():
           requiredDuringSchedulingIgnoredDuringExecution: [{anti}]
       tolerations: [{tolerations}]"""
 
+
+PADDING_BYTES = 256_000
+
+if forged is not None:
+    print("apiVersion: v1\nkind: Namespace\nmetadata: {name: forged-00}")
+    padding = "x" * PADDING_BYTES
+    for d in range(forged):
+        print(f"""---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forged-{d:03d}
+  namespace: forged-00
+  annotations: {{bench.example.com/padding: "{padding}"}}
+spec:
+  replicas: 0
+  selector: {{matchLabels: {{app: forged-{d:03d}}}}}
+  template:
+    metadata: {{labels: {{app: forged-{d:03d}}}}}
+    spec:
+      containers: [{{name: app, image: registry.k8s.io/pause:3.10}}]""")
+    sys.exit(0)
 
 if unschedulable:
     placement, prefix = scheduling(), "unsched"

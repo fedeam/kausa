@@ -455,7 +455,7 @@ mod tests {
 
     fn shared_in<'a>(metrics: &'a Metrics, ttl: Duration, term: &'a Term) -> Shared<'a> {
         Shared {
-            budget: RefCell::new(Budget::new(30, 200)),
+            budget: RefCell::new(Budget::new(30, 200, std::time::Instant::now())),
             dedup: RefCell::new(Dedup::new(ttl, 1024)),
             writer: None,
             history: None,

@@ -9,13 +9,20 @@ appends each request body to a file so that the test can check what left the clu
 It is also the fake receiver of kausa's notifications (docs/adr/0015-notifications.md): a POST
 whose path starts with /hook/ never reaches the model's request log. The first one is answered 503
 and every later one 200, so that kausa retries once, and each one appends a JSON line with the
-status it got, its path, its Authorization header and its body to the hook log. Standard library
-only.
+status it got, its path, its Authorization header and its body to the hook log.
+
+With --time-log, every line appended to the request log is matched by one line in the time log:
+the wall-clock second the request was received (time.time(), three decimals), comparable with the
+Pods' status.startTime because kind's nodes share the host clock. Both files are appended under
+one lock, so they always have the same number of lines, in the same order, and the request log's
+line count still equals the model calls (docs/adr/0021-refill-the-call-budget.md). Standard
+library only.
 """
 
 import argparse
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ANSWER = {
@@ -41,10 +48,13 @@ def main():
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--hook-log", required=True)
+    parser.add_argument("--time-log")
     args = parser.parse_args()
     # The number of notifications received, under the lock that also orders the hook log.
     hooks = {"received": 0}
     hook_lock = threading.Lock()
+    # Orders the request log and the time log together, so that their lines pair up.
+    request_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def hook(self, body):
@@ -64,13 +74,18 @@ def main():
             self.end_headers()
 
         def do_POST(self):
+            received = time.time()
             length = int(self.headers.get("content-length", "0"))
             body = self.rfile.read(length)
             if self.path.startswith("/hook/"):
                 self.hook(body)
                 return
-            with open(args.log, "ab") as log:
-                log.write(body + b"\n")
+            with request_lock:
+                with open(args.log, "ab") as log:
+                    log.write(body + b"\n")
+                if args.time_log:
+                    with open(args.time_log, "a", encoding="utf-8") as times:
+                        times.write(f"{received:.3f}\n")
             if self.path != "/v1/chat/completions":
                 self.send_error(404)
                 return

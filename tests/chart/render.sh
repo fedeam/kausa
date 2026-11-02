@@ -5,8 +5,9 @@
 # (docs/adr/0015-notifications.md), with the Deployment watch of D014 on and off
 # (docs/adr/0018-stuck-rollouts.md) and with one or two replicas
 # (docs/adr/0019-high-availability.md), and checks the rendered objects, the rules, the
-# Deployment's arguments and volumes, the NetworkPolicy, NOTES.txt, and every refusal of
-# kausa.validate with its exact message.
+# Deployment's arguments and volumes, the NetworkPolicy, NOTES.txt, the budget's flags and comments
+# (docs/adr/0021-refill-the-call-budget.md), and every refusal of kausa.validate with its exact
+# message.
 # Needs helm, git and coreutils only, and never contacts a cluster (KUBECONFIG points nowhere).
 # Run it from anywhere: tests/chart/render.sh. It prints one line per check and exits 1 if any
 # failed.
@@ -2163,6 +2164,137 @@ refuse replicas-file-1.5 "$(not_replicas 1.5)" "${HA_CL[@]}" -f "$VALUES_FLOAT"
 refuse replicas-file-1.5-namespaced "$(not_replicas 1.5)" "${HA_NS[@]}" -f "$VALUES_FLOAT"
 refuse replicas-json-2.5 "$(not_replicas 2.5)" "${HA_CL[@]}" --set-json replicaCount=2.5
 refuse replicas-json-true "$(not_replicas true)" "${HA_CL[@]}" --set-json replicaCount=true
+
+# --- Refill budget (docs/adr/0021-refill-the-call-budget.md) ------------------------------------
+
+# kausa refills the hourly budget at a steady rate from a start burst of 3. The chart passes the
+# same two flags as before, with no new value, no new default and no refusal: only the comments of
+# values.yaml and the two-replica paragraph of NOTES.txt change.
+
+# budget_args FILE: the values of --max-calls-per-hour and --max-calls-per-day, in that order,
+# one per line, as rendered (quoted).
+budget_args() {
+  args "$1" | awk '
+    want { print substr($0, 3); want = 0 }
+    $0 == "- --max-calls-per-hour" || $0 == "- --max-calls-per-day" { want = 1 }'
+}
+
+# check_budget_args NAME HOUR DAY ARGS...: one --max-calls-per-hour "HOUR" and one
+# --max-calls-per-day "DAY", in that order.
+check_budget_args() {
+  local name=$1 hour=$2 day=$3
+  shift 3
+  local out="$WORK/budget-$name"
+  if ! render "$out" "$RELEASE" "$CHART" "$@"; then
+    fail "budget/$name does not render: $(cat "$out.err")"
+    return 0
+  fi
+  local got
+  got=$(budget_args "$out" | paste -sd' ' -)
+  if [ "$got" = "\"$hour\" \"$day\"" ] &&
+    [ "$(args "$out" | grep -cxF -- '- --max-calls-per-hour')" = 1 ] &&
+    [ "$(args "$out" | grep -cxF -- '- --max-calls-per-day')" = 1 ]; then
+    ok "budget/$name"
+  else
+    fail "budget/$name: expected --max-calls-per-hour \"$hour\" --max-calls-per-day \"$day\"," \
+      "got: $got"
+  fi
+}
+
+for set in cluster namespaced; do
+  case $set in
+    cluster) scope=(--set rbac.scope=cluster) ;;
+    *) scope=(--set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a}') ;;
+  esac
+  check_budget_args "$set-defaults" 30 200 "${scope[@]}" "${ENDPOINT[@]}"
+  # The e2e values: one call a second for the existing runs, one every 10 s for the budget case.
+  check_budget_args "$set-3600" 3600 200 "${scope[@]}" "${ENDPOINT[@]}" \
+    --set budget.callsPerHour=3600
+  check_budget_args "$set-360" 360 200 "${scope[@]}" "${ENDPOINT[@]}" \
+    --set budget.callsPerHour=360
+  check_budget_args "$set-two-replicas" 30 200 "${scope[@]}" "${ENDPOINT[@]}" --set replicaCount=2
+done
+check_budget_args zero 0 0 --set rbac.scope=cluster "${ENDPOINT[@]}" \
+  --set budget.callsPerHour=0 --set budget.callsPerDay=0
+check_budget_args largest 1000000 1000000 --set rbac.scope=cluster "${ENDPOINT[@]}" \
+  --set budget.callsPerHour=1000000 --set budget.callsPerDay=1000000
+# A dry run passes them too, as before; detection only (no endpoint, no dry run) passes neither.
+check_budget_args dry-run 360 200 --set rbac.scope=cluster "${DRY[@]}" \
+  --set budget.callsPerHour=360
+out="$WORK/budget-detect-only"
+if render "$out" "$RELEASE" "$CHART" --set rbac.scope=cluster --set budget.callsPerHour=360; then
+  if args "$out" | grep -qE -- '^- --max-calls-per-(hour|day)$'; then
+    fail "budget/detect-only: detection only passes a budget flag"
+  else
+    ok "budget/detect-only"
+  fi
+else
+  fail "budget/detect-only does not render: $(cat "$out.err")"
+fi
+
+# values.yaml: the budget block and replicaCount keep their keys and defaults; their comments
+# describe the refill, the start burst after a takeover and the advice for the daily cap.
+VALUES="$CHART/values.yaml"
+budget_values=$(awk '
+  $0 == "budget:" { on = 1; print; next }
+  on && /^[^ #]/ { on = 0 }
+  on && /^ *#/ { next }
+  on && NF { print }' "$VALUES")
+expected_budget_values=$(printf '%s\n' 'budget:' '  callsPerHour: 30' '  callsPerDay: 200' \
+  '  maxInputTokens: 6000' '  dedupHours: 6')
+if [ "$budget_values" = "$expected_budget_values" ]; then
+  ok "values.yaml: the budget block keeps its keys and defaults"
+else
+  fail "values.yaml: the budget block changed: $budget_values"
+fi
+if grep -qx 'replicaCount: 1' "$VALUES"; then
+  ok "values.yaml: replicaCount stays 1"
+else
+  fail "values.yaml: replicaCount is no longer 1"
+fi
+
+# comments_of KEY: the comment lines right above a top-level KEY and inside its block, without
+# the '#', joined by spaces.
+comments_of() {
+  awk -v key="$1" '
+    /^#/ { above = above " " substr($0, 2); next }
+    $0 == key ":" || index($0, key ": ") == 1 { print above; on = 1; above = ""; next }
+    on && /^ +#/ { sub(/^ +#/, ""); print; next }
+    on && /^[^ ]/ { on = 0 }
+    { above = "" }' "$VALUES" | tr '\n' ' ' | tr -s ' '
+}
+since=$FAILURES
+budget_comments=$(comments_of budget)
+for words in 'start burst of 3' '3600/callsPerHour' 'callsPerHour <= callsPerDay / 24'; do
+  printf '%s' "$budget_comments" | grep -qF -- "$words" ||
+    fail "values.yaml: the budget comments do not say '$words': $budget_comments"
+done
+replica_comments=$(comments_of replicaCount)
+for words in 'own call budget' 'at most 3 calls' 'twice'; do
+  printf '%s' "$replica_comments" | grep -qF -- "$words" ||
+    fail "values.yaml: the replicaCount comments do not say '$words': $replica_comments"
+done
+passed "$since" "values.yaml: the comments describe the refilling budget"
+
+# NOTES.txt with two replicas: a takeover brings at most 3 calls, and the word budget stays.
+for set in cluster namespaced; do
+  file="$WORK/notes-standby-$set-two"
+  [ -s "$file" ] || { fail "NOTES.txt with two replicas ($set) is empty"; continue; }
+  since=$FAILURES
+  collapsed "$file" | grep -qi 'budget' ||
+    fail "NOTES.txt with two replicas ($set) no longer mentions the budget"
+  collapsed "$file" | grep -qF 'at most 3' ||
+    fail "NOTES.txt with two replicas ($set) does not say a takeover brings at most 3 calls"
+  passed "$since" "NOTES.txt with two replicas ($set) describes the refilling budget"
+done
+
+# The budget values add no refusal, and the earlier checks still come first.
+refuse budget-scope-first "$NOT_SET" --set budget.callsPerHour=360
+refuse budget-v0.1-checks-stay "model.name is required with model.endpoint" \
+  --set rbac.scope=cluster --set model.endpoint=https://api.example.com/v1 \
+  --set budget.callsPerHour=360
+refuse budget-replicas-stay "$(not_replicas 3)" --set rbac.scope=cluster \
+  --set budget.callsPerHour=360 --set replicaCount=3
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "FAIL: $FAILURES chart checks failed" >&2

@@ -92,8 +92,10 @@ StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)). Also since v0.4.0
 watches, explains and writes; the other reads the Lease every 5 s and takes it over if the leader
 stops renewing it ([0019. Offer an optional standby replica that takes over through a
 chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md)). A hosted
-provider over HTTPS (the distroless CA bundle with rustls) was tried on 2026-10-30. Not tested
-yet: clusters larger than about a hundred Pods, and long runs
+provider over HTTPS (the distroless CA bundle with rustls) was tried on 2026-10-30. Starts were
+measured in kind with up to 10,000 Pods ([Thousands of
+Pods](docs/research/2026-10-28-thousands-of-pods.md), [List
+pages](docs/research/2026-11-02-list-pages.md)). Not tested yet: long runs
 ([Architecture](docs/explanation/architecture.md)).
 
 **Who controls kausa's inputs.** Anyone who can create or change a workload in a watched namespace
@@ -167,11 +169,14 @@ kausa must:
 - **Bound its cost and its resources.** A call budget per hour and per day, a cap on input tokens
   per request and on output tokens, deduplication of repeated incidents, one request at a time
   and a bounded queue, so that a tenant who makes Pods fail on purpose cannot run up the bill or
-  the memory. The budget and the deduplication cache live in memory, so they hold per process
-  lifetime: a restart starts them over. With two replicas each process keeps its own, across its
-  own terms as leader: a replica that steps down and leads again keeps its count and its cache,
-  so a release spends at most twice `budget.callsPerHour` and `budget.callsPerDay` while both
-  processes live. Watches keep small records instead of whole objects; log
+  the memory. The budget is a refill bucket under the hourly and daily caps
+  ([0021](docs/adr/0021-refill-the-call-budget.md)): each start, and each takeover with two
+  replicas, allows at most 3 calls at once, then one every `3600 / callsPerHour` seconds. The
+  budget and the deduplication cache live in memory, with nothing stored or read back: a restart
+  empties the cache but does not refill the budget beyond those 3 calls. With two replicas each
+  process keeps its own windows across its own terms as leader, so each process starts at most
+  `budget.callsPerHour` calls in any hour and `budget.callsPerDay` in any day. Watches keep small
+  records instead of whole objects; log
   tails, requests, answers and caches are capped. Hitting a limit is counted in the metrics and
   never crashes kausa.
 - **Never explain itself.** Events with kausa's own reporting controller are ignored, so its
@@ -203,7 +208,7 @@ kausa must:
   costs at most the duplicates below; and, since RBAC cannot narrow `patch` to `spec`, change the
   Lease's labels and annotations (checked in kind, Kubernetes v1.36.4). Nothing more: it cannot
   create, list, watch or delete Leases, touch another Lease, another namespace or anything
-  cluster-scoped. A flip never resets a budget: each process keeps its own across its terms.
+  cluster-scoped. A flip never refills a budget: each takeover starts with at most 3 calls.
 - **Whoever can write Leases in kausa's namespace can stop it** (with `replicaCount: 2`), in every
   replica and with no handover, by holding the Lease under another identity or by changing its
   version faster than `LEASE_DURATION` (30 s) while the leader is dead. The reviewer of
@@ -234,9 +239,13 @@ kausa must:
   metrics `accept` and its connections share the process at random, as with one replica, and the
   Lease keeper is polled before them only to renew or to step down, so a connection flood from
   any peer that `networkPolicy.metricsFrom` allows (any, by default) slows the controller no more
-  than with one replica, and cannot keep a starved leader holding the Lease. Measuring this under
-  the 200m CPU limit is an open item before release (the research note that
-  [0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md) requires).
+  than with one replica, and cannot keep a starved leader holding the Lease. Measured in kind on
+  2026-10-29 at the 200m CPU limit: under a flood of 64 or 256 connections the leader renewed with
+  at most 24 ms of delay and kept explaining ([Standby and
+  failover](docs/research/2026-10-29-standby-and-failover.md)).
+- **The metrics port shows the budget's state.** `kausa_budget_calls_remaining` and
+  `kausa_explanation_queue_length` tell any peer that `networkPolicy.metricsFrom` allows when the
+  budget is spent and how many incidents wait, with no namespace, workload or other name.
 
 - **Redaction has false negatives.** A secret in a format no rule knows, split across lines or
   encoded, can reach the provider. Every rule ships with a test corpus, and `--dry-run` shows the
@@ -284,10 +293,12 @@ kausa must:
   characters for the model to join. Those links stay links.
 - **The budget is shared.** The call budget and the queue are one per release, shared by every
   namespace it watches (the whole cluster, or the listed namespaces), so a tenant that makes
-  many workloads fail can use up the budget and push other namespaces' incidents out of the queue:
-  their failures then get an `ExplanationSkipped` Event or none. It protects the bill, not
-  fairness between namespaces; separate releases with disjoint `rbac.namespaces` have separate
-  budgets.
+  many workloads fail can use up the budget and, by flooding the queue, push other namespaces'
+  waiting incidents out: the oldest of a full queue that waits for the budget gets an
+  `ExplanationSkipped` Event (reason `budget`), and an incident dropped when several settle at
+  once, or while the slot is busy, is only logged (`explanation dropped`) and counted. It protects
+  the bill, not fairness between namespaces; separate releases with disjoint `rbac.namespaces` have
+  separate budgets.
 - **The history can be rewritten or deleted by a compromised kausa** (with `--history`). RBAC
   cannot narrow `patch` and `delete` on `explanations` to kausa's own objects, so a stolen kausa
   token can rewrite or delete any Explanation, or add `finalizers` that stall its deletion (and,
@@ -337,14 +348,22 @@ kausa must:
   it for as long as they keep producing fresh, distinct events that never settle; it comes 10
   minutes after the last one. They cannot silence it for good: only an explained incident does,
   and the same writer can already forge explanations with events.
-- **A list page is held whole.** Records are small, but each watch decodes list pages of up to 500
-  whole objects, and no Pod quota bounds Deployments scaled to zero (hypothesis: an object is
-  capped at about 1.5 MiB, annotations at 256 KiB). This holds for the Pod watch already; smaller
-  pages for all three watches are a follow-up.
-- **The hard cost limit is the provider's.** kausa's budget starts over when kausa restarts, and a
-  kausa that restarts often can spend more than its daily cap; with `replicaCount: 2`, each
-  replica has its own, so a release can spend up to twice its caps while both run. Operators should set a spending cap
-  or rate limit on the provider key.
+- **A list page is held whole.** Records are small, but each watch decodes a list page whole, and
+  no Pod quota bounds Deployments scaled to zero (hypothesis: an object is capped at about
+  1.5 MiB, annotations at 256 KiB). kausa lists in pages of 50 objects, not kube-runtime's 500:
+  beside 10,000 Pods, 500 Deployments with 250 KiB of annotations each took the peak of the macOS
+  binary to 161 to 170 MiB, against 591 to 608 MiB with pages of 500 ([List
+  pages](docs/research/2026-11-02-list-pages.md)). That is under the chart's limit of 192Mi but
+  above a 75% margin, and objects nearer the size limit can take more.
+- **The hard cost limit is the provider's.** kausa's caps hold per process, and only in memory.
+  With `I = 3600 / callsPerHour` seconds, `K` the starts and takeovers in a span of `T` and `c(s)`
+  the credit at its start (at most `callsPerHour`, at most 3 right after a start), a release
+  starts at most `c(s) + 3K + T/I` calls in it. So a kausa that restarts often, or whose Lease is
+  flipped, adds at most 3 calls a start, and a day holds at most `24 × callsPerHour + 3K + c(s)`:
+  the daily cap holds across restarts, up to those bursts, only with `budget.callsPerHour <=
+  budget.callsPerDay / 24`. The bound rests on terms not overlapping (0019's timing hypotheses
+  with the Lease, `strategy: Recreate` without it); with `replicaCount: 2`, each replica keeps its
+  own caps. Operators should set a spending cap or rate limit on the provider key.
 - **Events are visible to everyone who can read Events** in that namespace. An explanation only
   repeats names already visible on the object, and never a value that redaction removed. It
   summarizes the incident's redacted event messages and log lines, so readers of Events in that
