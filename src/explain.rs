@@ -106,10 +106,22 @@ pub const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Whether a detection reads the failed container's log (docs/reference/rules.md).
 pub fn reads_logs(detection: Detection) -> bool {
-    matches!(
-        detection,
-        Detection::CrashLoop | Detection::OutOfMemory | Detection::JobFailed
-    )
+    match detection {
+        Detection::CrashLoop => true,
+        Detection::ImagePull => false,
+        Detection::OutOfMemory => true,
+        Detection::ContainerCreate => false,
+        Detection::Unschedulable => false,
+        Detection::ProbeFailure => false,
+        Detection::VolumeFailure => false,
+        Detection::JobFailed => true,
+        Detection::PodEvicted => false,
+        Detection::SandboxCreate => false,
+        Detection::PodCreate => false,
+        Detection::ClaimProvisioning => false,
+        Detection::AutoscalerMetrics => false,
+        Detection::RolloutStalled => false,
+    }
 }
 
 /// Explains one incident and logs the outcome: from the deduplication cache when the same failure
