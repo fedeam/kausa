@@ -22,6 +22,11 @@ use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord};
 /// while, and the kubelet's back-off grows to five minutes, so the gap has to be longer than that.
 pub const STATE_GRACE: SignedDuration = SignedDuration::from_secs(330);
 
+/// The most Pod names a pending failure keeps. While a failure lasts, its Pods may keep being
+/// replaced; past this many, only the names first in sorted order are kept, whatever the order
+/// the Pods were seen in.
+const MAX_PODS: usize = 100;
+
 /// What makes two failures the same incident: the namespace, the top-level owner and the
 /// detection.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -251,7 +256,8 @@ pub struct Incident {
     pub fingerprint: String,
     pub first_seen: Timestamp,
     pub last_seen: Timestamp,
-    /// The Pods whose failures make up the incident, sorted.
+    /// The Pods whose failures make up the incident, sorted: the first `MAX_PODS` in order of
+    /// those seen while it was pending, and every Pod failing when it settled.
     pub pods: BTreeSet<String>,
     /// The first signal in a fixed order (by Pod, container, reason, message), as the example.
     pub sample: Signal,
@@ -264,7 +270,7 @@ struct Pending {
     /// The last check that had a signal for this failure.
     last_signal_at: Timestamp,
     /// Every Pod seen failing while the failure was pending, so that replicas whose crash loops
-    /// are out of step all count.
+    /// are out of step all count; at most `MAX_PODS`, the first in sorted order.
     pods: BTreeSet<String>,
     emitted: bool,
 }
@@ -416,6 +422,9 @@ impl Tracker {
         entry
             .pods
             .extend(group.iter().filter_map(|s| s.pod.clone()));
+        while entry.pods.len() > MAX_PODS {
+            entry.pods.pop_last();
+        }
         Some(Seen {
             first_seen: entry.first_seen,
             last_seen: entry.last_seen,
@@ -440,14 +449,18 @@ impl Tracker {
                 &b.message,
             ))
         });
+        // The Pods failing now count even past the cap, so that the sample's own name is
+        // normalized in the fingerprint and the explanation finds Pods that still exist.
+        let mut pods = seen.pods;
+        pods.extend(group.iter().filter_map(|s| s.pod.clone()));
         let sample = group.swap_remove(0);
         Some(Incident {
-            fingerprint: incident_fingerprint(&key, &sample, &seen.pods),
+            fingerprint: incident_fingerprint(&key, &sample, &pods),
             owner: sample.owner.clone(),
             key,
             first_seen: seen.first_seen,
             last_seen: seen.last_seen,
-            pods: seen.pods,
+            pods,
             sample,
         })
     }
@@ -1136,6 +1149,70 @@ mod tests {
             ["cache-a", "cache-b", "cache-c"]
         );
         assert_eq!(found[0].key.owner_name, "cache");
+    }
+
+    #[test]
+    fn a_failure_keeps_at_most_max_pods_names() {
+        // A Deployment whose new Pods fail too: the ReplicaSet replaces one every 5 seconds,
+        // through a settle window of 10 minutes and for as long again after the incident.
+        let deploy = owner("Deployment", "api");
+        let failing = |i: i64| {
+            let mut record = pod(&format!("api-{i:03}"), "Pending", None);
+            record.containers[0].waiting_reason = Some("CreateContainerConfigError".into());
+            record.containers[0].waiting_message = Some(format!("secret not found for api-{i:03}"));
+            record
+        };
+        let settle = SignedDuration::from_secs(600);
+        let timeline: Vec<_> = (0..=240).map(|i| (5 * i, vec![failing(i)])).collect();
+        let mut tracker = Tracker::new(settle);
+        assert_eq!(
+            checks(&mut tracker, &timeline[..120], &deploy),
+            [0; 120],
+            "nothing settles before the window"
+        );
+        let views = [PodView {
+            record: &timeline[120].1[0],
+            owner: &deploy,
+        }];
+        let found = tracker.tick(t(600), collect_signals(&views, &[], t(600), FRESH));
+        assert_eq!(found.len(), 1);
+        let incident = &found[0];
+        assert_eq!(incident.key.detection.id(), "D004");
+        // The first 100 names in order, and the Pod failing now, which is the sample.
+        let mut expected: Vec<_> = (0..100).map(|i| format!("api-{i:03}")).collect();
+        expected.push("api-120".into());
+        assert_eq!(
+            incident.pods.iter().collect::<Vec<_>>(),
+            expected.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(incident.sample.pod.as_deref(), Some("api-120"));
+        // The fingerprint is the one of the same failure in a single Pod.
+        let mut small = Tracker::new(settle);
+        let one: Vec<_> = (0..=120).map(|i| (5 * i, vec![failing(7)])).collect();
+        let small_found: Vec<_> = one
+            .iter()
+            .flat_map(|(at, records)| {
+                let views: Vec<_> = records
+                    .iter()
+                    .map(|record| PodView {
+                        record,
+                        owner: &deploy,
+                    })
+                    .collect();
+                small.tick(t(*at), collect_signals(&views, &[], t(*at), FRESH))
+            })
+            .collect();
+        assert_eq!(small_found.len(), 1);
+        assert_eq!(small_found[0].pods.len(), 1);
+        assert_eq!(incident.fingerprint, small_found[0].fingerprint);
+        // While the failure lasts, the names stop growing at the cap.
+        assert_eq!(
+            checks(&mut tracker, &timeline[121..], &deploy),
+            [0; 120],
+            "one incident while the failure lasts"
+        );
+        let pending: Vec<_> = tracker.pending.values().map(|p| p.pods.len()).collect();
+        assert_eq!(pending, [MAX_PODS]);
     }
 
     #[test]
