@@ -80,3 +80,10 @@ chart-created Lease, elected by kausa's own code](0019-high-availability.md) kee
 or `2`: with `2`, two replicas, still with `Recreate`, of which only the holder of a Lease acts,
 with a PodDisruptionBudget and a preferred pod anti-affinity. With `1` the chart renders as
 before, byte for byte ([Helm chart](../reference/helm-chart.md)).
+
+Update 2026-11-02: [0020. Check the model endpoint on demand with `kausa check-endpoint` and `helm
+test`, and hold calls behind a breaker while it fails](0020-check-the-endpoint.md) adds two chart
+values, `model.timeoutSeconds` (120) and `endpointCheck.enabled` (true), and two objects that
+exist only for `helm test`: a test Pod that runs `kausa check-endpoint` with no ServiceAccount
+token, and its own NetworkPolicy when `networkPolicy.enabled`. `helm install` and `helm upgrade`
+create neither.

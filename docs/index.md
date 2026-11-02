@@ -146,7 +146,13 @@ checks](how-to/develop.md).
   progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
   StatefulSets or DaemonSets](adr/0018-stuck-rollouts.md) and [0019. Offer an optional standby
   replica that takes over through a chart-created Lease, elected by kausa's own
-  code](adr/0019-high-availability.md).
+  code](adr/0019-high-availability.md). Accepted for v0.5: [0020. Check the model endpoint on
+  demand with `kausa check-endpoint` and `helm test`, and hold calls behind a breaker while it
+  fails](adr/0020-check-the-endpoint.md), [0021. Refill the hourly call budget at a steady rate
+  from a start burst of three, and let incidents wait for it in the queue, so that a restart does
+  not refill it](adr/0021-refill-the-call-budget.md) and [0022. Pass the model's answer through
+  the pattern redaction rules before it is written anywhere, and redact the query of an HTTP
+  request line](adr/0022-redact-the-answer.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
