@@ -376,3 +376,21 @@ after its start; at most 4 may`.
   The kind test of the cluster scope passed locally on Docker Desktop with the fix: 88 requests in
   610 s over 10 starts, at most 90, and every process logged `stopped` 0.41 to 0.53 s before the
   next one logged `started`.
+
+## Later the same day: `kausa check-endpoint` against a hosted provider
+
+- The release build of the change of 0020 ran `kausa check-endpoint` three times against the
+  OpenAI-compatible endpoint of Google's Gemini API, with a key the maintainer gave (passed in
+  `KAUSA_API_KEY`, never printed or written):
+  - `gemini-3.5-flash-lite`: `result` `ok`, status `200`, a valid answer, 514 tokens in and 102
+    out, about 3.7 s; exit `0`.
+  - `gemini-2.5-flash`, no longer offered to new users: `cause` `not_found`, class
+    `configuration`, the provider's message in `detail`, and the hint to check the model name;
+    exit `1`.
+  - A wrong key: Gemini answers `400` with `INVALID_ARGUMENT` ("Please pass a valid API key"), not
+    `401`, so the cause is `rejected` and the hint points at `--no-json-schema`. Under 0020 a `400`
+    never opens the breaker, so a wrong Gemini key skips each incident instead of holding calls.
+    Follow-up: recognize a provider's key error inside a `400` body with the fixed-key lookup
+    (Gemini's `error.status` and, if present, its `details[].reason`), without letting a
+    tenant-shaped `400` count.
+
