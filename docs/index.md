@@ -156,4 +156,5 @@ checks](how-to/develop.md).
   [2026-10-27 — Publication](journal/2026-10-27-publication.md);
   [2026-10-28 — First release](journal/2026-10-28-first-release.md);
   [2026-10-29 — Notifications](journal/2026-10-29-notifications.md);
-  [2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md).
+  [2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md);
+  [2026-11-02 — The good first issues](journal/2026-11-02-good-first-issues.md).
