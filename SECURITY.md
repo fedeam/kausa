@@ -22,7 +22,9 @@ provider or wrote it into an Event, rotate that secret first; do not include it 
 
 These are vulnerabilities, not ordinary bugs:
 
-- a value that a redaction rule should catch reaching a request, an Event or kausa's log in clear;
+- a value that a redaction rule should catch reaching a request, an Event, an Explanation, kausa's
+  log or a notification in clear, whether it came from the cluster or from the model's answer
+  (`R003`–`R014` on the answer);
 - any request to a host other than the Kubernetes API server, the configured endpoint and, with
   notifications on, the configured webhook;
 - a notification that carries a field outside [Data sent in
@@ -157,7 +159,11 @@ kausa must:
   in the request, marked as untrusted; the system message says they may contain instructions to
   ignore. The model has no tools and no functions, and kausa never acts on an answer: it validates
   it against a fixed schema, caps its length, strips control and invisible formatting characters
-  and markup, and writes it only as plain text in an Event and in its own log.
+  and markup, passes it through the pattern redaction rules `R003`–`R014` (an address, a token, a
+  URL's query or a host outside the allowlist the model writes is redacted, whoever put it there),
+  and writes it only as plain text in an Event, its own log and, when they are on, the history and
+  the notification ([0022. Pass the model's answer through the pattern redaction rules before it
+  is written anywhere, and redact the query of an HTTP request line](docs/adr/0022-redact-the-answer.md)).
 - **Bound its cost and its resources.** A call budget per hour and per day, a cap on input tokens
   per request and on output tokens, deduplication of repeated incidents, one request at a time
   and a bounded queue, so that a tenant who makes Pods fail on purpose cannot run up the bill or
@@ -246,8 +252,10 @@ kausa must:
   redacted](docs/adr/0017-richer-context-for-the-model.md)). Their values are never sent, except
   the fixed `kubernetes.io/os` and `kubernetes.io/arch` ones.
 - **A misleading explanation is still possible.** Injected text can shape what the model writes,
-  for example a suggested command that does harm. kausa never runs anything, and the explanation
-  is advice for a person, who has to read it as such.
+  for example a suggested command that does harm, a misleading cause or a demanded `high`
+  confidence. The redaction rules on the answer remove values, not advice: commands (`curl … |
+  sh`, `kubectl delete …`) are written as the model wrote them. kausa never runs anything, and the
+  explanation is advice for a person, who has to read it as such.
 - **The provider sees what is sent.** Its retention and training policies are the provider's.
   kausa documents what it sends; choosing the provider is the operator's decision.
 - **The webhook's operator learns what a notification says.** With notifications on, the real
@@ -268,7 +276,12 @@ kausa must:
   showed them as plain text. In Telegram, a real post showed the joiners keeping mentions and
   commands inert and a URL staying a link ([Data sent in
   notifications](docs/reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
-  Injected text can also make a notification misleading, as with an Event.
+  Injected text can also make a notification misleading, as with an Event. Since v0.5 a link in
+  the answer loses its query, and its host unless the host is on `R013`'s allowlist (`github.com`,
+  `kubernetes.io`, the `example` domains, the public registries; path included, so
+  `github.com/<anyone>/…` stays) or no rule recognizes it: an uppercase host, a bare host under a
+  suffix `R013` does not list (`name.test/x`), or a value split, encoded or written in fullwidth
+  characters for the model to join. Those links stay links.
 - **The budget is shared.** The call budget and the queue are one per release, shared by every
   namespace it watches (the whole cluster, or the listed namespaces), so a tenant that makes
   many workloads fail can use up the budget and push other namespaces' incidents out of the queue:

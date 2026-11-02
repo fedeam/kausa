@@ -109,9 +109,11 @@ pub struct Explanation {
 }
 
 impl Explanation {
-    /// The explanation with `f` applied to every text (used to map pseudonyms back), cleaned and
-    /// cut again afterwards: a restored name comes from the cluster and may be long or hostile.
-    pub fn map_clean(&self, f: impl Fn(&str) -> String) -> Self {
+    /// The explanation with `f` applied to every text (the answer pass, and mapping pseudonyms
+    /// back), cleaned and cut again afterwards: a restored name comes from the cluster and may be
+    /// long or hostile. `f` may keep state (the answer pass numbers new hosts in the order it sees
+    /// them), so it is called on the summary, then the cause, then each step in order.
+    pub fn map_clean(&self, mut f: impl FnMut(&str) -> String) -> Self {
         Self {
             summary: clean(&f(&self.summary), MAX_SUMMARY),
             cause: clean(&f(&self.cause), MAX_CAUSE),
@@ -469,6 +471,62 @@ mod tests {
             "never guess what they hide",
         ] {
             assert!(SYSTEM.contains(kept), "the system message lost: {kept}");
+        }
+    }
+
+    // Acceptance tests for docs/adr/0022-redact-the-answer.md, written before the code: the
+    // answer pass runs through `Explanation::map_clean(&self, mut f: impl FnMut(&str) -> String)`
+    // with the incident's `Redactor`, which numbers new hosts in the order it sees them, so `f` is
+    // called on the summary, the cause, then each step.
+
+    use crate::redact::Redactor;
+
+    #[test]
+    fn map_clean_calls_a_stateful_closure_in_field_order() {
+        let e = Explanation {
+            summary: "s".into(),
+            cause: "c".into(),
+            steps: vec!["a".into(), "b".into()],
+            confidence: "low".into(),
+        };
+        let mut seen = Vec::new();
+        let numbered = e.map_clean(|text| {
+            seen.push(text.to_owned());
+            format!("{} {text}", seen.len())
+        });
+        assert_eq!(seen, ["s", "c", "a", "b"]);
+        assert_eq!(numbered.summary, "1 s");
+        assert_eq!(numbered.cause, "2 c");
+        assert_eq!(numbered.steps, ["3 a", "4 b"]);
+        assert_eq!(numbered.confidence, "low");
+    }
+
+    #[test]
+    fn a_field_full_of_addresses_stays_within_its_cap() {
+        let mut addresses = String::new();
+        for i in 0..40 {
+            addresses.push_str(&format!("192.0.2.{} ", 10 + i));
+        }
+        let answer = json!({
+            "summary": addresses,
+            "cause": addresses,
+            "steps": [addresses],
+            "confidence": "low",
+        });
+        let e = validate(&answer.to_string()).expect("valid");
+        assert_eq!(e.summary.chars().count(), MAX_SUMMARY);
+        let mut r = Redactor::new();
+        let redacted = e.map_clean(|text| r.answer(text));
+        for (field, text, max) in [
+            ("summary", &redacted.summary, MAX_SUMMARY),
+            ("cause", &redacted.cause, MAX_CAUSE),
+            ("step", &redacted.steps[0], MAX_STEP),
+        ] {
+            assert!(text.chars().count() <= max, "{field}: too long");
+            assert!(!text.contains("192.0.2."), "{field}: an address is left");
+            assert!(text.ends_with("<redacted:ip>"), "{field}: {text}");
+            assert!(markers_are_whole(text), "{field}: {text}");
+            assert_eq!(&clean(text, max), text, "{field}");
         }
     }
 }

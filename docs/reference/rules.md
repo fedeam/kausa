@@ -301,13 +301,51 @@ format](command-line.md)).
 | `R011` | Known token formats | GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` and 36 characters; `github_pat_`), GitLab (`glpat-`, `gldt-`, `glrt-`, `glrtr-`, `glcbt-`, `glptt-`, `glft-`, `glimt-`, `glagent-`, `glwt-`, `glsoat-`, `glffct-`, `gloas-` and 20 or more characters; prefixes from [GitLab token overview](https://docs.gitlab.com/security/tokens/)), npm (`npm_` and 36 or more letters and digits: a Base62 checksum of six characters after 178 bits of entropy, from [Announcing npm's new access token format](https://github.blog/security/announcing-npms-new-access-token-format)), PyPI (`pypi-` and 85 or more characters, from [Secret reporting API](https://docs.pypi.org/api/secrets/)), Docker (`dckr_pat_`, `dckr_oat_` and 10 or more characters; prefixes from [AI Governance API](https://docs.docker.com/reference/api/ai-governance/latest/)), Slack (`xoxa-`, `xoxb-`, `xoxp-`, `xoxo-`, `xoxs-`, `xoxr-`), AWS access key ids (`AKIA` or `ASIA` and 16 characters), Stripe (`sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`), OpenAI and Anthropic style keys (`sk-`, `sk-proj-`, `sk-ant-` and 20 or more characters), Google API keys (`AIza` and 35 characters). Hypothesis to verify against each issuer's documentation: that the formats without a source are the current ones, and the lengths of GitLab's and Docker's tokens, which their documentation does not give; `R012` catches most long tokens anyway |
 | `R012` | High-entropy strings | Runs of 32 or more characters from `[A-Za-z0-9+/_-]` and percent escapes (with `=` padding) that contain a letter and a digit and have a Shannon entropy of at least 4 bits per character, or 3 for a hexadecimal run (whose ceiling is 4). A run with two or more slashes (a path or URL) is judged segment by segment, with segments of 20 or more characters |
 | `R013` | Hostnames | Lowercase dotted names ending in a common top-level domain or an internal suffix (`.com`, `.net`, `.org`, `.io`, `.dev`, `.local`, `.lan`, `.internal`, `.corp`, `.svc`, `.svc.cluster.local`, `.home.arpa` and others); the host of any URL (`http://api.shop/`), whatever its suffix; and `name.other:port` (a Service in another namespace), unless its last label is a file extension (`main.rs:10`). The public registries and a few public hosts (`github.com`, `kubernetes.io`, `k8s.io`, the `example` domains) stay. Replaced by `host-1`, `host-2`…, never mapped back. Lowercase only, so Java packages and class names (`com.example.App`) stay |
-| `R014` | Query and fragment of URLs | Whatever follows the first `?` or `#` of a URL with a scheme (`http://`, `https://`, `postgres://`…), up to a quote, an angle bracket, a backtick, a backslash or whitespace: `http://<redacted:ip>:8080/ready?<redacted:query>#<redacted:fragment>`. The scheme, host (left to `R004` and `R013`) and path stay, and so does punctuation that ends a sentence after the URL. Runs right after `R009`, so a token in a query is counted here, not by `R008` or `R010`. A path without a scheme (`GET /orders?page=2`) keeps its query |
+| `R014` | Query and fragment of URLs | Whatever follows the first `?` or `#` of a URL with a scheme (`http://`, `https://`, `postgres://`…), up to a quote, an angle bracket, a backtick, a backslash or whitespace: `http://<redacted:ip>:8080/ready?<redacted:query>#<redacted:fragment>`. The scheme, host (left to `R004` and `R013`) and path stay, and so does punctuation that ends a sentence after the URL. Also the query and fragment of an HTTP request line without a scheme: an uppercase method (`GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS` or `TRACE`; not `CONNECT`, whose target is a host and port), spaces or tabs, and a target starting with `/`: `GET /orders?<redacted:query> HTTP/1.1`, `"POST /login?<redacted:query>#<redacted:fragment>"`. A lowercase method (`get /x?y=1`), a lone `?` or `#` (`GET /?`) and a path without a method stay. Runs right after `R009`, so a token in a query is counted here, not by `R008` or `R010` |
 
 Rules are tested with a corpus of invented lines that must be redacted and lines that must stay
 (ordinary log lines with numbers, timestamps, versions, durations, paths and public URLs), so that
 a change in a rule shows its effect on both sides. Fixtures use only fake values: `example.com`,
 the documentation ranges `192.0.2.0/24` and `2001:db8::/32`, and token strings built to match a
 format, never ones that were issued.
+
+## On the model's answer
+
+Since v0.5 ([0022. Pass the model's answer through the pattern redaction rules before it is
+written anywhere, and redact the query of an HTTP request line](../adr/0022-redact-the-answer.md)),
+the model's answer passes the same pattern rules before it is logged, stored or written: after
+`prompt::validate` has checked it against the schema and cleaned it, and before the names are
+mapped back, `summary`, `cause` and each step go through `Redactor::answer` with the incident's own
+redactor. `confidence` is a closed set and is not touched. The rules run in the order of the
+request, `R009`, `R014`, `R007`, `R008`, `R006`, `R010`, `R011`, `R005`, `R004` (IPv4, then IPv6),
+`R003`, `R013` and `R012`, the twelve ids of `ANSWER_RULES` in `src/redact.rs`, with the markers
+the request uses. Two steps of the request pass are skipped:
+
+- the neutralization of text that looks like a placeholder, which would turn the model's
+  `deployment-1` into `deployment_1` and stop it being mapped back;
+- `R002`, which would replace ordinary words that match a real name in any case ("the API server"
+  beside a Deployment named `api`) and the public image references the request sends as written.
+  `R001` is structural and does not apply to text.
+
+The details that differ:
+
+- `R013` uses one allowlist for both sides (the public registries and hosts above) and the
+  incident's own host table: a host the request replaced keeps its `host-N`, a new one gets the
+  next number, and `host-N` is never mapped back.
+- Three details exist only on the answer, so that an answer that echoes kausa's own output passes
+  unchanged and uncounted: kausa's own `<redacted:token>` and `<redacted:secret>` are not read as
+  `R010` elements (`<token>value`), so `<redacted:token> was rejected` keeps its words; `R003` treats a placeholder whose
+  first letter the model capitalized (`pods "Pod-1"`) and a quoted `<redacted:name>` as kausa's
+  own; and a match counts only when its replacement differs from the text it matched.
+- `R007` has no exception: after an echoed `Authorization: <redacted:authorization>`, the rest of
+  the field is redacted too, so `Authorization: <redacted:authorization> was rejected` is written
+  as `Authorization: <redacted:authorization>` (counted once).
+
+The values replaced on the answer are counted apart from the request's: the `answer_redactions`
+field of the `explanation` log line and `kausa_answer_redactions_total{rule}` ([Command line and log
+format](command-line.md)). A new pattern rule joins `ANSWER_RULES` ([Add a detection or redaction
+rule](../how-to/add-a-rule.md)); a test checks that the list matches the ids the request pass
+counts, minus `R002`.
 
 ## Limits
 
@@ -324,6 +362,20 @@ format, never ones that were issued.
   not list (`karpenter.sh`) or under a subdomain of `kubernetes.io` or `k8s.io` is sent. A cloud
   provider's key (`cloud.google.com/…`, `eks.amazonaws.com/…`) becomes `host-N/…` (`R013`), never
   mapped back in the answer.
+- `R014` covers URLs with a scheme and HTTP request lines. A query in a key-value or JSON form
+  (`method=GET path=/x?y`, `"path":"/x?y"`, `uri=/x?y`) is not a request line and is sent.
+- The same gaps hold on the model's answer, which an injected log line or event message can shape:
+  commands (`curl … | sh`, `kubectl delete …`) are not redacted; nor are URLs and images on the
+  allowlisted hosts and registries, path included (`github.com/<anyone>/…`, `example.com/…`), an
+  uppercase host, a bare host under a suffix `R013` does not list (`name.test/x`), or values split,
+  encoded or written in fullwidth characters. A misleading cause or a demanded confidence is not a
+  value and stays.
+- On the answer, redaction also costs readability: `0.0.0.0`, `127.0.0.1`, `::1` and versions
+  shaped like addresses become `<redacted:ip>`; prose after `Authorization:` or `Cookie:` is lost
+  to the end of the field; a word after `token:`, `auth:` or `password:` is replaced; "Basic
+  authentication" becomes `Basic <redacted:authorization>`; documentation anchors lose their
+  fragment; a quoted public image digest becomes `<redacted:secret>`; and links to public sites
+  outside the allowlist (`docs.docker.com`) become `https://host-N/…`.
 - A kubelet `Unhealthy` note for a probe's connection error quotes the probe URL; its query and
   fragment are redacted (`R014`), its path is not, and a note may name a port by its name
   (hypothesis, not reproduced), which the request's `port` never does; both are sent as event text

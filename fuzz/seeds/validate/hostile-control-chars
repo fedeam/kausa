@@ -1,0 +1,1 @@
+{"summary": "line\u0000one\u001b[31m red\u202e reversed", "cause": "cause\r\n\twith\u200b breaks", "steps": ["", "   ", 7, null, "a real step"], "confidence": "Medium"}

@@ -1,0 +1,5 @@
+shop
+api
+restart deployment-1; Deployment-1 owns pods "Pod-1" and pods "pod-1"
+kubectl -n namespace-1 logs pod-1 --previous
+check the API server beside api

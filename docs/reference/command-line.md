@@ -164,7 +164,7 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `owner lookup failed` | warn | `namespace`, `pod`, `job` or `replicaset` (the object a Pod or an event is about), `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's or the event's next update), the incident names the ReplicaSet or Job instead |
 | `stopped` | info | |
 | `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
-| `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them) and `redactions`; or, when it comes from the deduplication cache, `explanation` and `"cached": true` |
+| `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them), `redactions` (the request's replacements per rule) and `answer_redactions` (the values replaced in the model's answer per rule, `{}` when none; [On the model's answer](rules.md#on-the-models-answer)); or, when it comes from the deduplication cache, `explanation` and `"cached": true`, with neither count. The `explanation` is the redacted answer: kausa keeps no unredacted copy |
 | `explanation retried` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`, `detail` (the start of the endpoint's error body, at most 512 bytes on one line, or `null`), `retry_in_seconds`: the first call failed with a timeout, a failed connection, `429` or a `5xx` status, and is tried once more 30 seconds later. A call that never reached the endpoint (a failed connection) is given back to the budget |
 | `endpoint error` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`, `detail`: the endpoint's error body, logged before the `explanation skipped` line it leads to. The body is the provider's text, so it goes to the log only, not to the Event |
 | `explanation skipped` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`: the call budget is spent, the context does not fit `--max-input-tokens`, the endpoint failed or answered an error status, or the answer did not validate |
@@ -278,7 +278,8 @@ and any other method `405`. The counters live in memory and start over when kaus
 | `kausa_explanations_retried_total` | | Calls tried again after a transient error |
 | `kausa_explanations_dropped_total` | | Incidents dropped because the queue of 16 was full |
 | `kausa_requests_logged_total` | | Requests logged instead of sent (`--dry-run`) |
-| `kausa_redactions_total` | `rule` | Values replaced by redaction |
+| `kausa_redactions_total` | `rule` | Values replaced by redaction in the requests (help text: `Values replaced by redaction in the requests, by rule.`) |
+| `kausa_answer_redactions_total` | `rule` (the twelve ids of [On the model's answer](rules.md#on-the-models-answer), never `R002`) | Values replaced by redaction in the model's answers (help text: `Values replaced by redaction in the model's answers, by rule.`). See below what a rise means |
 | `kausa_events_written_total` | `reason` (`Explained`, `ExplanationSkipped`) | Events created or updated |
 | `kausa_event_write_errors_total` | | Events that could not be written |
 | `kausa_history_writes_total` | `outcome` (`created`, `updated`, `refused`, `conflict`, `error`) | Explanation objects written, by outcome |
@@ -297,6 +298,14 @@ The gauge, rendered after the counters with `# TYPE kausa_leader gauge`:
 | `kausa_leader` | | `1` while this process acts: it holds the Lease, or runs without `--leader-lease`; `0` as a standby (help text: `1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a standby.`). Summed over a release's Pods, anything but `1` means nobody acts, or (never expected) two do |
 
 No metric names a Pod, a namespace or the Lease.
+
+A rise of `kausa_answer_redactions_total` means an answer carried a value kausa would not send:
+usually text injected into the failing workload's logs or events, a value the model invented, or
+a host it built from placeholders (`deployment-1.namespace-1.svc.cluster.local` becomes `host-N`).
+The answer was written redacted all the same, and kausa keeps no unredacted copy. To see which
+incident it was, read the `answer_redactions` field of the `explanation` log lines, then that
+workload's logs and events. Some benign answers count too, such as `127.0.0.1` (`R004`) or a link
+to a public site outside `R013`'s allowlist (`R013`).
 
 ## Leader election
 

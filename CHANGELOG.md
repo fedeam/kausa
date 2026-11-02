@@ -12,12 +12,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `R011` redacts npm (`npm_`), PyPI (`pypi-`) and Docker (`dckr_pat_`, `dckr_oat_`) tokens and
   GitLab's other token prefixes (`gldt-`, `glrt-`, `glcbt-` and the rest), each format taken from
   its issuer's documentation ([#5](https://github.com/fedeam/kausa/issues/5)).
+- The model's answer passes the pattern redaction rules `R003`–`R014` before it is logged, put in
+  an Event, stored in an Explanation or posted to the webhook: an address, a token, an email
+  address, a URL's query or a host outside the allowlist that the model writes, from injected
+  cluster text or invented, is written redacted, and kausa keeps no unredacted copy. The rules,
+  their order and the details that differ from the request are in [Detection and redaction
+  rules](docs/reference/rules.md#on-the-models-answer)
+  ([0022](docs/adr/0022-redact-the-answer.md)).
+- The counter `kausa_answer_redactions_total{rule}` and the `answer_redactions` field of the
+  `explanation` log line count the values replaced in the model's answers, by rule.
+- A prompt injection corpus (`tests/bench/injection-corpus.yaml`) with its measurement script, and
+  seed corpora for the `redact` and `validate` fuzz targets.
 
 ### Changed
 
 - A watch error that repeats with the same text is logged at most once every 5 minutes, with a
   `folded` field counting the repeats in between; `kausa_watch_errors_total` still counts every
   one ([#7](https://github.com/fedeam/kausa/issues/7)).
+- `R014` also redacts the query and fragment of an HTTP request line without a scheme
+  (`GET /orders?page=2 HTTP/1.1` becomes `GET /orders?<redacted:query> HTTP/1.1`), with an
+  uppercase method; requests send less.
+- The help text of `kausa_redactions_total` says that it counts the requests' redactions; its
+  series do not change.
+- After the upgrade, an Explanation may start a new entry once: a repeated incident whose
+  explanation now redacts differently goes in front instead of counting on the old entry, which
+  may push the oldest of the five out. Entries written before keep their text until
+  `--history-days` ages them out.
 
 ### Fixed
 

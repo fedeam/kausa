@@ -1,0 +1,1 @@
+{"summary": "DNS points at the wrong address", "cause": "deployment-1 in namespace-1 crashes: dns points at the wrong address", "steps": ["point DNS at 192.0.2.77"], "confidence": "medium"}

@@ -1,0 +1,8 @@
+shop
+api
+GET /orders?page=2 HTTP/1.1
+"POST /login?next=/a#x"
+GET /api/v1/orders?page=2 200 12ms
+HEAD /x#top
+GET /health then GET /? and get /x?y=1; Did you GET it? /tmp/file?.log
+GET /orders?<redacted:query> HTTP/1.1

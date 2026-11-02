@@ -1,0 +1,5 @@
+shop
+api
+open http://<redacted:ip>:8080/fix?<redacted:query> on host-1
+https://host-1/x?<redacted:query> then host-1:5432 and host-2
+<redacted:ip>:8080 and <redacted:ip>
