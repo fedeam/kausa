@@ -99,6 +99,16 @@ A failed notification counts in kausa_notifications_total{outcome="failed"} and 
 
   kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "kausa.fullname" . }} | grep 'notification failed'
 {{- end }}
+{{- if include "kausa.endpointCheck" . }}
+
+Check the model endpoint, key and model (one request with synthetic data, billed by the provider,
+outside kausa's budget):
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --logs
+
+The finished test Pod stays until the next helm test; delete it with
+  kubectl -n {{ .Release.Namespace }} delete pod {{ include "kausa.endpointCheckName" . }}
+{{- end }}
 
 rbac.scope must be set on every helm upgrade: keep it in a values file, or upgrade with
 --reuse-values. An upgrade without it fails.

@@ -87,3 +87,8 @@ values, `model.timeoutSeconds` (120) and `endpointCheck.enabled` (true), and two
 exist only for `helm test`: a test Pod that runs `kausa check-endpoint` with no ServiceAccount
 token, and its own NetworkPolicy when `networkPolicy.enabled`. `helm install` and `helm upgrade`
 create neither.
+
+Update 2026-11-02: as implemented with [0020](0020-check-the-endpoint.md), the chart gains
+`model.timeoutSeconds`, `endpointCheck.enabled` and two objects: a `helm test` Pod with no
+ServiceAccount token and, with the NetworkPolicy on, a policy limited to DNS and the endpoint
+([Helm chart](../reference/helm-chart.md#the-endpoint-check)).

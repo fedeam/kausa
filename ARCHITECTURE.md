@@ -17,10 +17,15 @@ API server ──watch──▶ run.rs ──▶ record.rs ──▶ detect.rs �
      context.rs ◀── allowlisted fields ── redact.rs (placeholders, patterns) ◀──────────┘
           │
           ▼
-     prompt.rs ──▶ budget.rs ──▶ model.rs ──▶ prompt::validate ──▶ redact::answer ──▶ restore names
-     (request,      (calls per    (one POST,     (schema, caps,       (R003–R014 on       │
-     untrusted      hour/day,     HTTPS, no      cleaning)            the answer)         ▼
-     wrapper)       dedup cache)  redirects)                                              events.rs (an Event
+     prompt.rs ──▶ breaker.rs ──▶ budget.rs ──▶ model.rs ──▶ prompt::validate ──▶ redact::answer
+     (request,     (holds calls   (calls per    (one POST,    (schema, caps,       (R003–R014 on
+     untrusted     while the      hour/day,     HTTPS, no     cleaning)            the answer)
+     wrapper)      endpoint       dedup cache)  redirects;                              │
+                   fails)                       model/pure.rs                           ▼
+                                                names the cause)                  restore names
+                                                                                          │
+                                                                                          ▼
+                                                                                          events.rs (an Event
                                                                                           on the owner)
                                                                                           │
                                                                                           ▼
@@ -39,14 +44,17 @@ write and webhook attempt first checks that its term (sent + 20 s) still holds
 ```
 
 Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa's own log,
-`metrics.rs` serves the counters and the health endpoints.
+`metrics.rs` serves the counters and the health endpoints. `kausa check-endpoint` (`check.rs`) is
+apart from this flow: a fabricated incident through `context.rs`, `prompt.rs`, `model.rs` and
+`prompt::validate`, on demand, with no Kubernetes client, breaker or budget.
 
 ## Codemap
 
 | File | What it does | Change it when |
 |---|---|---|
-| `src/main.rs` | Flags, usage errors (`--namespace` checked before any connection, at most `MAX_NAMESPACES`), the settings passed to `run` | A flag is added or changed |
-| `src/run.rs` | `run()` keeps what lives across terms (client, signals, metrics listener and connections, the `Term`, and `Shared`: `Budget`, `Dedup`, the writers and the notification queue) and, with `--leader-lease`, alternates a standby phase and a leading phase, stepping down in place on a lost Lease and releasing it on a stop; `lead()` is one term of the controller loop: one Pod watch, one event watch and (unless `--no-rollouts`) one Deployment watch for the whole cluster, or three per `--namespace`, merged per kind and tagged with their watch; relists, `403` drops and a new watcher after a `403` (`Restarting`) per watch; repeated watch errors folded in the log (`WatchErrors`); lists in pages of `LIST_PAGE_SIZE` (50); readiness once every watch has listed; the tick, the explanation queue and the admission of the explanation slot (`allowance`, `admit`, `enqueue`: while the budget waits, jobs wait, a cached repeat passes them, and the oldest of a full queue of 16 is skipped; the one place a second gate goes in front of the budget), the `explanations waiting` line, the budget's term start in `serve`, the notification slot beside it (one send at a time, which a duplicate skips), the metrics listener, owner lookups with a cache | The loop's scheduling or what it watches changes |
+| `src/main.rs` | The two commands, flags, usage errors (`--namespace` checked before any connection, at most `MAX_NAMESPACES`), the six model flags both commands share, parsed by one helper (`ModelFlags`), the settings passed to `run` | A flag is added or changed |
+| `src/check.rs` | `kausa check-endpoint`: the compiled-in, fabricated `D001` incident, its request (pinned by `tests/golden/check-endpoint-request-*.json`), the one call and the one `endpoint check` line with its step booleans; no Kubernetes client, no budget, no retry | The check's request or line changes (the request needs an ADR, as anything sent to the model) |
+| `src/run.rs` | `run()` keeps what lives across terms (client, signals, metrics listener and connections, the `Term`, and `Shared`: `Budget`, `Dedup`, the writers and the notification queue) and, with `--leader-lease`, alternates a standby phase and a leading phase, stepping down in place on a lost Lease and releasing it on a stop; `lead()` is one term of the controller loop: one Pod watch, one event watch and (unless `--no-rollouts`) one Deployment watch for the whole cluster, or three per `--namespace`, merged per kind and tagged with their watch; relists, `403` drops and a new watcher after a `403` (`Restarting`) per watch; repeated watch errors folded in the log (`WatchErrors`); lists in pages of `LIST_PAGE_SIZE` (50); readiness once every watch has listed; the tick, the explanation queue and the admission of the explanation slot (`allowance`, `admit`, `enqueue`: the breaker first, then the budget; while either holds, jobs wait, a cached repeat passes them, and the oldest of a full queue of 16 is skipped with the reason of the gate that held it), what `explain::run` returns (`Next`: a delayed retry, a requeue at the back through `enqueue`), the `explanations waiting` line, the `kausa_endpoint_state` gauge at each pass, the budget's term start in `serve`, the notification slot beside it (one send at a time, which a duplicate skips), the metrics listener, owner lookups with a cache | The loop's scheduling or what it watches changes |
 | `src/leader.rs` | With `--leader-lease`: the calls on the one Lease (`get`, and a JSON merge patch of `spec` with a `resourceVersion` precondition, under a 5-second timeout), the `Term` the write guard reads, the standby (read every 5 s, take a free or stale Lease), the keeper (renew every 5 s, step down on another holder or at its own deadline), the release, and the rate-limited `lease error` lines | How the replicas elect their leader changes (0019) |
 | `src/leader/pure.rs` | The pure part of the election: the timings and `WRITE_BOUND` (with the compile-time check `RENEW_DEADLINE + WRITE_BOUND <= LEASE_DURATION`), what kausa reads from an untrusted Lease (version and holder), the take-or-wait decision on the monotonic clock, `leaseTransitions`, and the exact acquire, renew and release bodies | The election's rules, timings or bodies change |
 | `src/record.rs` | Reduces a Pod, an Event or a Deployment to the few fields kausa keeps; the object is dropped at once (a Deployment's record is kept only while `D014` matches) | A rule needs a field that is not recorded |
@@ -54,29 +62,32 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `src/incident.rs` | Signals, grouping by top-level owner, the settle window, and the yield of `D014` to an explained incident of the same Deployment | Grouping or settling changes |
 | `src/fingerprint.rs` | The incident fingerprint (dedup key, Event name, notification field), never sent to the model | What makes two incidents "the same" changes |
 | `src/owner.rs` | ReplicaSet → Deployment and Job → CronJob, metadata only | A new owner hop (needs an ADR: a new permission) |
-| `src/explain.rs` | One incident to one explanation: the budget's refusal (`refusal`) before the log is read, log tail, fit to the token cap, dry-run or call, retry, validation, Event; the term guard (`Shared.term`) before the budget take, after the model's answer and before each write | The explanation pipeline changes |
+| `src/explain.rs` | One incident to one explanation: the breaker's and the budget's refusal (`refusal`) before the log is read, log tail, fit to the token cap, dry-run or call, the call recorded into the breaker (`Shared.breaker`) before the term check with its `endpoint unavailable` / `endpoint available` lines and the last-success gauge, the job's outcome by cause (`Next`: done, retry, requeue), validation, Event; the term guard (`Shared.term`) before the budget take, after the model's answer and before each write | The explanation pipeline changes |
 | `src/context.rs` | The context sent to the model: allowlisted fields only (`R001`), all names and text redacted | Anything sent to the model changes (needs an ADR) |
 | `src/redact.rs` | The redaction rules `R002`–`R014`; the answer pass (`Redactor::answer`), which runs the pattern rules of `ANSWER_RULES` (all but `R002`) on the model's answer and counts them apart; the mapping back of placeholders, and `restore_only`, which maps back only the names a notification may carry | A redaction rule is added or changed (a pattern rule also joins `ANSWER_RULES`) |
 | `src/prompt.rs` | The fixed request (system message, untrusted wrapper, answer schema), the validation of the answer, and `map_clean`, which passes each field of an answer through a function (the answer pass, the restores) and cleans and caps it again | The request or the answer's format changes |
 | `src/budget.rs` | The call budget: a refill bucket (a start burst of `START_BURST`, 3, then one call every `3600/N` seconds, capacity `N`) under the 60-minute and 24-hour windows, `check` (an `Allowance`: `Now`, `Wait { until }` or `Never`) that changes nothing, `take` (the authority), `refund`, `start_term` (cuts the credit to the burst) and `remaining` for the gauges; the deduplication cache (with each entry's notification text and whether the webhook acknowledged it, and `is_fresh`) | Cost controls change |
-| `src/model.rs` | The client of the one OpenAI-compatible endpoint | The HTTP call changes |
+| `src/model.rs` | The client of the one OpenAI-compatible endpoint: `--model-timeout`, the reqwest errors mapped to `connection` and `timeout`, `Retry-After` read before the body, and a `CallError` with its cause, status and delay | The HTTP call changes |
+| `src/model/pure.rs` | The pure, fuzzed reading of an endpoint's answer: `Cause` and its class and hint, `classify` (status, then `error.code` / `error.type` against `QUOTA_CODES` and `TOO_LARGE_CODES`), `completion` (a chat completion, `not_an_answer` or `no_content` of a kind), `retry_after` (clamped to 30-600 s) | A cause, a code list or the reading of an answer changes (a code joins a list only with a captured body as a fixture) |
+| `src/breaker.rs` | The pure breaker in front of the budget: `OPEN_AFTER` (3), `FIRST_HOLD` (60 s), `MAX_HOLD` (1800 s), `state(now)` and `record(call, now)`, which returns the transition the log reports; no clock of its own | How kausa holds calls while the endpoint fails changes (needs an ADR) |
 | `src/events.rs` | The `Explained` / `ExplanationSkipped` Event; a repeat patches only its series; each call checks the term first, and the whole write ends within `WRITE_BOUND` (10 s) | The output changes |
 | `src/notification.rs` | The pure, fuzzed bodies of a notification: `json`, the shared plain text, `slack` (escaped) and `telegram` (with word joiners), the 4,000-unit cut, the Telegram chat id | What a notification carries changes (needs an ADR, and [Data sent in notifications](docs/reference/data-sent-in-notifications.md)) |
 | `src/notify.rs` | The webhook transport: the URL checks, the `reqwest` client (no proxy, no redirects), one send with its retry (each attempt checks the term first), the queue of 16 and the dequeue rule, the `notification *` log lines and counters | How notifications are sent or queued changes |
 | `src/history.rs` | With `--history`: the writer of the Explanation of an explained incident (`list` by name, then `create` or a merge patch of `status`, under one 10-second timeout) and the sweep (age, then `MAX_OBJECTS`, with `resourceVersion` preconditions, each call within 10 s), both checking the term before each call, over `Api<DynamicObject>` | What kausa keeps of an explanation, or its retention, changes |
 | `src/history/pure.rs` | The pure, fuzzed part of the history: the name, the create and patch bodies, the reading of a stored (untrusted) object, the identity check, the merge and the sweep's plan | The Explanation's content or the merge changes |
-| `src/metrics.rs` | The counters (among them `kausa_redactions_total` for the requests and `kausa_answer_redactions_total` for the answers), the gauges (`GAUGES`: `kausa_leader`, always rendered, and `kausa_budget_calls_remaining` and `kausa_explanation_queue_length`, through `set_gauge`, rendered only once set), `/metrics`, `/healthz`, `/readyz` (`starting`, `ready`, or `standby` for a replica that does not hold the Lease) | A counter or gauge is added |
+| `src/metrics.rs` | The counters (among them `kausa_redactions_total` for the requests and `kausa_answer_redactions_total` for the answers), the five gauges (`GAUGES`: `kausa_leader`, always rendered, and `kausa_budget_calls_remaining`, `kausa_explanation_queue_length`, `kausa_endpoint_state` and `kausa_model_last_success_timestamp_seconds`, through `set_gauge`, rendered only once set), `/metrics`, `/healthz`, `/readyz` (`starting`, `ready`, or `standby` for a replica that does not hold the Lease) | A counter or gauge is added |
 | `src/log.rs` | One JSON object per line, through a serializer | Only to keep it safe |
-| `charts/kausa/` | The Helm chart: RBAC by `rbac.scope` (`templates/rbac.yaml`: a ClusterRole, or a Role per listed namespace, both from `kausa.rules`), the refusals of `kausa.validate`, Deployment, Service, NetworkPolicy | Install, permissions or a flag change |
+| `charts/kausa/` | The Helm chart: RBAC by `rbac.scope` (`templates/rbac.yaml`: a ClusterRole, or a Role per listed namespace, both from `kausa.rules`), the refusals of `kausa.validate`, Deployment, Service, NetworkPolicy (`templates/networkpolicy.yaml`: kausa's, and a second, `<fullname>-endpoint-check`, with egress to DNS and the endpoint only, for the test Pod) | Install, permissions or a flag change |
+| `charts/kausa/templates/tests/` | `endpoint-check.yaml`: the `helm test` Pod that runs `kausa check-endpoint` (`before-hook-creation`, no ServiceAccount token, the namespace's `default` identity, the API-key Secret only, labels that no selector of kausa's matches), rendered by `kausa.endpointCheck` | The endpoint check's Pod changes |
 | `charts/kausa/templates/leader-election.yaml` | Only with `replicaCount: 2`: the Lease `<fullname>-leader` (`spec: {}`; Helm owns the object, kausa its `spec`), and the Role and RoleBinding of the same name with `get` and `patch` on that Lease alone, the same in both scopes, outside `kausa.rules` | The standby's Lease or its one permission changes (needs an ADR) |
 | `charts/kausa/templates/poddisruptionbudget.yaml` | Only with `replicaCount: 2`: `maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow` | How a drain treats the two replicas changes |
 | `charts/kausa/files/explanation-schema.json` | The Explanation's `openAPIV3Schema`, with every cap; read by the CRD template and by the schema test in `src/history/pure.rs` | The Explanation's fields or limits change (a CHANGELOG line) |
 | `charts/kausa/templates/explanation-crd.yaml`, `explanation-reader.yaml` | The CustomResourceDefinition `explanations.kausa.fedeam.com` and the reader ClusterRole aggregated to `view`, only while the release writes history with `history.installCRD` (the reader also with `history.readers.aggregate`) | The CRD's columns or its readers change |
 | `Dockerfile` | The `ci` target (every check) and the `runtime` image | A check, a pinned tool or the image changes |
-| `tests/cli.rs` | Command-line behaviour and exit codes | A flag or exit code changes |
+| `tests/cli.rs` | Command-line behaviour and exit codes, `kausa check-endpoint` against a local fake server included | A flag or exit code changes |
 | `tests/chart/render.sh` | Chart checks with helm alone: both scopes, the rules against the v0.1.0 chart, each notification format, `NOTES.txt`, every refusal | The chart changes |
-| `tests/e2e/` | The kind test, once per `rbac.scope` (`KAUSA_E2E_SCOPE`) and once more namespaced with a standby (`KAUSA_E2E_REPLICAS=2`: graceful, frozen and fail-closed handovers): chart, Events, what leaves the cluster (to the fake model and the fake webhook), the ClusterRole or the Roles and what they grant, an unlisted and a refusing namespace, metrics | The chart or what kausa writes changes |
-| `fuzz/`, `.clusterfuzzlite/` | Fuzz targets for redaction (with the answer pass, `restore` and `restore_only`), answer validation, the history's merge and the notification bodies (`notification`), run by ClusterFuzzLite; seed corpora for `redact` and `validate` in `fuzz/seeds/<target>/`, zipped by `.clusterfuzzlite/build.sh` | A parser of untrusted text changes, or a new one is added |
+| `tests/e2e/` | The kind test, once per `rbac.scope` (`KAUSA_E2E_SCOPE`) and once more namespaced with a standby (`KAUSA_E2E_REPLICAS=2`: graceful, frozen and fail-closed handovers): chart, Events, what leaves the cluster (to the fake model and the fake webhook), the ClusterRole or the Roles and what they grant, an unlisted and a refusing namespace, metrics, `helm test` (a pass, and `not_found` on a missing model) and, in the cluster scope, the breaker against a failing fake endpoint | The chart or what kausa writes changes |
+| `fuzz/`, `.clusterfuzzlite/` | Fuzz targets for redaction (with the answer pass, `restore` and `restore_only`), answer validation, the history's merge, the notification bodies (`notification`) and the endpoint's answers (`endpoint_error`, `src/model/pure.rs`), run by ClusterFuzzLite; seed corpora for `redact` and `validate` in `fuzz/seeds/<target>/`, zipped by `.clusterfuzzlite/build.sh` | A parser of untrusted text changes, or a new one is added |
 | `tests/bench/` | The benchmarks, kept out of CI: the seeded failures (one or more per detection), their known causes with a fixed rubric (`known-causes.json`), the scorer that replays dry-run requests against an endpoint and grades the answers (`score.py`, no model as judge), the token-counting proxy and the scale scripts | A benchmark is repeated, or a detection is added or changed (its seeded failure and known cause) |
 
 Unit tests live next to the code, in each file's `tests` module.
@@ -108,8 +119,11 @@ accepted ADR, and most should never change.
 5. **Cluster text is data, never instructions**: the model gets no tools, and its answer must
    match the schema, is cleaned and passes the pattern redaction rules `R003`–`R014` before it is
    logged, stored or written ([0022](docs/adr/0022-redact-the-answer.md)). Code that parses untrusted text
-   (cluster text, the model's answer, an Explanation read back) never panics on any input; the
-   fuzz targets check it. Nothing read back from an Explanation or the Lease is logged, sent or
+   (cluster text, the model's answer, an Explanation read back, the endpoint's error body) never
+   panics on any input; the fuzz targets check it. The endpoint's error body and its
+   `Retry-After` header are untrusted: kausa reads the body only by fixed keys, compares what it
+   reads with fixed lists, and derives only a cause it defines and a clamped delay; the start of
+   the body stays in kausa's log only ([0020](docs/adr/0020-check-the-endpoint.md)). Nothing read back from an Explanation or the Lease is logged, sent or
    reused (the Lease's holder is only compared with kausa's own identity, and its version echoed
    as the next precondition).
 6. **One call per incident per process, within the budget, and one explanation at a time;
@@ -125,10 +139,17 @@ accepted ADR, and most should never change.
    `RENEW_DEADLINE`, as in an API server outage, which also drops the records and settle progress
    a single replica keeps. One call per incident becomes one per incident per process: a
    failover, forced or not, may explain a still-failing incident once more
-   ([0019](docs/adr/0019-high-availability.md)).
-7. **Rules are pure**: `detect.rs`, `incident.rs`, `fingerprint.rs`, `redact.rs` and
-   `history/pure.rs` do no I/O and read no clock of their own (the history's `now` comes in as a
-   string), so the same state gives the same incidents, fingerprints, redactions and merges.
+   ([0019](docs/adr/0019-high-availability.md)). While the endpoint fails (0020's breaker is not
+   closed), kausa makes no call and takes no budget except probes, queued incidents one at a time
+   after each hold, at least every 30 minutes while one waits; `rejected`, `too_large` and
+   `no_content`, the causes kausa classifies as the request's, never move it, and
+   `invalid_answer` counts as an answer; an incident is still called at most twice per process.
+   `kausa check-endpoint` is not the controller: it sends one fixed synthetic request, reads
+   nothing from the cluster, and no budget counts it ([0020](docs/adr/0020-check-the-endpoint.md)).
+7. **Rules are pure**: `detect.rs`, `incident.rs`, `fingerprint.rs`, `redact.rs`,
+   `history/pure.rs`, `model/pure.rs` and `breaker.rs` do no I/O and read no clock of their own
+   (the history's `now` comes in as a string, the breaker's as an `Instant`), so the same state
+   gives the same incidents, fingerprints, redactions, merges, causes and breaker decisions.
 8. **No cache of whole objects**: watch events are reduced to records at once, and objects are
    never logged.
 9. **kausa's log goes through `log.rs`**, so a value from the cluster cannot break a line.

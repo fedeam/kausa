@@ -70,6 +70,19 @@
 #   RoleBinding (nobody leads, nothing is written or sent, helm upgrade restores one leader); a
 #   foreign label write that keeps the holder; a rollout that ends with one leader; and an uninstall
 #   that leaves no Lease, Role, RoleBinding or PodDisruptionBudget.
+#
+# Every run checks the endpoint check (docs/adr/0020-check-the-endpoint.md): helm test --logs
+# passes against the fake endpoint, its Pod admitted under the restricted Pod Security Standard,
+# with one endpoint check line and one request, the synthetic body of
+# tests/golden/check-endpoint-request-json-schema.json, which kausa does not count as a model call.
+# After an upgrade to the model e2e-missing, which the fake endpoint answers 404, helm test fails
+# with cause not_found; the next upgrade sets the model back. After the budget case, the cluster
+# scope checks the breaker: with the fake endpoint answering 401 and 18 failing Jobs (D008), the
+# first call opens it, no request reaches the endpoint during the 60 s hold, kausa_endpoint_state
+# reads open and endpoint unavailable is logged, and each incident the full queue skips while it
+# holds gets one ExplanationSkipped Event with the fixed note, as many as the endpoint_unavailable
+# counter; with the 401s gone, the probe closes it (endpoint available, the gauge reads closed) and
+# the queue drains.
 set -euo pipefail
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -118,6 +131,12 @@ LEASE=$RELEASE-leader
 LEASES=leases.coordination.k8s.io
 # src/leader.rs: the hint of a lease error answered 403.
 HINT_403="kausa needs get and patch on this Lease (docs/reference/permissions.md)"
+# The fake endpoint's fail file (tests/e2e/fake_endpoint.py): while it exists, every model request
+# is answered with the status on its first line.
+FAIL_FILE=$WORK/endpoint-fail
+# The requests the helm test Pod sent to the fake endpoint: outside kausa's budget, they are no
+# model call of kausa's (docs/adr/0020-check-the-endpoint.md).
+CHECK_REQUESTS=0
 k() { kubectl --context "$CONTEXT" "$@"; }
 h() { helm --kube-context "$CONTEXT" "$@"; }
 
@@ -169,7 +188,7 @@ fi
 PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
 # The time log holds one receive time per line of the request log, so both always count the same.
 python3 tests/e2e/fake_endpoint.py --port "$PORT" --log "$WORK/requests.jsonl" \
-  --time-log "$WORK/request-times.txt" --hook-log "$WORK/hooks.jsonl" &
+  --time-log "$WORK/request-times.txt" --hook-log "$WORK/hooks.jsonl" --fail-file "$FAIL_FILE" &
 ENDPOINT_PID=$!
 for _ in $(seq 1 20); do
   curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/v1/chat/completions" && break
@@ -783,6 +802,121 @@ writes_snapshot() {
 }
 # The number of lines in file $1.
 lines_of() { wc -l < "$1" | tr -d ' '; }
+# Checks the endpoint check (docs/adr/0020-check-the-endpoint.md) whose helm test output is in
+# WORK/helm-test.txt, for the release's model $2, from the fake endpoint's request log as it was
+# $3 lines long before it: with $1 = ok, result ok; with $1 = not_found, a 404 for a model the
+# endpoint does not have. Its one endpoint check line has exactly the documented fields, and the
+# endpoint received exactly one request with the synthetic body of the golden file (model.jsonSchema
+# stays true), the model set to $2. The messages name fields and counts, never a request.
+check_endpoint_line() {
+  python3 -I - "$@" "$WORK" "http://$gateway:$PORT" <<'EOF'
+import json, sys
+
+mode, model, before, work, endpoint = sys.argv[1:6]
+GOLDEN = "tests/golden/check-endpoint-request-json-schema.json"
+FIELDS = ["answer_valid", "api_key", "authenticated", "cause", "class", "connected", "detail",
+          "endpoint", "hint", "json_schema", "latency_ms", "level", "model", "model_found", "msg",
+          "prompt_version", "reason", "request_accepted", "result", "retry_after_seconds",
+          "status", "timeout_seconds", "tokens_in", "tokens_out", "ts"]
+
+
+def fail(message):
+    sys.exit("FAIL: helm test with model %s: %s" % (model, message))
+
+
+found = []
+for text in open(work + "/helm-test.txt", encoding="utf-8", errors="replace"):
+    try:
+        entry = json.loads(text)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "endpoint check":
+        found.append(entry)
+if len(found) != 1:
+    fail("%d endpoint check lines in its output" % len(found))
+line = found[0]
+if sorted(line) != FIELDS:
+    fail("the endpoint check line has the fields %s" % sorted(line))
+want = {"endpoint": endpoint, "model": model, "json_schema": True, "timeout_seconds": 120,
+        "api_key": False, "connected": True, "retry_after_seconds": None}
+if mode == "ok":
+    want.update({"level": "info", "result": "ok", "cause": None, "class": None, "status": 200,
+                 "authenticated": True, "model_found": True, "request_accepted": True,
+                 "answer_valid": True, "reason": None, "hint": None, "detail": None,
+                 "tokens_in": 100, "tokens_out": 20})
+else:
+    want.update({"level": "error", "result": "failed", "cause": "not_found",
+                 "class": "configuration", "status": 404, "authenticated": None,
+                 "model_found": False, "request_accepted": None, "answer_valid": None,
+                 "reason": "the endpoint answered 404 Not Found", "tokens_in": None,
+                 "tokens_out": None})
+    if not isinstance(line["hint"], str) or not line["hint"]:
+        fail("the endpoint check line has no hint")
+for key, value in want.items():
+    if json.dumps(line[key]) != json.dumps(value):
+        fail("%s is %s, not %s" % (key, json.dumps(line[key]), json.dumps(value)))
+latency = line["latency_ms"]
+if not isinstance(latency, int) or isinstance(latency, bool) or latency < 0:
+    fail("latency_ms is not a whole number")
+if not isinstance(line["prompt_version"], str) or not line["prompt_version"]:
+    fail("prompt_version is not a string")
+
+golden = json.load(open(GOLDEN, encoding="utf-8"))
+golden["model"] = model
+new = open(work + "/requests.jsonl", "rb").read().splitlines()[int(before):]
+same = 0
+for text in new:
+    try:
+        same += json.loads(text) == golden
+    except ValueError:
+        pass
+if same != 1:
+    fail("%d of the %d requests the endpoint received during it are the synthetic one of %s"
+         % (same, len(new), GOLDEN))
+print("helm test with model %s: result %s, cause %s, %d ms; the synthetic request, once"
+      % (model, line["result"], json.dumps(line["cause"]), latency))
+EOF
+}
+# Runs helm test --logs on the release, whose model is $2, and checks it with check_endpoint_line
+# $1 $2: it must exit 0 with $1 = ok and fail with $1 = not_found. Its one request is counted in
+# CHECK_REQUESTS. On a failure, helm's output is printed: it holds no token.
+endpoint_check() {
+  before=$(lines_of "$WORK/requests.jsonl")
+  if h test "$RELEASE" -n "$NAMESPACE" --logs --timeout 180s > "$WORK/helm-test.txt" 2>&1; then
+    check_status=0
+  else
+    check_status=$?
+  fi
+  CHECK_REQUESTS=$((CHECK_REQUESTS + 1))
+  if [ "$1" = ok ] && [ "$check_status" != 0 ]; then
+    cat "$WORK/helm-test.txt" >&2
+    fail "helm test exited $check_status with model $2"
+  fi
+  if [ "$1" != ok ] && [ "$check_status" = 0 ]; then
+    cat "$WORK/helm-test.txt" >&2
+    fail "helm test passed with model $2"
+  fi
+  check_endpoint_line "$1" "$2" "$before" || { cat "$WORK/helm-test.txt" >&2; exit 1; }
+}
+# The value of series $1 in the metrics in file $2, empty when absent.
+metric_of() { awk -v series="$1" '$1 == series { print $2 }' "$2"; }
+# "yes" when the metrics in file $1 have exactly one kausa_endpoint_state series at 1, state $2,
+# and the other two at 0.
+endpoint_state_is() {
+  awk -v want="$2" '
+    $1 ~ /^kausa_endpoint_state[{]state="[a-z_]+"[}]$/ {
+      state = $1
+      sub(/^kausa_endpoint_state[{]state="/, "", state)
+      sub(/"[}]$/, "", state)
+      if (!(state in seen)) n++
+      seen[state] = $2
+    }
+    END {
+      ok = ("closed" in seen) && ("half_open" in seen) && ("open" in seen) && n == 3
+      for (state in seen) ok = ok && seen[state] == (state == want ? 1 : 0)
+      print (ok ? "yes" : "no")
+    }' "$1"
+}
 
 # The standby replica (docs/adr/0019-high-availability.md), before anything else touches the Pods.
 if [ "$REPLICAS" = 1 ]; then
@@ -1556,17 +1690,46 @@ restarts=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa \
 if [ -z "$restarts" ] || [ -n "$(printf '%s' "$restarts" | tr -d ' 0')" ]; then
   fail "kausa restarted ($restarts)"
 fi
-# The history adds no request: each one the endpoint received is a model call kausa counted. A
-# call still in flight is logged by the endpoint before kausa counts it, so this is retried.
+# The endpoint check (docs/adr/0020-check-the-endpoint.md): helm test runs kausa check-endpoint in
+# a Pod of its own, admitted in NAMESPACE under the restricted Pod Security Standard, and it
+# passes against the fake endpoint with one synthetic request.
+enforce=$(k get namespace "$NAMESPACE" \
+  -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')
+[ "$enforce" = restricted ] || fail "$NAMESPACE enforces the Pod Security Standard '$enforce'"
+endpoint_check ok fake
+
+# The history adds no request: each one the endpoint received is a model call kausa counted or the
+# endpoint check's, which kausa does not count. A call still in flight is logged by the endpoint
+# before kausa counts it, so this is retried.
 calls="" lines=""
 for _ in $(seq 1 10); do
   calls=$(model_calls)
   lines=$(wc -l < "$WORK/requests.jsonl" | tr -d ' ')
-  [ "$calls" = "$lines" ] && break
+  [ $((calls + CHECK_REQUESTS)) = "$lines" ] && break
   sleep 2
 done
-[ "$calls" = "$lines" ] || fail "the endpoint received $lines requests for $calls model calls"
-echo "requests: $lines, as many as model calls"
+[ $((calls + CHECK_REQUESTS)) = "$lines" ] ||
+  fail "the endpoint received $lines requests for $calls model calls and $CHECK_REQUESTS checks"
+echo "requests: $lines, as many as model calls and endpoint checks ($CHECK_REQUESTS)"
+
+# A model the endpoint does not have: helm test fails with cause not_found. The upgrade rolls kausa
+# out with that model too, which explains nothing meanwhile; the next one sets the model back, and
+# every kausa Pod runs with --model fake again.
+h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+  --set model.name=e2e-missing
+endpoint_check not_found e2e-missing
+h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+  --set model.name=fake
+k -n "$NAMESPACE" rollout status deploy/kausa --timeout 120s
+if [ "$REPLICAS" = 2 ]; then
+  wait_pair 120 "no two Ready kausa Pods with one of them holding the Lease after model.name=fake"
+fi
+for p in $(kausa_pods); do
+  args=$(kausa_args "pod/$p")
+  printf '%s\n' "$args" | awk 'prev == "--model" && $0 == "fake" { ok = 1 } { prev = $0 }
+    END { exit !ok }' || fail "a kausa Pod does not run with --model fake after the upgrade back"
+done
+echo "helm test with model e2e-missing: failed with cause not_found; the model is fake again"
 
 # The built-in view and edit roles read Explanations through the reader role, and write none. The
 # aggregation controller fills them in a moment after the install.
@@ -2311,6 +2474,189 @@ EOF
   h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 120s --reuse-values \
     --set budget.callsPerHour=3600 --set settleSeconds="$SETTLE"
   pod=pod/$(kausa_pods | head -n 1)
+
+  # The breaker (docs/adr/0020-check-the-endpoint.md), with the hourly budget of 3600 back for the
+  # drain. The fake endpoint answers 401 while the fail file exists, a configuration error, so the
+  # first call opens the breaker at once, for 60 s; 18 failing Jobs (D008), each its own owner,
+  # are more incidents than the queue's 16, so that the slot skips some while it holds. The file
+  # goes 5 s before the hold ends, and the probe closes the breaker.
+  breaker_pod=$(kausa_pods | head -n 1)
+  [ -n "$breaker_pod" ] || fail "no kausa Pod for the breaker case"
+  printf '401\n' > "$FAIL_FILE.new"
+  mv "$FAIL_FILE.new" "$FAIL_FILE"
+  for i in $(seq -w 0 17); do
+    seed_failure "breaker-$i"
+  done
+  opened=""
+  deadline=$((SECONDS + 180))
+  while :; do
+    kausa_log "pod/$breaker_pod"
+    [ "$(log_count "endpoint unavailable" < "$WORK/kausa.log")" -ge 1 ] && opened=yes && break
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 2
+  done
+  [ -n "$opened" ] || fail "kausa logged no endpoint unavailable within 180 s of the 401s"
+  # Nothing calls the endpoint while the breaker holds, so its last request is the opening call:
+  # the hold ends no sooner than the probe_in_seconds of the endpoint unavailable line after it.
+  opened_lines=$(lines_of "$WORK/requests.jsonl")
+  opened_at=$(tail -n 1 "$WORK/request-times.txt")
+  # The one endpoint unavailable line so far: a 401, the key, one failed call, the first hold, and
+  # no field of an incident's.
+  hold=$(python3 -I - "$WORK/kausa.log" <<'EOF'
+import json, sys
+
+
+def fail(message):
+    sys.exit("FAIL: the endpoint unavailable line: " + message)
+
+
+found = []
+for text in open(sys.argv[1]):
+    try:
+        entry = json.loads(text)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "endpoint unavailable":
+        found.append(entry)
+if len(found) != 1:
+    fail("%d of them before the first hold ended" % len(found))
+line = found[0]
+want = {"level": "warn", "cause": "key", "class": "configuration", "status": 401,
+        "reason": "the endpoint answered 401 Unauthorized", "failed_calls": 1,
+        "probe_in_seconds": 60}
+for key, value in want.items():
+    if json.dumps(line.get(key)) != json.dumps(value):
+        fail("%s is %s, not %s" % (key, json.dumps(line.get(key)), json.dumps(value)))
+if not isinstance(line.get("hint"), str) or not line["hint"]:
+    fail("it has no hint")
+for key in ("detection", "namespace", "owner", "fingerprint"):
+    if key in line:
+        fail("it has the incident field " + key)
+print(line["probe_in_seconds"])
+EOF
+  ) || exit 1
+  # Seconds from now to $1 (Unix time), negative once past.
+  until_time() { python3 -c 'import sys, time; print(int(float(sys.argv[1]) - time.time()))' "$1"; }
+  watch_until=$(python3 -c 'import sys; print("%.3f" % (float(sys.argv[1]) + int(sys.argv[2])))' \
+    "$opened_at" "$((hold - 5))")
+  [ "$(until_time "$watch_until")" -ge 10 ] ||
+    fail "the endpoint unavailable line was read too late to watch the hold"
+  # Until 5 s before the hold ends: no request reaches the endpoint, and the gauge reads open.
+  read_open=""
+  while [ "$(until_time "$watch_until")" -gt 0 ]; do
+    [ "$(lines_of "$WORK/requests.jsonl")" = "$opened_lines" ] ||
+      fail "a model request reached the endpoint while the breaker held"
+    kausa_metrics > "$WORK/metrics.txt"
+    [ "$(endpoint_state_is "$WORK/metrics.txt" open)" = yes ] && read_open=yes
+    sleep 2
+  done
+  [ -n "$read_open" ] || fail "kausa_endpoint_state never read open while the breaker held"
+  echo "the breaker opened on a 401: endpoint unavailable, no request for ${hold}s, the gauge open"
+  rm -f "$FAIL_FILE"
+
+  # The probe closes the breaker and the queue drains. Then, read together: no request came within
+  # the hold of the opening call, and one came after it; one endpoint available line; the gauges
+  # read closed, an empty queue and a last success after the opening call; a Job breaker-NN is
+  # explained; and each incident skipped as endpoint_unavailable has one ExplanationSkipped Event
+  # with the fixed note, written by this Pod, as many as the counter.
+  breaker_check() {
+    python3 -I - "$WORK" "$breaker_pod" "$opened_lines" "$opened_at" "$hold" <<'EOF'
+import json, re, sys
+
+work, pod, opened_lines, opened_at, hold = sys.argv[1:6]
+opened_lines, opened_at, hold = int(opened_lines), float(opened_at), int(hold)
+REASON = "the model endpoint is unavailable; this incident waited and was not explained"
+NOTE = "kausa could not explain this failure: " + REASON
+
+
+def fail(message):
+    sys.exit("FAIL: the breaker: " + message)
+
+
+times = [float(t) for t in open(work + "/request-times.txt") if t.strip()][opened_lines:]
+early = [t for t in times if t < opened_at + hold]
+if early:
+    fail("a model request reached the endpoint %.3f s after the opening call, within the %d s "
+         "hold" % (min(early) - opened_at, hold))
+if not times:
+    fail("no probe reached the endpoint after the hold")
+
+entries = []
+for text in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(text)
+    except ValueError:
+        continue
+    if isinstance(entry, dict):
+        entries.append(entry)
+available = [e for e in entries if e.get("msg") == "endpoint available"]
+if len(available) != 1:
+    fail("%d endpoint available lines" % len(available))
+seconds = available[0].get("unavailable_seconds")
+if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < hold:
+    fail("endpoint available has unavailable_seconds %s" % json.dumps(seconds))
+calls = available[0].get("failed_calls")
+if isinstance(calls, bool) or not isinstance(calls, int) or calls < 1:
+    fail("endpoint available has failed_calls %s" % json.dumps(calls))
+skipped = [e.get("fingerprint") for e in entries
+           if e.get("msg") == "explanation skipped" and e.get("reason") == REASON]
+if not skipped:
+    fail("no explanation skipped line with the endpoint_unavailable reason")
+
+metrics = {}
+for text in open(work + "/metrics.txt"):
+    parts = text.split()
+    if len(parts) == 2 and not text.startswith("#"):
+        metrics[parts[0]] = float(parts[1])
+states = {s: metrics.get('kausa_endpoint_state{state="%s"}' % s)
+          for s in ("closed", "half_open", "open")}
+if states != {"closed": 1, "half_open": 0, "open": 0}:
+    fail("kausa_endpoint_state reads %s" % json.dumps(states))
+queue = metrics.get("kausa_explanation_queue_length")
+if queue != 0:
+    fail("kausa_explanation_queue_length is %s" % json.dumps(queue))
+last = metrics.get("kausa_model_last_success_timestamp_seconds")
+if last is None or last <= opened_at:
+    fail("kausa_model_last_success_timestamp_seconds is %s, not after the opening call"
+         % json.dumps(last))
+
+noted, explained = [], 0
+for event in json.load(open(work + "/events.json"))["items"]:
+    if event.get("reportingController") != "kausa" or event.get("reportingInstance") != pod:
+        continue
+    regarding = event.get("regarding") or {}
+    if event.get("reason") == "ExplanationSkipped" and event.get("note") == NOTE:
+        match = re.match(r"kausa\.skipped\.([0-9a-f]{16})\.", event["metadata"]["name"])
+        noted.append(match.group(1) if match else None)
+    if (event.get("reason") == "Explained" and regarding.get("kind") == "Job"
+            and (regarding.get("name") or "").startswith("breaker-")):
+        explained += 1
+if sorted(noted, key=str) != sorted(skipped, key=str):
+    fail("%d ExplanationSkipped Events with the fixed note for %d incidents skipped as "
+         "endpoint_unavailable, or not one each" % (len(noted), len(skipped)))
+counter = metrics.get('kausa_explanations_skipped_total{reason="endpoint_unavailable"}')
+if counter != len(noted):
+    fail("the endpoint_unavailable counter is %s for %d Events" % (json.dumps(counter), len(noted)))
+if not explained:
+    fail("no Job breaker-NN has an Explained Event after the probe")
+print("the breaker closed after %.0f s and %d failed calls; %d incidents skipped as "
+      "endpoint_unavailable, one Event each; %d Jobs breaker-NN explained"
+      % (seconds, calls, len(noted), explained))
+EOF
+  }
+  drained=""
+  deadline=$((SECONDS + 300))
+  while :; do
+    kausa_log "pod/$breaker_pod"
+    k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
+    kausa_metrics > "$WORK/metrics.txt"
+    breaker_report=$(breaker_check 2>/dev/null) && drained=yes && break
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 3
+  done
+  [ -n "$drained" ] || breaker_report=$(breaker_check) || exit 1
+  echo "$breaker_report"
+  [ "$(restart_count "$breaker_pod")" = 0 ] || fail "kausa restarted during the breaker case"
 
   # dryRun=true turns the history off: the rule, the reader role and the CustomResourceDefinition
   # go, and with it every Explanation, kausa's and the hand-made ones. The chart refuses

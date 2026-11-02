@@ -285,7 +285,8 @@ RUN set -eu; \
 # float64) renders as a whole number. A chart whose values.yaml has no notifications map and no
 # networkPolicy.notifications (helm upgrade --reuse-values from v0.2) renders like the chart and
 # refuses without a nil-pointer error. tests/chart/render.sh checks the same renders in more
-# detail, and NOTES.txt.
+# detail, and NOTES.txt. doc reads the first document of a kind: kausa's NetworkPolicy, not the
+# endpoint check's after it (docs/adr/0020-check-the-endpoint.md).
 RUN set -euf; \
     endpoint="--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k"; \
     on="--set notifications.enabled=true --set notifications.existingSecret=hook"; \
@@ -298,7 +299,7 @@ RUN set -euf; \
     fail() { echo "notifications: $*" >&2; exit 1; }; \
     render_in() { chart=$1; shift; helm template kausa "$chart" --kube-version 1.36.0 --namespace kausa-system "$@" || fail "$chart does not render with $*"; }; \
     render() { render_in charts/kausa "$@"; }; \
-    doc() { printf '%s\n' "$1" | awk -v kind="$2" '/^---/ { on = 0 }; $0 == "kind: " kind { on = 1 }; on'; }; \
+    doc() { printf '%s\n' "$1" | awk -v kind="$2" '/^---/ { if (on) exit }; $0 == "kind: " kind { on = 1 }; on'; }; \
     others() { printf '%s\n' "$1" | awk 'function flush() { if (!skip) printf "%s", d; d = ""; skip = 0 }; /^---/ { flush() }; /^kind: (Deployment|NetworkPolicy)$/ { skip = 1 }; { d = d $0 "\n" }; END { flush() }'; }; \
     args() { printf '%s\n' "$1" | sed -n '/^ *args:$/,/^ *env:$/p' | sed 's/^ *//'; }; \
     plus_notify() { awk '$0 == "- --metrics-address" { while ((getline l < "/tmp/notify-args") > 0) print l }; { print }'; }; \

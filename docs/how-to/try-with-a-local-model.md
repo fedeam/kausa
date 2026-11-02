@@ -32,6 +32,21 @@ watch, released in v0.4.0, adds a path to the proxy of step 2 (two with
    curl -s http://127.0.0.1:11434/v1/models
    ```
 
+   Then check it the way kausa calls it (from v0.5), with one synthetic request and no cluster:
+
+   ```sh
+   ./target/release/kausa check-endpoint --endpoint http://127.0.0.1:11434/v1 --allow-http \
+     --model qwen3:0.6b
+   ```
+
+   It prints one `endpoint check` line and exits `0` when the model answered with kausa's JSON;
+   otherwise the line's `cause` and `hint` say what to fix ([Command line and log
+   format](../reference/command-line.md#kausa-check-endpoint)). On 2026-11-02, with Ollama 0.9.2,
+   `qwen3:0.6b` and `qwen3:4b` passed in about 2 and 4 seconds, a model that is not pulled
+   failed with `cause` `not_found`, the URL without `/v1` with `not_found` too, and a port with
+   nothing listening with `connection`. `qwen3:0.6b` with `--no-json-schema` failed with
+   `invalid_answer`: without structured output, its answer was not JSON.
+
 2. **Optionally, put a read-only proxy between kausa and the cluster.** `kubectl proxy` uses your
    own credentials, so kausa gets none; the filters let through only the requests kausa makes and
    refuse every write. Replace `<context>` with the context of the cluster you mean:
@@ -133,6 +148,10 @@ benchmark. To grade another model the same way, replay a dry-run's requests with
   `~/.kube/config` → point `KUBECONFIG` at one.
 - **`the endpoint uses plain HTTP`** → add `--allow-http`, only for an endpoint on your machine,
   in the cluster or in the same private network.
+- **`kausa check-endpoint` fails** → its `cause` and `hint` say which step: `connection` (is `ollama
+  serve` running, on that port?), `not_found` (`ollama pull` the model, and keep `/v1` in the URL),
+  `timeout` (a large model on slow hardware: `--model-timeout 300`), `invalid_answer` (try a larger
+  model, or drop `--no-json-schema`).
 - **`explanation skipped` with `invalid answer`** → the model did not answer the expected JSON.
   Try `--no-json-schema` if the server does not support structured output, or a larger model.
 - **`log read failed`** → the container's log is gone (the Pod was deleted, or it never ran);

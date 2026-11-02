@@ -135,3 +135,9 @@ written anywhere, and redact the query of an HTTP request line](0022-redact-the-
 "Untrusted data stays data" to the answer: its text passes the pattern rules (every rule but
 `R002`) before it reaches an Event, the history, the log or a notification. Nothing new is sent
 to the provider by either.
+
+Update 2026-11-02: as implemented with [0020](0020-check-the-endpoint.md), the one fixed request
+with no cluster data is sent only when an operator runs `kausa check-endpoint` or `helm test`;
+[Data sent to the provider](../reference/data-sent-to-the-provider.md#the-endpoint-check) prints
+it in full, and golden files pin it. The destination, the path and the redaction steps do not
+change, and the breaker only removes calls.

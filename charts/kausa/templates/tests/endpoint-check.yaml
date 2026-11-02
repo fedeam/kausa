@@ -1,0 +1,97 @@
+{{- if include "kausa.endpointCheck" . }}
+{{- /*
+The endpoint check (docs/adr/0020-check-the-endpoint.md): helm test runs kausa check-endpoint once,
+one synthetic request to the model endpoint, outside kausa's budget. A test hook, so install and
+upgrade never create it. before-hook-creation, not hook-succeeded: the finished Pod stays until the
+next helm test, so that helm test --logs can read its line. No ServiceAccount of kausa's and no
+token: the check reads nothing from the cluster. Its labels carry no app.kubernetes.io/name, so no
+selector of kausa's matches it; nor podLabels or podAnnotations, which a selector may read.
+*/}}
+{{- $timeout := include "kausa.modelTimeout" . }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "kausa.endpointCheckName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kausa.endpointCheckLabels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  # The call's timeout plus 60 seconds.
+  activeDeadlineSeconds: {{ add (atoi $timeout) 60 }}
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    # Makes the API key file readable by the check's group, and by no one else.
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: endpoint-check
+      image: {{ include "kausa.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      args:
+        - check-endpoint
+        - --endpoint
+        - {{ .Values.model.endpoint | quote }}
+        - --model
+        - {{ .Values.model.name | quote }}
+        - --model-timeout
+        - {{ $timeout | quote }}
+        {{- if .Values.model.allowHttp }}
+        - --allow-http
+        {{- end }}
+        {{- if not .Values.model.jsonSchema }}
+        - --no-json-schema
+        {{- end }}
+        {{- if .Values.model.apiKey.existingSecret }}
+        - --api-key-file
+        - /var/run/secrets/kausa/api-key
+        {{- end }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        {{- toYaml .Values.resources | nindent 8 }}
+      {{- if .Values.model.apiKey.existingSecret }}
+      volumeMounts:
+        - name: api-key
+          mountPath: /var/run/secrets/kausa
+          readOnly: true
+      {{- end }}
+  {{- if .Values.model.apiKey.existingSecret }}
+  {{- /* The API key's Secret, as the Deployment mounts it; never the notification Secret. */}}
+  volumes:
+    - name: api-key
+      secret:
+        secretName: {{ .Values.model.apiKey.existingSecret }}
+        defaultMode: 0440
+        items:
+          - key: {{ .Values.model.apiKey.key }}
+            path: api-key
+  {{- end }}
+  {{- with .Values.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.affinity }}
+  affinity:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

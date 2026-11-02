@@ -41,6 +41,10 @@ model:
   allowHttp: false
   # Ask for structured output (response_format); turn off for servers that do not support it.
   jsonSchema: true
+  # A call's total timeout in seconds (--model-timeout), 10-600, for kausa and for the helm test
+  # Pod. Above 240, pass helm test a --timeout longer than 5 minutes: the test Pod's deadline is
+  # this value plus 60 seconds.
+  timeoutSeconds: 120
   # The API key, from a Secret you create (kausa never reads Secrets through the API: the kubelet
   # mounts this one as a file).
   apiKey:
@@ -49,6 +53,13 @@ model:
 
 # Log the redacted request of each incident instead of sending it. No Event is written.
 dryRun: false
+# Check the model endpoint, the key and the model with one synthetic request, billed by the
+# provider and outside kausa's budget (docs/adr/0020-check-the-endpoint.md): renders the helm test
+# Pod <fullname>-endpoint-check and, with networkPolicy.enabled, its NetworkPolicy, only with
+# model.endpoint and dryRun false. The Pod is created only by helm test, never on install or
+# upgrade. true or false.
+endpointCheck:
+  enabled: true
 # Read the last lines of the failed container for crash loops, out-of-memory kills and failed
 # Jobs. false also removes pods/log from the ClusterRole or the Roles.
 logs: true

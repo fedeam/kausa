@@ -91,6 +91,8 @@ spec:
             {{- if not .Values.model.jsonSchema }}
             - --no-json-schema
             {{- end }}
+            - --model-timeout
+            - {{ include "kausa.modelTimeout" . | quote }}
             {{- if .Values.model.apiKey.existingSecret }}
             - --api-key-file
             - /var/run/secrets/kausa/api-key

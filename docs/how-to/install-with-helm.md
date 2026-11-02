@@ -18,7 +18,11 @@ or a webhook](send-notifications.md)). The v0.4.0 chart (2026-10-30) adds a watc
 for stalled rollouts (`rollouts`, on by default), which the kind test installed in both scopes on
 2026-10-29 ([Upgrade to the Deployment watch](#upgrade-to-the-deployment-watch)), and an optional
 standby replica (`replicaCount: 2`, off by default), whose renders are checked in both scopes and
-whose kind test runs on GitHub Actions ([Run a standby replica](#run-a-standby-replica)).
+whose kind test runs on GitHub Actions ([Run a standby replica](#run-a-standby-replica)). The
+chart of v0.5 (not released as of 2026-11-02) adds `helm test`, which checks the endpoint, the key
+and the model with one synthetic request (step 6); its kind test runs on GitHub Actions, and the
+v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa check-endpoint` and
+`helm test`, and hold calls behind a breaker while it fails](../adr/0020-check-the-endpoint.md)).
 
 ## Before you start
 
@@ -81,6 +85,22 @@ whose kind test runs on GitHub Actions ([Run a standby replica](#run-a-standby-r
    addresses in `networkPolicy.apiServer.cidrs` (from
    `kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes`) and the
    endpoint's peers in `networkPolicy.endpoint.to`.
+
+6. **Check the endpoint, the key and the model** (with a chart that has the test, from v0.5):
+
+   ```sh
+   helm test kausa -n kausa --logs
+   ```
+
+   It runs `kausa check-endpoint` in a Pod of its own: one request with synthetic data, billed by
+   the provider and outside kausa's budget, and one `endpoint check` line. `"result":"ok"` and
+   exit `0` mean an answer came back and passed kausa's validation; otherwise `helm test` fails,
+   and the line's `cause` and `hint` say what to fix ([If something fails](#if-something-fails)).
+   With `model.timeoutSeconds` above 240, add `--timeout 15m` (anything longer than the value
+   plus 60 seconds): `helm test` waits 5 minutes by default. The finished Pod stays, with its log,
+   until the next `helm test`; delete it with `kubectl -n kausa delete pod kausa-endpoint-check`.
+   Install and upgrade never create it; `--set endpointCheck.enabled=false` leaves it out of the
+   chart.
 
 ## Run your own build
 
@@ -373,8 +393,10 @@ What to expect:
   `kubectl get events.events.k8s.io -A --field-selector reportingController=kausa` (or `-n
   <namespace>` for each listed namespace) lists kausa's Events, and `kubectl describe deployment -n <namespace> <name>` shows the explanation.
 - With the history on: `kubectl get explanations -A` lists one object per explained incident.
+- `helm test kausa -n kausa --logs` prints `"result":"ok"` (step 6).
 - `kubectl get --raw /api/v1/namespaces/kausa/services/kausa-metrics:9090/proxy/metrics` shows
-  the counters and the gauges.
+  the counters and the gauges; `kausa_endpoint_state{state="closed"} 1` while kausa calls its
+  endpoint.
 - To hear when the budget holds explanations back, two example alerts on the gauges of [Command
   line and log format](../reference/command-line.md#metrics):
 
@@ -393,6 +415,29 @@ What to expect:
   queue to drain after an upgrade at the defaults (13 calls of 120 seconds, plus the settle
   window); a standby and a replica that stepped down read 0. `window="hour"` at 0 is normal under
   load and is not worth an alert.
+- To hear when kausa stops calling its endpoint because it keeps failing (the breaker of [Command
+  line and log format](../reference/command-line.md#the-breaker)), an example alert:
+
+  ```yaml
+  - alert: KausaModelEndpointFailing
+    # The breaker has not been closed for 20 minutes, and a call failed in the last 45
+    # (the longest hold is 30 minutes, plus a probe of up to --model-timeout).
+    expr: |
+      max_over_time(kausa_endpoint_state{state="closed"}[20m]) == 0
+        and ignoring(state, outcome)
+      increase(kausa_model_calls_total{outcome="error"}[45m]) > 0
+    labels: {severity: warning}
+    annotations:
+      summary: kausa stopped calling its model endpoint; incidents wait or are skipped.
+      description: Read kausa's "endpoint unavailable" log line, then run helm test on the release.
+  ```
+
+  It fires about 20 minutes after the breaker opens and keeps firing while probes fail. It never
+  fires on a standby (always `closed`), nor on a quiet cluster that sits half open after an
+  outage, where no call fails; it resolves when a call closes the breaker, or 45 minutes after
+  the last failed call. A passing `helm test` does not resolve it: the test is another process.
+  The expression is a hypothesis until `promtool check rules` runs on it (not run as of
+  2026-11-02).
 
 ## If something fails
 
@@ -437,6 +482,46 @@ What to expect:
   about another rule or target → kausa leaves it alone; delete it if it is not yours.
 - **`explanation skipped`** in the log → the budget, the endpoint or the validation stopped it;
   the reason is in the line and in the `ExplanationSkipped` Event.
+- **`endpoint unavailable`** in the log, `kausa_endpoint_state{state="open"}` at 1, or incidents
+  skipped as `endpoint_unavailable` → kausa stopped calling a failing endpoint and probes it once
+  per hold, up to every 30 minutes; queued incidents wait → run `helm test kausa -n kausa --logs`
+  and act on its `cause`, below. A fixed key needs a restart of kausa (`kubectl -n kausa rollout
+  restart deploy/kausa`): it reads the key once, at start. Credit added at the provider needs
+  nothing: the next probe closes the breaker and the waiting incidents are explained.
+
+`helm test` fails with one `endpoint check` line; by its `cause` ([Causes](../reference/command-line.md#causes)):
+
+- **`key`** (`401`, `403`) → the endpoint refused the key → check the Secret of
+  `model.apiKey.existingSecret` and its `model.apiKey.key`, and the key's access to the model.
+- **`not_found`** (`404`, `405`, `410`) → a wrong model name, a model no longer offered, or a
+  wrong URL → check `model.name`, and that `model.endpoint` is the base URL (often ending in
+  `/v1`; kausa appends `/chat/completions`).
+- **`quota`** (`402`, or `429` with `insufficient_quota`) → the account has no credit left → add
+  credit, or use another key.
+- **`redirect`** (`3xx`) → the URL redirects, and kausa follows no redirect → put the final URL in
+  `model.endpoint`.
+- **`not_an_answer`** → a `2xx` that is not a chat completion (not JSON, or no `choices`) → the URL
+  serves something else: put the API's base URL in `model.endpoint`.
+- **`no_content`** → the model answered without text; `reason` says whether it refused, a filter
+  removed the text or it ran out of output tokens (kausa asks for 800) → try another model, or one
+  that does not reason at length.
+- **`invalid_answer`** → the model answered, but not with kausa's JSON → try a larger model, or
+  `model.jsonSchema=false` if the server ignores `response_format`.
+- **`timeout`** → no answer within `model.timeoutSeconds` → the model may be slow on this hardware
+  or overloaded: raise the value (and `helm test --timeout` above 240), or try later.
+- **`connection`** → kausa could not connect: DNS, TLS or a refused connection → check
+  `model.endpoint`, the certificate, and with the NetworkPolicy, `networkPolicy.endpoint.to` and
+  `.ports`.
+- **`rate_limited`** (`429`) or **`server_error`** (`5xx`) → the provider is busy or failing →
+  try later; kausa waits by itself (`retry_after_seconds` shows the provider's `Retry-After`).
+- **`rejected`** (another `4xx`) → the endpoint refused the request → read `detail`; if the server
+  does not support structured output, set `model.jsonSchema=false`.
+- **`too_large`** (`413`) → the model refuses a request of this size: unexpected for the check's
+  small request; for incidents, lower `budget.maxInputTokens` or use a model with a larger
+  context.
+- **`helm test` itself times out** → the Pod did not finish within 5 minutes (an image that cannot
+  be pulled, or `model.timeoutSeconds` above 240) → `kubectl -n kausa describe pod
+  kausa-endpoint-check`, and pass a longer `--timeout`.
 
 ## Uninstall
 
@@ -450,4 +535,6 @@ and `history.installCRD=true`, `helm uninstall` also deletes the CustomResourceD
 Explanation in the cluster; with `history.installCRD=false`, the administrator who installed it
 deletes it (`kubectl delete crd explanations.kausa.fedeam.com`), which deletes every Explanation.
 With `replicaCount=2`, `helm uninstall` also deletes the Lease, its Role and RoleBinding and the
-PodDisruptionBudget.
+PodDisruptionBudget. `helm uninstall` leaves the finished `helm test` Pod (seen in kind on
+2026-11-02); deleting the namespace deletes it, or, to keep the namespace, `kubectl -n kausa
+delete pod kausa-endpoint-check`.

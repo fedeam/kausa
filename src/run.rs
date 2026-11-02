@@ -46,11 +46,12 @@ use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::breaker::{Breaker, State as BreakerState};
 use crate::budget::{Allowance, Budget, Dedup, HOURLY_SPENT};
 use crate::context::Gathered;
 use crate::detect::{Detection, detect_event, detect_rollout};
 use crate::events::Writer;
-use crate::explain::{self, LogSource, QUEUE_LIMIT, Settings, Shared, Work};
+use crate::explain::{self, LogSource, Next, QUEUE_LIMIT, Settings, Shared, Work};
 use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals, rollout_signals};
 use crate::leader::pure::{TIMINGS, Timings};
@@ -420,6 +421,12 @@ pub async fn run(options: Options) -> Result<(), RunError> {
                 options.explain.as_ref().and_then(|s| s.notify.as_ref())
             ),
             "leader_lease": leader_lease(options.leader_lease.as_ref()),
+            // `null` without a model client: no --endpoint, or --dry-run.
+            "model_timeout_seconds": options
+                .explain
+                .as_ref()
+                .and_then(|s| s.model.as_ref())
+                .map(|client| client.timeout().as_secs()),
         }),
     )?;
 
@@ -451,6 +458,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             Instant::now(),
         )),
         dedup: RefCell::new(Dedup::new(settings.dedup_ttl, DEDUP_CAPACITY)),
+        breaker: RefCell::new(Breaker::new()),
         writer: (settings.events && settings.model.is_some())
             .then(|| Writer::new(client.clone(), settings.instance.clone())),
         history: settings
@@ -461,14 +469,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         notifications: RefCell::new(VecDeque::new()),
         term: &term,
     });
-    // The gauges of docs/adr/0021-refill-the-call-budget.md: the queue whenever kausa explains,
-    // the budget only with a model (a dry run has none to show).
-    if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared.as_ref()) {
-        metrics.set_gauge(QUEUE_GAUGE, &[], 0);
-        if settings.model.is_some() {
-            show_budget(&metrics, &shared.budget.borrow(), Instant::now());
-        }
-    }
+    show_start(&metrics, &options, shared.as_ref(), Instant::now());
     let lease = options
         .leader_lease
         .as_ref()
@@ -651,9 +652,11 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
                 }
             });
         if election.is_some() {
-            // A standby until it holds the Lease: no model call, no write, gauge 0.
+            // A standby until it holds the Lease: no model call, no write, gauge 0, and the
+            // endpoint shown closed (it calls nothing).
             self.term.close();
             self.metrics.set_leading(false);
+            show_endpoint(self.metrics, BreakerState::Closed);
         }
         let mut stop = pin!(stop);
         let mut connections = FuturesUnordered::new();
@@ -815,7 +818,8 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
     /// the webhook are dropped and counted, and the budget and the deduplication cache are kept
     /// for the next term: the budget's windows are kept, and its credit is cut to the start burst
     /// when the next term starts (docs/adr/0021-refill-the-call-budget.md). The queue went with
-    /// the controller, so its gauge reads 0.
+    /// the controller, so its gauge reads 0. The breaker is kept too, and the endpoint is shown
+    /// closed while a standby (docs/adr/0020-check-the-endpoint.md).
     fn step_down(&self, election: &Election<'_, L>, lost: Lost) -> io::Result<()> {
         self.term.close();
         let reason = match lost {
@@ -829,6 +833,7 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
         self.metrics
             .inc("kausa_leadership_changes_total", &[("to", "standby")]);
         self.metrics.set_leading(false);
+        show_endpoint(self.metrics, BreakerState::Closed);
         if let Some(shared) = self.shared {
             self.metrics.set_gauge(QUEUE_GAUGE, &[], 0);
             let cleared = shared.notifications.borrow_mut().drain(..).count();
@@ -870,15 +875,16 @@ async fn lead<C: Cluster>(
     let mut running: Option<Explaining<'_>> = None;
     // The notification being sent, beside the explanation slot: a slow webhook never holds it.
     let mut notifying: Option<Notifying<'_>> = None;
-    // Jobs whose first call failed with a transient error, and when they may be tried again.
+    // Jobs whose first call failed with a transient error while the breaker stayed closed, and
+    // when they may be tried again.
     let mut delayed: Vec<(Instant, Work)> = Vec::new();
 
     // When the last sweep of the history began (docs/adr/0014-explanation-history.md): a sweep is
     // due at once in each term.
     let mut last_sweep: Option<Instant> = None;
     // Whether the budget made the slot wait the last time it was asked
-    // (docs/adr/0021-refill-the-call-budget.md), and whether `explanations waiting` was logged
-    // since the queue was last empty.
+    // (docs/adr/0021-refill-the-call-budget.md; not the breaker), and whether `explanations
+    // waiting` was logged since the queue was last empty.
     let mut waiting = false;
     let mut announced = false;
 
@@ -886,8 +892,13 @@ async fn lead<C: Cluster>(
         if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
             let now = Instant::now();
             let queue_empty = queue.is_empty();
-            // When the next call is due, if the budget holds every queued job on this pass.
-            let mut held: Option<Instant> = None;
+            // The breaker's state, before the budget's (docs/adr/0020-check-the-endpoint.md).
+            let breaker = shared.breaker.borrow().state(now);
+            if settings.model.is_some() {
+                show_endpoint(metrics, breaker);
+            }
+            // When the next call is due and why, if a gate holds every queued job on this pass.
+            let mut held: Option<(Instant, &'static str)> = None;
             let history = shared.history.as_ref();
             match next_in_slot(
                 running.is_some(),
@@ -904,32 +915,37 @@ async fn lead<C: Cluster>(
                             history
                                 .sweep(namespaces, shared.metrics, shared.term)
                                 .await
-                                .map(|()| None)
+                                .map(|()| Next::Done)
                         }));
                     }
                 }
                 Some(Slot::Explain) => {
                     let allowance = allowance(settings, shared, now);
-                    waiting = matches!(allowance, Allowance::Wait { .. });
+                    let gate = holding_gate(&allowance, breaker);
+                    waiting = gate == Some(HOURLY_SPENT);
                     let job = admit(&mut queue, &allowance, &shared.dedup.borrow(), now);
-                    match (job, allowance) {
-                        (Some(job), _) => running = Some(cluster.explain(job, settings, shared)),
-                        (None, Allowance::Wait { until }) => held = Some(until),
-                        (None, _) => {}
+                    match (job, allowance, gate) {
+                        (Some(job), _, _) => {
+                            running = Some(cluster.explain(job, settings, shared));
+                        }
+                        (None, Allowance::Wait { until }, Some(gate)) => {
+                            held = Some((until, gate));
+                        }
+                        (None, _, _) => {}
                     }
                 }
                 None => {}
             }
             metrics.set_gauge(QUEUE_GAUGE, &[], queue.len() as u64);
             if announce(&mut announced, queue_empty, held.is_some())
-                && let Some(until) = held
+                && let Some((until, reason)) = held
             {
                 let due = until.saturating_duration_since(now);
                 let seconds = due.as_secs() + u64::from(due.subsec_nanos() > 0);
                 log::info(
                     "explanations waiting",
                     json!({
-                        "reason": HOURLY_SPENT,
+                        "reason": reason,
                         "queued": queue.len(),
                         "next_call_in_seconds": seconds,
                     }),
@@ -951,8 +967,12 @@ async fn lead<C: Cluster>(
             result = async { running.as_mut().expect("guarded by the condition").await },
                 if running.is_some() => {
                 running = None;
-                if let Some(job) = result? {
-                    delayed.push((Instant::now() + explain::RETRY_DELAY, job));
+                match result? {
+                    Next::Done => {}
+                    Next::Retry(job, delay) => delayed.push((Instant::now() + delay, job)),
+                    // The back of the queue, within its limit
+                    // (docs/adr/0020-check-the-endpoint.md).
+                    Next::Requeue(job) => enqueue(&mut queue, job, metrics, waiting)?,
                 }
             }
             result = async { notifying.as_mut().expect("guarded by the condition").await },
@@ -1034,6 +1054,37 @@ async fn lead<C: Cluster>(
 
 /// The gauge of the incidents waiting for an explanation (docs/adr/0021-refill-the-call-budget.md).
 const QUEUE_GAUGE: &str = "kausa_explanation_queue_length";
+
+/// Sets the gauges a process shows from its start. Those of
+/// docs/adr/0021-refill-the-call-budget.md: the queue whenever kausa explains, the budget only with
+/// a model (a dry run has none to show). Those of docs/adr/0020-check-the-endpoint.md: the
+/// endpoint's state always (closed without one), and its last success only with a model.
+fn show_start(metrics: &Metrics, options: &Options, shared: Option<&Shared<'_>>, now: Instant) {
+    show_endpoint(metrics, BreakerState::Closed);
+    if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
+        metrics.set_gauge(QUEUE_GAUGE, &[], 0);
+        if settings.model.is_some() {
+            show_budget(metrics, &shared.budget.borrow(), now);
+            metrics.set_gauge(explain::LAST_SUCCESS_GAUGE, &[], 0);
+        }
+    }
+}
+
+/// Sets `kausa_endpoint_state`: `state` at 1, the other two at 0
+/// (docs/adr/0020-check-the-endpoint.md).
+fn show_endpoint(metrics: &Metrics, state: BreakerState) {
+    for (label, of) in [
+        ("closed", BreakerState::Closed),
+        ("half_open", BreakerState::HalfOpen),
+        ("open", BreakerState::Open),
+    ] {
+        metrics.set_gauge(
+            "kausa_endpoint_state",
+            &[("state", label)],
+            u64::from(of == state),
+        );
+    }
+}
 
 /// Sets `kausa_budget_calls_remaining` from `budget` at `now`: the hour window is cut to the start
 /// burst while this process does not lead, since a takeover brings no more.
@@ -1425,9 +1476,9 @@ impl State {
     }
 }
 
-/// What holds the explanation slot: an explanation, which ends with a job to retry if its call
-/// failed transiently, or a sweep of the history, which ends with none.
-type Explaining<'a> = Pin<Box<dyn Future<Output = io::Result<Option<Work>>> + 'a>>;
+/// What holds the explanation slot: an explanation, which ends with what becomes of its job (done,
+/// retried after a delay, or back to the queue), or a sweep of the history, which ends done.
+type Explaining<'a> = Pin<Box<dyn Future<Output = io::Result<Next>> + 'a>>;
 
 /// What holds the notification slot: the delivery of one notification, with its retry and the
 /// least interval before the next.
@@ -1467,15 +1518,32 @@ fn next_in_slot(
     }
 }
 
-/// Whether the next queued job may make a model call (docs/adr/0021-refill-the-call-budget.md):
-/// the budget's answer, and always `Now` without a model (a dry run spends no budget). The one
-/// gate of the explanation slot: the endpoint breaker of docs/adr/0020-check-the-endpoint.md goes
-/// in front of the budget here, as another gate that holds.
+/// Whether the next queued job may make a model call: always `Now` without a model (a dry run
+/// makes no call and spends no budget); while the endpoint's breaker is open, `Wait` until its
+/// probe is due (docs/adr/0020-check-the-endpoint.md); else the budget's answer
+/// (docs/adr/0021-refill-the-call-budget.md). The one admission function of the slot: the
+/// breaker, then the budget. In half-open the admitted job is the probe and waits for the budget
+/// like any call.
 fn allowance(settings: &Settings, shared: &Shared<'_>, now: Instant) -> Allowance {
     if settings.model.is_none() {
         return Allowance::Now;
     }
+    let breaker = shared.breaker.borrow();
+    if let (BreakerState::Open, Some(until)) = (breaker.state(now), breaker.open_until()) {
+        return Allowance::Wait { until };
+    }
     shared.budget.borrow().check(now)
+}
+
+/// Which gate holds the slot, as the reason of `explanations waiting`: `None` unless `allowance`
+/// is `Wait`; the breaker's while it is open (`allowance` asks it first), else the budget's. Only
+/// the budget's makes `explanation dropped` say `waiting_for_budget`.
+fn holding_gate(allowance: &Allowance, breaker: BreakerState) -> Option<&'static str> {
+    match (allowance, breaker) {
+        (Allowance::Wait { .. }, BreakerState::Open) => Some(explain::ENDPOINT_UNAVAILABLE),
+        (Allowance::Wait { .. }, _) => Some(HOURLY_SPENT),
+        _ => None,
+    }
 }
 
 /// Which queued job takes the free explanation slot (docs/adr/0021-refill-the-call-budget.md):
@@ -3334,6 +3402,9 @@ mod tests {
         /// Takes a call from the budget, as `explain::run` does, and notes whether one was left
         /// (and `false` for cached); caches nothing.
         Take,
+        /// Runs the real `explain::run` (docs/adr/0020-check-the-endpoint.md): with the options'
+        /// model, logs and Events off, so the Kubernetes client is never used.
+        Real,
     }
 
     /// Counts the explanations dropped while in flight.
@@ -3491,16 +3562,27 @@ mod tests {
         fn explain<'a>(
             &'a self,
             job: Work,
-            _settings: &'a Settings,
+            settings: &'a Settings,
             shared: &'a Shared<'_>,
         ) -> Explaining<'a> {
-            let incident = job.gathered.incident;
-            self.jobs
-                .borrow_mut()
-                .push((self.watches.get(), incident.fingerprint.clone()));
+            self.jobs.borrow_mut().push((
+                self.watches.get(),
+                job.gathered.incident.fingerprint.clone(),
+            ));
             self.started.borrow_mut().push(Instant::now());
+            if self.explains == Explains::Real {
+                assert!(
+                    !settings.logs && !settings.events,
+                    "a real explanation reads no log"
+                );
+                let config = kube::Config::new("http://127.0.0.1:9".parse().expect("a URL"));
+                let client = Client::try_from(config).expect("a client");
+                return Box::pin(explain::run(job, client, settings, shared));
+            }
+            let incident = job.gathered.incident;
             Box::pin(async move {
                 match self.explains {
+                    Explains::Real => unreachable!("run above"),
                     Explains::Done => {}
                     Explains::Hang => {
                         let _dropped = Dropped(Rc::clone(&self.dropped));
@@ -3529,7 +3611,7 @@ mod tests {
                         self.found.borrow_mut().push((left, false));
                     }
                 }
-                Ok(None)
+                Ok(explain::Next::Done)
             })
         }
     }
@@ -3593,6 +3675,7 @@ mod tests {
                 Instant::now(),
             )),
             dedup: RefCell::new(Dedup::new(settings.dedup_ttl, DEDUP_CAPACITY)),
+            breaker: RefCell::new(crate::breaker::Breaker::new()),
             writer: None,
             history: None,
             metrics,
@@ -3982,8 +4065,10 @@ mod tests {
     /// The same options with an endpoint, so the budget gates the slot; the fake cluster's
     /// explanations never call it.
     fn with_endpoint(mut options: Options) -> Options {
-        options.explain.as_mut().expect("settings").model =
-            Some(ModelClient::new("http://127.0.0.1:9", None, true).expect("a model client"));
+        options.explain.as_mut().expect("settings").model = Some(
+            ModelClient::new("http://127.0.0.1:9", None, true, Duration::from_secs(120))
+                .expect("a model client"),
+        );
         options
     }
 
@@ -4587,5 +4672,620 @@ mod tests {
         assert_eq!(events.page_size, Some(LIST_PAGE_SIZE));
         assert_eq!(events.field_selector.as_deref(), Some("type=Warning"));
         assert!(LIST_PAGE_SIZE < watcher::Config::default().page_size.unwrap_or(u32::MAX));
+    }
+
+    // Acceptance tests for the breaker of docs/adr/0020-check-the-endpoint.md in the slot, written
+    // before the code. They use, beside the API of explain.rs's own tests (`Shared::breaker`,
+    // `explain::Next`, `explain::run` recording each call into the breaker):
+    //
+    // - `allowance` answers `Allowance::Wait { until: open_until }` while the breaker is open,
+    //   before the budget; `admit` is unchanged, so a full queue lets its oldest job out, which
+    //   `explain::run` skips as `endpoint_unavailable`;
+    // - `lead` puts a `Next::Retry` in the delayed list and a `Next::Requeue` at the back of the
+    //   queue through `enqueue` (at most `QUEUE_LIMIT`, the oldest dropped);
+    // - the gauge `kausa_endpoint_state{state}`, set from the breaker at the top of each pass of
+    //   `lead` with a model, and to `closed` on a standby and on a step-down.
+    //
+    // The fake cluster runs the real `explain::run` (`Explains::Real`) against a counting fake
+    // model on localhost. The breaker is put in a state by recording calls at injected instants;
+    // the script of a test may replace it between two calls, as a hold that ended would.
+
+    use std::sync::Mutex;
+
+    use crate::breaker::{Breaker, Call, State as BreakerState};
+
+    const OPEN: &str = "kausa_endpoint_state{state=\"open\"}";
+    const HALF_OPEN: &str = "kausa_endpoint_state{state=\"half_open\"}";
+    const CLOSED: &str = "kausa_endpoint_state{state=\"closed\"}";
+    const UNAVAILABLE: &str = "kausa_explanations_skipped_total{reason=\"endpoint_unavailable\"}";
+    const ENDPOINT_SKIPS: &str = "kausa_explanations_skipped_total{reason=\"endpoint\"}";
+    const RETRIED: &str = "kausa_explanations_retried_total";
+    const CACHED: &str = "kausa_explanations_cached_total";
+
+    /// A fake model that answers every request with `response` after `wait`, and counts them.
+    /// Returns its base URL.
+    fn fake_model(response: String, wait: Duration) -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut request = Vec::new();
+                let mut buffer = vec![0; 65536];
+                loop {
+                    let n = stream.read(&mut buffer).unwrap_or(0);
+                    request.extend_from_slice(&buffer[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(str::to_owned)
+                            })
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                std::thread::sleep(wait);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (url, calls)
+    }
+
+    fn reply(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A valid explanation, as the model would send it.
+    fn answered() -> String {
+        let content = json!({
+            "summary": "deployment-1 crashes.",
+            "cause": "container-1 exits.",
+            "steps": ["Check the arguments."],
+            "confidence": "low",
+        })
+        .to_string();
+        let body = json!({"choices": [{"message": {"content": content}}]});
+        reply("200 OK", &body.to_string())
+    }
+
+    fn unavailable_503() -> String {
+        reply("503 Service Unavailable", "")
+    }
+
+    fn refused_401() -> String {
+        reply("401 Unauthorized", "{}")
+    }
+
+    /// A chat completion with no content: the model refused.
+    fn empty_completion() -> String {
+        let body = json!({"choices": [{"message": {"content": null, "refusal": "no"}}]});
+        reply("200 OK", &body.to_string())
+    }
+
+    /// The options with the fake model at `url`, logs and Events off.
+    fn with_model(mut options: Options, url: &str) -> Options {
+        let settings = options.explain.as_mut().expect("settings");
+        settings.model = Some(
+            ModelClient::new(url, None, true, Duration::from_secs(120)).expect("a model client"),
+        );
+        assert!(!settings.logs && !settings.events);
+        options
+    }
+
+    fn earlier(seconds: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(seconds))
+            .expect("an earlier instant")
+    }
+
+    /// A breaker opened now by a configuration error: held for 60 s.
+    fn held() -> Breaker {
+        let mut breaker = Breaker::new();
+        breaker.record(Call::Configuration { retry_after: None }, Instant::now());
+        breaker
+    }
+
+    /// A breaker whose first hold ended a second ago: the next admitted job is the probe.
+    fn probing() -> Breaker {
+        let mut breaker = Breaker::new();
+        breaker.record(Call::Configuration { retry_after: None }, earlier(61));
+        breaker
+    }
+
+    /// A closed breaker after `n` transient failures.
+    fn failing(n: usize) -> Breaker {
+        let mut breaker = Breaker::new();
+        for _ in 0..n {
+            breaker.record(Call::Transient { retry_after: None }, Instant::now());
+        }
+        breaker
+    }
+
+    fn breaker_state(shared: &Shared<'_>) -> BreakerState {
+        shared.breaker.borrow().state(Instant::now())
+    }
+
+    /// The three series of the endpoint gauge, in the order closed, half-open, open.
+    fn endpoint_state(metrics: &Metrics) -> (Option<u64>, Option<u64>, Option<u64>) {
+        let text = metrics.render();
+        (
+            gauge(&text, CLOSED),
+            gauge(&text, HALF_OPEN),
+            gauge(&text, OPEN),
+        )
+    }
+
+    #[test]
+    fn allowance_puts_the_breaker_before_the_budget() {
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let gated = with_endpoint(options(false, 30));
+        let settings = gated.explain.as_ref().expect("settings");
+        // Open: the gate holds until the probe is due, whatever the budget has left.
+        let shared = shared_of(&gated, &metrics, &term);
+        let now = Instant::now();
+        shared.breaker.replace(held());
+        let until = shared.breaker.borrow().open_until().expect("open");
+        assert_eq!(allowance(settings, &shared, now), Allowance::Wait { until });
+        for _ in 0..START_BURST {
+            shared.budget.borrow_mut().take(now).expect("a call");
+        }
+        assert_eq!(allowance(settings, &shared, now), Allowance::Wait { until });
+        // Half-open and closed: the budget's answer, Now, Wait or Never.
+        for breaker in [probing(), failing(2)] {
+            let shared = shared_of(&gated, &metrics, &term);
+            let now = Instant::now();
+            shared.breaker.replace(breaker);
+            assert_eq!(allowance(settings, &shared, now), Allowance::Now);
+            for _ in 0..START_BURST {
+                shared.budget.borrow_mut().take(now).expect("a call");
+            }
+            assert_eq!(
+                allowance(settings, &shared, now),
+                shared.budget.borrow().check(now)
+            );
+            assert!(matches!(
+                allowance(settings, &shared, now),
+                Allowance::Wait { .. }
+            ));
+        }
+        let mut day_spent = with_endpoint(options(false, 30));
+        day_spent.explain.as_mut().expect("settings").calls_per_day = 0;
+        let shared = shared_of(&day_spent, &metrics, &term);
+        shared.breaker.replace(probing());
+        assert!(matches!(
+            allowance(day_spent.explain.as_ref().expect("settings"), &shared, now),
+            Allowance::Never(_)
+        ));
+        // Without a model, no gate: dry-run makes no call.
+        let dry = options(false, 30);
+        let shared = shared_of(&dry, &metrics, &term);
+        shared.breaker.replace(held());
+        assert_eq!(
+            allowance(dry.explain.as_ref().expect("settings"), &shared, now),
+            Allowance::Now
+        );
+    }
+
+    #[test]
+    fn while_the_breaker_holds_a_full_queue_skips_its_oldest_once_per_pass_and_calls_nothing() {
+        let (url, calls) = fake_model(answered(), Duration::ZERO);
+        // 30 calls an hour: no call refills during the test, so any take would show.
+        let options = with_model(options(false, 30), &url);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        shared.breaker.replace(held());
+        // 17 at the first tick: one is dropped there, silently, and the slot skips the next.
+        let names: Vec<String> = (0..=QUEUE_LIMIT).map(|n| format!("api-{n:02}")).collect();
+        let pods: Vec<Pod> = names.iter().map(|name| crashing(name)).collect();
+        let order = fingerprints(&jobs_of(&pods));
+        let lease = FakeLease::new(None);
+        let mut cluster = FakeCluster::new(pods, Explains::Real);
+        cluster.gate = Arc::new(AtomicBool::new(false));
+        cluster.later = vec![crashing("web-99")];
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || counter(&metrics, UNAVAILABLE) == 1).await,
+                "one skip"
+            );
+            // Ten more passes: 15 queued, nothing more is skipped.
+            until(TEST_TICK * 10, || false).await;
+            assert_eq!(counter(&metrics, UNAVAILABLE), 1, "a skip below 16");
+            assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(15));
+            // One more incident fills the queue again: one more skip.
+            cluster.gate.store(true, Ordering::SeqCst);
+            assert!(
+                until(WAIT, || counter(&metrics, UNAVAILABLE) == 2).await,
+                "a second skip"
+            );
+            until(TEST_TICK * 10, || false).await;
+        }));
+        served(result);
+        assert_eq!(counter(&metrics, UNAVAILABLE), 2);
+        assert_eq!(counter(&metrics, DROPPED_JOBS), 1, "the tick dropped one");
+        assert_eq!(
+            started_jobs(&cluster),
+            [order[1].clone(), order[2].clone()],
+            "the slot skips the oldest each time"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "the model was called");
+        assert_eq!(
+            hour_left(&shared),
+            START_BURST as u64,
+            "the budget was taken"
+        );
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(15));
+        assert_eq!(endpoint_state(&metrics), (Some(0), Some(0), Some(1)));
+        assert_eq!(counter(&metrics, "kausa_model_calls_total"), 0);
+    }
+
+    #[test]
+    fn while_the_breaker_holds_cached_jobs_are_served_out_of_order() {
+        let (url, calls) = fake_model(answered(), Duration::ZERO);
+        let options = with_model(options(false, 3600), &url);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        shared.breaker.replace(held());
+        let pods = crashing_pods(&["api-1", "api-2", "api-3"]);
+        let order = fingerprints(&jobs_of(&pods));
+        shared
+            .dedup
+            .borrow_mut()
+            .put(&order[2], explanation(), None, Instant::now());
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(pods, Explains::Real);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(until(WAIT, || cluster.jobs() == 1).await, "one explanation");
+            until(TEST_TICK * 10, || false).await;
+        }));
+        served(result);
+        assert_eq!(started_jobs(&cluster), [order[2].clone()]);
+        assert_eq!(counter(&metrics, CACHED), 1);
+        assert_eq!(counter(&metrics, UNAVAILABLE), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(2));
+        assert_eq!(breaker_state(&shared), BreakerState::Open);
+    }
+
+    #[test]
+    fn a_configuration_error_skips_its_job_and_holds_the_others() {
+        let (url, calls) = fake_model(refused_401(), Duration::ZERO);
+        let options = with_model(options(false, 3600), &url);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        let pods = crashing_pods(&["api-1", "api-2", "api-3"]);
+        let order = fingerprints(&jobs_of(&pods));
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(pods, Explains::Real);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || counter(&metrics, ENDPOINT_SKIPS) == 1).await,
+                "a skip"
+            );
+            until(TEST_TICK * 10, || false).await;
+        }));
+        served(result);
+        assert_eq!(started_jobs(&cluster), [order[0].clone()]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            counter(&metrics, RETRIED),
+            0,
+            "a configuration error was retried"
+        );
+        assert_eq!(breaker_state(&shared), BreakerState::Open);
+        assert_eq!(endpoint_state(&metrics), (Some(0), Some(0), Some(1)));
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(2));
+    }
+
+    #[test]
+    fn probes_rotate_and_a_job_is_called_at_most_twice() {
+        let (url, calls) = fake_model(unavailable_503(), Duration::ZERO);
+        let options = with_model(options(false, 3600), &url);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        // Two transient failures already: the next one opens it.
+        shared.breaker.replace(failing(2));
+        let pods = crashing_pods(&["api-1", "api-2", "api-3"]);
+        let order = fingerprints(&jobs_of(&pods));
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(pods, Explains::Real);
+        let states = Mutex::new(Vec::new());
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            for requeued in 1..=3 {
+                assert!(
+                    until(WAIT, || counter(&metrics, RETRIED) == requeued).await,
+                    "requeue {requeued}"
+                );
+                states
+                    .lock()
+                    .expect("the states")
+                    .push(breaker_state(&shared));
+                // The hold ends: the next admitted job is the probe.
+                shared.breaker.replace(probing());
+            }
+            assert!(
+                until(WAIT, || counter(&metrics, ENDPOINT_SKIPS) == 1).await,
+                "the second failure of the first job"
+            );
+            until(TEST_TICK * 10, || false).await;
+        }));
+        served(result);
+        assert_eq!(
+            *states.lock().expect("the states"),
+            [BreakerState::Open; 3],
+            "a failed probe did not reopen it"
+        );
+        assert_eq!(
+            started_jobs(&cluster),
+            [
+                order[0].clone(),
+                order[1].clone(),
+                order[2].clone(),
+                order[0].clone()
+            ],
+            "three probes, three jobs; the first comes back from the back of the queue"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(counter(&metrics, RETRIED), 3);
+        assert_eq!(counter(&metrics, ENDPOINT_SKIPS), 1);
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(2));
+    }
+
+    #[test]
+    fn a_closing_probe_drains_the_queue_in_order() {
+        let (url, calls) = fake_model(answered(), Duration::ZERO);
+        let options = with_model(options(false, 3600), &url);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        shared.breaker.replace(probing());
+        let pods = crashing_pods(&["api-1", "api-2", "api-3"]);
+        let order = fingerprints(&jobs_of(&pods));
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(pods, Explains::Real);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || counter(
+                    &metrics,
+                    "kausa_model_calls_total{outcome=\"ok\"}"
+                ) == 3)
+                .await,
+                "three explanations"
+            );
+            until(TEST_TICK * 2, || false).await;
+        }));
+        served(result);
+        assert_eq!(started_jobs(&cluster), order, "in their order");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(breaker_state(&shared), BreakerState::Closed);
+        assert_eq!(endpoint_state(&metrics), (Some(1), Some(0), Some(0)));
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(0));
+        assert!(
+            gauge(
+                &metrics.render(),
+                "kausa_model_last_success_timestamp_seconds"
+            )
+            .is_some_and(|t| t > 0)
+        );
+    }
+
+    #[test]
+    fn empty_completions_while_half_open_probe_each_job_and_never_open_it() {
+        let (url, calls) = fake_model(empty_completion(), Duration::ZERO);
+        let options = with_model(options(false, 3600), &url);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        shared.breaker.replace(probing());
+        let pods = crashing_pods(&["api-1", "api-2", "api-3"]);
+        let order = fingerprints(&jobs_of(&pods));
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(pods, Explains::Real);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || counter(&metrics, ENDPOINT_SKIPS) == 3).await,
+                "three skips"
+            );
+            until(TEST_TICK * 2, || false).await;
+        }));
+        served(result);
+        assert_eq!(started_jobs(&cluster), order);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(counter(&metrics, RETRIED), 0);
+        assert_eq!(breaker_state(&shared), BreakerState::HalfOpen);
+        assert_eq!(endpoint_state(&metrics), (Some(0), Some(1), Some(0)));
+    }
+
+    #[test]
+    fn a_requeue_on_a_full_queue_drops_the_oldest_and_the_queue_never_exceeds_16() {
+        // The probe is slow, so one more incident fills the queue while it runs.
+        let (url, calls) = fake_model(unavailable_503(), Duration::from_millis(300));
+        let options = with_model(options(false, 3600), &url);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let shared = shared_of(&options, &metrics, &term);
+        shared.breaker.replace(probing());
+        let names: Vec<String> = (0..QUEUE_LIMIT).map(|n| format!("api-{n:02}")).collect();
+        let pods: Vec<Pod> = names.iter().map(|name| crashing(name)).collect();
+        let order = fingerprints(&jobs_of(&pods));
+        let lease = FakeLease::new(None);
+        let mut cluster = FakeCluster::new(pods, Explains::Real);
+        cluster.gate = Arc::new(AtomicBool::new(false));
+        cluster.later = vec![crashing("web-99")];
+        let longest = Cell::new(0);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || calls.load(Ordering::SeqCst) == 1).await,
+                "the probe started"
+            );
+            cluster.gate.store(true, Ordering::SeqCst);
+            assert!(
+                until(WAIT, || {
+                    let length = gauge(&metrics.render(), QUEUE_LENGTH).unwrap_or(0);
+                    longest.set(longest.get().max(length));
+                    counter(&metrics, UNAVAILABLE) == 1
+                })
+                .await,
+                "the full queue let its oldest out"
+            );
+            until(TEST_TICK * 10, || {
+                let length = gauge(&metrics.render(), QUEUE_LENGTH).unwrap_or(0);
+                longest.set(longest.get().max(length));
+                false
+            })
+            .await;
+        }));
+        served(result);
+        assert!(longest.get() <= QUEUE_LIMIT as u64, "{}", longest.get());
+        assert_eq!(counter(&metrics, RETRIED), 1, "the probe was requeued");
+        assert_eq!(
+            counter(&metrics, DROPPED_JOBS),
+            1,
+            "the requeue dropped one"
+        );
+        assert_eq!(
+            started_jobs(&cluster),
+            [order[0].clone(), order[2].clone()],
+            "the probe, then the oldest left after the drop of the second"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gauge(&metrics.render(), QUEUE_LENGTH), Some(15));
+    }
+
+    #[test]
+    fn the_breaker_survives_a_step_down_and_the_gauge_reads_closed_on_a_standby() {
+        let (url, calls) = fake_model(answered(), Duration::ZERO);
+        let options = with_model(options(true, 3600), &url);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        shared.breaker.replace(held());
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(vec![crashing("api-1")], Explains::Real);
+        let on_standby = Cell::new(None);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || counter(&metrics, OPEN) == 1).await,
+                "the leader shows the breaker open"
+            );
+            // Another replica takes the Lease and dies: it is taken back after lease_duration.
+            lease.write(Some(OTHER));
+            assert!(
+                until(WAIT, || counter(&metrics, TO_STANDBY) == 1).await,
+                "stepped down"
+            );
+            on_standby.set(Some(endpoint_state(&metrics)));
+            assert!(
+                until(WAIT, || counter(&metrics, TO_LEADER) == 2).await,
+                "a second term"
+            );
+            assert!(
+                until(WAIT, || counter(&metrics, OPEN) == 1).await,
+                "the second term shows the kept breaker"
+            );
+        }));
+        served(result);
+        assert_eq!(on_standby.get(), Some((Some(1), Some(0), Some(0))));
+        assert_eq!(
+            breaker_state(&shared),
+            BreakerState::Open,
+            "the breaker was reset"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "a term reset the breaker");
+    }
+
+    #[test]
+    fn a_standby_shows_the_endpoint_closed() {
+        let (url, _calls) = fake_model(answered(), Duration::ZERO);
+        let options = with_model(options(true, 3600), &url);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        shared.breaker.replace(held());
+        let lease = FakeLease::new(Some(OTHER));
+        lease.renewing.set(true);
+        let cluster = FakeCluster::new(vec![crashing("api-1")], Explains::Real);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(until(WAIT, || lease.gets.get() >= 4).await, "four reads");
+        }));
+        served(result);
+        assert_eq!(cluster.jobs(), 0);
+        assert_eq!(endpoint_state(&metrics), (Some(1), Some(0), Some(0)));
+    }
+
+    #[test]
+    fn the_start_shows_the_endpoint_closed_and_its_last_success_only_with_a_model() {
+        const LAST_SUCCESS: &str = "kausa_model_last_success_timestamp_seconds";
+        let term = Term::unbounded();
+        // Not explaining at all (no --endpoint and no --dry-run): the state alone, closed.
+        let metrics = Metrics::default();
+        let mut quiet = options(false, 30);
+        quiet.explain = None;
+        show_start(&metrics, &quiet, None, Instant::now());
+        let text = metrics.render();
+        assert_eq!(endpoint_state(&metrics), (Some(1), Some(0), Some(0)));
+        assert_eq!(gauge(&text, QUEUE_LENGTH), None, "{text}");
+        assert_eq!(gauge(&text, LAST_SUCCESS), None, "{text}");
+        // A dry run: closed and the queue, no budget and no last success.
+        let metrics = Metrics::default();
+        let dry = options(false, 30);
+        let shared = shared_of(&dry, &metrics, &term);
+        show_start(&metrics, &dry, Some(&shared), Instant::now());
+        let text = metrics.render();
+        assert_eq!(endpoint_state(&metrics), (Some(1), Some(0), Some(0)));
+        assert_eq!(gauge(&text, QUEUE_LENGTH), Some(0), "{text}");
+        assert_eq!(gauge(&text, DAY_LEFT), None, "{text}");
+        assert_eq!(gauge(&text, LAST_SUCCESS), None, "{text}");
+        // With a model: closed, and the last success 0 before the first chat completion.
+        let metrics = Metrics::default();
+        let gated = with_endpoint(options(false, 30));
+        let shared = shared_of(&gated, &metrics, &term);
+        show_start(&metrics, &gated, Some(&shared), Instant::now());
+        let text = metrics.render();
+        assert_eq!(endpoint_state(&metrics), (Some(1), Some(0), Some(0)));
+        assert_eq!(gauge(&text, QUEUE_LENGTH), Some(0), "{text}");
+        assert_eq!(gauge(&text, DAY_LEFT), Some(200), "{text}");
+        assert_eq!(gauge(&text, LAST_SUCCESS), Some(0), "{text}");
+    }
+
+    #[test]
+    fn the_gate_that_holds_names_the_wait_and_only_the_budget_waits_for_budget() {
+        let until = Instant::now() + Duration::from_secs(60);
+        let wait = Allowance::Wait { until };
+        let never = Allowance::Never("the daily call budget is spent");
+        for (allowance, breaker, gate) in [
+            (
+                &wait,
+                BreakerState::Open,
+                Some(explain::ENDPOINT_UNAVAILABLE),
+            ),
+            (&wait, BreakerState::HalfOpen, Some(HOURLY_SPENT)),
+            (&wait, BreakerState::Closed, Some(HOURLY_SPENT)),
+            (&Allowance::Now, BreakerState::Closed, None),
+            (&Allowance::Now, BreakerState::HalfOpen, None),
+            (&never, BreakerState::Closed, None),
+            (&never, BreakerState::HalfOpen, None),
+        ] {
+            assert_eq!(
+                holding_gate(allowance, breaker),
+                gate,
+                "{allowance:?} {breaker:?}"
+            );
+        }
+        assert_eq!(
+            explain::ENDPOINT_UNAVAILABLE,
+            "the model endpoint is unavailable"
+        );
+        assert_eq!(HOURLY_SPENT, "the hourly call budget is spent");
     }
 }

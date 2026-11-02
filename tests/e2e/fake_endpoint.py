@@ -11,6 +11,14 @@ whose path starts with /hook/ never reaches the model's request log. The first o
 and every later one 200, so that kausa retries once, and each one appends a JSON line with the
 status it got, its path, its Authorization header and its body to the hook log.
 
+It also stands in for a failing provider (docs/adr/0020-check-the-endpoint.md). With --fail-file,
+while that file exists, every POST to /v1/chat/completions is answered with the status on the
+file's first line, written STATUS or STATUS RETRY_AFTER (for example 401, or 503 1), with a
+Retry-After header when the second number is given and an OpenAI-shaped error body. A request
+whose model is e2e-missing is answered 404 with the body a provider gives an unknown model, for
+the helm test that must fail with cause not_found. Both are logged like any other request, so that
+each one, and each helm test, adds exactly one line to the request log and one to the time log.
+
 With --time-log, every line appended to the request log is matched by one line in the time log:
 the wall-clock second the request was received (time.time(), three decimals), comparable with the
 ts of kausa's log lines because kind's nodes share the host clock (on Docker Desktop, a VM's clock
@@ -41,6 +49,44 @@ INJECTED = ["192.0.2.7", "not-a-real-token", "zq7canary"]
 # The second step as kausa writes it: R004, R014 and R013 applied, the host numbered as the
 # incident's request numbered it.
 REDACTED_STEP = r"open http://<redacted:ip>:8080/fix\?<redacted:query> on host-[0-9]+"
+# The model the endpoint does not have, and the body of its 404, shaped like OpenAI's.
+MISSING_MODEL = "e2e-missing"
+MISSING_BODY = {
+    "error": {
+        "message": "The model 'e2e-missing' does not exist",
+        "type": "invalid_request_error",
+        "code": "model_not_found",
+    }
+}
+# The body of every answer while the fail file exists.
+FAILURE_BODY = {
+    "error": {"message": "e2e: failing on purpose", "type": "e2e", "code": "e2e_failure"}
+}
+
+
+def failure(path):
+    """The status and the Retry-After value (or None) on the first line of the file at path, or
+    None while it does not exist. A line that is not one or two whole numbers raises ValueError."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as file:
+            first = file.readline()
+    except FileNotFoundError:
+        return None
+    words = first.split()
+    if not 1 <= len(words) <= 2 or not all(w.isascii() and w.isdigit() for w in words):
+        raise ValueError("the fail file's first line is not STATUS[ RETRY_AFTER]")
+    return int(words[0]), (words[1] if len(words) == 2 else None)
+
+
+def requested_model(body):
+    """The request's JSON model, or None when the body is not a JSON object with one."""
+    try:
+        request = json.loads(body)
+    except ValueError:
+        return None
+    return request.get("model") if isinstance(request, dict) else None
 
 
 def main():
@@ -49,6 +95,8 @@ def main():
     parser.add_argument("--log", required=True)
     parser.add_argument("--hook-log", required=True)
     parser.add_argument("--time-log")
+    # While this file exists, every model request is answered with the status it holds.
+    parser.add_argument("--fail-file")
     args = parser.parse_args()
     # The number of notifications received, under the lock that also orders the hook log.
     hooks = {"received": 0}
@@ -73,6 +121,16 @@ def main():
             self.send_header("content-length", "0")
             self.end_headers()
 
+        def answer(self, status, body, retry_after=None):
+            response = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(response)))
+            if retry_after is not None:
+                self.send_header("retry-after", retry_after)
+            self.end_headers()
+            self.wfile.write(response)
+
         def do_POST(self):
             received = time.time()
             length = int(self.headers.get("content-length", "0"))
@@ -89,7 +147,20 @@ def main():
             if self.path != "/v1/chat/completions":
                 self.send_error(404)
                 return
-            response = json.dumps(
+            try:
+                failing = failure(args.fail_file)
+            except ValueError as error:
+                self.send_error(500, str(error))
+                return
+            if failing is not None:
+                status, retry_after = failing
+                self.answer(status, FAILURE_BODY, retry_after)
+                return
+            if requested_model(body) == MISSING_MODEL:
+                self.answer(404, MISSING_BODY)
+                return
+            self.answer(
+                200,
                 {
                     "id": "e2e",
                     "object": "chat.completion",
@@ -101,13 +172,8 @@ def main():
                         }
                     ],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
-                }
-            ).encode()
-            self.send_response(200)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
+                },
+            )
 
         def log_message(self, format, *args):
             pass

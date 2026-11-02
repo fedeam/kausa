@@ -16,6 +16,7 @@ use kube::api::LogParams;
 use kube::{Api, Client};
 use serde_json::{Value, json};
 
+use crate::breaker::{Breaker, Call, State, Transition};
 use crate::budget::{Allowance, Budget, Dedup, HOURLY_SPENT};
 use crate::context::{self, Gathered};
 use crate::detect::Detection;
@@ -24,7 +25,7 @@ use crate::history::History;
 use crate::leader::Term;
 use crate::log;
 use crate::metrics::Metrics;
-use crate::model::ModelClient;
+use crate::model::{CallError, Cause, Class, ModelClient};
 use crate::notify;
 use crate::prompt::{self, OutputMode, PROMPT_VERSION};
 
@@ -64,12 +65,15 @@ pub struct Settings {
     pub notify: Option<notify::Notifier>,
 }
 
-/// What the explanations share across incidents: the budget, the deduplication cache, the Event
-/// writer, the history writer, the metrics, the queue of notifications and the lease term. Borrowed
-/// only between awaits.
+/// What the explanations share across incidents: the budget, the deduplication cache, the
+/// endpoint's breaker, the Event writer, the history writer, the metrics, the queue of
+/// notifications and the lease term. Borrowed only between awaits.
 pub struct Shared<'a> {
     pub budget: RefCell<Budget>,
     pub dedup: RefCell<Dedup>,
+    /// The breaker in front of the budget (docs/adr/0020-check-the-endpoint.md): one per process,
+    /// kept across terms, so a flipped Lease cannot reset it and multiply the probes.
+    pub breaker: RefCell<Breaker>,
     pub writer: Option<Writer>,
     /// The history writer, with `--history` and an endpoint.
     pub history: Option<History>,
@@ -101,8 +105,35 @@ pub struct Work {
     pub attempt: u8,
 }
 
-/// How long a transient failure waits before its one retry.
+/// How long a transient failure waits before its one retry, unless `Retry-After` asks for more.
 pub const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The reason of `explanations waiting` while the breaker holds the queue.
+pub const ENDPOINT_UNAVAILABLE: &str = "the model endpoint is unavailable";
+
+/// The note of a job skipped as `endpoint_unavailable`: the queue was full while the breaker held.
+/// Fixed, so a repeat of the same incident patches the same Event.
+pub const ENDPOINT_UNAVAILABLE_NOTE: &str =
+    "the model endpoint is unavailable; this incident waited and was not explained";
+
+/// The note of a job the endpoint refused as too large (`too_large`).
+pub const TOO_LARGE_NOTE: &str =
+    "the endpoint refused the request as too large for the model: lower --max-input-tokens";
+
+/// The gauge of the last call answered with a chat completion (docs/adr/0020-check-the-endpoint.md).
+pub const LAST_SUCCESS_GAUGE: &str = "kausa_model_last_success_timestamp_seconds";
+
+/// What becomes of a job once `run` is done with it.
+pub enum Next {
+    /// Explained, served from the cache, skipped or dropped: nothing more.
+    Done,
+    /// A transient first failure while the breaker stays closed: tried once more after the delay
+    /// (`Retry-After`, or `RETRY_DELAY`).
+    Retry(Work, Duration),
+    /// A transient first failure that left the breaker open: back to the end of the queue, to
+    /// wait out the hold with the others, so the probes rotate across incidents.
+    Requeue(Work),
+}
 
 /// Whether a detection reads the failed container's log (docs/reference/rules.md).
 pub fn reads_logs(detection: Detection) -> bool {
@@ -132,17 +163,23 @@ pub fn reads_logs(detection: Detection) -> bool {
 /// explanations are written as Events when that is on, and explanations, fresh or cached, into
 /// the history with `--history`. With notifications on, an explanation is queued for the webhook
 /// once its Event and history are written: a new one always, a cached one while its notification
-/// was not sent; a skip never is. A first call that fails with a transient error (a timeout, a
-/// failed connection, `429` or a `5xx` status) returns the job, to be tried once more after
-/// `RETRY_DELAY`; a call that never reached the endpoint is given back to the budget. Once the
-/// lease term has ended, the work is dropped without a word: no call, no budget, no cache entry,
-/// no Event, history entry or notification.
+/// was not sent; a skip never is.
+///
+/// Each call's outcome is recorded in the breaker as soon as it returns, even past the term
+/// (docs/adr/0020-check-the-endpoint.md). While the breaker is open, a job not in the cache is
+/// skipped as `endpoint_unavailable` before its log is read (the slot lets one out only when 16
+/// wait). A first call that fails with a transient cause is retried once: after `Retry-After` or
+/// `RETRY_DELAY` while the breaker stays closed, else from the back of the queue; a configuration
+/// cause is never retried; `too_large` is skipped as `context_too_large`; a call that never
+/// reached the endpoint is given back to the budget. Once the lease term has ended, the work is
+/// dropped without a word: no call, no budget, no cache entry, no Event, history entry or
+/// notification.
 pub async fn run(
     job: Work,
     client: Client,
     settings: &Settings,
     shared: &Shared<'_>,
-) -> io::Result<Option<Work>> {
+) -> io::Result<Next> {
     let retry = (job.attempt == 0).then(|| Work {
         attempt: 1,
         ..job.clone()
@@ -163,7 +200,7 @@ pub async fn run(
             .get(&fingerprint, std::time::Instant::now());
         if let Some(cached) = cached {
             if !shared.term.holds() {
-                return Ok(None);
+                return Ok(Next::Done);
             }
             shared.metrics.inc("kausa_explanations_cached_total", &[]);
             log::info(
@@ -186,18 +223,18 @@ pub async fn run(
             {
                 notify::enqueue(shared, notify::queued(&gathered.incident, notice))?;
             }
-            return Ok(None);
+            return Ok(Next::Done);
         }
     }
 
-    // A job the budget refuses now is skipped before its log is read. The queue in `run.rs` lets
-    // a job start while the budget waits only when its fingerprint is fresh in the cache; one whose
-    // entry expires between that check and the `get` above (microseconds) ends here, as a budget
-    // skip.
+    // A job the breaker or the budget refuses now is skipped before its log is read. The queue in
+    // `run.rs` lets a job start while a gate holds only when its fingerprint is fresh in the cache
+    // or 16 jobs wait; one whose entry expires between that check and the `get` above
+    // (microseconds) ends here, as a skip of that gate.
     if let Some((reason, why)) = refusal(settings, shared, std::time::Instant::now()) {
         return skip(settings, shared, &gathered, about, reason, why)
             .await
-            .map(|()| None);
+            .map(|()| Next::Done);
     }
 
     if settings.logs
@@ -226,7 +263,7 @@ pub async fn run(
             "the context does not fit --max-input-tokens even without logs",
         )
         .await
-        .map(|()| None);
+        .map(|()| Next::Done);
     };
     let redactions = counts(redactor.counts());
     for (rule, n) in redactor.counts() {
@@ -241,18 +278,23 @@ pub async fn run(
             "request",
             merge(about, json!({"request": body, "redactions": redactions})),
         )
-        .map(|()| None);
+        .map(|()| Next::Done);
     };
     if !shared.term.holds() {
-        return Ok(None);
+        return Ok(Next::Done);
     }
     let taken = shared.budget.borrow_mut().take(std::time::Instant::now());
     if let Err(why) = taken {
         return skip(settings, shared, &gathered, about, "budget", why)
             .await
-            .map(|()| None);
+            .map(|()| Next::Done);
     }
-    let answer = match model.complete(&body).await {
+    let result = model.complete(&body).await;
+    // The breaker counts the call before the term check: the answer is true of the endpoint even
+    // when the term ended during the call.
+    let now = std::time::Instant::now();
+    record(shared, settings, result.as_ref().err(), now)?;
+    let answer = match result {
         Ok(answer) => answer,
         Err(error) => {
             shared
@@ -263,44 +305,34 @@ pub async fn run(
             }
             // The term ended during the call: no retry, no skip.
             if !shared.term.holds() {
-                return Ok(None);
+                return Ok(Next::Done);
             }
-            if error.transient
+            if error.cause.class() == Class::Transient
                 && let Some(retry) = retry
             {
-                shared.metrics.inc("kausa_explanations_retried_total", &[]);
-                log::warn(
-                    "explanation retried",
-                    merge(
-                        about,
-                        json!({
-                            "reason": error.message,
-                            "detail": error.detail,
-                            "retry_in_seconds": RETRY_DELAY.as_secs(),
-                        }),
-                    ),
-                )?;
-                return Ok(Some(retry));
+                return retried(shared, about, &error, retry, now);
             }
             if let Some(detail) = &error.detail {
                 log::warn(
                     "endpoint error",
                     merge(
                         about.clone(),
-                        json!({"reason": error.message, "detail": detail}),
+                        json!({
+                            "reason": error.message,
+                            "detail": detail,
+                            "cause": error.cause.as_str(),
+                            "status": error.status,
+                        }),
                     ),
                 )?;
             }
-            return skip(
-                settings,
-                shared,
-                &gathered,
-                about,
-                "endpoint",
-                &error.message,
-            )
-            .await
-            .map(|()| None);
+            let (reason, why) = match error.cause {
+                Cause::TooLarge => ("context_too_large", TOO_LARGE_NOTE),
+                _ => ("endpoint", error.message.as_str()),
+            };
+            return skip(settings, shared, &gathered, about, reason, why)
+                .await
+                .map(|()| Next::Done);
         }
     };
     if let Some(n) = answer.prompt_tokens {
@@ -322,7 +354,7 @@ pub async fn run(
             let why = format!("invalid answer: {error}");
             return skip(settings, shared, &gathered, about, "invalid_answer", &why)
                 .await
-                .map(|()| None);
+                .map(|()| Next::Done);
         }
     };
     shared
@@ -330,7 +362,7 @@ pub async fn run(
         .inc("kausa_model_calls_total", &[("outcome", "ok")]);
     // The term ended while the model answered: the answer is dropped, not cached.
     if !shared.term.holds() {
-        return Ok(None);
+        return Ok(Next::Done);
     }
     // The answer is untrusted: the pattern rules run on it before any sink sees it, and every
     // copy below (the restores, the cache, the log, the Event, the history and the notification)
@@ -378,7 +410,123 @@ pub async fn run(
     if let Some(narrow) = narrow {
         notify::enqueue(shared, notify::queued(&gathered.incident, narrow))?;
     }
-    Ok(None)
+    Ok(Next::Done)
+}
+
+/// Records a call that ended at `now` in the breaker (`None`: a chat completion, valid or not)
+/// and logs what that changed: `endpoint unavailable` on each move into open, `endpoint
+/// available` on closing. A chat completion also sets the last success. Neither line names an
+/// incident: they are about the endpoint.
+fn record(
+    shared: &Shared<'_>,
+    settings: &Settings,
+    error: Option<&CallError>,
+    now: std::time::Instant,
+) -> io::Result<()> {
+    let call = match error {
+        None => Call::Answer,
+        Some(error) => match error.cause.class() {
+            Class::Transient => Call::Transient {
+                retry_after: error.retry_after,
+            },
+            Class::Configuration => Call::Configuration {
+                retry_after: error.retry_after,
+            },
+            Class::Rejected => Call::Neutral,
+        },
+    };
+    if error.is_none() {
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        shared.metrics.set_gauge(LAST_SUCCESS_GAUGE, &[], unix);
+    }
+    let transition = shared.breaker.borrow_mut().record(call, now);
+    match endpoint_line(transition, error, settings.mode) {
+        Some((level, msg, fields)) => log::line(level, msg, fields),
+        None => Ok(()),
+    }
+}
+
+/// The line a breaker transition logs, as level, message and fields: `endpoint unavailable` (warn)
+/// on each move into open, with the failed call's cause, `endpoint available` (info) on closing;
+/// `None` for anything else.
+fn endpoint_line(
+    transition: Transition,
+    error: Option<&CallError>,
+    mode: OutputMode,
+) -> Option<(&'static str, &'static str, Value)> {
+    match (transition, error) {
+        (Transition::Opened { hold, failed_calls }, Some(error)) => Some((
+            "warn",
+            "endpoint unavailable",
+            json!({
+                "cause": error.cause.as_str(),
+                "class": error.cause.class().as_str(),
+                "status": error.status,
+                "reason": error.message,
+                "hint": error.cause.hint(mode == OutputMode::JsonSchema),
+                "detail": error.detail,
+                "failed_calls": failed_calls,
+                "probe_in_seconds": hold.as_secs(),
+            }),
+        )),
+        (
+            Transition::Closed {
+                unavailable,
+                failed_calls,
+            },
+            _,
+        ) => Some((
+            "info",
+            "endpoint available",
+            json!({
+                "unavailable_seconds": unavailable.as_secs(),
+                "failed_calls": failed_calls,
+            }),
+        )),
+        _ => None,
+    }
+}
+
+/// A transient first failure: tried again after `Retry-After` or `RETRY_DELAY` while the breaker
+/// stays closed, else sent to the back of the queue to wait out the hold. Logged and counted
+/// either way.
+fn retried(
+    shared: &Shared<'_>,
+    about: Value,
+    error: &CallError,
+    retry: Work,
+    now: std::time::Instant,
+) -> io::Result<Next> {
+    let breaker = shared.breaker.borrow();
+    let (next, queued, wait) = match (breaker.state(now), breaker.open_until()) {
+        (State::Closed, _) | (_, None) => {
+            let delay = error.retry_after.unwrap_or(RETRY_DELAY);
+            (Next::Retry(retry, delay), false, delay)
+        }
+        (_, Some(until)) => (
+            Next::Requeue(retry),
+            true,
+            until.saturating_duration_since(now),
+        ),
+    };
+    drop(breaker);
+    shared.metrics.inc("kausa_explanations_retried_total", &[]);
+    log::warn(
+        "explanation retried",
+        merge(
+            about,
+            json!({
+                "reason": error.message,
+                "detail": error.detail,
+                "cause": error.cause.as_str(),
+                "queued": queued,
+                "retry_in_seconds": wait.as_secs() + u64::from(wait.subsec_nanos() > 0),
+            }),
+        ),
+    )?;
+    Ok(next)
 }
 
 /// Builds the request, cutting the context until it fits `max_input_tokens`: first the log tail
@@ -443,7 +591,8 @@ fn estimate_tokens(body: &Value) -> usize {
 }
 
 /// Why a call may not start at `now`, as the skip counter's reason and the logged message, or
-/// `None` when it may (always in dry-run, which makes no call). It changes nothing: `run` still
+/// `None` when it may (always in dry-run, which makes no call): the breaker first, while it is
+/// open, then the budget (docs/adr/0020-check-the-endpoint.md). It changes nothing: `run` still
 /// takes the call from the budget, which stays the authority.
 fn refusal(
     settings: &Settings,
@@ -451,6 +600,9 @@ fn refusal(
     now: std::time::Instant,
 ) -> Option<(&'static str, &'static str)> {
     settings.model.as_ref()?;
+    if shared.breaker.borrow().state(now) == State::Open {
+        return Some(("endpoint_unavailable", ENDPOINT_UNAVAILABLE_NOTE));
+    }
     match shared.budget.borrow().check(now) {
         Allowance::Now => None,
         Allowance::Wait { .. } => Some(("budget", HOURLY_SPENT)),
@@ -800,7 +952,10 @@ mod tests {
 
     fn settings(model: Option<String>, notify: bool, calls_per_hour: usize) -> Settings {
         Settings {
-            model: model.map(|url| ModelClient::new(&url, None, true).expect("a model client")),
+            model: model.map(|url| {
+                ModelClient::new(&url, None, true, Duration::from_secs(120))
+                    .expect("a model client")
+            }),
             model_name: "m".into(),
             logs: false,
             mode: OutputMode::JsonSchema,
@@ -832,6 +987,7 @@ mod tests {
                 std::time::Instant::now(),
             )),
             dedup: RefCell::new(Dedup::new(settings.dedup_ttl, 1024)),
+            breaker: RefCell::new(crate::breaker::Breaker::new()),
             writer: None,
             history: None,
             metrics,
@@ -840,7 +996,7 @@ mod tests {
         }
     }
 
-    /// Runs one explanation and returns what `run` returned (whether a retry was asked).
+    /// Runs one explanation and returns whether `run` gave the job back (a retry or a requeue).
     fn explain(job: Work, settings: &Settings, shared: &Shared<'_>) -> bool {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -852,7 +1008,7 @@ mod tests {
                 run(job, client, settings, shared).await
             })
             .expect("the log")
-            .is_some()
+            .is_given_back()
     }
 
     fn queued_summaries(shared: &Shared<'_>) -> Vec<String> {
@@ -1460,7 +1616,7 @@ mod tests {
                 )
                 .await
                 .expect("the log")
-                .is_some();
+                .is_given_back();
                 let budget_left = shared
                     .budget
                     .borrow_mut()
@@ -1685,7 +1841,7 @@ mod tests {
             let retry = runtime
                 .block_on(async { run(job, kube_client(&api), &settings, &shared).await })
                 .expect("the log");
-            assert!(retry.is_none(), "{case}: a retry was asked");
+            assert!(!retry.is_given_back(), "{case}: a retry was asked");
             assert!(
                 api_calls.recv_timeout(Duration::from_millis(300)).is_err(),
                 "{case}: the log was read"
@@ -2056,5 +2212,823 @@ mod tests {
             "after the term: the model was not asked"
         );
         assert!(text.contains(unused), "after the term: counted");
+    }
+
+    // Acceptance tests for the breaker of docs/adr/0020-check-the-endpoint.md, written before the
+    // code. They use this API, which explain.rs does not have yet:
+    //
+    // - `Shared::breaker: RefCell<crate::breaker::Breaker>`;
+    // - `run` returns `io::Result<Next>` with `pub enum Next { Done, Retry(Work, Duration),
+    //   Requeue(Work) }`;
+    // - `ENDPOINT_UNAVAILABLE`, `ENDPOINT_UNAVAILABLE_NOTE` and `TOO_LARGE_NOTE`;
+    // - `refusal` answers `("endpoint_unavailable", ENDPOINT_UNAVAILABLE_NOTE)` while the breaker
+    //   is open, before the budget's rows;
+    // - `run` records each call into the breaker right after the endpoint answers, before the term
+    //   check, and sets `kausa_model_last_success_timestamp_seconds` on every chat completion;
+    // - the outcome of a failed call follows the table of the ADR's design (5.5).
+    //
+    // The breaker is put in a state by recording calls at injected instants: `std::time::Instant`
+    // cannot be paused, so a hold that has ended is one recorded in the past.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::breaker::{Call, State};
+
+    /// Whether `run` gave the job back (a retry or a requeue).
+    trait GivenBack {
+        fn is_given_back(&self) -> bool;
+    }
+
+    impl GivenBack for Next {
+        fn is_given_back(&self) -> bool {
+            !matches!(self, Next::Done)
+        }
+    }
+
+    fn outcome(next: &Next) -> &'static str {
+        match next {
+            Next::Done => "done",
+            Next::Retry(..) => "retry",
+            Next::Requeue(_) => "requeue",
+        }
+    }
+
+    const UNAVAILABLE_NOTE: &str = "the model endpoint is unavailable; this incident waited and \
+                                    was not explained";
+    const LARGE_NOTE: &str =
+        "the endpoint refused the request as too large for the model: lower --max-input-tokens";
+    const SKIPPED_NOTE: &str = "kausa could not explain this failure: ";
+
+    #[test]
+    fn the_fixed_texts_are_those_of_the_adr() {
+        assert_eq!(ENDPOINT_UNAVAILABLE, "the model endpoint is unavailable");
+        assert_eq!(ENDPOINT_UNAVAILABLE_NOTE, UNAVAILABLE_NOTE);
+        assert!(ENDPOINT_UNAVAILABLE_NOTE.starts_with(ENDPOINT_UNAVAILABLE));
+        assert_eq!(TOO_LARGE_NOTE, LARGE_NOTE);
+        assert_eq!(RETRY_DELAY, Duration::from_secs(30));
+    }
+
+    fn ago(seconds: u64) -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_sub(Duration::from_secs(seconds))
+            .expect("an earlier instant")
+    }
+
+    /// Opens the breaker now, for the first hold of 60 s.
+    fn hold(shared: &Shared<'_>) {
+        shared.breaker.borrow_mut().record(
+            Call::Configuration { retry_after: None },
+            std::time::Instant::now(),
+        );
+        assert_eq!(state(shared), State::Open);
+    }
+
+    /// Opens the breaker 61 s ago: its first hold has ended, the next call is the probe.
+    fn half_open(shared: &Shared<'_>) {
+        shared
+            .breaker
+            .borrow_mut()
+            .record(Call::Configuration { retry_after: None }, ago(61));
+        assert_eq!(state(shared), State::HalfOpen);
+    }
+
+    /// Records `n` transient failures now, the breaker still closed.
+    fn failed(shared: &Shared<'_>, n: usize) {
+        for _ in 0..n {
+            shared.breaker.borrow_mut().record(
+                Call::Transient { retry_after: None },
+                std::time::Instant::now(),
+            );
+        }
+        assert_eq!(state(shared), State::Closed);
+    }
+
+    fn state(shared: &Shared<'_>) -> State {
+        shared.breaker.borrow().state(std::time::Instant::now())
+    }
+
+    /// A fake model that answers every request with `response` after `wait`, and counts them.
+    /// Returns its base URL.
+    fn answering(response: String, wait: Duration) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                read_request(&mut stream);
+                std::thread::sleep(wait);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (url, calls)
+    }
+
+    fn reply(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\n\
+             connection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn valid_reply() -> String {
+        let body = json!({
+            "choices": [{"message": {"content": answer()}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        });
+        reply("200 OK", "", &body.to_string())
+    }
+
+    /// A chat completion with no content: the model refused, with a text no sink may show.
+    const REFUSAL_CANARY: &str = "REFUSAL-CANARY-not-for-any-sink";
+
+    fn refusal_reply() -> String {
+        let body = json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": null, "refusal": REFUSAL_CANARY},
+                "finish_reason": "stop",
+            }],
+        });
+        reply("200 OK", "", &body.to_string())
+    }
+
+    /// A fake API server that answers every request `500` and sends each whole request (line,
+    /// headers and body) to the channel. Returns its URL.
+    fn recording_api_server() -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}", listener.local_addr().expect("an address"));
+        let (seen, requests) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut request = Vec::new();
+                let mut buffer = vec![0; 65536];
+                loop {
+                    let n = stream.read(&mut buffer).unwrap_or(0);
+                    request.extend_from_slice(&buffer[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(str::to_owned)
+                            })
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let _ = seen.send(String::from_utf8_lossy(&request).into_owned());
+                let body = json!({
+                    "apiVersion": "v1", "kind": "Status", "metadata": {}, "status": "Failure",
+                    "message": "an invented message", "reason": "InternalError", "code": 500,
+                })
+                .to_string();
+                let answer = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(answer.as_bytes());
+            }
+        });
+        (url, requests)
+    }
+
+    /// The note of the one Event written to the recording API server, read from its body.
+    fn event_note(requests: &mpsc::Receiver<String>) -> String {
+        let request = requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("an Event write");
+        assert!(
+            request.starts_with("POST /apis/events.k8s.io/v1/"),
+            "not an Event: {}",
+            request.lines().next().unwrap_or_default()
+        );
+        let body = request.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+        let event: Value = serde_json::from_str(body).expect("an Event body");
+        event["note"].as_str().expect("a note").to_owned()
+    }
+
+    /// Runs `job` with `settings` and `shared`, its log read through `api` (logs on only where a
+    /// test sets them), and returns what `run` returned.
+    fn run_job(job: Work, settings: &Settings, shared: &Shared<'_>, api: &str) -> Next {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(async { run(job, kube_client(api), settings, shared).await })
+            .expect("the log")
+    }
+
+    /// As `run_job`, with the Events written to `events_api`: the writer's client is built in
+    /// the runtime that runs the job.
+    fn run_job_with_events(
+        job: Work,
+        settings: &Settings,
+        shared: &mut Shared<'_>,
+        api: &str,
+        events_api: &str,
+    ) -> Next {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(async {
+                shared.writer = Some(Writer::new(kube_client(events_api), "kausa".into()));
+                run(job, kube_client(api), settings, shared).await
+            })
+            .expect("the log")
+    }
+
+    /// The value of a series in the metrics, `None` when it is not rendered.
+    fn series(metrics: &Metrics, name: &str) -> Option<u64> {
+        metrics
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+            .map(|value| value.parse().expect("a value"))
+    }
+
+    fn skipped(metrics: &Metrics, reason: &str) -> u64 {
+        series(
+            metrics,
+            &format!("kausa_explanations_skipped_total{{reason=\"{reason}\"}}"),
+        )
+        .unwrap_or(0)
+    }
+
+    fn retried(metrics: &Metrics) -> u64 {
+        series(metrics, "kausa_explanations_retried_total").unwrap_or(0)
+    }
+
+    const LAST_SUCCESS: &str = "kausa_model_last_success_timestamp_seconds";
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs()
+    }
+
+    #[test]
+    fn while_the_breaker_holds_a_job_is_skipped_without_a_call_a_take_or_a_log_read() {
+        let (model_url, model_calls) = answering(valid_reply(), Duration::ZERO);
+        let mut settings = settings(Some(model_url), false, 30);
+        settings.logs = true;
+        settings.events = true;
+        let (log_api, log_reads) = counted_api_server();
+        let (event_api, events) = recording_api_server();
+        let metrics = Metrics::default();
+        let mut shared = shared(&settings, &metrics);
+        hold(&shared);
+        let left = shared
+            .budget
+            .borrow()
+            .remaining(std::time::Instant::now(), true);
+        let mut job = work();
+        job.log = Some(log_source());
+        let next = run_job_with_events(job, &settings, &mut shared, &log_api, &event_api);
+        assert!(matches!(next, Next::Done), "{}", outcome(&next));
+        assert_eq!(skipped(&metrics, "endpoint_unavailable"), 1);
+        assert_eq!(series(&metrics, "kausa_model_calls_total"), Some(0));
+        assert_eq!(
+            model_calls.load(Ordering::SeqCst),
+            0,
+            "the model was called"
+        );
+        assert!(
+            log_reads.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the log was read"
+        );
+        assert_eq!(
+            shared
+                .budget
+                .borrow()
+                .remaining(std::time::Instant::now(), true),
+            left,
+            "the budget was taken"
+        );
+        assert_eq!(
+            event_note(&events),
+            format!("{SKIPPED_NOTE}{UNAVAILABLE_NOTE}")
+        );
+        assert_eq!(state(&shared), State::Open, "a skip moved the breaker");
+    }
+
+    #[test]
+    fn refusal_puts_the_breaker_before_the_budget() {
+        let unavailable = Some(("endpoint_unavailable", UNAVAILABLE_NOTE));
+        let now = std::time::Instant::now;
+        let spend_burst = |shared: &Shared<'_>| {
+            for _ in 0..crate::budget::START_BURST {
+                shared
+                    .budget
+                    .borrow_mut()
+                    .take(now())
+                    .expect("a call of the burst");
+            }
+        };
+        let with_model = settings(Some(nowhere()), false, 30);
+        let metrics = Metrics::default();
+        // Open: the breaker's answer, whether or not the budget has a call left.
+        let shared_open = shared(&with_model, &metrics);
+        hold(&shared_open);
+        assert_eq!(refusal(&with_model, &shared_open, now()), unavailable);
+        spend_burst(&shared_open);
+        assert_eq!(refusal(&with_model, &shared_open, now()), unavailable);
+        // Half-open: the budget's rows; the probe takes a call like any other.
+        let shared_half = shared(&with_model, &metrics);
+        half_open(&shared_half);
+        assert_eq!(refusal(&with_model, &shared_half, now()), None);
+        spend_burst(&shared_half);
+        assert_eq!(
+            refusal(&with_model, &shared_half, now()),
+            Some(("budget", HOURLY))
+        );
+        // Closed after two failures: nothing refused.
+        let shared_closed = shared(&with_model, &metrics);
+        failed(&shared_closed, 2);
+        assert_eq!(refusal(&with_model, &shared_closed, now()), None);
+        // Without a model (dry-run) nothing is refused, whatever the breaker says.
+        let dry = settings(None, false, 30);
+        let shared_dry = shared(&dry, &metrics);
+        hold(&shared_dry);
+        assert_eq!(refusal(&dry, &shared_dry, now()), None);
+    }
+
+    #[test]
+    fn a_cached_job_is_served_while_the_breaker_holds_and_leaves_the_probe_to_the_next() {
+        for (case, open) in [("open", true), ("half-open", false)] {
+            let settings = settings(Some(nowhere()), false, 30);
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            if open {
+                hold(&shared);
+            } else {
+                half_open(&shared);
+            }
+            let before = state(&shared);
+            shared.dedup.borrow_mut().put(
+                FINGERPRINT,
+                stored("full text"),
+                None,
+                std::time::Instant::now(),
+            );
+            assert!(!explain(work(), &settings, &shared), "{case}");
+            assert_eq!(
+                series(&metrics, "kausa_explanations_cached_total"),
+                Some(1),
+                "{case}"
+            );
+            assert_eq!(skipped(&metrics, "endpoint_unavailable"), 0, "{case}");
+            assert_eq!(
+                series(&metrics, "kausa_model_calls_total"),
+                Some(0),
+                "{case}"
+            );
+            assert_eq!(state(&shared), before, "{case}: a cached job moved it");
+        }
+    }
+
+    #[test]
+    fn a_transient_failure_while_closed_is_retried_after_retry_after_or_30_seconds() {
+        for (response, delay) in [
+            (reply("503 Service Unavailable", "", ""), RETRY_DELAY),
+            (
+                reply("429 Too Many Requests", "retry-after: 120\r\n", "{}"),
+                Duration::from_secs(120),
+            ),
+            (
+                reply("503 Service Unavailable", "retry-after: 99999\r\n", ""),
+                Duration::from_secs(600),
+            ),
+            (reply("408 Request Timeout", "", ""), RETRY_DELAY),
+        ] {
+            let (url, calls) = answering(response, Duration::ZERO);
+            let settings = settings(Some(url), false, 30);
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            let next = run_job(work(), &settings, &shared, "http://127.0.0.1:9");
+            match next {
+                Next::Retry(job, after) => {
+                    assert_eq!(job.attempt, 1);
+                    assert_eq!(job.gathered.incident.fingerprint, FINGERPRINT);
+                    assert_eq!(after, delay);
+                }
+                other => panic!("{delay:?}: {}", outcome(&other)),
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(retried(&metrics), 1);
+            assert_eq!(state(&shared), State::Closed, "one failure opened it");
+            assert_eq!(
+                series(&metrics, "kausa_model_calls_total{outcome=\"error\"}"),
+                Some(1)
+            );
+        }
+    }
+
+    #[test]
+    fn a_transient_failure_that_opens_the_breaker_requeues_the_job() {
+        // The third transient failure in a row, from a server or a refused connection, and a
+        // first failure of a probe.
+        for (case, url, before) in [
+            (
+                "503",
+                answering(reply("503 Service Unavailable", "", ""), Duration::ZERO).0,
+                2,
+            ),
+            ("refused", nowhere(), 2),
+            (
+                "probe",
+                answering(reply("502 Bad Gateway", "", ""), Duration::ZERO).0,
+                0,
+            ),
+        ] {
+            let settings = settings(Some(url), false, 30);
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            if case == "probe" {
+                half_open(&shared);
+            } else {
+                failed(&shared, before);
+            }
+            let left = shared
+                .budget
+                .borrow()
+                .remaining(std::time::Instant::now(), true);
+            let next = run_job(work(), &settings, &shared, "http://127.0.0.1:9");
+            match next {
+                Next::Requeue(job) => assert_eq!(job.attempt, 1, "{case}"),
+                other => panic!("{case}: {}", outcome(&other)),
+            }
+            assert_eq!(state(&shared), State::Open, "{case}");
+            assert_eq!(retried(&metrics), 1, "{case}");
+            assert_eq!(skipped(&metrics, "endpoint"), 0, "{case}");
+            let now_left = shared
+                .budget
+                .borrow()
+                .remaining(std::time::Instant::now(), true);
+            if case == "refused" {
+                assert_eq!(now_left, left, "a call that never reached was not refunded");
+            } else {
+                assert_ne!(now_left, left, "{case}: a reached call was refunded");
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_transient_failure_skips_the_job_with_endpoint() {
+        for open_before in [false, true] {
+            let (url, _calls) = answering(reply("503 Service Unavailable", "", ""), Duration::ZERO);
+            let settings = settings(Some(url), false, 30);
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            if open_before {
+                half_open(&shared);
+            }
+            let mut job = work();
+            job.attempt = 1;
+            let next = run_job(job, &settings, &shared, "http://127.0.0.1:9");
+            assert!(matches!(next, Next::Done), "{}", outcome(&next));
+            assert_eq!(skipped(&metrics, "endpoint"), 1);
+            assert_eq!(retried(&metrics), 0);
+            let expected = if open_before {
+                State::Open
+            } else {
+                State::Closed
+            };
+            assert_eq!(state(&shared), expected, "open before: {open_before}");
+        }
+    }
+
+    #[test]
+    fn a_configuration_error_skips_the_job_at_once_and_opens_the_breaker() {
+        let not_json = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\
+                        connection: close\r\n\r\nOK"
+            .to_owned();
+        for (case, response) in [
+            ("key", reply("401 Unauthorized", "", "{}")),
+            ("not_found", reply("404 Not Found", "", "{}")),
+            ("quota", reply("402 Payment Required", "", "{}")),
+            (
+                "redirect",
+                reply(
+                    "307 Temporary Redirect",
+                    "location: http://192.0.2.1/\r\n",
+                    "",
+                ),
+            ),
+            ("not_an_answer", not_json),
+        ] {
+            for attempt in [0, 1] {
+                let (url, calls) = answering(response.clone(), Duration::ZERO);
+                let settings = settings(Some(url), false, 30);
+                let metrics = Metrics::default();
+                let shared = shared(&settings, &metrics);
+                let mut job = work();
+                job.attempt = attempt;
+                let next = run_job(job, &settings, &shared, "http://127.0.0.1:9");
+                assert!(matches!(next, Next::Done), "{case}: {}", outcome(&next));
+                assert_eq!(calls.load(Ordering::SeqCst), 1, "{case}");
+                assert_eq!(skipped(&metrics, "endpoint"), 1, "{case}");
+                assert_eq!(retried(&metrics), 0, "{case}: retried");
+                assert_eq!(state(&shared), State::Open, "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_request_the_endpoint_refuses_is_skipped_and_never_moves_the_breaker() {
+        let large = json!({"error": {"code": "context_length_exceeded"}}).to_string();
+        let cases = [
+            ("no_content", refusal_reply(), "endpoint"),
+            ("rejected", reply("400 Bad Request", "", "{}"), "endpoint"),
+            (
+                "rejected",
+                reply("422 Unprocessable Entity", "", "{}"),
+                "endpoint",
+            ),
+            (
+                "too_large",
+                reply("413 Payload Too Large", "", ""),
+                "context_too_large",
+            ),
+            (
+                "too_large",
+                reply("400 Bad Request", "", &large),
+                "context_too_large",
+            ),
+        ];
+        for (case, response, reason) in cases {
+            for (before, attempt) in [("closed", 0), ("two failures", 0), ("half-open", 1)] {
+                let (url, _calls) = answering(response.clone(), Duration::ZERO);
+                let settings = settings(Some(url), false, 30);
+                let metrics = Metrics::default();
+                let shared = shared(&settings, &metrics);
+                match before {
+                    "two failures" => failed(&shared, 2),
+                    "half-open" => half_open(&shared),
+                    _ => {}
+                }
+                let state_before = state(&shared);
+                let mut job = work();
+                job.attempt = attempt;
+                let next = run_job(job, &settings, &shared, "http://127.0.0.1:9");
+                assert!(
+                    matches!(next, Next::Done),
+                    "{case} {before}: {}",
+                    outcome(&next)
+                );
+                assert_eq!(skipped(&metrics, reason), 1, "{case} {before}");
+                assert_eq!(retried(&metrics), 0, "{case} {before}: retried");
+                assert_eq!(state(&shared), state_before, "{case} {before}: moved");
+                assert_eq!(
+                    series(&metrics, "kausa_model_calls_total{outcome=\"error\"}"),
+                    Some(1),
+                    "{case} {before}"
+                );
+                if before == "two failures" {
+                    // Neither reset nor counted: the next transient failure is the third.
+                    let opened = shared.breaker.borrow_mut().record(
+                        Call::Transient { retry_after: None },
+                        std::time::Instant::now(),
+                    );
+                    assert!(
+                        matches!(opened, crate::breaker::Transition::Opened { .. }),
+                        "{case}: the count was reset"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_flood_of_empty_completions_while_half_open_never_opens_the_breaker() {
+        let (url, calls) = answering(refusal_reply(), Duration::ZERO);
+        let settings = settings(Some(url), false, 3600);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        half_open(&shared);
+        for _ in 0..3 {
+            let next = run_job(work(), &settings, &shared, "http://127.0.0.1:9");
+            assert!(matches!(next, Next::Done), "{}", outcome(&next));
+            assert_eq!(state(&shared), State::HalfOpen);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(skipped(&metrics, "endpoint"), 3);
+    }
+
+    #[test]
+    fn the_notes_of_refused_requests_are_fixed_and_carry_no_model_text() {
+        let cases = [
+            (
+                refusal_reply(),
+                "the model answered with no content: it refused".to_owned(),
+            ),
+            (
+                reply(
+                    "200 OK",
+                    "",
+                    &json!({"choices": [{"message": {"content": null},
+                                         "finish_reason": "content_filter"}]})
+                    .to_string(),
+                ),
+                "the model answered with no content: a content filter removed it".to_owned(),
+            ),
+            (
+                reply(
+                    "200 OK",
+                    "",
+                    &json!({"choices": [{"message": {"content": null},
+                                         "finish_reason": "length"}]})
+                    .to_string(),
+                ),
+                "the model answered with no content: it ran out of output tokens".to_owned(),
+            ),
+            (
+                reply("413 Payload Too Large", "", ""),
+                LARGE_NOTE.to_owned(),
+            ),
+        ];
+        for (response, why) in cases {
+            let (url, _calls) = answering(response, Duration::ZERO);
+            let mut settings = settings(Some(url), false, 30);
+            settings.events = true;
+            let (api, events) = recording_api_server();
+            let metrics = Metrics::default();
+            let mut shared = shared(&settings, &metrics);
+            let next =
+                run_job_with_events(work(), &settings, &mut shared, "http://127.0.0.1:9", &api);
+            assert!(matches!(next, Next::Done), "{why}: {}", outcome(&next));
+            let note = event_note(&events);
+            assert_eq!(note, format!("{SKIPPED_NOTE}{why}"));
+            assert!(!note.contains(REFUSAL_CANARY), "{why}: the model's text");
+        }
+    }
+
+    #[test]
+    fn a_chat_completion_closes_the_breaker_and_sets_the_last_success() {
+        let invalid = json!({
+            "choices": [{"message": {"content": "not an explanation"}}],
+        });
+        for (case, response) in [
+            ("valid", valid_reply()),
+            ("invalid", reply("200 OK", "", &invalid.to_string())),
+        ] {
+            let (url, _calls) = answering(response, Duration::ZERO);
+            let settings = settings(Some(url), false, 30);
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            half_open(&shared);
+            let before = unix_now();
+            let next = run_job(work(), &settings, &shared, "http://127.0.0.1:9");
+            let after = unix_now();
+            assert!(matches!(next, Next::Done), "{case}: {}", outcome(&next));
+            assert_eq!(state(&shared), State::Closed, "{case}");
+            let last = series(&metrics, LAST_SUCCESS).expect("the last success");
+            assert!((before..=after).contains(&last), "{case}: {last}");
+        }
+        // A failed call sets nothing.
+        let (url, _calls) = answering(reply("401 Unauthorized", "", "{}"), Duration::ZERO);
+        let settings = settings(Some(url), false, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        run_job(work(), &settings, &shared, "http://127.0.0.1:9");
+        assert_eq!(series(&metrics, LAST_SUCCESS), None);
+    }
+
+    #[test]
+    fn a_call_that_ends_after_the_term_still_moves_the_breaker() {
+        for (response, expected) in [
+            (reply("401 Unauthorized", "", "{}"), State::Open),
+            (valid_reply(), State::Closed),
+        ] {
+            let (url, calls) = answering(response, Duration::from_millis(400));
+            let settings = settings(Some(url), false, 30);
+            let metrics = Metrics::default();
+            let term = Term::closed();
+            term.extend_to(std::time::Instant::now() + Duration::from_millis(150));
+            let shared = shared_in(&settings, &metrics, &term);
+            if expected == State::Closed {
+                half_open(&shared);
+            }
+            let next = run_job(work(), &settings, &shared, "http://127.0.0.1:9");
+            assert!(matches!(next, Next::Done), "{}", outcome(&next));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(state(&shared), expected);
+            // Past the term: no skip and no retry.
+            assert_eq!(
+                series(&metrics, "kausa_explanations_skipped_total"),
+                Some(0)
+            );
+            assert_eq!(retried(&metrics), 0);
+        }
+    }
+
+    fn call_error(cause: Cause, status: Option<u16>) -> CallError {
+        CallError {
+            message: "an invented reason".into(),
+            detail: Some("an invented body".into()),
+            cause,
+            status,
+            retry_after: None,
+            reached: true,
+        }
+    }
+
+    #[test]
+    fn each_breaker_transition_logs_one_line_about_the_endpoint() {
+        let unavailable = call_error(Cause::ServerError, Some(503));
+        let key = call_error(Cause::Key, Some(401));
+        let rejected = call_error(Cause::Rejected, Some(400));
+        let start = std::time::Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let mut breaker = crate::breaker::Breaker::new();
+        let mut lines = Vec::new();
+        // Three transient failures open it, a neutral call changes nothing, a failed probe
+        // reopens it, an answer closes it, a second answer is nothing, a key error opens it.
+        for (error, seconds) in [
+            (Some(&unavailable), 0),
+            (Some(&unavailable), 1),
+            (Some(&unavailable), 2),
+            (Some(&rejected), 3),
+            (Some(&unavailable), 63),
+            (None, 184),
+            (None, 185),
+            (Some(&key), 186),
+        ] {
+            let call = match error.map(|e| e.cause.class()) {
+                None => Call::Answer,
+                Some(Class::Transient) => Call::Transient { retry_after: None },
+                Some(Class::Configuration) => Call::Configuration { retry_after: None },
+                Some(Class::Rejected) => Call::Neutral,
+            };
+            let transition = breaker.record(call, at(seconds));
+            if let Some(line) = endpoint_line(transition, error, OutputMode::JsonSchema) {
+                lines.push((seconds, line));
+            }
+        }
+        let summary: Vec<(u64, &str, &str)> = lines
+            .iter()
+            .map(|(seconds, (level, msg, _))| (*seconds, *level, *msg))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (2, "warn", "endpoint unavailable"),
+                (63, "warn", "endpoint unavailable"),
+                (184, "info", "endpoint available"),
+                (186, "warn", "endpoint unavailable"),
+            ]
+        );
+        assert_eq!(
+            lines[0].1.2,
+            json!({
+                "cause": "server_error",
+                "class": "transient",
+                "status": 503,
+                "reason": "an invented reason",
+                "hint": Cause::ServerError.hint(true),
+                "detail": "an invented body",
+                "failed_calls": 3,
+                "probe_in_seconds": 60,
+            })
+        );
+        assert_eq!(lines[1].1.2["failed_calls"], 4);
+        assert_eq!(lines[1].1.2["probe_in_seconds"], 120);
+        assert_eq!(
+            lines[2].1.2,
+            json!({"unavailable_seconds": 182, "failed_calls": 4})
+        );
+        assert_eq!(lines[3].1.2["cause"], "key");
+        assert_eq!(lines[3].1.2["class"], "configuration");
+        assert_eq!(lines[3].1.2["failed_calls"], 1);
+        // The hint follows the output mode.
+        let instructions = endpoint_line(
+            crate::breaker::Transition::Opened {
+                hold: Duration::from_secs(60),
+                failed_calls: 1,
+            },
+            Some(&rejected),
+            OutputMode::Instructions,
+        )
+        .expect("a line");
+        assert_eq!(instructions.2["hint"], Cause::Rejected.hint(false));
+        // No line names an incident.
+        for (_, (_, _, fields)) in &lines {
+            for key in ["fingerprint", "namespace", "owner", "detection"] {
+                assert!(fields.get(key).is_none(), "{key}");
+            }
+        }
     }
 }

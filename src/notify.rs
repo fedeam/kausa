@@ -458,6 +458,7 @@ mod tests {
         Shared {
             budget: RefCell::new(Budget::new(30, 200, std::time::Instant::now())),
             dedup: RefCell::new(Dedup::new(ttl, 1024)),
+            breaker: RefCell::new(crate::breaker::Breaker::new()),
             writer: None,
             history: None,
             metrics,

@@ -27,7 +27,12 @@ chart on the GitHub release](../adr/0012-releases.md) and [0013. Offer a namespa
 one watch pair and one Role per listed namespace, and nothing
 cluster-wide](../adr/0013-namespaced-install-mode.md) and [0014. Keep each incident's full
 explanations in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md) and [0015. Post each new explanation to one optional webhook, as JSON, Slack or
-Telegram](../adr/0015-notifications.md).
+Telegram](../adr/0015-notifications.md). Since v0.5 (not released as of 2026-11-02), the values
+`model.timeoutSeconds` and `endpointCheck.enabled`, the `helm test` Pod that runs `kausa
+check-endpoint` and its NetworkPolicy ([0020. Check the model endpoint on demand with `kausa
+check-endpoint` and `helm test`, and hold calls behind a breaker while it
+fails](../adr/0020-check-the-endpoint.md)), checked by the renders; the kind test runs `helm
+test` in CI.
 
 ## Objects
 
@@ -42,6 +47,8 @@ Telegram](../adr/0015-notifications.md).
 | PodDisruptionBudget | the release's full name | Only with `replicaCount: 2`: `maxUnavailable: 1`, `unhealthyPodEvictionPolicy: AlwaysAllow` |
 | Service | `<full name>-metrics` | Only with `metrics.enabled` |
 | NetworkPolicy | the release's full name | Only with `networkPolicy.enabled` |
+| Pod (a `helm test` hook) | `<full name>-endpoint-check` | Only when the endpoint check renders: `endpointCheck.enabled`, `model.endpoint` and not `dryRun`. Created only by `helm test`, never by `helm install` or `helm upgrade`, and left after it ([The endpoint check](#the-endpoint-check)) |
+| NetworkPolicy | `<full name>-endpoint-check` | Only when the endpoint check renders and `networkPolicy.enabled`: an ordinary release object, not a hook, that lets the test Pod reach DNS and the model endpoint only |
 | CustomResourceDefinition | `explanations.kausa.fedeam.com` | Only while the release writes history (`kausa.writesHistory`) and `history.installCRD` is true. Cluster-scoped, in both `rbac.scope`s. No `helm.sh/resource-policy: keep` ([Explanation resource](explanation-resource.md)) |
 | ClusterRole | `<full name>-explanation-reader` | Only with the CustomResourceDefinition and `history.readers.aggregate`: `get`, `list` and `watch` on `explanations`, aggregated to `view` ([Permissions](permissions.md)) |
 
@@ -79,7 +86,9 @@ but about kausa's own Lease, and is the same in both scopes.
 | `model.jsonSchema` | `true` | `false` adds `--no-json-schema` |
 | `model.apiKey.existingSecret` | `""` | A Secret of yours, mounted read-only at `/var/run/secrets/kausa/api-key` (mode 0440, group 65532) and passed as `--api-key-file` |
 | `model.apiKey.key` | `api-key` | The key of that Secret |
+| `model.timeoutSeconds` | `120` | `--model-timeout` for kausa (with an endpoint or `dryRun`) and for the test Pod: a call's total timeout in seconds, 10 to 600. A missing key (the values of a v0.4.1 release reused with `--reuse-values`) or `null` means `120`. Above 240, give `helm test` a `--timeout` longer than its 5 minutes: the test Pod's deadline is this value plus 60 seconds |
 | `dryRun` | `false` | `--dry-run` |
+| `endpointCheck.enabled` | `true` | Render the `helm test` Pod and, with `networkPolicy.enabled`, its NetworkPolicy, only with `model.endpoint` and without `dryRun` ([The endpoint check](#the-endpoint-check)). `true` or `false`; a missing key or map (a v0.4.1 release reused with `--reuse-values`) or `null` means `true`, and `endpointCheck` itself set to anything else (`endpointCheck: false`) is refused |
 | `logs` | `true` | `false` adds `--no-logs` and removes `pods/log` |
 | `events` | `true` | `false` adds `--no-events` and removes the Event writes |
 | `rollouts` | `true` | Watch Deployments and explain rollouts past their progress deadline (`D014`). `false` adds `--no-rollouts` and removes `list` and `watch` on `deployments` from the ClusterRole or the Roles. Only the value `false` turns it off: a missing value (the values of a v0.3 release reused with `--reuse-values`) or `null` means on. Independent of the endpoint and `dryRun`. No refusal |
@@ -135,6 +144,9 @@ reason, and nothing is applied) in these cases, checked in this order, with thes
 | The NetworkPolicy with an endpoint (outside `dryRun`) and without its peers | `networkPolicy.endpoint.to is required with networkPolicy.enabled and model.endpoint: without it kausa cannot reach the model` |
 | `history.days` is not a whole number from 1 to 30, whether the history is on or off (for example `0`, `31`, `abc` or `7.5`) | `history.days must be a whole number of days from 1 to 30, not '<value>'` |
 | `replicaCount` is anything but `1` or `2` (for example `0`, `3`, `two`, `-1` or `1.5`); a missing key or `null` is `1` | `replicaCount must be 1 or 2, not '<value>': a second replica is a standby that takes over through a Lease (docs/adr/0019-high-availability.md)` |
+| `model.timeoutSeconds` is not a whole number from 10 to 600, with or without an endpoint (for example `9`, `601`, `abc` or `1.5`); a missing key or `null` is `120` | `model.timeoutSeconds must be a whole number of seconds from 10 to 600, not '<value>'` |
+| `endpointCheck.enabled` is anything but `true` or `false` (for example `yes`) | `endpointCheck.enabled must be true or false, not '<value>'` |
+| `endpointCheck` is set to anything but a map or `null` (for example `endpointCheck: false` or `--set endpointCheck=false`, meant as off: use `endpointCheck.enabled=false`) | `endpointCheck must be a map with enabled: true or false, not '<value>'` |
 | Notifications without `existingSecret` | `notifications.existingSecret is required with notifications.enabled: the Secret that holds the webhook URL` |
 | Notifications with another format | `notifications.format must be json, slack or telegram, not '<value>'` |
 | `telegram` without a chat id | `notifications.telegramChatId is required with notifications.format=telegram` |
@@ -148,6 +160,53 @@ The checks are in `kausa.validate` (`templates/_helpers.tpl`). `rbac` is read wi
 missing or null map reaches the first message and never a nil-pointer error.
 
 The notification checks run only with `notifications.enabled`.
+
+## The endpoint check
+
+`helm test <release> -n <namespace> --logs` runs [`kausa
+check-endpoint`](command-line.md#kausa-check-endpoint) once in a Pod and prints its one `endpoint
+check` line: one request with synthetic data, billed by the provider and outside kausa's budget.
+It passes when the line says `"result":"ok"`, and fails otherwise, with the cause and a hint in
+the line. It checks the endpoint, the key and the model; it reads nothing from the cluster, and a
+pass does not change what the running kausa does (its breaker is its own).
+
+The Pod, `<full name>-endpoint-check` (`templates/tests/endpoint-check.yaml`):
+
+- annotations `helm.sh/hook: test` and `helm.sh/hook-delete-policy: before-hook-creation`, so
+  `helm install` and `helm upgrade` never create it and the finished Pod stays, with its log, until
+  the next `helm test` replaces it; `helm uninstall` leaves it too (both seen in kind with Helm
+  3.16.1 on 2026-11-02). Delete it with `kubectl -n <namespace> delete pod <full
+  name>-endpoint-check`;
+- labels `app.kubernetes.io/instance`, `app.kubernetes.io/component: endpoint-check`,
+  `app.kubernetes.io/version`, `app.kubernetes.io/managed-by` and `helm.sh/chart`, never
+  `app.kubernetes.io/name`, `podLabels` or `podAnnotations`: no selector of kausa's (the metrics
+  Service, the PodDisruptionBudget, the anti-affinity, kausa's NetworkPolicy) matches it;
+- `restartPolicy: Never`, `activeDeadlineSeconds` `model.timeoutSeconds` plus 60 (180 by default);
+- no `serviceAccountName` (the namespace's `default`, never kausa's ServiceAccount),
+  `automountServiceAccountToken: false` and `enableServiceLinks: false`: no token and no Service
+  variables;
+- the Deployment's Pod and container security contexts, image, pull policy, `imagePullSecrets`,
+  `resources`, `nodeSelector`, `tolerations` and `affinity` (not the standby's anti-affinity); no
+  `env`, ports or probes;
+- the arguments `check-endpoint --endpoint <model.endpoint> --model <model.name> --model-timeout
+  <model.timeoutSeconds>`, plus `--allow-http` with `model.allowHttp`, `--no-json-schema` with
+  `model.jsonSchema=false` and `--api-key-file /var/run/secrets/kausa/api-key` with
+  `model.apiKey.existingSecret`;
+- one volume, only with `model.apiKey.existingSecret`: the API key's Secret, mounted as the
+  Deployment mounts it (read-only, one item `api-key`, mode 0440, group 65532). Never the
+  notification Secret.
+
+With `networkPolicy.enabled`, the NetworkPolicy `<full name>-endpoint-check` selects the test Pod
+by its `instance` and `component` labels, allows no ingress, and allows egress to DNS (UDP and TCP
+53) and to `networkPolicy.endpoint.to` on `networkPolicy.endpoint.ports`, rendered exactly as in
+kausa's own policy; no API server and no webhook. It is an ordinary object of the release, so it
+exists before the test Pod starts and `helm uninstall` deletes it.
+
+`helm test` waits 5 minutes by default; with `model.timeoutSeconds` above 240, pass a longer
+`--timeout`. `NOTES.txt` prints the `helm test` and cleanup commands when the Pod renders. How
+Argo CD and Flux treat `helm.sh/hook: test` objects is not checked (hypothesis: they skip them); a
+release managed by one of them can set `endpointCheck.enabled=false`. Nothing in `kausa.rules`,
+`rbac.yaml` or `leader-election.yaml` changes: the test needs no permission.
 
 ## Notifications
 

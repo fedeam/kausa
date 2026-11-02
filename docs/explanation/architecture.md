@@ -195,16 +195,40 @@ produces the same incident, the same fingerprint and the same request bytes.
   `<start_of_turn>`, `[INST]`) get their brackets swapped for look-alikes in the user message, so
   that a server that renders the conversation as text cannot read them as turn boundaries.
 - **Client.** reqwest with rustls and the ring provider (the same TLS stack as the Kubernetes
-  client), no redirects, no proxy from the environment, a 10-second connect and a 120-second total
-  timeout, and a 256 KiB cap on the answer. Plain HTTP only with `--allow-http`.
+  client), no redirects, no proxy from the environment, a 10-second connect and a total timeout of
+  `--model-timeout` (10 to 600 seconds, 120 by default; the chart's `model.timeoutSeconds`), and a
+  256 KiB cap on the answer. Plain HTTP only with `--allow-http`. Each failed call gets a cause,
+  from a pure, fuzzed reading of the status, `error.code` and `error.type` of the body and, for a
+  `2xx`, the shape of the chat completion (`src/model/pure.rs`), and each cause a class:
+  `transient` (a connection, a timeout, a rate limit, a server error), `configuration` (a
+  redirect, a URL that does not serve the API, a spent quota, a refused key, a missing model) or
+  `rejected` (a request the endpoint refused, one too large, a completion with no content), which
+  the request, and so a tenant's text, can cause ([Causes](../reference/command-line.md#causes)).
+  `Retry-After` is honoured on `429` and `503`, in seconds only, clamped to 30-600.
+- **The endpoint check.** `kausa check-endpoint`, and the chart's `helm test`, which runs it, send
+  one fabricated crash loop through the same request, client and validation, on demand, outside
+  the budget, and print one line naming the step that failed, its cause and a hint. It reads
+  nothing from the cluster ([0020](../adr/0020-check-the-endpoint.md)).
 - **One at a time.** Explanations run one after the other, inside the controller's loop, so a
   slow endpoint never stops the watches (nor does a metrics client: up to 8 connections are
   answered at once, each with 2-second timeouts); incidents wait in a queue of 16, and the oldest is dropped
   (and logged) when it overflows.
-- **One retry.** A call that fails with a timeout, a failed connection, `429` or a `5xx` status
-  is tried once more 30 seconds later; then the incident is skipped. A call that never reached
-  the endpoint is given back to the budget. The start of an error body (at most 512 bytes) goes
-  to kausa's log, not to the Event.
+- **One retry.** A call that fails with a transient cause is tried once more, 30 seconds later or
+  after `Retry-After`; then the incident is skipped. A configuration error, a rejected request and
+  a completion with no content are skipped at once (`413` as `context_too_large`). A call that
+  never reached the endpoint is given back to the budget. The start of an error body (at most 512
+  bytes) goes to kausa's log, not to the Event.
+- **The breaker.** In front of the budget, one per process and kept across terms (`src/breaker.rs`,
+  pure, `now` passed in). 3 transient failures in a row, or 1 configuration error, open it for 60
+  seconds (or `Retry-After`): no call, no budget taken, no log read; cached repeats are still
+  served, the others wait, and with 16 waiting the oldest is skipped as `endpoint_unavailable`.
+  Then the next incident admitted is the one probe: a chat completion closes it, a failure opens
+  it again for twice as long, up to 30 minutes. A transient first failure that leaves it open
+  sends its incident to the back of the queue, so successive probes are different incidents. The
+  rejected causes never move it, so a tenant whose requests are refused cannot hold the other
+  namespaces' explanations; an answer that fails validation counts as an answer. The gauge
+  `kausa_endpoint_state` and the lines `endpoint unavailable` and `endpoint available` show it
+  ([The breaker](../reference/command-line.md#the-breaker)).
 
 ## Cost controls
 
@@ -224,6 +248,15 @@ produces the same incident, the same fingerprint and the same request bytes.
   is still to verify). The budget is global: one budget and one queue for the whole cluster, not
   per namespace. An incident the budget skips is logged and counted, with an
   `ExplanationSkipped` Event.
+- **The breaker in front of the budget.** One admission function asks the breaker first, then the
+  budget, and both make incidents wait in the same queue of 16. While the endpoint is down,
+  kausa spends 3 calls to open the breaker (1 for a configuration error), then one probe per hold,
+  1, 3, 7, 15, 31 and 61 minutes after it opened and every 30 minutes after that: about 54 calls a
+  day at most, against up to the daily cap (200 by default) before. Events: one per probe
+  incident that fails for good and one per incident skipped at 16, none for those that wait. An
+  incident that settles during an outage is explained up to one hold (30 minutes) after the
+  endpoint is back, and its log is read only then. `kausa check-endpoint` and `helm test` are
+  outside the budget: each run is one call the provider may bill.
 - **Deduplication.** A cache in memory of up to 1024 explanations, keyed by fingerprint, for
   `--dedup-hours` (6 by default): a repeated incident gets the stored explanation again, logged
   with `"cached": true` and written as an Event, with no new call.

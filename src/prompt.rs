@@ -14,6 +14,10 @@ use unicode_normalization::UnicodeNormalization;
 /// The version of the system message and the answer schema, logged with each explanation.
 pub const PROMPT_VERSION: &str = "2";
 
+/// The most output tokens a request asks for (`max_tokens`): `kausa run` and `kausa
+/// check-endpoint` send the same, and the hint of `no_content` names it.
+pub const MAX_TOKENS: u32 = 800;
+
 const SYSTEM: &str = "\
 You are kausa, a tool that explains why a Kubernetes workload is failing to the person who \
 operates the cluster. You receive one JSON document with the facts kausa observed about one \
