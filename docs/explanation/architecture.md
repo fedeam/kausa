@@ -34,7 +34,9 @@ Pod status ─────┼─▶ detect ─▶ settle ─▶ correlate ─▶
 Deployments ────┘                                          │
                                          seen before? ─────┼──▶ re-emit the stored explanation
                                                            ▼
-          gather context ─▶ redact ─▶ budget ─▶ model ─▶ validate ─▶ map names back ─▶ Event
+          gather context ─▶ redact ─▶ budget ─▶ model ─▶ validate ─▶ redact the answer
+                                                                          │
+                                                         Event ◀─ map names back
 ```
 
 Only the model call leaves the cluster, and, with notifications on, the post of each new
@@ -176,6 +178,17 @@ produces the same incident, the same fingerprint and the same request bytes.
   bidirectional, zero-width and HTML payloads. The real names mapped back into the answer come
   from the cluster, so the texts are cleaned and cut again after that. An answer that fails
   validation is logged as skipped, never written.
+- **Redaction of the answer.** Before the names are mapped back, the summary, the cause and each
+  step pass the pattern redaction rules `R003`–`R014` with the incident's own redactor, so an
+  address, a token, a URL's query or a host outside the allowlist that the model writes (from
+  injected cluster text, or invented) is redacted in the Event, the log, the history and the
+  notification alike; a new host gets the next `host-N` of the request's numbering. The pass skips
+  `R002` and the neutralization of placeholders, so that the model's `deployment-1` still maps back
+  and ordinary words are not taken for real names. It does not run on a cached repeat, a dry-run
+  or an answer that failed validation. The values it replaced are counted in
+  `kausa_answer_redactions_total` and the `answer_redactions` field of the `explanation` log line
+  ([On the model's answer](../reference/rules.md#on-the-models-answer)); kausa keeps no unredacted
+  copy.
 - **Template markers.** Chat-template markers in cluster text (`<|im_start|>`, `</s>`,
   `<start_of_turn>`, `[INST]`) get their brackets swapped for look-alikes in the user message, so
   that a server that renders the conversation as text cannot read them as turn boundaries.

@@ -1,0 +1,1 @@
+{"summary": "Someone should be told", "cause": "deployment-1 in namespace-1 crashes: someone should be told", "steps": ["mail root@zq7canary.internal"], "confidence": "medium"}

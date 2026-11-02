@@ -3,8 +3,10 @@
 //!
 //! A `Redactor` lives for one incident. It gives the names kausa knows stable placeholders, numbered
 //! in order of appearance (`R002`), applies the patterns `R003` to `R014` to free text, counts what
-//! each rule replaced, and maps the `R002` placeholders back in the model's answer. Everything is
-//! deterministic: the same incident produces the same request.
+//! each rule replaced, and maps the `R002` placeholders back in the model's answer. The answer is
+//! untrusted, so the same patterns run on it first (`answer`, without `R002`), counted apart
+//! (docs/adr/0022-redact-the-answer.md). Everything is deterministic: the same incident produces
+//! the same request.
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
@@ -92,7 +94,25 @@ pub struct Redactor {
     /// Hostnames and their placeholders (`R013`), never mapped back.
     hosts: Vec<(String, String)>,
     counters: BTreeMap<String, usize>,
+    /// What each rule replaced in the request.
     counts: BTreeMap<&'static str, usize>,
+    /// What each rule replaced in the model's answer.
+    answer_counts: BTreeMap<&'static str, usize>,
+}
+
+/// The pattern rules that also run on the model's answer, in the order they run
+/// (docs/adr/0022-redact-the-answer.md): every rule of `Redactor::text` but `R002`, which replaces
+/// known real names (the model saw only placeholders and public image references). `R001` is the
+/// allowlist of fields and applies to no text.
+pub const ANSWER_RULES: [&str; 12] = [
+    "R009", "R014", "R007", "R008", "R006", "R010", "R011", "R005", "R004", "R003", "R013", "R012",
+];
+
+/// Which text a pass of the pattern rules redacts: the request, or the model's answer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Request,
+    Answer,
 }
 
 impl Redactor {
@@ -121,37 +141,53 @@ impl Redactor {
         }
         let registry = self.name_of_kind("registry", host);
         let path = self.name_of_kind("image", path);
-        self.count("R002");
+        self.tally(Pass::Request, "R002", 1);
         match tag {
             Some(tag) => format!("{registry}/{path}:{tag}"),
             None => format!("{registry}/{path}"),
         }
     }
 
-    /// Redacts free text. First the secrets (`R009`, then the query and fragment of URLs, `R014`,
-    /// whatever they hold, then `R007`, `R008`, `R006`, `R010`, `R011`), so that a known name
-    /// inside a secret's key cannot break the key apart; then the known names (`R002`); then
-    /// addresses, Kubernetes names, hostnames and high-entropy strings (`R005`, `R004`, `R003`,
-    /// `R013`, `R012`). Text that already looks like one of kausa's placeholders is neutralized
+    /// Redacts free text. First the secrets (`R009`, then the query and fragment of URLs and of
+    /// HTTP request lines, `R014`, whatever they hold, then `R007`, `R008`, `R006`, `R010`,
+    /// `R011`), so that a known name inside a secret's key cannot break the key apart; then the
+    /// known names (`R002`); then addresses, Kubernetes names, hostnames and high-entropy strings
+    /// (`R005`, `R004`, `R003`, `R013`, `R012`). Text that already looks like one of kausa's placeholders is neutralized
     /// first, so the answer cannot map it to a real name.
     pub fn text(&mut self, text: &str) -> String {
-        let mut out = self.neutralize_placeholders(text);
-        out = self.apply(&PEM, "R009", out, |_| "<redacted:pem>".into());
-        out = self.url_query(out);
-        out = self.apply(&AUTHORIZATION_HEADER, "R007", out, |c| {
+        let out = self.neutralize_placeholders(text);
+        self.patterns(out, Pass::Request)
+    }
+
+    /// Redacts one text of the model's answer (docs/adr/0022-redact-the-answer.md): the pattern
+    /// rules of `text`, in the same order, without the neutralization of placeholders (which
+    /// would break the restore) and without `R002`. What it replaces is counted apart, in
+    /// `answer_counts`. Kausa's own output echoed by the model (a marker, `host-N`, a placeholder
+    /// in any case) is left as it is and not counted.
+    pub fn answer(&mut self, text: &str) -> String {
+        self.patterns(text.to_owned(), Pass::Answer)
+    }
+
+    /// The one chain of pattern rules, for the request or for the answer: only the request pass
+    /// replaces known names (`R002`).
+    fn patterns(&mut self, text: String, pass: Pass) -> String {
+        let mut out = self.apply(&PEM, "R009", text, pass, |_| "<redacted:pem>".into());
+        out = self.query_and_fragment(&URL_QUERY, out, pass);
+        out = self.query_and_fragment(&REQUEST_LINE_QUERY, out, pass);
+        out = self.apply(&AUTHORIZATION_HEADER, "R007", out, pass, |c| {
             format!("{}<redacted:authorization>", &c[1])
         });
-        out = self.apply(&COOKIE_HEADER, "R007", out, |c| {
+        out = self.apply(&COOKIE_HEADER, "R007", out, pass, |c| {
             format!("{}<redacted:cookie>", &c[1])
         });
-        out = self.apply(&AUTHORIZATION_SCHEME, "R007", out, |c| {
+        out = self.apply(&AUTHORIZATION_SCHEME, "R007", out, pass, |c| {
             format!("{} <redacted:authorization>", &c[1])
         });
-        out = self.apply(&JWT, "R008", out, |_| "<redacted:jwt>".into());
-        out = self.apply(&URL_USERINFO, "R006", out, |c| {
+        out = self.apply(&JWT, "R008", out, pass, |_| "<redacted:jwt>".into());
+        out = self.apply(&URL_USERINFO, "R006", out, pass, |c| {
             format!("{}<redacted:userinfo>@", &c[1])
         });
-        out = self.apply(&SECRET_KEY_VALUE, "R010", out, |c| {
+        out = self.apply(&SECRET_KEY_VALUE, "R010", out, pass, |c| {
             let value = &c[2];
             let marker = if value.starts_with("\\\"") {
                 "\\\"<redacted:value>\\\""
@@ -164,20 +200,30 @@ impl Redactor {
             };
             format!("{}{marker}", &c[1])
         });
-        out = self.apply(&SECRET_FLAG, "R010", out, |c| {
+        out = self.apply(&SECRET_FLAG, "R010", out, pass, |c| {
             format!("{} <redacted:value>", &c[1])
         });
-        out = self.apply(&SECRET_ELEMENT, "R010", out, |c| {
-            format!("{}<redacted:value>", &c[1])
+        out = self.apply(&SECRET_ELEMENT, "R010", out, pass, |c| {
+            // In an answer, kausa's own `<redacted:token>` or `<redacted:secret>` is not an
+            // element: the words after it stay.
+            if pass == Pass::Answer && is_marker(&c[1]) {
+                c[0].to_owned()
+            } else {
+                format!("{}<redacted:value>", &c[1])
+            }
         });
-        out = self.apply(&KNOWN_TOKEN, "R011", out, |_| "<redacted:token>".into());
-        out = self.replace_names(&out);
-        out = self.apply(&EMAIL, "R005", out, |_| "<redacted:email>".into());
-        out = self.apply(&IPV4, "R004", out, |_| "<redacted:ip>".into());
-        out = self.ipv6(out);
-        out = self.kubernetes_names(out);
-        out = self.hostnames(out);
-        self.high_entropy(out)
+        out = self.apply(&KNOWN_TOKEN, "R011", out, pass, |_| {
+            "<redacted:token>".into()
+        });
+        if pass == Pass::Request {
+            out = self.replace_names(&out);
+        }
+        out = self.apply(&EMAIL, "R005", out, pass, |_| "<redacted:email>".into());
+        out = self.apply(&IPV4, "R004", out, pass, |_| "<redacted:ip>".into());
+        out = self.ipv6(out, pass);
+        out = self.kubernetes_names(out, pass);
+        out = self.hostnames(out, pass);
+        self.high_entropy(out, pass)
     }
 
     /// Maps the `R002` placeholders in `text` back to the real names, in one pass, so a restored
@@ -212,9 +258,15 @@ impl Redactor {
             .into_owned()
     }
 
-    /// How many values each rule replaced, by rule id.
+    /// How many values each rule replaced in the request, by rule id.
     pub fn counts(&self) -> &BTreeMap<&'static str, usize> {
         &self.counts
+    }
+
+    /// How many values each rule replaced in the model's answer, by rule id (an id of
+    /// `ANSWER_RULES`).
+    pub fn answer_counts(&self) -> &BTreeMap<&'static str, usize> {
+        &self.answer_counts
     }
 
     fn next(&mut self, prefix: String) -> String {
@@ -232,8 +284,19 @@ impl Redactor {
         placeholder
     }
 
-    fn count(&mut self, rule: &'static str) {
-        *self.counts.entry(rule).or_insert(0) += 1;
+    /// Adds `n` replacements by `rule` to the counts of `pass`.
+    fn tally(&mut self, pass: Pass, rule: &'static str, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let counts = match pass {
+            Pass::Request => &mut self.counts,
+            Pass::Answer => {
+                debug_assert!(ANSWER_RULES.contains(&rule), "{rule} runs on requests only");
+                &mut self.answer_counts
+            }
+        };
+        *counts.entry(rule).or_insert(0) += n;
     }
 
     /// `pod-1` in text from the cluster becomes `pod_1`, unless it is a registered real name, so
@@ -261,40 +324,43 @@ impl Redactor {
         let mut out = text.to_owned();
         for (real, placeholder) in names {
             let (replaced, n) = replace_word(&out, &real, &placeholder);
-            if n > 0 {
-                *self.counts.entry("R002").or_insert(0) += n;
-            }
+            self.tally(Pass::Request, "R002", n);
             out = replaced;
         }
         out
     }
 
+    /// Replaces every match of `pattern`. On the answer, a match counts only when its
+    /// replacement changes it, so an echoed marker is not counted.
     fn apply(
         &mut self,
         pattern: &Regex,
         rule: &'static str,
         text: String,
+        pass: Pass,
         replacement: impl Fn(&Captures<'_>) -> String,
     ) -> String {
         let mut n = 0;
         let out = pattern
             .replace_all(&text, |c: &Captures<'_>| {
-                n += 1;
-                replacement(c)
+                let replaced = replacement(c);
+                if pass == Pass::Request || replaced != c[0] {
+                    n += 1;
+                }
+                replaced
             })
             .into_owned();
-        if n > 0 {
-            *self.counts.entry(rule).or_insert(0) += n;
-        }
+        self.tally(pass, rule, n);
         out
     }
 
-    /// The query and fragment of a URL (`R014`), whatever they hold: `?<redacted:query>` and
-    /// `#<redacted:fragment>`. Punctuation that ends a sentence after the URL is kept, and a `?` or
-    /// `#` with nothing after it is left alone.
-    fn url_query(&mut self, text: String) -> String {
+    /// The query and fragment (`R014`) of what `pattern` finds, a URL or an HTTP request line,
+    /// whatever they hold: `?<redacted:query>` and `#<redacted:fragment>`. `pattern` captures
+    /// what is kept (group 1), then the query and fragment (group 2). Punctuation that ends a
+    /// sentence after them is kept, and a `?` or `#` with nothing after it is left alone.
+    fn query_and_fragment(&mut self, pattern: &Regex, text: String, pass: Pass) -> String {
         let mut n = 0;
-        let out = URL_QUERY
+        let out = pattern
             .replace_all(&text, |c: &Captures<'_>| {
                 let tail = &c[2];
                 let kept = tail.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
@@ -320,15 +386,13 @@ impl Redactor {
                 out
             })
             .into_owned();
-        if n > 0 {
-            *self.counts.entry("R014").or_insert(0) += n;
-        }
+        self.tally(pass, "R014", n);
         out
     }
 
     /// IPv6 addresses: a candidate must parse as one, after dropping the colons a message puts
     /// around it (`… 2001:db8::1: refused`), and must not touch a word (`Foo::Bar` stays).
-    fn ipv6(&mut self, text: String) -> String {
+    fn ipv6(&mut self, text: String, pass: Pass) -> String {
         let mut out = String::with_capacity(text.len());
         let mut last = 0;
         let mut n = 0;
@@ -357,26 +421,39 @@ impl Redactor {
             }
         }
         out.push_str(&text[last..]);
-        if n > 0 {
-            *self.counts.entry("R004").or_insert(0) += n;
-        }
+        self.tally(pass, "R004", n);
         out
     }
 
-    fn kubernetes_names(&mut self, text: String) -> String {
+    fn kubernetes_names(&mut self, text: String, pass: Pass) -> String {
         let placeholders: Vec<String> = self.names.iter().map(|(_, p)| p.clone()).collect();
-        let ours = |name: &str| placeholders.iter().any(|p| p == name);
+        // On the answer, a placeholder the model capitalized (`Pod-1`) is ours too, as `restore`
+        // maps it back.
+        let ours = |name: &str| {
+            let mut name = name.to_owned();
+            if pass == Pass::Answer
+                && let Some(first) = name.get_mut(..1)
+            {
+                first.make_ascii_lowercase();
+            }
+            placeholders.contains(&name)
+        };
+        // On the answer, a match counts only when its replacement changes it.
+        let changed = |replaced: &str, matched: &str| pass == Pass::Request || replaced != matched;
         let mut n = 0;
         // The pattern of v0.3 first, unchanged, so the second pass can only add redactions
         // (invariant 4): a quote left open after a kind of the second pass cannot hide a name the
         // first pass catches.
         let mut out = KUBERNETES_NAME
             .replace_all(&text, |c: &Captures<'_>| {
-                if ours(&c[2]) {
+                if ours(&c[2]) || (pass == Pass::Answer && &c[2] == "<redacted:name>") {
                     c[0].to_owned()
                 } else {
-                    n += 1;
-                    format!("{} \"<redacted:name>\"", &c[1])
+                    let replaced = format!("{} \"<redacted:name>\"", &c[1]);
+                    if changed(&replaced, &c[0]) {
+                        n += 1;
+                    }
+                    replaced
                 }
             })
             .into_owned();
@@ -388,8 +465,11 @@ impl Redactor {
                     if ours(&q[1]) || &q[1] == "<redacted:name>" {
                         q[0].to_owned()
                     } else {
-                        n += 1;
-                        "\"<redacted:name>\"".to_owned()
+                        let replaced = "\"<redacted:name>\"".to_owned();
+                        if changed(&replaced, &q[0]) {
+                            n += 1;
+                        }
+                        replaced
                     }
                 });
                 format!("{} {names}", &c[1])
@@ -400,8 +480,11 @@ impl Redactor {
                 if ours(&c[2]) {
                     c[0].to_owned()
                 } else {
-                    n += 1;
-                    format!("{}<redacted:name>", &c[1])
+                    let replaced = format!("{}<redacted:name>", &c[1]);
+                    if changed(&replaced, &c[0]) {
+                        n += 1;
+                    }
+                    replaced
                 }
             })
             .into_owned();
@@ -410,8 +493,11 @@ impl Redactor {
                 if ours(&c[3]) {
                     c[0].to_owned()
                 } else {
-                    n += 1;
-                    format!("{}{}/<redacted:name>", &c[1], &c[2])
+                    let replaced = format!("{}{}/<redacted:name>", &c[1], &c[2]);
+                    if changed(&replaced, &c[0]) {
+                        n += 1;
+                    }
+                    replaced
                 }
             })
             .into_owned();
@@ -420,18 +506,19 @@ impl Redactor {
                 if ours(&c[2]) {
                     c[0].to_owned()
                 } else {
-                    n += 1;
-                    format!("{}<redacted:name>", &c[1])
+                    let replaced = format!("{}<redacted:name>", &c[1]);
+                    if changed(&replaced, &c[0]) {
+                        n += 1;
+                    }
+                    replaced
                 }
             })
             .into_owned();
-        if n > 0 {
-            *self.counts.entry("R003").or_insert(0) += n;
-        }
+        self.tally(pass, "R003", n);
         out
     }
 
-    fn host_placeholder(&mut self, host: &str) -> Option<String> {
+    fn host_placeholder(&mut self, host: &str, pass: Pass) -> Option<String> {
         let host = host.to_ascii_lowercase();
         let public = PUBLIC_HOSTS
             .iter()
@@ -440,7 +527,7 @@ impl Redactor {
         if public {
             return None;
         }
-        self.count("R013");
+        self.tally(pass, "R013", 1);
         if let Some((_, placeholder)) = self.hosts.iter().find(|(h, _)| *h == host) {
             return Some(placeholder.clone());
         }
@@ -452,9 +539,9 @@ impl Redactor {
     /// Hostnames in three forms: a dotted name with a known suffix, the host of a URL whatever its
     /// suffix (`http://svc.ns/`), and `name.other:port` (a Service in another namespace), except
     /// when its last label is a file extension (`main.rs:10`).
-    fn hostnames(&mut self, text: String) -> String {
-        let mut out = self.replace_matches(&HOSTNAME, &text, 0);
-        out = self.replace_matches(&URL_HOST, &out, 1);
+    fn hostnames(&mut self, text: String, pass: Pass) -> String {
+        let mut out = self.replace_matches(&HOSTNAME, &text, 0, pass);
+        out = self.replace_matches(&URL_HOST, &out, 1, pass);
         let mut result = String::with_capacity(out.len());
         let mut last = 0;
         let matches: Vec<(usize, usize, String)> = HOST_PORT
@@ -469,7 +556,7 @@ impl Redactor {
             })
             .collect();
         for (start, end, host) in matches {
-            if let Some(placeholder) = self.host_placeholder(&host) {
+            if let Some(placeholder) = self.host_placeholder(&host, pass) {
                 result.push_str(&out[last..start]);
                 result.push_str(&placeholder);
                 last = end;
@@ -480,7 +567,7 @@ impl Redactor {
     }
 
     /// Replaces capture group `group` of every match of `pattern` with a host placeholder.
-    fn replace_matches(&mut self, pattern: &Regex, text: &str, group: usize) -> String {
+    fn replace_matches(&mut self, pattern: &Regex, text: &str, group: usize, pass: Pass) -> String {
         let mut out = String::with_capacity(text.len());
         let mut last = 0;
         let spans: Vec<(usize, usize)> = pattern
@@ -488,7 +575,7 @@ impl Redactor {
             .filter_map(|c| c.get(group).map(|m| (m.start(), m.end())))
             .collect();
         for (start, end) in spans {
-            if let Some(placeholder) = self.host_placeholder(&text[start..end]) {
+            if let Some(placeholder) = self.host_placeholder(&text[start..end], pass) {
                 out.push_str(&text[last..start]);
                 out.push_str(&placeholder);
                 last = end;
@@ -498,7 +585,7 @@ impl Redactor {
         out
     }
 
-    fn high_entropy(&mut self, text: String) -> String {
+    fn high_entropy(&mut self, text: String, pass: Pass) -> String {
         let mut n = 0;
         let out = TOKEN_RUN
             .replace_all(&text, |c: &Captures<'_>| {
@@ -526,11 +613,18 @@ impl Redactor {
                 }
             })
             .into_owned();
-        if n > 0 {
-            *self.counts.entry("R012").or_insert(0) += n;
-        }
+        self.tally(pass, "R012", n);
         out
     }
+}
+
+/// Whether `text` is one whole marker of kausa's (`<redacted:token>`).
+fn is_marker(text: &str) -> bool {
+    text.strip_prefix("<redacted:")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .is_some_and(|kind| {
+            !kind.is_empty() && kind.bytes().all(|b| b.is_ascii_lowercase() || b == b':')
+        })
 }
 
 /// Whether a run of token characters looks like a secret: a letter and a digit, and a Shannon
@@ -642,6 +736,14 @@ static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
 /// Quotes, angle brackets, backticks, backslashes and whitespace end the URL.
 static URL_QUERY: LazyLock<Regex> =
     LazyLock::new(|| regex(r#"(?i)(\b[a-z][a-z0-9+.-]*://[^\s?#"'<>`\\]*)([?#][^\s"'<>`\\]*)"#));
+/// An HTTP request line, as an access log writes it (`GET /orders?page=2 HTTP/1.1`): the method,
+/// in capitals, and the path up to its query or fragment (group 1), then the query and fragment
+/// (group 2), ended as `URL_QUERY` ends a URL. `CONNECT` takes no path.
+static REQUEST_LINE_QUERY: LazyLock<Regex> = LazyLock::new(|| {
+    regex(
+        r#"(\b(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE)[ \t]+/[^\s?#"'<>`\\]*)([?#][^\s"'<>`\\]*)"#,
+    )
+});
 static SECRET_KEY_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     regex(&format!(
         r#"(?i)(\b[a-z0-9_.-]*{SECRET_KEYS}\b\\?["']?\s*(?:[:=]|%3[ad])\s*)(\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"',;&}}<\\]+)"#
@@ -1176,7 +1278,6 @@ mod tests {
             "is it up at https://example.com/health?",
             "see https://example.com/page# for more",
             "what? and #hashtag without a URL",
-            "GET /api/v1/orders?page=2 200 12ms",
         ];
         for line in lines {
             let mut r = Redactor::new();
@@ -1496,5 +1597,485 @@ mod tests {
             .filter(|id| id.starts_with('R'))
             .collect();
         assert_eq!(documented, ids.into_iter().collect::<Vec<_>>());
+    }
+
+    // Acceptance tests for docs/adr/0022-redact-the-answer.md, written before the code. They use
+    // `ANSWER_RULES: [&str; 12]`, `Redactor::answer(&mut self, text: &str) -> String` and
+    // `Redactor::answer_counts(&self) -> &BTreeMap<&'static str, usize>`: the pattern rules of
+    // `text`, in the same order, without the neutralization of placeholders and without `R002`,
+    // counted apart from the request. Values are invented: the canary `zq7canary`, documentation
+    // addresses, `example.org` and tokens of zeros. Failure messages name the case, never the text
+    // (CodeQL rust/cleartext-logging).
+
+    use std::collections::BTreeSet;
+
+    /// What the answer pass of `r` counted, by rule.
+    fn answer_counted(r: &Redactor) -> Vec<(&'static str, usize)> {
+        r.answer_counts()
+            .iter()
+            .map(|(rule, n)| (*rule, *n))
+            .collect()
+    }
+
+    /// A rule, an answer text, what the answer pass of a fresh redactor makes of it, and what it
+    /// counts.
+    type RuleCase = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [(&'static str, usize)],
+    );
+
+    /// One answer text per rule of `ANSWER_RULES`.
+    const ONE_PER_RULE: [RuleCase; 12] = [
+        (
+            "R009",
+            "key -----BEGIN EXAMPLE KEY----- Tm90IGEga2V5 -----END EXAMPLE KEY----- end",
+            "key <redacted:pem> end",
+            &[("R009", 1)],
+        ),
+        (
+            "R014",
+            "open https://zq7canary.internal/x?y=1",
+            "open https://host-1/x?<redacted:query>",
+            &[("R013", 1), ("R014", 1)],
+        ),
+        (
+            "R007",
+            "Authorization: Bearer abcdefgh12345678",
+            "Authorization: <redacted:authorization>",
+            &[("R007", 1)],
+        ),
+        (
+            "R008",
+            "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl ok",
+            "jwt <redacted:jwt> ok",
+            &[("R008", 1)],
+        ),
+        (
+            "R006",
+            "postgres://u:p@db:5432",
+            "postgres://<redacted:userinfo>@db:5432",
+            &[("R006", 1)],
+        ),
+        (
+            "R010",
+            "password=x",
+            "password=<redacted:value>",
+            &[("R010", 1)],
+        ),
+        (
+            "R011",
+            "use ghp_000000000000000000000000000000000000 now",
+            "use <redacted:token> now",
+            &[("R011", 1)],
+        ),
+        (
+            "R005",
+            "mail root@example.org",
+            "mail <redacted:email>",
+            &[("R005", 1)],
+        ),
+        (
+            "R004",
+            "192.0.2.7 and 2001:db8::7",
+            "<redacted:ip> and <redacted:ip>",
+            &[("R004", 2)],
+        ),
+        (
+            "R003",
+            r#"secret "real" not found"#,
+            r#"secret "<redacted:name>" not found"#,
+            &[("R003", 1)],
+        ),
+        (
+            "R013",
+            "dial zq7canary.internal",
+            "dial host-1",
+            &[("R013", 1)],
+        ),
+        (
+            "R012",
+            "hash 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b",
+            "hash <redacted:secret>",
+            &[("R012", 1)],
+        ),
+    ];
+
+    #[test]
+    fn the_answer_pass_runs_every_pattern_rule() {
+        let mut covered = BTreeSet::new();
+        for (rule, input, expected, counted) in ONE_PER_RULE {
+            let mut r = Redactor::new();
+            assert_eq!(r.answer(input), expected, "{rule}");
+            assert_eq!(answer_counted(&r), counted.to_vec(), "{rule}");
+            assert!(r.counts().is_empty(), "{rule}: counted as a request");
+            covered.insert(rule);
+        }
+        assert_eq!(covered, ANSWER_RULES.into_iter().collect::<BTreeSet<_>>());
+        // After a request, the answers leave the request's counts as they were.
+        let mut r = incident_redactor();
+        r.text("web at 192.0.2.1 mails x@example.com");
+        let request = r.counts().clone();
+        assert!(!request.is_empty());
+        for (_, input, _, _) in ONE_PER_RULE {
+            r.answer(input);
+        }
+        assert_eq!(r.counts(), &request);
+        assert_eq!(r.answer_counts().get("R004"), Some(&2));
+    }
+
+    #[test]
+    fn answer_rules_match_the_request_chain() {
+        assert_eq!(
+            ANSWER_RULES,
+            [
+                "R009", "R014", "R007", "R008", "R006", "R010", "R011", "R005", "R004", "R003",
+                "R013", "R012",
+            ]
+        );
+        let listed: BTreeSet<&str> = ANSWER_RULES.into_iter().collect();
+        assert_eq!(listed.len(), ANSWER_RULES.len(), "an id is listed twice");
+        assert!(!listed.contains("R001") && !listed.contains("R002"));
+        // Every id the code counts, minus `R002`, runs on answers: a rule added to the chain
+        // must join `ANSWER_RULES` (docs/how-to/add-a-rule.md).
+        let source = include_str!("redact.rs");
+        let code = &source[..source.find("#[cfg(test)]").unwrap()];
+        let mut in_code: BTreeSet<&str> = code
+            .split('"')
+            .filter(|s| {
+                s.len() == 4 && s.starts_with('R') && s[1..].bytes().all(|b| b.is_ascii_digit())
+            })
+            .collect();
+        assert!(in_code.remove("R002"));
+        assert_eq!(in_code, listed);
+        // And every listed id is one that `text` counts: one line per rule, and a known name.
+        let mut r = Redactor::new();
+        r.name(NameKind::Object("Deployment"), "storefront");
+        let mut lines: Vec<&str> = ONE_PER_RULE.iter().map(|(_, input, _, _)| *input).collect();
+        lines.push("storefront restarts");
+        r.text(&lines.join("\n"));
+        let mut counted: BTreeSet<&str> = r.counts().keys().copied().collect();
+        assert!(counted.remove("R002"), "R002 not counted on the request");
+        assert_eq!(counted, listed);
+    }
+
+    #[test]
+    fn echoes_of_kausas_output_are_kept_and_not_counted() {
+        const MARKERS: [&str; 13] = [
+            "<redacted:pem>",
+            "<redacted:authorization>",
+            "<redacted:cookie>",
+            "<redacted:jwt>",
+            "<redacted:userinfo>",
+            "<redacted:value>",
+            "<redacted:token>",
+            "<redacted:email>",
+            "<redacted:ip>",
+            "<redacted:name>",
+            "<redacted:secret>",
+            "<redacted:query>",
+            "<redacted:fragment>",
+        ];
+        let mut echoes: Vec<String> = Vec::new();
+        for marker in MARKERS {
+            echoes.push(marker.to_owned());
+            echoes.push(format!("{marker} was rejected; rotate it"));
+            echoes.push(format!("the value \"{marker}\" in the log"));
+            echoes.push(format!("the value '{marker}' in the log"));
+        }
+        for echo in [
+            // Each marker where the request writes it.
+            r#"Error: secret "<redacted:name>" not found"#,
+            r#"secret '<redacted:name>' not found"#,
+            r#"pods "<redacted:name>" is forbidden"#,
+            "password: <redacted:value>",
+            "the token: <redacted:value> expired",
+            "run --token <redacted:value> --verbose",
+            "Authorization: <redacted:authorization>",
+            "Cookie: <redacted:cookie>",
+            "https://host-1/x?<redacted:query>",
+            "https://host-1/x?<redacted:query>#<redacted:fragment>",
+            "GET /orders?<redacted:query> HTTP/1.1",
+            "host-1:5432",
+            "<redacted:ip>:8080",
+            "<redacted:token> was rejected; rotate it",
+            "<redacted:secret> in the log",
+            "check host-1 and host-2, then host-12",
+            // Lines of this file's request corpus, as the request pass leaves them.
+            r#"Readiness probe failed: Get "http://<redacted:ip>:8080/ready?<redacted:query>#<redacted:fragment>": dial tcp <redacted:ip>:8080: connect: connection refused"#,
+            "GET https://api.example.com/v1/users?<redacted:query>",
+            "fetched http://host-1/items?<redacted:query>.",
+            "connecting to postgres://<redacted:userinfo>@db:5432/shop",
+            r#"{"api_key": "<redacted:value>", "user": "x"}"#,
+            r#"{"body":"{\"user\":\"admin\",\"password\":\"<redacted:value>\"}"}"#,
+            "MYSQL_PWD=<redacted:value> REDIS_PASS=<redacted:value>",
+            "client_secret%3D<redacted:value>&x=1",
+            "run --password <redacted:value> --verbose",
+            "jwt <redacted:jwt> ok",
+            "using <redacted:token> for git",
+            "mail <redacted:email> now",
+            "connect ECONNREFUSED <redacted:ip>:5432",
+            "listen on [<redacted:ip>]:8080",
+            "dial <redacted:ip>: connection refused",
+            "dial tcp: lookup host-1: no such host",
+            "GET https://host-1/v1",
+            "dial host-1:8080 failed",
+            "https://host-1/c?<redacted:query>",
+            "value=<redacted:secret> here",
+            "GET /files/<redacted:secret>/raw",
+            "couldn't find key password in Secret prod/<redacted:name>",
+            r#"forbidden: User "system:serviceaccount:prod:<redacted:name>" cannot list"#,
+            "Error creating: pods \"<redacted:name>\" is forbidden: exceeded quota: \
+             <redacted:name>, requested: pods=1, used: pods=3, limited: pods=3",
+            r#"privileged (containers "<redacted:name>", "<redacted:name>" must not set it)"#,
+            r#"deployments.apps "<redacted:name>" not found"#,
+            r#"failed to provision volume with StorageClass "<redacted:name>": NodePath"#,
+            "GET /orders?<redacted:query> HTTP/1.1 500",
+            // Left out on purpose, interactions of the chain that exist on requests too
+            // (docs/adr/0022-redact-the-answer.md, Context): `SERVICE_ACCOUNT_USER` after a marker
+            // (`system:serviceaccount:<redacted:secret>:x`), an IPv6 prefix before an `R012`
+            // marker (`2001:db8::<redacted:secret>`) and `R007`'s quoted cookie across unbalanced
+            // quotes. `R007`'s header form after a marker is the next test.
+        ] {
+            echoes.push(echo.to_owned());
+        }
+        for (case, echo) in echoes.iter().enumerate() {
+            let mut r = incident_redactor();
+            assert_eq!(&r.answer(echo), echo, "echo {case}");
+            assert!(r.answer_counts().is_empty(), "echo {case}: counted");
+        }
+    }
+
+    #[test]
+    fn a_value_after_an_echoed_authorization_marker_is_still_redacted() {
+        let mut r = Redactor::new();
+        assert_eq!(
+            r.answer("Authorization: <redacted:authorization> was rejected"),
+            "Authorization: <redacted:authorization>"
+        );
+        assert_eq!(answer_counted(&r), [("R007", 1)]);
+        let mut r = Redactor::new();
+        assert_eq!(
+            r.answer("Authorization: <redacted:authorization> abcdefgh12345678"),
+            "Authorization: <redacted:authorization>"
+        );
+        assert_eq!(answer_counted(&r), [("R007", 1)]);
+    }
+
+    #[test]
+    fn placeholders_in_any_case_survive_the_answer_and_come_back() {
+        let pod = "web-7d9c8b6f4d-2xkqp";
+        for (case, (answer, restored, narrow)) in [
+            ("deployment-1", "web".to_owned(), "web".to_owned()),
+            ("Deployment-1", "web".to_owned(), "web".to_owned()),
+            ("pod-1", pod.to_owned(), "pod-1".to_owned()),
+            (
+                "Pod-1 restarts",
+                format!("{pod} restarts"),
+                "Pod-1 restarts".to_owned(),
+            ),
+            (
+                r#"pods "Pod-1" is waiting"#,
+                format!(r#"pods "{pod}" is waiting"#),
+                r#"pods "Pod-1" is waiting"#.to_owned(),
+            ),
+            (
+                r#"pods "pod-1" is waiting"#,
+                format!(r#"pods "{pod}" is waiting"#),
+                r#"pods "pod-1" is waiting"#.to_owned(),
+            ),
+            (
+                r#"container "Container-1" of pods "pod-1""#,
+                format!(r#"container "server" of pods "{pod}""#),
+                r#"container "Container-1" of pods "pod-1""#.to_owned(),
+            ),
+            (
+                "kubectl -n namespace-1 logs pod-1 --previous",
+                format!("kubectl -n shop logs {pod} --previous"),
+                "kubectl -n shop logs pod-1 --previous".to_owned(),
+            ),
+            (
+                "Namespace-1 runs node-1 as serviceaccount-1",
+                "shop runs worker-7 as web-runner".to_owned(),
+                "shop runs node-1 as serviceaccount-1".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut r = incident_redactor();
+            let answered = r.answer(answer);
+            assert_eq!(answered, answer, "case {case}");
+            assert!(r.answer_counts().is_empty(), "case {case}: counted");
+            assert_eq!(r.restore(&answered), restored, "case {case}");
+            assert_eq!(
+                r.restore_only(&answered, &["shop", "web"]),
+                narrow,
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_names_are_not_replaced_in_answers() {
+        let mut r = Redactor::new();
+        r.name(NameKind::Namespace, "shop");
+        assert_eq!(
+            r.name(NameKind::Object("Deployment"), "api"),
+            "deployment-1"
+        );
+        // Public image references are sent as they are, so the model may repeat them.
+        assert_eq!(r.image("ghcr.io/example/api:v2"), "ghcr.io/example/api:v2");
+        for (case, text) in [
+            "check the API server",
+            "the api answers slowly; check the Shop namespace's quota",
+            "pull ghcr.io/example/api:v2 again",
+            "run busybox:1.37 with a shell",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(r.answer(text), text, "case {case}");
+        }
+        assert!(r.answer_counts().is_empty());
+    }
+
+    #[test]
+    fn answer_hosts_continue_the_request_numbering() {
+        let mut r = incident_redactor();
+        assert_eq!(
+            r.text("dial db.billing.svc.cluster.local:5432 failed"),
+            "dial host-1:5432 failed"
+        );
+        let answered =
+            r.answer("check db.billing.svc.cluster.local, zq7canary.internal and host-1");
+        assert_eq!(answered, "check host-1, host-2 and host-1");
+        assert_eq!(answer_counted(&r), [("R013", 2)]);
+        assert_eq!(r.counts().get("R013"), Some(&1));
+        // A host keeps its number in later answers of the incident.
+        assert_eq!(
+            r.answer("open https://zq7canary.internal/"),
+            "open https://host-2/"
+        );
+        // `host-N` is never mapped back.
+        assert_eq!(r.restore(&answered), answered);
+        assert_eq!(r.restore_only(&answered, &["shop", "web"]), answered);
+    }
+
+    #[test]
+    fn the_answer_pass_is_deterministic() {
+        let answer = "deployment-1 calls https://zq7canary.internal/fix?token=abc from 192.0.2.7 \
+                      and db.shop.svc.cluster.local; mail root@example.org";
+        let run = || {
+            let mut r = incident_redactor();
+            let sent = r.text("dial db.shop.svc.cluster.local:5432 from 192.0.2.1");
+            let answered = r.answer(answer);
+            let again = r.answer(answer);
+            (
+                sent,
+                answered,
+                again,
+                r.counts().clone(),
+                r.answer_counts().clone(),
+            )
+        };
+        let (sent, answered, again, request, counted) = run();
+        assert_eq!(answered, again);
+        assert_eq!((sent, answered, again, request, counted), run());
+    }
+
+    #[test]
+    fn allowlisted_hosts_stay_in_answers() {
+        for (case, (text, expected, counted)) in [
+            (
+                "see https://kubernetes.io/docs/x#probes",
+                "see https://kubernetes.io/docs/x#<redacted:fragment>",
+                &[("R014", 1)][..],
+            ),
+            (
+                "see https://github.com/x/y?tab=readme and github.com/x/y",
+                "see https://github.com/x/y?<redacted:query> and github.com/x/y",
+                &[("R014", 1)][..],
+            ),
+            ("pull ghcr.io/x/y:1", "pull ghcr.io/x/y:1", &[][..]),
+            (
+                "read https://example.com/zq7canary/install.sh",
+                "read https://example.com/zq7canary/install.sh",
+                &[][..],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut r = Redactor::new();
+            assert_eq!(r.answer(text), expected, "case {case}");
+            assert_eq!(answer_counted(&r), counted.to_vec(), "case {case}");
+        }
+    }
+
+    #[test]
+    fn the_injected_step_of_the_end_to_end_test_is_redacted() {
+        // The same text and result as tests/e2e/fake_endpoint.py and tests/e2e/run.sh.
+        let mut r = Redactor::new();
+        assert_eq!(
+            r.answer("open http://192.0.2.7:8080/fix?token=not-a-real-token on zq7canary.internal"),
+            "open http://<redacted:ip>:8080/fix?<redacted:query> on host-1"
+        );
+        assert_eq!(answer_counted(&r), [("R004", 1), ("R013", 1), ("R014", 1)]);
+        assert!(r.counts().is_empty());
+    }
+
+    #[test]
+    fn request_lines_lose_their_query() {
+        let redacted = [
+            (
+                "GET /orders?page=2 HTTP/1.1",
+                "GET /orders?<redacted:query> HTTP/1.1",
+            ),
+            (
+                r#""POST /login?next=/a#x""#,
+                r#""POST /login?<redacted:query>#<redacted:fragment>""#,
+            ),
+            (
+                "GET /api/v1/orders?page=2 200 12ms",
+                "GET /api/v1/orders?<redacted:query> 200 12ms",
+            ),
+            ("HEAD /x#top", "HEAD /x#<redacted:fragment>"),
+            (
+                "GET /orders?customer=zq7canary-acme HTTP/1.1 500",
+                "GET /orders?<redacted:query> HTTP/1.1 500",
+            ),
+            (
+                "PUT\t/a/b?c=d, then retry",
+                "PUT\t/a/b?<redacted:query>, then retry",
+            ),
+        ];
+        let kept = [
+            "GET /health",
+            "GET /?",
+            "GET /healthz?",
+            "get /x?y=1",
+            "Did you GET it?",
+            "/tmp/file?.log",
+            "is it up? GET /x.",
+            "CONNECT /x?y=1",
+        ];
+        for (case, (input, expected)) in redacted.into_iter().enumerate() {
+            let mut r = Redactor::new();
+            assert_eq!(r.text(input), expected, "request {case}");
+            assert_eq!(r.counts().get("R014"), Some(&1), "request {case}");
+            let mut r = Redactor::new();
+            assert_eq!(r.answer(input), expected, "answer {case}");
+            assert_eq!(answer_counted(&r), [("R014", 1)], "answer {case}");
+        }
+        for (case, input) in kept.into_iter().enumerate() {
+            let mut r = Redactor::new();
+            assert_eq!(r.text(input), input, "request {case}");
+            assert_eq!(r.counts().get("R014"), None, "request {case}");
+            let mut r = Redactor::new();
+            assert_eq!(r.answer(input), input, "answer {case}");
+            assert!(r.answer_counts().is_empty(), "answer {case}");
+        }
     }
 }

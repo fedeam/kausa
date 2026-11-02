@@ -1,8 +1,10 @@
 """A fake OpenAI-compatible endpoint for the end-to-end test (tests/e2e/run.sh).
 
 It answers every POST to /v1/chat/completions with the same explanation, which names the
-placeholder of the namespace so that the test can check that kausa maps it back, and appends each
-request body to a file so that the test can check what left the cluster.
+placeholder of the namespace so that the test can check that kausa maps it back, and carries in its
+second step a URL, an address, a token and a host the cluster never held, so that the test can check
+that kausa redacts the answer before writing it anywhere (docs/adr/0022-redact-the-answer.md). It
+appends each request body to a file so that the test can check what left the cluster.
 
 It is also the fake receiver of kausa's notifications (docs/adr/0015-notifications.md): a POST
 whose path starts with /hook/ never reaches the model's request log. The first one is answered 503
@@ -19,9 +21,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ANSWER = {
     "summary": "e2e: a workload in namespace-1 fails.",
     "cause": "the container exits with a usage error.",
-    "steps": ["check the container's arguments"],
+    "steps": [
+        "check the container's arguments",
+        "open http://192.0.2.7:8080/fix?token=not-a-real-token on zq7canary.internal",
+    ],
     "confidence": "high",
 }
+# The values injected in the answer's second step (fake: a documentation address, a visibly fake
+# token and a canary host), which no Event note, Explanation, notification or explanation log line
+# may hold.
+INJECTED = ["192.0.2.7", "not-a-real-token", "zq7canary"]
+# The second step as kausa writes it: R004, R014 and R013 applied, the host numbered as the
+# incident's request numbered it.
+REDACTED_STEP = r"open http://<redacted:ip>:8080/fix\?<redacted:query> on host-[0-9]+"
 
 
 def main():

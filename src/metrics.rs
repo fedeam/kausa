@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 19] = [
+pub const COUNTERS: [(&str, &str); 20] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -47,7 +47,7 @@ pub const COUNTERS: [(&str, &str); 19] = [
     ),
     (
         "kausa_redactions_total",
-        "Values replaced by redaction, by rule.",
+        "Values replaced by redaction in the requests, by rule.",
     ),
     (
         "kausa_events_written_total",
@@ -88,6 +88,10 @@ pub const COUNTERS: [(&str, &str); 19] = [
     (
         "kausa_lease_errors_total",
         "Failed calls on the Lease, by `call` (get, patch); conflicts are not errors.",
+    ),
+    (
+        "kausa_answer_redactions_total",
+        "Values replaced by redaction in the model's answers, by rule.",
     ),
 ];
 
@@ -331,8 +335,9 @@ mod tests {
     // code: two more counters, appended to `COUNTERS`.
     #[test]
     fn the_notification_counters_come_last_with_their_help() {
-        // The two counters of docs/adr/0019-high-availability.md come after these.
-        assert_eq!(COUNTERS.len(), 19);
+        // The two counters of docs/adr/0019-high-availability.md and the one of
+        // docs/adr/0022-redact-the-answer.md come after these.
+        assert_eq!(COUNTERS.len(), 20);
         assert_eq!(
             COUNTERS[15],
             (
@@ -412,8 +417,9 @@ mod tests {
     // `watch="deployments"`, and `D014` incidents under `kausa_incidents_total`.
     #[test]
     fn the_deployment_watch_adds_no_counter() {
-        // 19: the standby's two counters (docs/adr/0019-high-availability.md) came later.
-        assert_eq!(COUNTERS.len(), 19, "a counter was added");
+        // 20: the standby's two counters (docs/adr/0019-high-availability.md) and the answer's
+        // redactions (docs/adr/0022-redact-the-answer.md) came later.
+        assert_eq!(COUNTERS.len(), 20, "a counter was added");
         assert!(COUNTERS.contains(&(
             "kausa_watch_errors_total",
             "Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch."
@@ -441,7 +447,8 @@ mod tests {
 
     #[test]
     fn the_standby_counters_come_last_with_their_help() {
-        assert_eq!(COUNTERS.len(), 19);
+        // The counter of docs/adr/0022-redact-the-answer.md comes after these.
+        assert_eq!(COUNTERS.len(), 20);
         assert_eq!(
             COUNTERS[17],
             (
@@ -547,5 +554,62 @@ mod tests {
         let single = Metrics::default();
         single.set_ready();
         assert_eq!(readyz(&single), ("200 OK", "ready\n".to_owned()));
+    }
+
+    // Acceptance tests for docs/adr/0022-redact-the-answer.md, written before the code: one
+    // counter appended after the standby's, by rule (an id of `redact::ANSWER_RULES`), and the
+    // help of `kausa_redactions_total` saying that it counts the requests. Found by name, so that
+    // a counter appended later does not break them.
+
+    const ANSWER_REDACTIONS_HELP: &str =
+        "Values replaced by redaction in the model's answers, by rule.";
+
+    fn counter_at(name: &str) -> usize {
+        COUNTERS
+            .iter()
+            .position(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("no counter {name}"))
+    }
+
+    #[test]
+    fn the_answer_redactions_counter_comes_after_the_standby_counters() {
+        let at = counter_at("kausa_answer_redactions_total");
+        assert_eq!(at, counter_at("kausa_lease_errors_total") + 1);
+        assert_eq!(COUNTERS[at].1, ANSWER_REDACTIONS_HELP);
+        assert_eq!(
+            COUNTERS[counter_at("kausa_redactions_total")].1,
+            "Values replaced by redaction in the requests, by rule."
+        );
+        let names: std::collections::BTreeSet<&str> = COUNTERS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), COUNTERS.len(), "a counter is listed twice");
+    }
+
+    #[test]
+    fn the_answer_redactions_counter_renders_as_zero_when_unused() {
+        let m = Metrics::default();
+        let text = m.render();
+        assert!(
+            text.contains(&format!(
+                "# HELP kausa_answer_redactions_total {ANSWER_REDACTIONS_HELP}\n\
+                 # TYPE kausa_answer_redactions_total counter\n\
+                 kausa_answer_redactions_total 0\n"
+            )),
+            "{text}"
+        );
+        m.add("kausa_answer_redactions_total", &[("rule", "R004")], 3);
+        m.inc("kausa_answer_redactions_total", &[("rule", "R013")]);
+        m.inc("kausa_redactions_total", &[("rule", "R004")]);
+        let text = respond("GET /metrics HTTP/1.1", &m).2;
+        for line in [
+            "kausa_answer_redactions_total{rule=\"R004\"} 3\n",
+            "kausa_answer_redactions_total{rule=\"R013\"} 1\n",
+            "kausa_redactions_total{rule=\"R004\"} 1\n",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        assert!(
+            !text.contains("kausa_answer_redactions_total 0\n"),
+            "{text}"
+        );
     }
 }

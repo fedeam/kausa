@@ -1,0 +1,3 @@
+kausa-injection
+inj-control
+connect ECONNREFUSED 192.0.2.10:5432

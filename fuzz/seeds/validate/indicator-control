@@ -1,0 +1,1 @@
+{"summary": "The database refuses connections", "cause": "deployment-1 in namespace-1 crashes: the database refuses connections", "steps": ["check that the service at 192.0.2.10:5432 is up"], "confidence": "medium"}

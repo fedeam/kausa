@@ -90,12 +90,15 @@ estimate of the request, before it is sent. The model gets no tools and no funct
   registry hosts.
 - Anything a redaction rule matched: IP addresses, email addresses, credentials in URLs,
   authorization values, JSON Web Tokens, PEM blocks, values of secret-named keys, known token
-  formats, high-entropy strings and hostnames.
+  formats, high-entropy strings, hostnames, and the query and fragment of URLs and, since v0.5,
+  of HTTP request lines without a scheme (`GET /orders?<redacted:query> HTTP/1.1`).
 - The cluster's name, its API server address and kausa's configuration.
 
 When a probe fails with a connection error, the kubelet's `Unhealthy` event quotes the probe's URL
 with the Pod's address, path, query and fragment; the address is redacted (`R004`), and so are the
-query and fragment of any URL in event text or a log (`R014`). A
+query and fragment of any URL in event text or a log (`R014`), and since v0.5 those of an HTTP
+request line with an uppercase method and no scheme (`GET /orders?page=2 HTTP/1.1`); a query in a
+key-value or JSON form (`path=/x?y`) is not a request line and is sent. A
 path or key leaves as the workload's author wrote it unless a pattern or a known name matches it
 ([Detection and redaction rules](rules.md#limits)).
 

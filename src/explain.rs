@@ -126,7 +126,8 @@ pub fn reads_logs(detection: Detection) -> bool {
 
 /// Explains one incident and logs the outcome: from the deduplication cache when the same failure
 /// was explained recently; otherwise reads the log tail, builds and fits the request, and logs it
-/// (dry-run) or sends it within the budget and validates the answer. Explanations and skipped
+/// (dry-run) or sends it within the budget, validates the answer and passes it through the pattern
+/// redaction rules (all but `R002`) before any copy of it is written. Explanations and skipped
 /// explanations are written as Events when that is on, and explanations, fresh or cached, into
 /// the history with `--history`. With notifications on, an explanation is queued for the webhook
 /// once its Event and history are written: a new one always, a cached one while its notification
@@ -204,7 +205,7 @@ pub async fn run(
             )?,
         }
     }
-    let Some((body, redactor)) = fit(&mut gathered, settings) else {
+    let Some((body, mut redactor)) = fit(&mut gathered, settings) else {
         return skip(
             settings,
             shared,
@@ -320,6 +321,18 @@ pub async fn run(
     if !shared.term.holds() {
         return Ok(None);
     }
+    // The answer is untrusted: the pattern rules run on it before any sink sees it, and every
+    // copy below (the restores, the cache, the log, the Event, the history and the notification)
+    // comes from the redacted text (docs/adr/0022-redact-the-answer.md).
+    let explanation = explanation.map_clean(|text| redactor.answer(text));
+    let answer_redactions = counts(redactor.answer_counts());
+    for (rule, n) in redactor.answer_counts() {
+        shared.metrics.add(
+            "kausa_answer_redactions_total",
+            &[("rule", rule)],
+            *n as u64,
+        );
+    }
     let restored = explanation.map_clean(|text| redactor.restore(text));
     // The notification's text maps back only the namespace and the top-level owner.
     let narrow = settings.notify.is_some().then(|| {
@@ -346,6 +359,7 @@ pub async fn run(
                 "tokens_in": answer.prompt_tokens,
                 "tokens_out": answer.completion_tokens,
                 "redactions": redactions,
+                "answer_redactions": answer_redactions,
             }),
         ),
     )?;
@@ -1544,5 +1558,302 @@ mod tests {
                 .render()
                 .contains("kausa_model_calls_total{outcome=\"ok\"} 1\n")
         );
+    }
+
+    // Acceptance tests for docs/adr/0022-redact-the-answer.md, written before the code. After the
+    // term check, `run` passes the summary, the cause and each step of a valid answer through
+    // `Redactor::answer` of the incident's redactor, adds what it counted to
+    // `kausa_answer_redactions_total{rule}`, and builds the dedup entry, the log line, the Event,
+    // the history entry and the notification from the redacted text. The pass does not run on a
+    // cached repeat, an answer that arrives after the term, an invalid answer or a dry-run. Values
+    // are invented; failure messages name the case and the sink, never the text.
+
+    use std::net::TcpStream;
+
+    /// Pieces of the values the hostile answer injects: none may reach a sink.
+    const INJECTED: [&str; 6] = [
+        "zq7canary",
+        "192.0.2.7",
+        "root@example.org",
+        "token=abc",
+        "ghp_",
+        "eyJ",
+    ];
+
+    /// A text with every injected value: a URL with a query on an unlisted host, an address, an
+    /// email, a token of zeros in GitHub's format and a JWT.
+    const HOSTILE: &str = "https://zq7canary.internal/fix?token=abc from 192.0.2.7, mail \
+                           root@example.org, use ghp_000000000000000000000000000000000000 and \
+                           eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl";
+
+    /// `HOSTILE` as the answer pass leaves it: the host is the incident's first.
+    const REDACTED: &str = "https://host-1/fix?<redacted:query> from <redacted:ip>, mail \
+                            <redacted:email>, use <redacted:token> and <redacted:jwt>";
+
+    /// The rules `HOSTILE` triggers, once each.
+    const HOSTILE_RULES: [&str; 6] = ["R004", "R005", "R008", "R011", "R013", "R014"];
+
+    /// The model's answer: `HOSTILE` in the summary, the cause and the first step, beside
+    /// placeholders the restores map back.
+    fn hostile_answer() -> String {
+        json!({
+            "summary": format!("deployment-1 in namespace-1 calls {HOSTILE}."),
+            "cause": format!("pod-1 calls {HOSTILE}."),
+            "steps": [
+                format!("Block {HOSTILE}."),
+                "Check Deployment-1's args on pod-1 in namespace-1.",
+            ],
+            "confidence": "medium",
+        })
+        .to_string()
+    }
+
+    /// The `kausa_redactions_total` lines of a rendering.
+    fn request_redactions(metrics: &Metrics) -> Vec<String> {
+        metrics
+            .render()
+            .lines()
+            .filter(|l| l.starts_with("kausa_redactions_total"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Fails when a piece of an injected value is in `text`.
+    fn assert_no_injected_value(text: &str, sink: &str) {
+        for (i, value) in INJECTED.iter().enumerate() {
+            assert!(
+                !text.contains(value),
+                "injected value {i} reached the {sink}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_answer_reaches_every_sink_redacted() {
+        let settings = settings(Some(model("200 OK", Some(hostile_answer()))), true, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        assert!(!explain(work(), &settings, &shared));
+        let full = Explanation {
+            summary: format!("web in shop calls {REDACTED}."),
+            cause: format!("web-7d9c8b6f4d-2xkqp calls {REDACTED}."),
+            steps: vec![
+                format!("Block {REDACTED}."),
+                "Check web's args on web-7d9c8b6f4d-2xkqp in shop.".into(),
+            ],
+            confidence: "medium".into(),
+        };
+        // The notification maps back only the namespace and the owner.
+        let narrow = Explanation {
+            summary: format!("web in shop calls {REDACTED}."),
+            cause: format!("pod-1 calls {REDACTED}."),
+            steps: vec![
+                format!("Block {REDACTED}."),
+                "Check web's args on pod-1 in shop.".into(),
+            ],
+            confidence: "medium".into(),
+        };
+        {
+            let dedup = shared.dedup.borrow();
+            let entry = dedup.peek(FINGERPRINT).expect("an entry");
+            assert_eq!(entry.explanation, full);
+            assert_eq!(entry.notice.as_ref(), Some(&narrow));
+            let note = crate::events::note(&entry.explanation);
+            assert_no_injected_value(&note, "Event note");
+            assert!(note.contains("<redacted:ip>"), "the note has no marker");
+        }
+        {
+            let queue = shared.notifications.borrow();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].explanation, narrow);
+            let notice = &queue[0].notice;
+            assert_eq!(notice.summary, narrow.summary);
+            assert_eq!(notice.cause, narrow.cause);
+            assert_eq!(notice.steps, narrow.steps);
+            let body = [&notice.summary, &notice.cause]
+                .into_iter()
+                .chain(&notice.steps)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_no_injected_value(&body, "notification");
+        }
+        // Counted by rule, once per field; the request's counter does not move.
+        let text = metrics.render();
+        for rule in HOSTILE_RULES {
+            assert!(
+                text.contains(&format!(
+                    "kausa_answer_redactions_total{{rule=\"{rule}\"}} 3\n"
+                )),
+                "{rule}: {text}"
+            );
+        }
+        let series = text
+            .lines()
+            .filter(|l| l.starts_with("kausa_answer_redactions_total{"))
+            .count();
+        assert_eq!(series, HOSTILE_RULES.len(), "{text}");
+        assert!(
+            !text.contains("kausa_answer_redactions_total{rule=\"R002\"}"),
+            "{text}"
+        );
+        // A changed answer is still a successful call.
+        assert!(
+            text.contains("kausa_model_calls_total{outcome=\"ok\"} 1\n"),
+            "{text}"
+        );
+        let benign_settings = self::settings(Some(model("200 OK", Some(answer()))), true, 30);
+        let benign = Metrics::default();
+        assert!(!explain(
+            work(),
+            &benign_settings,
+            &self::shared(&benign_settings, &benign)
+        ));
+        assert_eq!(request_redactions(&metrics), request_redactions(&benign));
+        assert!(
+            benign
+                .render()
+                .contains("kausa_answer_redactions_total 0\n"),
+            "a benign answer counted"
+        );
+    }
+
+    #[test]
+    fn the_names_of_the_benign_answer_come_back_as_before() {
+        // The answer pass leaves an answer with only placeholders as it is.
+        let settings = settings(Some(model("200 OK", Some(answer()))), true, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        assert!(!explain(work(), &settings, &shared));
+        let dedup = shared.dedup.borrow();
+        let entry = dedup.peek(FINGERPRINT).expect("an entry");
+        assert_eq!(entry.explanation, full());
+        assert_eq!(entry.notice, Some(narrow()));
+        assert!(
+            metrics
+                .render()
+                .contains("kausa_answer_redactions_total 0\n")
+        );
+    }
+
+    /// Reads one request from `stream`: the headers and a body of `content-length` bytes.
+    fn read_request(stream: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut buffer = vec![0; 65536];
+        loop {
+            let n = stream.read(&mut buffer).unwrap_or(0);
+            request.extend_from_slice(&buffer[..n]);
+            let text = String::from_utf8_lossy(&request);
+            if let Some(end) = text.find("\r\n\r\n") {
+                let length = text[..end]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_owned)
+                    })
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    return;
+                }
+            }
+            if n == 0 {
+                return;
+            }
+        }
+    }
+
+    /// A fake model that answers one request with `content` after `wait`. Returns its base URL.
+    fn slow_model(wait: Duration, content: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            read_request(&mut stream);
+            std::thread::sleep(wait);
+            let body = json!({
+                "choices": [{"message": {"content": content}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+            })
+            .to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+        });
+        url
+    }
+
+    #[test]
+    fn the_answer_pass_runs_only_on_a_fresh_valid_answer() {
+        let unused = "kausa_answer_redactions_total 0\n";
+        // A cached repeat re-emits the stored text as it is, without a pass.
+        let settings_cached = settings(Some(nowhere()), true, 30);
+        let metrics = Metrics::default();
+        let shared_cached = shared(&settings_cached, &metrics);
+        shared_cached.dedup.borrow_mut().put(
+            FINGERPRINT,
+            stored("stored text at 192.0.2.7"),
+            Some(stored("stored notice at 192.0.2.7")),
+            std::time::Instant::now(),
+        );
+        assert!(!explain(work(), &settings_cached, &shared_cached));
+        assert_eq!(
+            queued_summaries(&shared_cached),
+            ["stored notice at 192.0.2.7"]
+        );
+        let text = metrics.render();
+        assert!(
+            text.contains("kausa_explanations_cached_total 1\n"),
+            "cached"
+        );
+        assert!(text.contains(unused), "cached: counted");
+        // An invalid answer is a skip, whatever it carries.
+        let invalid = json!({
+            "summary": HOSTILE,
+            "cause": HOSTILE,
+            "steps": [HOSTILE],
+            "confidence": "certain",
+        })
+        .to_string();
+        let settings_invalid = settings(Some(model("200 OK", Some(invalid))), true, 30);
+        let metrics = Metrics::default();
+        let shared_invalid = shared(&settings_invalid, &metrics);
+        assert!(!explain(work(), &settings_invalid, &shared_invalid));
+        let text = metrics.render();
+        assert!(
+            text.contains("kausa_model_calls_total{outcome=\"invalid\"} 1\n"),
+            "invalid"
+        );
+        assert!(text.contains(unused), "invalid: counted");
+        // A dry-run has no answer.
+        let settings_dry = settings(None, true, 30);
+        let metrics = Metrics::default();
+        let shared_dry = shared(&settings_dry, &metrics);
+        assert!(!explain(work(), &settings_dry, &shared_dry));
+        assert!(metrics.render().contains(unused), "dry-run: counted");
+        // An answer that arrives after the term ended is dropped before the pass.
+        let (api, _api_calls) = counted_api_server();
+        let metrics = Metrics::default();
+        let left = explain_under(
+            slow_model(Duration::from_millis(400), hostile_answer()),
+            &api,
+            Some(Duration::from_millis(150)),
+            false,
+            &metrics,
+        );
+        assert!(!left.cached, "a dropped answer is not cached");
+        assert_eq!(left.queued, 0, "a dropped answer is not notified");
+        let text = metrics.render();
+        assert!(
+            text.contains("kausa_model_calls_total{outcome=\"ok\"} 1\n"),
+            "after the term: the model was not asked"
+        );
+        assert!(text.contains(unused), "after the term: counted");
     }
 }

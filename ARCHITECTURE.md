@@ -17,10 +17,12 @@ API server ──watch──▶ run.rs ──▶ record.rs ──▶ detect.rs �
      context.rs ◀── allowlisted fields ── redact.rs (placeholders, patterns) ◀──────────┘
           │
           ▼
-     prompt.rs ──▶ budget.rs ──▶ model.rs ──▶ prompt::validate ──▶ restore names ──▶ events.rs
-     (request,      (calls per    (one POST,     (schema, caps,                       (an Event on
-     untrusted      hour/day,     HTTPS, no      cleaning)                            the owner)
-     wrapper)       dedup cache)  redirects)                                              │
+     prompt.rs ──▶ budget.rs ──▶ model.rs ──▶ prompt::validate ──▶ redact::answer ──▶ restore names
+     (request,      (calls per    (one POST,     (schema, caps,       (R003–R014 on       │
+     untrusted      hour/day,     HTTPS, no      cleaning)            the answer)         ▼
+     wrapper)       dedup cache)  redirects)                                              events.rs (an Event
+                                                                                          on the owner)
+                                                                                          │
                                                                                           ▼
                                                     history.rs (with --history: the Explanation
                                                     in the incident's namespace; the sweep takes
@@ -54,8 +56,8 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `src/owner.rs` | ReplicaSet → Deployment and Job → CronJob, metadata only | A new owner hop (needs an ADR: a new permission) |
 | `src/explain.rs` | One incident to one explanation: log tail, fit to the token cap, dry-run or call, retry, validation, Event; the term guard (`Shared.term`) before the budget take, after the model's answer and before each write | The explanation pipeline changes |
 | `src/context.rs` | The context sent to the model: allowlisted fields only (`R001`), all names and text redacted | Anything sent to the model changes (needs an ADR) |
-| `src/redact.rs` | The redaction rules `R002`–`R014`, the mapping back of placeholders, and `restore_only`, which maps back only the names a notification may carry | A redaction rule is added or changed |
-| `src/prompt.rs` | The fixed request (system message, untrusted wrapper, answer schema) and the validation of the answer | The request or the answer's format changes |
+| `src/redact.rs` | The redaction rules `R002`–`R014`; the answer pass (`Redactor::answer`), which runs the pattern rules of `ANSWER_RULES` (all but `R002`) on the model's answer and counts them apart; the mapping back of placeholders, and `restore_only`, which maps back only the names a notification may carry | A redaction rule is added or changed (a pattern rule also joins `ANSWER_RULES`) |
+| `src/prompt.rs` | The fixed request (system message, untrusted wrapper, answer schema), the validation of the answer, and `map_clean`, which passes each field of an answer through a function (the answer pass, the restores) and cleans and caps it again | The request or the answer's format changes |
 | `src/budget.rs` | Call budget per hour and per day, the deduplication cache (with each entry's notification text and whether the webhook acknowledged it) | Cost controls change |
 | `src/model.rs` | The client of the one OpenAI-compatible endpoint | The HTTP call changes |
 | `src/events.rs` | The `Explained` / `ExplanationSkipped` Event; a repeat patches only its series; each call checks the term first, and the whole write ends within `WRITE_BOUND` (10 s) | The output changes |
@@ -63,7 +65,7 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `src/notify.rs` | The webhook transport: the URL checks, the `reqwest` client (no proxy, no redirects), one send with its retry (each attempt checks the term first), the queue of 16 and the dequeue rule, the `notification *` log lines and counters | How notifications are sent or queued changes |
 | `src/history.rs` | With `--history`: the writer of the Explanation of an explained incident (`list` by name, then `create` or a merge patch of `status`, under one 10-second timeout) and the sweep (age, then `MAX_OBJECTS`, with `resourceVersion` preconditions, each call within 10 s), both checking the term before each call, over `Api<DynamicObject>` | What kausa keeps of an explanation, or its retention, changes |
 | `src/history/pure.rs` | The pure, fuzzed part of the history: the name, the create and patch bodies, the reading of a stored (untrusted) object, the identity check, the merge and the sweep's plan | The Explanation's content or the merge changes |
-| `src/metrics.rs` | The counters, the `kausa_leader` gauge, `/metrics`, `/healthz`, `/readyz` (`starting`, `ready`, or `standby` for a replica that does not hold the Lease) | A counter or gauge is added |
+| `src/metrics.rs` | The counters (among them `kausa_redactions_total` for the requests and `kausa_answer_redactions_total` for the answers), the `kausa_leader` gauge, `/metrics`, `/healthz`, `/readyz` (`starting`, `ready`, or `standby` for a replica that does not hold the Lease) | A counter or gauge is added |
 | `src/log.rs` | One JSON object per line, through a serializer | Only to keep it safe |
 | `charts/kausa/` | The Helm chart: RBAC by `rbac.scope` (`templates/rbac.yaml`: a ClusterRole, or a Role per listed namespace, both from `kausa.rules`), the refusals of `kausa.validate`, Deployment, Service, NetworkPolicy | Install, permissions or a flag change |
 | `charts/kausa/templates/leader-election.yaml` | Only with `replicaCount: 2`: the Lease `<fullname>-leader` (`spec: {}`; Helm owns the object, kausa its `spec`), and the Role and RoleBinding of the same name with `get` and `patch` on that Lease alone, the same in both scopes, outside `kausa.rules` | The standby's Lease or its one permission changes (needs an ADR) |
@@ -74,7 +76,7 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `tests/cli.rs` | Command-line behaviour and exit codes | A flag or exit code changes |
 | `tests/chart/render.sh` | Chart checks with helm alone: both scopes, the rules against the v0.1.0 chart, each notification format, `NOTES.txt`, every refusal | The chart changes |
 | `tests/e2e/` | The kind test, once per `rbac.scope` (`KAUSA_E2E_SCOPE`) and once more namespaced with a standby (`KAUSA_E2E_REPLICAS=2`: graceful, frozen and fail-closed handovers): chart, Events, what leaves the cluster (to the fake model and the fake webhook), the ClusterRole or the Roles and what they grant, an unlisted and a refusing namespace, metrics | The chart or what kausa writes changes |
-| `fuzz/`, `.clusterfuzzlite/` | Fuzz targets for redaction (with `restore_only`), answer validation, the history's merge and the notification bodies (`notification`), run by ClusterFuzzLite | A parser of untrusted text changes, or a new one is added |
+| `fuzz/`, `.clusterfuzzlite/` | Fuzz targets for redaction (with the answer pass, `restore` and `restore_only`), answer validation, the history's merge and the notification bodies (`notification`), run by ClusterFuzzLite; seed corpora for `redact` and `validate` in `fuzz/seeds/<target>/`, zipped by `.clusterfuzzlite/build.sh` | A parser of untrusted text changes, or a new one is added |
 | `tests/bench/` | Seeded failures and the token-counting proxy of the benchmarks | A benchmark is repeated |
 
 Unit tests live next to the code, in each file's `tests` module.
@@ -102,9 +104,10 @@ accepted ADR, and most should never change.
    [Data sent to the provider](docs/reference/data-sent-to-the-provider.md), every name replaced
    and every free text redacted ([0008](docs/adr/0008-data-leaving-the-cluster.md)).
 4. **Redaction only ever gets stricter.** A change that lets through a value a rule caught before
-   needs an ADR.
+   needs an ADR. This covers the model's answer: running fewer rules on it needs an ADR.
 5. **Cluster text is data, never instructions**: the model gets no tools, and its answer must
-   match the schema and is cleaned before it is logged or written. Code that parses untrusted text
+   match the schema, is cleaned and passes the pattern redaction rules `R003`–`R014` before it is
+   logged, stored or written ([0022](docs/adr/0022-redact-the-answer.md)). Code that parses untrusted text
    (cluster text, the model's answer, an Explanation read back) never panics on any input; the
    fuzz targets check it. Nothing read back from an Explanation or the Lease is logged, sent or
    reused (the Lease's holder is only compared with kausa's own identity, and its version echoed

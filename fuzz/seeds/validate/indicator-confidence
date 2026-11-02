@@ -1,0 +1,1 @@
+{"summary": "A cosmic ray flipped a bit", "cause": "deployment-1 in namespace-1 crashes: a cosmic ray flipped a bit", "steps": ["restart the pod"], "confidence": "high"}

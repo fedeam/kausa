@@ -1,0 +1,6 @@
+shop
+api
+<redacted:token> was rejected; rotate it
+Authorization: <redacted:authorization> was rejected
+<redacted:secret> in the log, password: <redacted:password>, --token <redacted:token>
+secret "<redacted:secret>" and pods "<redacted:name>"

@@ -78,15 +78,26 @@ Status as of 2026-11-02: fourteen detection rules (`D001` to `D014`) and fourtee
    The `regex` crate runs in linear time, so a pattern cannot be made to take exponential time by
    hostile text; keep it anchored with `\b` or explicit delimiters so that it does not eat the
    words around the value.
-3. **Apply it** in `Redactor::text`, with `self.apply(&PATTERN, "R0nn", out, |c| …)`. The order
+3. **Apply it** in `Redactor::patterns`, the one chain that both `Redactor::text` (the request)
+   and `Redactor::answer` (the model's answer) run, with
+   `self.apply(&PATTERN, "R0nn", out, pass, |c| …)`. The order
    is part of the rule: the specific rules run before the broad ones, so put a new specific
    pattern before `R004` (addresses), `R003`, `R013` (hostnames) and `R012` (high-entropy
    strings), which would otherwise replace the value with a less precise marker. The replacement
-   is a `<redacted:…>` marker, never the value or a part of it.
+   is a `<redacted:…>` marker, never the value or a part of it. A pattern rule runs on the
+   model's answer too, so add its id to `ANSWER_RULES` at its place in the order: the test
+   `answer_rules_match_the_request_chain` fails until the list matches the ids the request pass
+   counts, minus `R002`. Running a rule on requests only is a weaker redaction of the answer and
+   needs an ADR ([0022. Pass the model's answer through the pattern redaction rules before it is
+   written anywhere, and redact the query of an HTTP request line](../adr/0022-redact-the-answer.md)).
 4. **Test it** in the `tests` module of `src/redact.rs`: lines that must be redacted (in
    `secrets_are_redacted` or `more_secret_shapes_are_redacted`, or a test of its own), lines that
    look alike and must stay (in `ordinary_lines_stay`: version strings, hashes in paths,
-   timestamps), and the count in `counts_say_what_each_rule_replaced` if it is a new id.
+   timestamps), and the count in `counts_say_what_each_rule_replaced` if it is a new id. For the
+   answer, add a case to `the_answer_pass_runs_every_pattern_rule` (the value is replaced and
+   counted in `answer_counts()` while `counts()` does not move) and an echoed-marker case to
+   `echoes_of_kausas_output_are_kept_and_not_counted` (its own marker, alone and followed by
+   words, passes `answer` unchanged and uncounted).
 5. **Document it**: its row in the table of [Detection and redaction
    rules](../reference/rules.md#redaction-rules), and a line in the Changelog. The test
    `every_counted_id_is_in_the_rules_reference` fails until the table lists every id that

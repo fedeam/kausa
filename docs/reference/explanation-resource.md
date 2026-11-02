@@ -42,7 +42,7 @@ so `kubectl explain explanation.status.entries` documents it.
 | `status.occurrences` | integer, at least 1 | How many times kausa wrote an explanation for this incident, fresh or from the deduplication cache, since the object was created; dropped entries still count |
 | `status.lastTime` | date-time, at most 20 | The last of those writes |
 | `status.entries` | array, at most 5, newest first | One entry per distinct text |
-| `entries[].summary` | string, at most 300 | The whole summary, with the real names mapped back |
+| `entries[].summary` | string, at most 300 | The whole summary, redacted by the pattern rules ([On the model's answer](rules.md#on-the-models-answer)), with the real names mapped back |
 | `entries[].cause` | string, at most 600 | The whole likely cause |
 | `entries[].steps` | array of at most 5 strings of at most 300 | The whole steps; the list may be empty |
 | `entries[].confidence` | `low`, `medium` or `high` | |
@@ -118,6 +118,13 @@ read-modify-write, all under a 10-second timeout:
   `count: 1`.
 - Then entries whose `lastTime` is older than the cutoff are dropped, and the list is cut to 5.
 - `occurrences` goes up by one (saturating) and `status.lastTime` becomes `now`.
+
+**Entries are the redacted answer.** Since v0.5, summary, cause and steps pass the pattern
+redaction rules `R003`–`R014` before they are written here, as they do before the Event and the
+log; the unredacted answer is never stored. Entries written by v0.4.1 or earlier keep their text
+until `--history-days` ages them out. After an upgrade, a repeat whose text now redacts
+differently goes in front as a new entry instead of counting on the old one, and may push the
+oldest of the five out: at most once per Explanation.
 
 **Stored entries are untrusted.** Before the merge, kausa drops an entry with a missing or wrongly
 typed field, an unknown confidence, a time not in the one form or later than `now`, a text above

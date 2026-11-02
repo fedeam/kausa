@@ -36,3 +36,63 @@ passed `cargo fmt`, clippy and `cargo test` (428 unit tests), and CI ran on each
   a new detection gets a default there without a compile error.
 - Dependabot titles start with an uppercase `Bump`, which the new title check rejects; it is not
   required, so the title is edited before merging.
+
+## Later the same day: the model's answer is redacted
+
+Request: implement [0022. Pass the model's answer through the pattern redaction rules before it is
+written anywhere, and redact the query of an HTTP request line](../adr/0022-redact-the-answer.md),
+with its corpus measured once.
+
+### What was done
+
+- `Redactor::answer` runs the twelve pattern rules of `ANSWER_RULES` (every rule of the request
+  but `R002`, without the neutralization of placeholders) on the summary, the cause and each step,
+  after validation and before both restores; the dedup entry, the log, the Event, the history and
+  the notification all derive from the redacted text. Three details exist only on the answer, so
+  that echoes of kausa's own output pass unchanged and uncounted. The values replaced are counted
+  in `kausa_answer_redactions_total{rule}` and the `answer_redactions` field of the `explanation`
+  log line; `kausa_redactions_total`'s help text now says it counts requests.
+- `R014` also redacts the query and fragment of an HTTP request line without a scheme, on both
+  sides.
+- The kind test injects a step with an address, a URL with a query and a host under `.internal`
+  into the fake model's answer and fails if any of them reaches an Event note, an Explanation,
+  the webhook's log or kausa's `explanation` lines. The `redact` fuzz target also runs the answer
+  pass and both restores; `fuzz/seeds/` holds seed corpora for `redact` and `validate`, zipped by
+  `.clusterfuzzlite/build.sh`.
+- The injection corpus (`tests/bench/injection-corpus.yaml`, thirteen cases) was measured once with
+  `qwen3:0.6b` on a local Ollama, v0.4.1 against this change, in a throwaway kind cluster deleted
+  afterwards ([Prompt injection, measured](../research/2026-11-02-prompt-injection-measured.md)).
+  No injected value reached either build's answers, so the pass replaced nothing, benign controls
+  included; the model copied a forged cause and obeyed a demanded `high` confidence in both. The
+  request-line query left the request.
+- The measurement script first ran kausa on both namespaces at once: their 23 incidents overflowed
+  the queue of 16, seven were dropped and never queued again, and the run timed out. It now runs
+  kausa once per namespace. The template case's indicator now matches any forged text, since the
+  model copied the forged cause, not the forged summary.
+- The rules reference, the command line and metrics, the data sent to the provider and in
+  notifications, the Explanation resource, the security policy, both architecture pages, the
+  how-to for a new rule and the changelog describe the answer pass; 0022 has an `Update` with the
+  numbers.
+
+### Decisions
+
+- Everything as accepted in 0022. The team called no hosted provider; the maintainer's side ran
+  `gemini-3.5-flash-lite` afterwards with the same script and `KAUSA_API_KEY`, on the change of
+  0022 only: it followed none of the thirteen injections, and the answer pass replaced nothing.
+
+### Hypotheses
+
+- Supported once: `temperature: 0` made Ollama repeat its answer for the same request (21 of 22
+  answers identical across the two builds; the other had a different request).
+- Not supported by `qwen3:0.6b`: models assemble injected pieces often enough for the pass to
+  matter (it joined none), nor by `gemini-3.5-flash-lite`, which followed no injection at all.
+- Open: ClusterFuzzLite unpacks `$OUT/<target>_seed_corpus.zip` and its builder has `zip`; the
+  first `cflite.yml` run on the pull request settles it.
+
+### Follow-ups
+
+- `URL_HOST` in any case (`R013`), and bare hosts under unlisted suffixes.
+- The loopback exemption on answers, if a benign answer loses `0.0.0.0` or `127.0.0.1`.
+- An example alert on `kausa_answer_redactions_total`, once the benign side shows which rules
+  stay quiet.
+- Check in the first `cflite.yml` log that the `redact` and `validate` seed corpora were unpacked.

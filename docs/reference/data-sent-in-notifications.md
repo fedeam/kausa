@@ -79,7 +79,7 @@ order; their order carries no meaning.
 | `object` | The incident's top-level owner, the object of the Event's `regarding`: `apiVersion`, `kind`, and its real `namespace` and `name`. No UID |
 | `fingerprint` | The incident fingerprint, 16 hexadecimal digits, the one in kausa's `incident` log line and in the Event's name |
 | `first_seen` | When the failure was first seen, RFC 3339 in UTC, the same string as in the `incident` log line |
-| `explanation` | The model's `summary`, `cause`, `steps` (zero to five) and `confidence` (`low`, `medium` or `high`), validated and cleaned as for the Event, with only the namespace's and the object's names mapped back ([Names](#names)) |
+| `explanation` | The model's `summary`, `cause`, `steps` (zero to five) and `confidence` (`low`, `medium` or `high`), validated, cleaned and passed through the pattern redaction rules `R003`–`R014` as for the Event ([On the model's answer](rules.md#on-the-models-answer)), with only the namespace's and the object's names mapped back ([Names](#names)) |
 
 Nothing else is in the body.
 
@@ -156,7 +156,8 @@ notification maps back only two, through `Redactor::restore_only`:
 | Pods, containers, nodes, service accounts (`pod-1`, `container-1`, `node-1`, `serviceaccount-1`) | Stay placeholders |
 | Images from private registries (`registry-1/image-1:tag`) | Stay placeholders |
 | Images from public registries and Docker Hub | As the model wrote them: they were never placeholders |
-| Values that redaction removed (`<redacted:ip>`, …) | Stay redacted |
+| Values that redaction removed (`<redacted:ip>`, …), from the context or from the model's answer | Stay redacted |
+| Hosts `R013` replaced (`host-1`), in the context or in the answer | Stay placeholders: never mapped back |
 
 A placeholder the model capitalized (`Deployment-1`) is matched as `restore` matches it. A
 container that has the owner's name is the same placeholder and so shows the owner's real name.
@@ -175,7 +176,10 @@ node finds them in the Event or in kausa's log.
 "Never logs" means that no field holds a log line. The explanation is the model's text, which can
 repeat the redacted context the model was given (log and event text, probe paths, label keys), up
 to the explanation's caps (2,400 characters in all), whether the model is verbose or injected text
-asks it to. kausa cannot tell a quote from a summary. The kind test checks that no body carries a log line of the requests, but
+asks it to. kausa cannot tell a quote from a summary. Since v0.5 the answer passes the pattern
+redaction rules before any of it is written, so a value they recognize (an address, a token, a
+URL's query, a host outside the allowlist) is redacted even when the model writes it out of the
+context or invents it; text they do not recognize, such as a command, is posted as written. The kind test checks that no body carries a log line of the requests, but
 its fake model never echoes its input, so it cannot catch a model that does.
 
 ## Compatibility

@@ -1,0 +1,1 @@
+{"summary": "The login fails", "cause": "deployment-1 in namespace-1 crashes: the login fails", "steps": ["log in at HTTPS://ZQ7CANARY.INTERNAL/LOGIN?SESSION=1"], "confidence": "medium"}

@@ -27,6 +27,12 @@
 # workload, what no body may hold, the bearer token, the counters, the started line, and that
 # kausa's log holds neither token. The dryRun=true upgrade turns notifications off.
 #
+# The fake endpoint's answer carries an injected step with a fake address, query token and host
+# (docs/adr/0022-redact-the-answer.md). Both check that every Explanation and notification holds
+# it redacted, that none of those values reached an Event note, an Explanation entry, a
+# notification or an explanation log line, and that kausa_answer_redactions_total counts R004,
+# R013 and R014 and never R002.
+#
 # Both watch Deployments (docs/adr/0018-stuck-rollouts.md): stalled, held by a scheduling gate, is
 # explained by D014 alone, and the request for it carries only the replica counts; crasher and
 # refused also pass their progress deadline, and before the first restart (after one, refused's
@@ -425,13 +431,14 @@ restart_kausa() {
 # Checks the Explanation of each Explained Event about $1 (kind) $2 (name) in TARGET, with the
 # events, the Explanations and kausa's log in WORK: named kausa.<fingerprint> after the Event, its
 # spec {$3, $4 $1 $2} cross-checked with the incident kausa logged under that fingerprint, its
-# newest entry the fake endpoint's answer with the namespace mapped back, starting the Event's
-# note, and every field kausa writes read back (none pruned). Prints the Explanations' names.
+# newest entry the fake endpoint's answer with the namespace mapped back and the injected step
+# redacted, starting the Event's note, and every field kausa writes read back (none pruned). Prints
+# the Explanations' names.
 check_explanations() {
   python3 -c '
 import json, re, sys
 sys.path.insert(0, "tests/e2e")
-from fake_endpoint import ANSWER
+from fake_endpoint import ANSWER, REDACTED_STEP
 kind, name, rule, api_version, target, work = sys.argv[1:7]
 
 def fail(message):
@@ -460,8 +467,8 @@ if not explained:
     fail("no Explained Event")
 spec = {"rule": rule, "target": {"apiVersion": api_version, "kind": kind, "name": name}}
 summary = ANSWER["summary"].replace("namespace-1", target)
-answer = {"summary": summary, "cause": ANSWER["cause"], "steps": ANSWER["steps"],
-          "confidence": ANSWER["confidence"], "model": "fake"}
+answer = {"summary": summary, "cause": ANSWER["cause"], "confidence": ANSWER["confidence"],
+          "model": "fake"}
 names = set()
 for event in explained:
     match = re.match(r"kausa\.([0-9a-f]{16})\.", event["metadata"]["name"])
@@ -497,6 +504,12 @@ for event in explained:
         if first[key] != value:
             fail("its newest entry has %s %s, not %s" % (key, json.dumps(first[key]),
                                                          json.dumps(value)))
+    # The first step as sent, the second redacted (docs/adr/0022-redact-the-answer.md); the
+    # message names no value, in case one reached the entry.
+    steps = first["steps"]
+    if (not isinstance(steps, list) or len(steps) != 2 or steps[0] != ANSWER["steps"][0]
+            or not isinstance(steps[1], str) or not re.fullmatch(REDACTED_STEP, steps[1])):
+        fail("its newest entry does not have the answer'"'"'s steps, the second one redacted")
     if target not in first["summary"]:
         fail("the summary does not name " + target)
     if not event["note"].startswith(first["summary"] + " "):
@@ -525,6 +538,44 @@ explanations_of() {
     sleep 3
   done
   history_names=$(check_explanations "$@") || exit 1
+}
+# None of the values the fake endpoint injected in its answer reached a sink
+# (docs/adr/0022-redact-the-answer.md): kausa's Event notes in TARGET, the entries of the
+# Explanations in TARGET, the bodies the webhook received and kausa's explanation log lines, from
+# events.json, explanations.json, hooks.jsonl and kausa.log in WORK. Each sink must hold something
+# to look at. The messages name the sink, never the value.
+no_injected_values() {
+  python3 -c '
+import json, sys
+sys.path.insert(0, "tests/e2e")
+from fake_endpoint import INJECTED
+work = sys.argv[1]
+
+def fail(message):
+    sys.exit("FAIL: " + message)
+
+notes = [e.get("note") or "" for e in json.load(open(work + "/events.json"))["items"]
+         if e.get("reportingController") == "kausa"]
+entries = [json.dumps(entry) for item in json.load(open(work + "/explanations.json"))["items"]
+           for entry in (item.get("status") or {}).get("entries") or []]
+hooks = [line for line in open(work + "/hooks.jsonl") if line.strip()]
+lines = []
+for line in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "explanation":
+        lines.append(line)
+for sink, texts in (("an Event note", notes), ("an Explanation entry", entries),
+                    ("a notification", hooks), ("an explanation log line", lines)):
+    if not texts:
+        fail("no %s to look for the injected values in" % sink)
+    if any(value in text for value in INJECTED for text in texts):
+        fail("an injected value reached " + sink)
+print("the injected values: in none of %d Event notes, %d Explanation entries, %d notifications "
+      "and %d explanation log lines" % (len(notes), len(entries), len(hooks), len(lines)))
+' "$WORK"
 }
 # The Role and the RoleBinding named after the release exist in namespace $1.
 has_roles() {
@@ -1080,18 +1131,22 @@ for _ in $(seq 1 60); do
 done
 [ "$answered" -ge 5 ] || fail "the webhook answered $answered notifications 200 in 120 seconds"
 k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
+k -n "$TARGET" get "$EXPLANATIONS" -o json > "$WORK/explanations.json"
 kausa_log
+# First, so that no later message can print an injected value.
+no_injected_values
 # What reached the webhook: the first POST got 503, every one carried the bearer token and went to
 # the URL's path, and each body is a v1 notification with only the documented fields. Exactly one
 # answered 200 for each failing workload, with the real namespace, the rule, and the fingerprint
-# and first_seen of the incident kausa logged and explained. No body holds the context sent to the
-# model, a log-tail line the model requests carried, a placeholder or the unlisted namespace, and
-# requests.jsonl holds no notification. The started line names the format and the host, and
-# kausa's log holds neither token.
+# and first_seen of the incident kausa logged and explained, and the fake endpoint's answer with
+# its second step redacted. No body holds the context sent to the model, a log-tail line the model
+# requests carried, a placeholder other than R013's host-N (never mapped back, by design) or the
+# unlisted namespace, and requests.jsonl holds no notification. The started line names the format
+# and the host, and kausa's log holds neither token.
 python3 -c '
 import json, re, sys
 sys.path.insert(0, "tests/e2e")
-from fake_endpoint import ANSWER
+from fake_endpoint import ANSWER, REDACTED_STEP
 target, other, work, gateway, path, bearer, bot = sys.argv[1:8]
 
 def fail(message):
@@ -1112,6 +1167,9 @@ SCHEMA = "kausa.fedeam.com/notification/v1"
 FIELDS = ["detection", "explanation", "fingerprint", "first_seen", "kausa_version", "object",
           "schema", "type"]
 PLACEHOLDER = re.compile(r"\b[a-z]+-[0-9]+\b", re.IGNORECASE)
+# The placeholders of R013, the only ones a notification may hold (src/redact.rs never restores
+# them).
+HOST = re.compile(r"host-[0-9]+")
 hooks = [json.loads(line) for line in open(work + "/hooks.jsonl")]
 if not hooks or hooks[0]["status"] != 503:
     fail("the first POST to the webhook was not answered 503")
@@ -1189,15 +1247,14 @@ for hook in hooks:
         if any(word in s for s in every):
             fail("a notification holds %s" % json.dumps(word))
     for s in every:
-        placeholder = PLACEHOLDER.search(s)
-        if placeholder:
-            fail("a notification holds the placeholder " + placeholder.group())
+        for placeholder in PLACEHOLDER.finditer(s):
+            if not HOST.fullmatch(placeholder.group()):
+                fail("a notification holds the placeholder " + placeholder.group())
     if hook["status"] == 200:
         bodies.append(body)
 
 explanation = {"summary": ANSWER["summary"].replace("namespace-1", target),
-               "cause": ANSWER["cause"], "steps": ANSWER["steps"],
-               "confidence": ANSWER["confidence"]}
+               "cause": ANSWER["cause"], "confidence": ANSWER["confidence"]}
 for body in bodies:
     if body["object"]["namespace"] != target:
         fail("a notification about namespace " + body["object"]["namespace"])
@@ -1228,8 +1285,13 @@ for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1
             kind, name, body["first_seen"], incident.get("first_seen")))
     if body["fingerprint"] not in explained.get((kind, name), set()):
         fail("%s %s: no Explained Event with fingerprint %s" % (kind, name, body["fingerprint"]))
-    if body["explanation"] != explanation:
+    if {k: v for k, v in body["explanation"].items() if k != "steps"} != explanation:
         fail("%s %s: explanation %s" % (kind, name, json.dumps(body["explanation"])))
+    # The first step as sent, the second redacted (docs/adr/0022-redact-the-answer.md).
+    steps = body["explanation"]["steps"]
+    if (not isinstance(steps, list) or len(steps) != 2 or steps[0] != ANSWER["steps"][0]
+            or not isinstance(steps[1], str) or not re.fullmatch(REDACTED_STEP, steps[1])):
+        fail("%s %s: the steps are not the answer'"'"'s, the second one redacted" % (kind, name))
 print("notifications: %d POSTs, the first answered 503; one v1 body each for crasher, "
       "failing-job, stranded and stalled" % len(hooks))
 ' "$TARGET" "$OTHER" "$WORK" "$gateway" "$HOOK_PATH" "$FAKE_BEARER" "$FAKE_BOT"
@@ -1377,6 +1439,16 @@ fi
 metrics=$(kausa_metrics)
 echo "$metrics" | grep -E '^kausa_events_written_total\{reason="Explained"\} [1-9]' >/dev/null ||
   fail "kausa_events_written_total does not count the Events"
+# The answer's injected step (docs/adr/0022-redact-the-answer.md): an address, a query and a host
+# replaced in the answers, and R002 never counted there.
+for rule in R004 R013 R014; do
+  echo "$metrics" | awk -v series="kausa_answer_redactions_total{rule=\"$rule\"}" \
+    '$1 == series && $2 >= 1 { n++ } END { exit !n }' ||
+    fail "kausa_answer_redactions_total does not count $rule"
+done
+if echo "$metrics" | grep -E '^kausa_answer_redactions_total\{([^}]*,)?rule="R002"' >/dev/null; then
+  fail "kausa_answer_redactions_total counts R002"
+fi
 echo "$metrics" | grep -E '^kausa_history_writes_total\{outcome="created"\} [1-9]' >/dev/null ||
   fail "kausa_history_writes_total does not count the Explanations created"
 echo "$metrics" |

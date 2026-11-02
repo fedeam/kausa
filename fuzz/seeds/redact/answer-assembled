@@ -1,0 +1,5 @@
+shop
+api
+open http://192.0.2.7:8080/fix?token=not-a-real-token on zq7canary.internal
+use ghp_000000000000000000000000000000000000 and mail root@zq7canary.internal
+or https://zq7canary.test/help#now and [2001:db8::7]:443

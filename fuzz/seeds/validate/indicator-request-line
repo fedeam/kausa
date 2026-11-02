@@ -1,0 +1,1 @@
+{"summary": "Orders for zq7canary-acme fail", "cause": "deployment-1 in namespace-1 crashes: orders for zq7canary-acme fail", "steps": ["GET /orders?customer=zq7canary-acme HTTP/1.1 returns 500"], "confidence": "medium"}

@@ -1,0 +1,1 @@
+{"summary": "The status page is down", "cause": "deployment-1 in namespace-1 crashes: the status page is down", "steps": ["open https://zq7canary.internal/status"], "confidence": "medium"}
