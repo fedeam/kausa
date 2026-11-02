@@ -13,10 +13,10 @@ status it got, its path, its Authorization header and its body to the hook log.
 
 With --time-log, every line appended to the request log is matched by one line in the time log:
 the wall-clock second the request was received (time.time(), three decimals), comparable with the
-Pods' status.startTime because kind's nodes share the host clock. Both files are appended under
-one lock, so they always have the same number of lines, in the same order, and the request log's
-line count still equals the model calls (docs/adr/0021-refill-the-call-budget.md). Standard
-library only.
+ts of kausa's log lines because kind's nodes share the host clock (on Docker Desktop, a VM's clock
+kept close to it). Both files are appended under one lock, so they always have the same number of
+lines, in the same order, and the request log's line count still equals the model calls
+(docs/adr/0021-refill-the-call-budget.md). Standard library only.
 """
 
 import argparse

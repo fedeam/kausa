@@ -170,3 +170,33 @@ Hypotheses still open, none checked here:
   depends on it.
 - H5: the `pod` label in the example alert `KausaDailyCallBudgetSpent` depends on the scrape
   configuration.
+
+## Later the same day: the budget case counted a call in the wrong life
+
+The kind job of the cluster scope failed in the budget case: `life 2: request 5 came 11.836 s
+after its start; at most 4 may`.
+
+- **Cause: the test, not the bucket.** A life started at its Pod's `status.startTime`, which the
+  API gives in whole seconds and the test cut down, so the new life began up to a second before
+  the replacement Pod existed, and could begin before the old one was deleted. The old process
+  stops about 50 ms after the delete (SIGTERM, then `stopped`), so its last call, if it came in
+  that second, was counted in the new life, on top of the new process's own burst.
+- **Reproduced locally**, in kind on Docker Desktop with the case's settings and the old
+  attribution: life 7's fifth request came 16.690 s after its start, where 4 may. The old life had
+  called 0.096 s after the new Pod's start as cut, 0.59 s before the delete. Over 9 deletions,
+  the old process stopped 0.04 to 0.74 s after the next Pod's start as cut, and 0.41 to 0.71 s
+  before the next process logged `started`. Counted from each process's `started` line, no life
+  went over the bound. CI kept no request times, so that its failure had this cause is inferred
+  from the reproduction, not seen.
+- **The fix** (`tests/e2e/run.sh`): each life is counted from its process's `started` line,
+  logged before the process builds its budget. The log of every life but the last is followed
+  until the process ends, and the check fails if a life has no `stopped` line or stopped after
+  the next one started: H2 above is now checked, not assumed. The 1 s margin stays, now for the
+  node's clock against the host's (on Docker Desktop, a VM's). The bound is stricter than before,
+  since a process starts after its Pod.
+- **The code follows 0021:** credit accrues from the process start whatever the phase, so a life
+  may start 4 calls at once 15 s in (a credit of 3 + 1.5); the test allows `3 + floor(r / 10 s)`.
+- **Checks:** `cargo fmt`, clippy with `-D warnings`, `cargo test`, `bash -n` and `shellcheck` pass.
+  The kind test of the cluster scope passed locally on Docker Desktop with the fix: 88 requests in
+  610 s over 10 starts, at most 90, and every process logged `stopped` 0.41 to 0.53 s before the
+  next one logged `started`.

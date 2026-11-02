@@ -46,8 +46,9 @@
 # The runs install with budget.callsPerHour=3600 (docs/adr/0021-refill-the-call-budget.md): after a
 # start burst of 3, one call a second. Before the dryRun=true upgrade, the cluster scope checks the
 # budget across restarts: callsPerHour=360 and settleSeconds=5, 20 crash-looping Deployments in
-# e2e-budget, and kausa's Pod deleted every 60 s for 10 minutes. The fake endpoint's receive times
-# stay within 3 calls per start plus one per 10 s, in total and in each life; the queue gauge rises
+# e2e-budget, and kausa's Pod deleted every 60 s for 10 minutes. Each life runs from its process's
+# started line to its stopped line, and no two overlap. The fake endpoint's receive times stay
+# within 3 calls per start plus one per 10 s, in total and in each life; the queue gauge rises
 # above 0, the hour gauge reads at most the burst right after a start, a life logs explanations
 # waiting, and every explanation dropped line says whether it was waiting for the budget.
 #
@@ -2009,7 +2010,10 @@ spec:
 EOF
     done
   }
-  # Pod $1's status.startTime, in whole seconds since the epoch (empty until it has one).
+  # Pod $1's status.startTime, in whole seconds since the epoch (empty until it has one). It only
+  # paces the lives. The check counts each life from its process's started line instead: cut to
+  # whole seconds, the replacement's startTime can come before the old Pod's deletion, and a call
+  # of the old process after it would be counted in the new life.
   pod_started() {
     k -n "$NAMESPACE" get pod "$1" -o json | python3 -c '
 import calendar, json, sys, time
@@ -2028,20 +2032,24 @@ if start:
       END { print life, at, (hour == "" ? "-" : hour), (queue == "" ? "-" : queue) }
     ' >> "$WORK/budget/scrapes.txt"
   }
-  # The assertions, on the files in $2 (lives.txt: "pod start restarts" per life, in order;
-  # scrapes.txt; life-N.log) and the fake endpoint's time log $1, with $3 the end of the last life
-  # and $4 and $5 the burst and the interval in seconds. Integer milliseconds throughout, so that
-  # the bounds are exact:
+  # The assertions, on the files in $2 (lives.txt: "pod restarts" per life, in order; scrapes.txt;
+  # life-N.log, kausa's log of life N) and the fake endpoint's time log $1, with $3 the end of the
+  # last life and $4 and $5 the burst and the interval in seconds. A life starts at its process's
+  # started line, logged before the process builds its budget, and ends at its stopped line (the
+  # last life at $3). Integer milliseconds throughout, so that the bounds are exact:
+  # 0. every life but the last logged stopped, before the next one logged started: the lives do not
+  #    overlap, so each request comes from the life it is counted in;
   # 1. requests in [T0, end] <= floor(B*K + (end - T0) / I), T0 the first start, K the starts;
   # 2. a request belongs to the life with the latest start at or before it, and the j-th of a life,
-  #    r after its start, has j <= B + floor((r + 1 s) / I) (1 s for startTime's whole seconds);
+  #    r after its start, has j <= B + floor((r + 1 s) / I) (1 s for the node's clock, which stamps
+  #    the log, against the host's, which stamps the requests: on Docker Desktop, a VM's);
   # 3. kausa_explanation_queue_length was above 0 in some scrape;
   # 4. the first scrape of each life has window="hour" <= B + floor((t - start + 1 s) / I);
   # 5. some life logged explanations waiting;
   # 6. every explanation dropped line has a boolean waiting_for_budget.
   budget_check() {
     python3 -I - "$@" <<'EOF'
-import bisect, glob, json, sys
+import bisect, calendar, glob, json, sys, time
 
 times_path, folder, end_text, burst, interval = sys.argv[1:6]
 burst, step = int(burst), int(interval) * 1000
@@ -2056,17 +2064,49 @@ def ms(text):
     return int(whole) * 1000 + int((fraction + "000")[:3])
 
 
-lives = []
-for line in open(folder + "/lives.txt"):
-    name, start, restarts = line.split()
-    lives.append((ms(start), int(restarts)))
-if not lives:
-    fail("no start recorded")
-starts = [start for start, _ in lives]
-if any(b <= a for a, b in zip(starts, starts[1:])):
-    fail("the recorded starts do not increase")
-if any(restarts for _, restarts in lives):
+def logged(text, up):
+    """kausa's ts (RFC 3339 in UTC, up to nine decimals) in milliseconds, rounded up if up."""
+    whole, _, fraction = text.rstrip("Z").partition(".")
+    fraction = fraction.ljust(9, "0")
+    seconds = calendar.timegm(time.strptime(whole, "%Y-%m-%dT%H:%M:%S"))
+    return seconds * 1000 + int(fraction[:3]) + (1 if up and int(fraction[3:]) else 0)
+
+
+def life_log(path):
+    """The started and stopped times of the log at path (None for a line it lacks)."""
+    started = stopped = None
+    for line in open(path):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("msg") == "started" and started is None:
+            started = logged(entry["ts"], False)
+        if entry.get("msg") == "stopped":
+            stopped = logged(entry["ts"], True)
+    return started, stopped
+
+
+restarts = [int(line.split()[1]) for line in open(folder + "/lives.txt") if line.strip()]
+if not restarts:
+    fail("no life recorded")
+if any(restarts):
     fail("kausa's container restarted within a life, a start this test does not count")
+starts, stops = [], []
+for life in range(1, len(restarts) + 1):
+    started, stopped = life_log("%s/life-%d.log" % (folder, life))
+    if started is None:
+        fail("life %d's log has no started line" % life)
+    starts.append(started)
+    stops.append(stopped)
+for life in range(1, len(starts)):
+    if stops[life - 1] is None:
+        fail("life %d's log has no stopped line: kausa did not stop on SIGTERM" % life)
+    if stops[life - 1] > starts[life]:
+        fail("life %d stopped %.3f s after life %d started: the lives overlap"
+             % (life, (stops[life - 1] - starts[life]) / 1000, life + 1))
 first, end, starts_counted = starts[0], ms(end_text), len(starts)
 
 requests = sorted(ms(line) for line in open(times_path) if line.strip())
@@ -2144,16 +2184,34 @@ EOF
       budget_scrape "$life" "$life_pod"
       sleep 2
     done
-    # The life's log and restarts, read before its Pod goes.
-    kausa_log "pod/$life_pod"
-    mv "$WORK/kausa.log" "$WORK/budget/life-$life.log"
+    # The life's restarts, read before its Pod goes.
     restarts=$(k -n "$NAMESPACE" get pod "$life_pod" \
       -o jsonpath='{.status.containerStatuses[0].restartCount}')
-    echo "$life_pod $start ${restarts:-0}" >> "$WORK/budget/lives.txt"
-    [ "$life" -lt "$BUDGET_LIVES" ] || break
-    # kubectl waits until the Pod is gone, and kausa stops on SIGTERM, so lives do not overlap
-    # (hypothesis H2 of the decision: the new Pod may be created while the old one terminates).
+    echo "$life_pod ${restarts:-0}" >> "$WORK/budget/lives.txt"
+    if [ "$life" -ge "$BUDGET_LIVES" ]; then
+      kausa_log "pod/$life_pod"
+      mv "$WORK/kausa.log" "$WORK/budget/life-$life.log"
+      break
+    fi
+    # The life's log, followed until its process ends, so that it holds the stopped line. The
+    # ReplicaSet creates the next Pod as soon as this one is deleted, before this process stops:
+    # the check fails if a life stopped after the next one started, since the decision's bound
+    # rests on terms not overlapping.
+    log_file=$WORK/budget/life-$life.log
+    k -n "$NAMESPACE" logs -f "pod/$life_pod" > "$log_file" &
+    follower=$!
+    for _ in $(seq 1 50); do
+      grep -q '"msg":"started"' "$log_file" && break
+      sleep 0.2
+    done
     k -n "$NAMESPACE" delete pod "$life_pod" --timeout 120s >/dev/null
+    # The Pod is gone, so its container is too: the stream ends at once; 10 s at most.
+    for _ in $(seq 1 50); do
+      kill -0 "$follower" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill "$follower" 2>/dev/null || true
+    wait "$follower" || true
     next_pod=""
     for _ in $(seq 1 60); do
       next_pod=$(kausa_pods | grep -vxF -- "$life_pod" | head -n 1 || true)
