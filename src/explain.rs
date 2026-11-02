@@ -16,7 +16,7 @@ use kube::api::LogParams;
 use kube::{Api, Client};
 use serde_json::{Value, json};
 
-use crate::budget::{Budget, Dedup};
+use crate::budget::{Allowance, Budget, Dedup, HOURLY_SPENT};
 use crate::context::{self, Gathered};
 use crate::detect::Detection;
 use crate::events::{Emitted, Outcome, Writer};
@@ -125,9 +125,10 @@ pub fn reads_logs(detection: Detection) -> bool {
 }
 
 /// Explains one incident and logs the outcome: from the deduplication cache when the same failure
-/// was explained recently; otherwise reads the log tail, builds and fits the request, and logs it
-/// (dry-run) or sends it within the budget, validates the answer and passes it through the pattern
-/// redaction rules (all but `R002`) before any copy of it is written. Explanations and skipped
+/// was explained recently; otherwise, unless the budget refuses the call (a skip that reads no
+/// log), reads the log tail, builds and fits the request, and logs it (dry-run) or sends it within
+/// the budget, validates the answer and passes it through the pattern redaction rules (all but
+/// `R002`) before any copy of it is written. Explanations and skipped
 /// explanations are written as Events when that is on, and explanations, fresh or cached, into
 /// the history with `--history`. With notifications on, an explanation is queued for the webhook
 /// once its Event and history are written: a new one always, a cached one while its notification
@@ -187,6 +188,16 @@ pub async fn run(
             }
             return Ok(None);
         }
+    }
+
+    // A job the budget refuses now is skipped before its log is read. The queue in `run.rs` lets
+    // a job start while the budget waits only when its fingerprint is fresh in the cache; one whose
+    // entry expires between that check and the `get` above (microseconds) ends here, as a budget
+    // skip.
+    if let Some((reason, why)) = refusal(settings, shared, std::time::Instant::now()) {
+        return skip(settings, shared, &gathered, about, reason, why)
+            .await
+            .map(|()| None);
     }
 
     if settings.logs
@@ -429,6 +440,22 @@ fn has_scheduling_or_path(pods: &[crate::record::PodRecord]) -> bool {
 /// for English and JSON. Only a cap; the endpoint's own count is in the log and the metrics.
 fn estimate_tokens(body: &Value) -> usize {
     body.to_string().len().div_ceil(4)
+}
+
+/// Why a call may not start at `now`, as the skip counter's reason and the logged message, or
+/// `None` when it may (always in dry-run, which makes no call). It changes nothing: `run` still
+/// takes the call from the budget, which stays the authority.
+fn refusal(
+    settings: &Settings,
+    shared: &Shared<'_>,
+    now: std::time::Instant,
+) -> Option<(&'static str, &'static str)> {
+    settings.model.as_ref()?;
+    match shared.budget.borrow().check(now) {
+        Allowance::Now => None,
+        Allowance::Wait { .. } => Some(("budget", HOURLY_SPENT)),
+        Allowance::Never(why) => Some(("budget", why)),
+    }
 }
 
 async fn skip(
@@ -798,7 +825,11 @@ mod tests {
 
     fn shared_in<'a>(settings: &Settings, metrics: &'a Metrics, term: &'a Term) -> Shared<'a> {
         Shared {
-            budget: RefCell::new(Budget::new(settings.calls_per_hour, settings.calls_per_day)),
+            budget: RefCell::new(Budget::new(
+                settings.calls_per_hour,
+                settings.calls_per_day,
+                std::time::Instant::now(),
+            )),
             dedup: RefCell::new(Dedup::new(settings.dedup_ttl, 1024)),
             writer: None,
             history: None,
@@ -1558,6 +1589,175 @@ mod tests {
                 .render()
                 .contains("kausa_model_calls_total{outcome=\"ok\"} 1\n")
         );
+    }
+
+    // Acceptance tests for the refill budget (docs/adr/0021-refill-the-call-budget.md), written
+    // before the code. They use `refusal(settings, shared, now) -> Option<(&'static str,
+    // &'static str)>` (the counter's reason and the message; `None` without a model) and the
+    // budget API of budget.rs (`Budget::new(per_hour, per_day, now)`, a start burst of 3).
+    // `run` asks it after the cache and before the log read, so a job the budget refuses is
+    // skipped with reason `budget` and reads no log.
+
+    const HOURLY: &str = "the hourly call budget is spent";
+    const DAILY: &str = "the daily call budget is spent";
+
+    fn log_source() -> LogSource {
+        LogSource {
+            namespace: "shop".into(),
+            pod: "web-7d9c8b6f4d-2xkqp".into(),
+            container: "server".into(),
+            previous: true,
+        }
+    }
+
+    #[test]
+    fn refusal_says_why_the_budget_refuses_a_call() {
+        let refusal_of = |settings: &Settings, takes: usize| {
+            let metrics = Metrics::default();
+            let shared = shared(settings, &metrics);
+            let now = std::time::Instant::now();
+            for _ in 0..takes {
+                shared
+                    .budget
+                    .borrow_mut()
+                    .take(now)
+                    .expect("a call of the budget");
+            }
+            refusal(settings, &shared, now)
+        };
+        let with_caps = |model: bool, per_hour: usize, per_day: usize| {
+            let mut settings = settings(model.then(nowhere), false, per_hour);
+            settings.calls_per_day = per_day;
+            settings
+        };
+        // Without a model (dry-run) nothing is refused, whatever the caps.
+        assert_eq!(refusal_of(&with_caps(false, 0, 0), 0), None);
+        assert_eq!(refusal_of(&with_caps(false, 30, 200), 0), None);
+        // A call may start.
+        assert_eq!(refusal_of(&with_caps(true, 30, 200), 0), None);
+        assert_eq!(refusal_of(&with_caps(true, 30, 200), 2), None);
+        // The start burst is spent: the bucket waits, and the message is the hourly one.
+        assert_eq!(
+            refusal_of(&with_caps(true, 30, 200), 3),
+            Some(("budget", HOURLY))
+        );
+        // Caps of 0 and a spent day, with today's messages.
+        assert_eq!(
+            refusal_of(&with_caps(true, 0, 200), 0),
+            Some(("budget", HOURLY))
+        );
+        assert_eq!(
+            refusal_of(&with_caps(true, 30, 0), 0),
+            Some(("budget", DAILY))
+        );
+        assert_eq!(
+            refusal_of(&with_caps(true, 30, 2), 2),
+            Some(("budget", DAILY))
+        );
+    }
+
+    #[test]
+    fn a_budget_skip_reads_no_log() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        // The daily cap is 0, or the start burst was spent at the same instant.
+        let mut day_spent = settings(Some(nowhere()), false, 30);
+        day_spent.calls_per_day = 0;
+        let burst_spent = settings(Some(nowhere()), false, 30);
+        for (case, mut settings, takes) in [("day", day_spent, 0), ("burst", burst_spent, 3)] {
+            settings.logs = true;
+            let (api, api_calls) = counted_api_server();
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            let now = std::time::Instant::now();
+            for _ in 0..takes {
+                shared
+                    .budget
+                    .borrow_mut()
+                    .take(now)
+                    .expect("a call of the burst");
+            }
+            let mut job = work();
+            job.log = Some(log_source());
+            let retry = runtime
+                .block_on(async { run(job, kube_client(&api), &settings, &shared).await })
+                .expect("the log");
+            assert!(retry.is_none(), "{case}: a retry was asked");
+            assert!(
+                api_calls.recv_timeout(Duration::from_millis(300)).is_err(),
+                "{case}: the log was read"
+            );
+            let text = metrics.render();
+            assert!(
+                text.contains("kausa_explanations_skipped_total{reason=\"budget\"} 1\n"),
+                "{case}: {text}"
+            );
+            assert!(
+                text.contains("kausa_model_calls_total 0\n"),
+                "{case}: {text}"
+            );
+        }
+        // The same job with a call left reads its log: the fake API server sees the read.
+        let mut settings = settings(Some(nowhere()), false, 30);
+        settings.logs = true;
+        let (api, api_calls) = counted_api_server();
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        let mut job = work();
+        job.log = Some(log_source());
+        runtime
+            .block_on(async { run(job, kube_client(&api), &settings, &shared).await })
+            .expect("the log");
+        let line = api_calls
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a log read");
+        assert!(line.starts_with("GET ") && line.contains("/log"), "{line}");
+    }
+
+    #[test]
+    fn a_cached_repeat_is_served_while_the_budget_refuses() {
+        // The start burst was spent at the same instant (the budget waits), or the daily cap is 0
+        // (it refuses for good). Either way the queue in `run.rs` hands a fresh cached job to the
+        // slot, and `run` serves it from the cache: no budget skip and no call.
+        let burst_spent = settings(Some(nowhere()), false, 30);
+        let mut day_spent = settings(Some(nowhere()), false, 30);
+        day_spent.calls_per_day = 0;
+        for (case, settings, takes) in [("burst", burst_spent, 3), ("day", day_spent, 0)] {
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            let now = std::time::Instant::now();
+            for _ in 0..takes {
+                shared
+                    .budget
+                    .borrow_mut()
+                    .take(now)
+                    .expect("a call of the burst");
+            }
+            assert!(
+                refusal(&settings, &shared, now).is_some(),
+                "{case}: the budget does not refuse"
+            );
+            shared
+                .dedup
+                .borrow_mut()
+                .put(FINGERPRINT, stored("full text"), None, now);
+            assert!(!explain(work(), &settings, &shared), "{case}: a retry");
+            let text = metrics.render();
+            assert!(
+                text.contains("kausa_explanations_cached_total 1\n"),
+                "{case}: {text}"
+            );
+            assert!(
+                text.contains("kausa_explanations_skipped_total 0\n"),
+                "{case}: {text}"
+            );
+            assert!(
+                text.contains("kausa_model_calls_total 0\n"),
+                "{case}: {text}"
+            );
+        }
     }
 
     // Acceptance tests for docs/adr/0022-redact-the-answer.md, written before the code. After the

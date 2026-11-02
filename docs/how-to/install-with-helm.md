@@ -143,9 +143,11 @@ add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md)).
   seconds. kausa has no setting for it; lower a Deployment's deadline to hear sooner, and a
   Deployment without one is never explained by `D014`.
 - **The first start explains every Deployment already past its deadline**, one window later,
-  within the call budget and the queue of 16 incidents waiting for an explanation (beyond it, the
-  oldest is dropped and counted in `kausa_explanations_dropped_total`); a restart does it again,
-  as for Pod failures. A stall already explained by a Pod rule or `D011` of the same Deployment
+  paced by the call budget: 3 at once, then one every `3600/budget.callsPerHour` seconds (120 at
+  the default), while the others wait in the queue of 16 incidents (beyond it, the oldest is
+  dropped and counted in `kausa_explanations_dropped_total`, or, while the queue waits for the
+  budget, skipped with an `ExplanationSkipped` Event); a restart does it again, as for Pod
+  failures. A stall already explained by a Pod rule or `D011` of the same Deployment
   gives no `D014`.
 
 ## Watch only some namespaces
@@ -188,8 +190,8 @@ Status as of 2026-10-29: v0.3.0 is the first release with this scope. The v0.2.0
    ```
 
 - **Changing the list or the scope** is a `helm upgrade`: Helm creates the Roles now listed and
-  deletes the others, and kausa's Pod is replaced, so its budget and deduplication cache start
-  over. `helm uninstall` removes every Role and RoleBinding.
+  deletes the others, and kausa's Pod is replaced, so its deduplication cache starts over and its
+  budget starts with 3 calls, then refills at the hourly rate. `helm uninstall` removes every Role and RoleBinding.
 - **Back to the whole cluster:** the list must be emptied too, and with `--reuse-values` only an
   explicit empty list does it: `--set rbac.scope=cluster --set-json 'rbac.namespaces=[]'`, or a
   values file with `scope: cluster` and `namespaces: []`. `--set rbac.namespaces=null` and `--set
@@ -350,6 +352,8 @@ What to expect:
 
 - **Each replica keeps its own call budget,** so while both run they can spend up to twice
   `budget.callsPerHour` and `budget.callsPerDay`; set the provider's own spending cap accordingly.
+  A takeover brings at most 3 calls at once, then the hourly rate, so a Lease that flips does not
+  refill the budget.
 - **A failover may explain an incident again.** The new leader does not have the old one's
   deduplication cache, so an incident that still fails is explained once more: one more call,
   Event (or series update), history entry and notification.
@@ -370,7 +374,25 @@ What to expect:
   <namespace>` for each listed namespace) lists kausa's Events, and `kubectl describe deployment -n <namespace> <name>` shows the explanation.
 - With the history on: `kubectl get explanations -A` lists one object per explained incident.
 - `kubectl get --raw /api/v1/namespaces/kausa/services/kausa-metrics:9090/proxy/metrics` shows
-  the counters.
+  the counters and the gauges.
+- To hear when the budget holds explanations back, two example alerts on the gauges of [Command
+  line and log format](../reference/command-line.md#metrics):
+
+  ```yaml
+  - alert: KausaDailyCallBudgetSpent
+    expr: kausa_budget_calls_remaining{window="day"} == 0 and on (pod) kausa_leader == 1
+    for: 10m
+  - alert: KausaExplanationsBehind
+    expr: min_over_time(kausa_explanation_queue_length[45m]) > 0
+  ```
+
+  The first fires when the acting replica has spent its daily cap; it keeps to the leader because
+  a former leader that spent its day still reads 0. It assumes your scrape configuration gives
+  each series a `pod` label (a hypothesis: adjust the `on (pod)` to your labels). The second fires
+  when incidents have waited for 45 minutes without the queue ever emptying, room for a full
+  queue to drain after an upgrade at the defaults (13 calls of 120 seconds, plus the settle
+  window); a standby and a replica that stepped down read 0. `window="hour"` at 0 is normal under
+  load and is not worth an alert.
 
 ## If something fails
 

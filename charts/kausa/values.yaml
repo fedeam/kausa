@@ -3,8 +3,10 @@
 
 # 1 runs kausa alone. 2 adds a standby: only the replica that holds the Lease <fullname>-leader
 # watches, explains and writes, and the other takes over if it stops
-# (docs/adr/0019-high-availability.md). Each replica keeps its own call budget, so two can spend up
-# to twice budget.callsPerHour and budget.callsPerDay while both run. Scale only through this value.
+# (docs/adr/0019-high-availability.md). Each replica keeps its own call budget: a takeover starts
+# with at most 3 calls, then the hourly rate (docs/adr/0021-refill-the-call-budget.md), and two
+# replicas can still spend up to twice budget.callsPerHour and budget.callsPerDay while both run.
+# Scale only through this value.
 replicaCount: 1
 
 image:
@@ -95,6 +97,11 @@ notifications:
 settleSeconds: 60
 # The call and token budget, and how long an explanation is reused for a repeated incident.
 budget:
+  # Calls in any hour, per process. Each start (an install, upgrade, restart or takeover) allows a
+  # start burst of 3 (fewer if callsPerHour is lower), then the budget refills one call every
+  # 3600/callsPerHour seconds, up to callsPerHour; incidents wait in the queue for their call. The
+  # daily cap holds per process: for it to hold across restarts (up to the bursts), set
+  # callsPerHour <= callsPerDay / 24.
   callsPerHour: 30
   callsPerDay: 200
   maxInputTokens: 6000

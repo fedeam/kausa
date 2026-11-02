@@ -96,16 +96,31 @@ pub const COUNTERS: [(&str, &str); 20] = [
 ];
 
 /// The gauges kausa exports, with their help text, rendered after the counters
-/// (docs/adr/0019-high-availability.md).
-pub const GAUGES: [(&str, &str); 1] = [(
-    "kausa_leader",
-    "1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a \
-     standby.",
-)];
+/// (docs/adr/0019-high-availability.md). `kausa_leader` is always rendered; the budget and queue
+/// gauges (docs/adr/0021-refill-the-call-budget.md) only once a series was set, so that a process
+/// that has no budget or no queue shows no 0 an alert could fire on.
+pub const GAUGES: [(&str, &str); 3] = [
+    (
+        "kausa_leader",
+        "1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a \
+         standby.",
+    ),
+    (
+        "kausa_budget_calls_remaining",
+        "Model calls this process may start now, by window (hour: the refill bucket within the \
+         60-minute cap; day: the 24-hour cap).",
+    ),
+    (
+        "kausa_explanation_queue_length",
+        "Incidents waiting for an explanation (at most 16).",
+    ),
+];
 
 #[derive(Debug)]
 pub struct Metrics {
     counters: RefCell<BTreeMap<(&'static str, String), u64>>,
+    /// The series of every gauge but `kausa_leader`, by name and labels; set, never added to.
+    gauges: RefCell<BTreeMap<(&'static str, String), u64>>,
     /// Set once, never cleared (docs/adr/0013-namespaced-install-mode.md).
     ready: Cell<bool>,
     /// Whether this process acts: it holds the Lease, or runs without --leader-lease.
@@ -117,6 +132,7 @@ impl Default for Metrics {
     fn default() -> Self {
         Self {
             counters: RefCell::default(),
+            gauges: RefCell::default(),
             ready: Cell::new(false),
             leading: Cell::new(true),
         }
@@ -126,16 +142,18 @@ impl Default for Metrics {
 impl Metrics {
     /// Adds `by` to the counter `name` with the given labels.
     pub fn add(&self, name: &'static str, labels: &[(&str, &str)], by: u64) {
-        let labels = labels
-            .iter()
-            .map(|(k, v)| format!("{k}=\"{}\"", escape(v)))
-            .collect::<Vec<_>>()
-            .join(",");
         *self
             .counters
             .borrow_mut()
-            .entry((name, labels))
+            .entry((name, label_set(labels)))
             .or_insert(0) += by;
+    }
+
+    /// Sets the series of the gauge `name` with the given labels to `value`.
+    pub fn set_gauge(&self, name: &'static str, labels: &[(&str, &str)], value: u64) {
+        self.gauges
+            .borrow_mut()
+            .insert((name, label_set(labels)), value);
     }
 
     pub fn inc(&self, name: &'static str, labels: &[(&str, &str)]) {
@@ -167,33 +185,58 @@ impl Metrics {
         let mut out = String::new();
         for (name, help) in COUNTERS {
             out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
-            let mut any = false;
-            for ((n, labels), value) in counters.iter() {
-                if *n != name {
-                    continue;
-                }
-                any = true;
-                if labels.is_empty() {
-                    out.push_str(&format!("{name} {value}\n"));
-                } else {
-                    out.push_str(&format!("{name}{{{labels}}} {value}\n"));
-                }
-            }
-            if !any {
+            if !push_series(&mut out, name, &counters) {
                 out.push_str(&format!("{name} 0\n"));
             }
         }
+        let gauges = self.gauges.borrow();
         for (name, help) in GAUGES {
-            let value = match name {
-                "kausa_leader" => u8::from(self.is_leading()),
-                _ => 0,
-            };
-            out.push_str(&format!(
-                "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
-            ));
+            if name == "kausa_leader" {
+                let value = u8::from(self.is_leading());
+                out.push_str(&format!(
+                    "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+                ));
+                continue;
+            }
+            // A gauge never set is not rendered at all.
+            let mut series = String::new();
+            if push_series(&mut series, name, &gauges) {
+                out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
+                out.push_str(&series);
+            }
         }
         out
     }
+}
+
+/// The labels of a series, formatted and escaped: `k1="v1",k2="v2"`.
+fn label_set(labels: &[(&str, &str)]) -> String {
+    labels
+        .iter()
+        .map(|(k, v)| format!("{k}=\"{}\"", escape(v)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Appends the series of `name`, sorted by labels; says whether there was one.
+fn push_series(
+    out: &mut String,
+    name: &str,
+    series: &BTreeMap<(&'static str, String), u64>,
+) -> bool {
+    let mut any = false;
+    for ((n, labels), value) in series {
+        if *n != name {
+            continue;
+        }
+        any = true;
+        if labels.is_empty() {
+            out.push_str(&format!("{name} {value}\n"));
+        } else {
+            out.push_str(&format!("{name}{{{labels}}} {value}\n"));
+        }
+    }
+    any
 }
 
 fn escape(value: &str) -> String {
@@ -495,7 +538,9 @@ mod tests {
 
     #[test]
     fn the_leader_gauge_comes_after_the_counters_and_is_1_by_default() {
-        assert_eq!(GAUGES.len(), 1);
+        // 3: the budget and queue gauges (docs/adr/0021-refill-the-call-budget.md) came later,
+        // and are not rendered until set.
+        assert_eq!(GAUGES.len(), 3);
         assert_eq!(GAUGES[0], ("kausa_leader", LEADER_HELP));
         let gauge = |value: u8| {
             format!(
@@ -554,6 +599,107 @@ mod tests {
         let single = Metrics::default();
         single.set_ready();
         assert_eq!(readyz(&single), ("200 OK", "ready\n".to_owned()));
+    }
+
+    // Acceptance tests for the budget and queue gauges (docs/adr/0021-refill-the-call-budget.md),
+    // written before the code. They use `GAUGES: [(&str, &str); 3]` and
+    // `Metrics::set_gauge(&self, name: &'static str, labels: &[(&str, &str)], value: u64)`, which
+    // sets a series (labels formatted and escaped as for counters). `kausa_leader` renders as
+    // before; every other gauge renders its HELP, TYPE and series only once a series was set,
+    // sorted by labels.
+
+    const BUDGET_HELP: &str = "Model calls this process may start now, by window (hour: the refill \
+                               bucket within the 60-minute cap; day: the 24-hour cap).";
+    const QUEUE_HELP: &str = "Incidents waiting for an explanation (at most 16).";
+
+    #[test]
+    fn gauges_render_after_kausa_leader_in_order_and_only_once_set() {
+        assert_eq!(
+            GAUGES,
+            [
+                ("kausa_leader", LEADER_HELP),
+                ("kausa_budget_calls_remaining", BUDGET_HELP),
+                ("kausa_explanation_queue_length", QUEUE_HELP),
+            ]
+        );
+        let leader = |value: u8| {
+            format!(
+                "# HELP kausa_leader {LEADER_HELP}\n# TYPE kausa_leader gauge\nkausa_leader {value}\n"
+            )
+        };
+        let budget = |hour: u64, day: u64| {
+            format!(
+                "# HELP kausa_budget_calls_remaining {BUDGET_HELP}\n\
+                 # TYPE kausa_budget_calls_remaining gauge\n\
+                 kausa_budget_calls_remaining{{window=\"day\"}} {day}\n\
+                 kausa_budget_calls_remaining{{window=\"hour\"}} {hour}\n"
+            )
+        };
+        let queue = |length: u64| {
+            format!(
+                "# HELP kausa_explanation_queue_length {QUEUE_HELP}\n\
+                 # TYPE kausa_explanation_queue_length gauge\n\
+                 kausa_explanation_queue_length {length}\n"
+            )
+        };
+        // A gauge never set is not rendered: no 0 that an alert could fire on.
+        let m = Metrics::default();
+        let text = m.render();
+        assert!(text.ends_with(&leader(1)), "{text}");
+        assert!(!text.contains("kausa_budget_calls_remaining"), "{text}");
+        assert!(!text.contains("kausa_explanation_queue_length"), "{text}");
+        // The queue alone (a dry run).
+        m.set_gauge("kausa_explanation_queue_length", &[], 0);
+        let text = m.render();
+        assert!(
+            text.ends_with(&format!("{}{}", leader(1), queue(0))),
+            "{text}"
+        );
+        assert!(!text.contains("kausa_budget_calls_remaining"), "{text}");
+        // Both, in the order of GAUGES, the day series before the hour series.
+        m.set_gauge("kausa_budget_calls_remaining", &[("window", "hour")], 3);
+        m.set_gauge("kausa_budget_calls_remaining", &[("window", "day")], 200);
+        let text = m.render();
+        assert!(
+            text.ends_with(&format!("{}{}{}", leader(1), budget(3, 200), queue(0))),
+            "{text}"
+        );
+        // A gauge is set, not added to.
+        m.set_gauge("kausa_budget_calls_remaining", &[("window", "hour")], 1);
+        m.set_gauge("kausa_explanation_queue_length", &[], 16);
+        m.set_gauge("kausa_explanation_queue_length", &[], 15);
+        m.set_leading(false);
+        let text = m.render();
+        assert!(
+            text.ends_with(&format!("{}{}{}", leader(0), budget(1, 200), queue(15))),
+            "{text}"
+        );
+        // One sample per series.
+        for series in [
+            "kausa_budget_calls_remaining{window=\"hour\"} ",
+            "kausa_budget_calls_remaining{window=\"day\"} ",
+            "kausa_explanation_queue_length ",
+        ] {
+            assert_eq!(
+                text.lines().filter(|l| l.starts_with(series)).count(),
+                1,
+                "{series}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn gauge_label_values_are_escaped() {
+        let m = Metrics::default();
+        m.set_gauge(
+            "kausa_budget_calls_remaining",
+            &[("window", "a\"b\\c\nd")],
+            2,
+        );
+        assert!(
+            m.render()
+                .contains(r#"kausa_budget_calls_remaining{window="a\"b\\c\nd"} 2"#)
+        );
     }
 
     // Acceptance tests for docs/adr/0022-redact-the-answer.md, written before the code: one

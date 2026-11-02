@@ -23,9 +23,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `explanation` log line count the values replaced in the model's answers, by rule.
 - A prompt injection corpus (`tests/bench/injection-corpus.yaml`) with its measurement script, and
   seed corpora for the `redact` and `validate` fuzz targets.
+- Two gauges: `kausa_budget_calls_remaining{window}` (`hour`: the calls the refill bucket allows
+  now within the 60-minute cap; `day`: what is left of the 24-hour cap), rendered with
+  `--endpoint`, and `kausa_explanation_queue_length` (at most 16), rendered with `--endpoint` or
+  `--dry-run`. A gauge never set is not rendered.
+- An `explanations waiting` log line (`reason`, `queued`, `next_call_in_seconds`), once when
+  incidents start waiting for the budget, and a `waiting_for_budget` field on `explanation
+  dropped` ([0021](docs/adr/0021-refill-the-call-budget.md)).
 
 ### Changed
 
+- The hourly call budget refills at a steady rate instead of starting full: each start (and, with
+  `--leader-lease`, each takeover) allows 3 calls at once, then one every `3600/N` seconds up to
+  `N` (`--max-calls-per-hour`), and the 60-minute and daily caps still hold. A restart no longer
+  brings a full hour's budget. `--max-calls-per-day`'s help says it counts per process
+  ([0021](docs/adr/0021-refill-the-call-budget.md)).
+- While the budget waits, incidents wait in the queue instead of being skipped, and a repeat with a
+  cached explanation passes them. When 16 are waiting, the oldest is skipped with an
+  `ExplanationSkipped` Event (reason `budget`). A spent daily cap and a cap of 0 still skip at once.
+- A budget skip no longer reads the container log, so it may come where `context_too_large` came
+  before, and delayed retries no longer take the queue past 16.
 - A watch error that repeats with the same text is logged at most once every 5 minutes, with a
   `folded` field counting the repeats in between; `kausa_watch_errors_total` still counts every
   one ([#7](https://github.com/fedeam/kausa/issues/7)).
@@ -38,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explanation now redacts differently goes in front instead of counting on the old entry, which
   may push the oldest of the five out. Entries written before keep their text until
   `--history-days` ages them out.
+- The Pod, Event and Deployment watches list in pages of 50 objects instead of 500, which bounds
+  the memory a page of large objects takes while it is decoded, for about ten times the list
+  requests ([List pages](docs/research/2026-11-02-list-pages.md)).
 
 ### Fixed
 

@@ -54,8 +54,8 @@ Options of `kausa run`:
 | `--notify-telegram-chat-id <ID>` | With `telegram` only, and required with it: the chat, an integer that is not `0` (a leading `-`, no `+`) or `@` and a channel's username (a letter, then 4 to 31 letters, digits or `_`). Not a secret |
 | `--notify-token-file <PATH>` | With `json` only, optional: a file whose content (trimmed) is sent as `Authorization: Bearer <token>` |
 | `--notify-allow-http` | Allow an `http://` webhook, for one in the cluster or the same private network; separate from `--allow-http` |
-| `--max-calls-per-hour <N>` | Model calls allowed in any hour, `30` by default; `0` allows none |
-| `--max-calls-per-day <N>` | Model calls allowed in any 24 hours, `200` by default |
+| `--max-calls-per-hour <N>` | Model calls allowed in any hour, `30` by default; `0` allows none. Each start allows 3 at once (`N` if fewer), then one every `3600/N` seconds, up to `N` saved; with `--leader-lease`, each takeover also starts with at most 3 ([0021](../adr/0021-refill-the-call-budget.md)). Help: `Model calls allowed in any hour (default 30); each start allows 3 at once, then one every 3600/N seconds` |
+| `--max-calls-per-day <N>` | Model calls allowed in any 24 hours, per process, `200` by default. A restart starts a new process: for the daily cap to hold across restarts, up to the bursts of 3, set `--max-calls-per-hour` to at most a 24th of it |
 | `--max-input-tokens <N>` | Cap on a request's estimated input tokens (a quarter of its bytes), `6000` by default: the context is cut to fit, and an incident that still does not fit is skipped |
 | `--dedup-hours <N>` | How long an incident's explanation is reused when the same incident (same fingerprint) comes back, `6` by default; `0` turns the reuse off |
 | `--metrics-address <ADDR>` | Serve `/metrics`, `/healthz` and `/readyz` on this IP address and port, for example `[::]:9090` in a Pod (IPv4 and IPv6 on Linux) or `127.0.0.1:9090` on a machine; not served by default |
@@ -167,9 +167,10 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them), `redactions` (the request's replacements per rule) and `answer_redactions` (the values replaced in the model's answer per rule, `{}` when none; [On the model's answer](rules.md#on-the-models-answer)); or, when it comes from the deduplication cache, `explanation` and `"cached": true`, with neither count. The `explanation` is the redacted answer: kausa keeps no unredacted copy |
 | `explanation retried` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`, `detail` (the start of the endpoint's error body, at most 512 bytes on one line, or `null`), `retry_in_seconds`: the first call failed with a timeout, a failed connection, `429` or a `5xx` status, and is tried once more 30 seconds later. A call that never reached the endpoint (a failed connection) is given back to the budget |
 | `endpoint error` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`, `detail`: the endpoint's error body, logged before the `explanation skipped` line it leads to. The body is the provider's text, so it goes to the log only, not to the Event |
-| `explanation skipped` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`: the call budget is spent, the context does not fit `--max-input-tokens`, the endpoint failed or answered an error status, or the answer did not validate |
+| `explanation skipped` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`: the call budget is spent, the context does not fit `--max-input-tokens`, the endpoint failed or answered an error status, or the answer did not validate. A skip for the budget comes before the log is read, so it reads no log: the daily cap is spent, a cap is `0`, or the incident was the oldest of a full queue of 16 waiting for the budget |
+| `explanations waiting` | info | `reason` (`the hourly call budget is spent`), `queued` (the incidents left in the queue), `next_call_in_seconds` (when the next call may start, rounded up): incidents wait for the refill bucket or the 60-minute cap. Logged once per waiting period, the first time the slot is held since the queue was last empty; not per incident or per pass |
 | `event write failed` | warn | `fingerprint`, `error`: the Event could not be created or patched; `no answer within 10 seconds` when the whole write (create, and on a repeat its list and series patch) took longer |
-| `explanation dropped` | warn | `fingerprint`, `reason`: the queue of 16 incidents waiting for an explanation was full |
+| `explanation dropped` | warn | `fingerprint`, `reason` (`the queue is full`), `waiting_for_budget` (`true` when the budget made the slot wait the last time it was asked): the queue of 16 incidents waiting for an explanation was full when a new incident or a delayed retry joined it, and the oldest was dropped, with no Event |
 | `history write failed` | warn | `fingerprint`, `namespace`, `error`: the Explanation could not be written. `error` is `the CustomResourceDefinition explanations.kausa.fedeam.com is not installed (chart value history.installCRD)` when the list answered `404`, `no answer within 10 seconds` on the timeout, `409 Conflict: the Explanation was created or changed by another writer since it was read; not retried`, the code and reason only (for example `422 Invalid`) when the API server refused the list, create or patch, since its message can quote the stored object, and kube-rs's text otherwise |
 | `history write refused` | warn | `fingerprint`, `namespace`, `reason`: an object of that name exists and is not kausa's to append to: `the Explanation kausa.<fingerprint> does not carry the label app.kubernetes.io/managed-by=kausa` or `the Explanation kausa.<fingerprint> is about another rule or target` |
 | `history sweep failed` | warn | `namespace` (the listed namespace whose list or delete failed, or `null` in cluster scope), `error` (the same `404` text when the CRD is missing; otherwise, when the API server refused the list or a delete, its code and reason only, since its message can quote an object or name a listed namespace, and kube-rs's text for any other failure). A failed list ends that namespace's part of the sweep; the next namespace goes on |
@@ -255,8 +256,8 @@ kausa's log sees them.
 
 ## Metrics
 
-With `--metrics-address`, `GET /metrics` returns these counters and the `kausa_leader` gauge in
-the Prometheus text format; each counter is `0` until something counts. `GET /healthz` answers
+With `--metrics-address`, `GET /metrics` returns these counters and the gauges below in the
+Prometheus text format; each counter is `0` until something counts. `GET /healthz` answers
 `200` while kausa runs, and `GET /readyz` answers `200` with `ready` once every watch has listed at
 least once (the three of the whole cluster, or three per namespace with `--namespace`: 3 × N; two
 and 2 × N with `--no-rollouts`), and `503` with `starting` before. With `--leader-lease`, a
@@ -291,11 +292,15 @@ and any other method `405`. The counters live in memory and start over when kaus
 | `kausa_lease_errors_total` | `call` (`get`, `patch`) | Failed calls on the Lease; a `409` is not one (help text: ``Failed calls on the Lease, by `call` (get, patch); conflicts are not errors.``) |
 | `kausa_watch_errors_total` | `watch` (`pods`, `events`, `deployments`) | Errors of the Pod, Event and Deployment watches (every namespace's together; the namespace is in the log line), which retry with backoff (the counter's help text: `Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch.`); a steady rise with no incidents means kausa is not seeing the cluster |
 
-The gauge, rendered after the counters with `# TYPE kausa_leader gauge`:
+The gauges, rendered after the counters, in this order, each with `# TYPE <name> gauge`.
+`kausa_leader` is always rendered; the other two only once they have a value, so a mode that does
+not set them shows no line for them, not a `0`:
 
 | Gauge | Labels | Value |
 |---|---|---|
 | `kausa_leader` | | `1` while this process acts: it holds the Lease, or runs without `--leader-lease`; `0` as a standby (help text: `1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a standby.`). Summed over a release's Pods, anything but `1` means nobody acts, or (never expected) two do |
+| `kausa_budget_calls_remaining` | `window` (`hour`, `day`) | With `--endpoint` only. `hour`: the whole calls in the refill bucket, within the 60-minute cap (`--max-calls-per-hour` minus the calls of the last 60 minutes): the calls this process may start now. On a standby, at most 3: what a takeover would bring. `day`: `--max-calls-per-day` minus the calls of the last 24 hours. Refreshed when a metrics connection is accepted, on the leader and on a standby alike. `0` for `hour` is normal while incidents wait; `0` for `day` on the leader means no call until the oldest of the day's calls is 24 hours old (help text: `Model calls this process may start now, by window (hour: the refill bucket within the 60-minute cap; day: the 24-hour cap).`) |
+| `kausa_explanation_queue_length` | | With `--endpoint` or `--dry-run`. Incidents waiting for an explanation, 0 to 16: not the one being explained, nor the delayed retries. Set once per pass of the loop; `0` on a standby and after a step-down (help text: `Incidents waiting for an explanation (at most 16).`) |
 
 No metric names a Pod, a namespace or the Lease.
 

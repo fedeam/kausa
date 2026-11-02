@@ -80,8 +80,8 @@ produces the same incident, the same fingerprint and the same request bytes.
   and the `Progressing` condition's status and reason), never its Pod template, labels, other
   annotations, selector, strategy or any condition message. The record is kept only while the rule
   matches, and dropped on any update that does not, and on delete, so memory grows with stalled
-  Deployments, not with Deployments. A list page still holds up to 500 whole objects while it is
-  decoded, as for Pods.
+  Deployments, not with Deployments. A list page still holds up to 50 whole objects while it is
+  decoded, as for Pods (`LIST_PAGE_SIZE`, [List pages](../research/2026-11-02-list-pages.md)).
 - **Server-side filtering.** The event watch uses the field selector
   `type=Warning,reportingController!=kausa`: `events.k8s.io/v1` supports both fields (its field
   label conversion in Kubernetes' `pkg/apis/events/v1/conversion.go`, checked on 2026-10-26).
@@ -206,20 +206,35 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 ## Cost controls
 
-- **Budget.** A cap on model calls per hour (`--max-calls-per-hour`, 30 by default) and per day
-  (`--max-calls-per-day`, 200), counted over sliding windows; a cap on the estimated input tokens
+- **Budget.** A refill bucket under two caps on model calls, per hour (`--max-calls-per-hour`,
+  `N`, 30 by default) and per day (`--max-calls-per-day`, 200), counted over sliding windows of 60
+  minutes and 24 hours ([0021](../adr/0021-refill-the-call-budget.md)). The bucket starts with a
+  burst of 3 calls (`N` if fewer), gains one every `3600/N` seconds (120 s at the default) and
+  holds at most `N`; a call starts only when the bucket holds a whole call and both windows have
+  room. While only the bucket or the 60-minute cap stops a call, incidents wait in the queue, and a
+  repeat with a fresh cached explanation passes them; when 16 are waiting, the oldest is skipped. A
+  spent daily cap, or a cap of 0, skips the next incident at once. A skip reads no log. Also a cap
+  on the estimated input tokens
   of a request (`--max-input-tokens`, 6000, estimated as a quarter of the request's bytes): the
   log tail is halved until the request fits, then all but the first Pod and three events are
   dropped, and an incident that still does not fit is skipped; and `max_tokens` 800 on the answer
   (whether some endpoints, such as OpenAI's reasoning models, need `max_completion_tokens` instead
   is still to verify). The budget is global: one budget and one queue for the whole cluster, not
-  per namespace. An incident over the budget is skipped, logged and counted, with an
+  per namespace. An incident the budget skips is logged and counted, with an
   `ExplanationSkipped` Event.
 - **Deduplication.** A cache in memory of up to 1024 explanations, keyed by fingerprint, for
   `--dedup-hours` (6 by default): a repeated incident gets the stored explanation again, logged
   with `"cached": true` and written as an Event, with no new call.
-- **Restarts.** The budget counters and the deduplication cache live in memory and start over
-  when kausa restarts, so incidents that are still failing are explained again after a restart.
+- **Restarts.** The budget and the deduplication cache live in memory, and nothing is stored or
+  read back. A restart empties the cache, so incidents that are still failing are explained again,
+  but it no longer refills the budget: each start, and each takeover with `--leader-lease`, brings
+  at most the burst of 3. With `c(s)` the credit of the process that acts at `s` (at most `N`, at
+  most 3 at a start), `K` the starts and takeovers in `(s, s + T]` and `I = 3600/N` seconds, a
+  release starts at most `c(s) + 3K + T/I` calls in `[s, s + T]`, and each process at most `N` in
+  any 60 minutes and `callsPerDay` in any 24 hours of its life. This rests on terms not overlapping
+  (0019's timing hypotheses with the Lease; `strategy: Recreate` without it). The daily cap holds
+  per process only: across restarts, a day holds at most `24N + 3K + c(s)`, so for the daily cap
+  to hold whatever the restarts, up to the bursts, set `callsPerHour <= callsPerDay / 24`.
 - **Metrics.** With `--metrics-address`, Prometheus counters on their own port: incidents by
   detection, model calls by outcome, tokens in and out as the endpoint reports them, cache hits,
   skipped explanations by reason, dropped ones, logged requests, redactions by rule, and Events
@@ -305,8 +320,9 @@ own deadline timer, which a hung call cannot delay, and when it ends, the contro
 dropped with everything in flight. A flood on the metrics port therefore takes no more of the
 controller's share than with one replica, and cannot keep a starved leader holding the Lease
 (how much it takes under the 200m CPU limit is not measured yet). Stepping down never exits:
-`Budget` and `Dedup` (with the notified marks) are kept for the next term; the records, the
-tracker, both queues, the delayed retries and the owner cache are dropped.
+`Budget` and `Dedup` (with the notified marks) are kept for the next term (the budget's windows
+are; its credit is cut to the burst of 3 when the next term starts); the records, the tracker, both
+queues, the delayed retries and the owner cache are dropped.
 
 **Timings,** constants (production values), on each replica's monotonic clock only:
 
@@ -335,8 +351,10 @@ about 0.5 s with 32 namespaces and 1.6 s with 10,000 Pods in kind: [Thirty-two
 namespaces](../research/2026-10-28-32-namespaces.md), [Thousands of
 Pods](../research/2026-10-28-thousands-of-pods.md)) and its incidents settle (60 s by default). With one replica, a lost node leaves nothing explained until the Pod is replaced, about
 five minutes with the default `tolerationSeconds` of 300 (hypothesis) plus start-up and the settle
-window. These takeover times are the design's; their measurement in kind is an open item (the
-research note that 0019 makes a condition of shipping).
+window. Measured in kind on 2026-10-29 ([Standby and
+failover](../research/2026-10-29-standby-and-failover.md)): a graceful delete was taken over in
+0.44 to 0.80 s, usually by the replacement Pod, and a frozen leader 30 to 35 s after its last
+renewal (27.7 to 32.7 s after it stopped), five runs each.
 
 **What a failover costs:**
 
@@ -347,7 +365,7 @@ research note that 0019 makes a condition of shipping).
 | The explanation in flight | Its call is spent, its answer dropped | One call |
 | Notification queue (16) | Dropped (counted `dropped`) | 16 |
 | `Dedup` and the notified marks | Per process; the new leader's is its own (empty, or from its last term) | One more call, Event series patch or new Event, history merge and notification per still-failing incident |
-| `Budget` | Per process, kept across its terms | At most twice `callsPerHour` and `callsPerDay` per release while both processes live; a restarted container or a new Pod starts over, as with one replica |
+| `Budget` | Per process; windows kept across its terms, credit cut to 3 at each term start | A release starts at most `c(s) + 3K + T/I`; each process at most `callsPerHour` an hour and `callsPerDay` a day |
 | Owner cache | Rebuilt | One `get` per ReplicaSet or Job |
 | Counters | Per process | Dashboards sum over the Pods |
 

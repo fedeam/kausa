@@ -1772,3 +1772,38 @@ fn help_lists_the_leader_lease_flag_and_what_kausa_writes() {
         "{help}"
     );
 }
+
+// The call budget refills at a steady rate from a start burst of three
+// (docs/adr/0021-refill-the-call-budget.md). The flags, their defaults and their ranges do not
+// change; only their help lines do.
+
+const BUDGET_HELP_LINES: [&str; 4] = [
+    "  --max-calls-per-hour <N>  Model calls allowed in any hour (default 30); each",
+    "                            start allows 3 at once, then one every 3600/N seconds",
+    "  --max-calls-per-day <N>   Model calls allowed in any day, per process",
+    "                            (default 200)",
+];
+
+#[test]
+fn help_explains_the_refilling_budget() {
+    let output = kausa(&["--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = stdout(&output);
+    let options: Vec<&str> = help
+        .lines()
+        .skip_while(|l| *l != "Options of kausa run:")
+        .take_while(|l| !l.is_empty())
+        .collect();
+    assert!(
+        options.windows(4).any(|w| w == BUDGET_HELP_LINES),
+        "the budget lines are not under 'Options of kausa run:': {help}"
+    );
+    // The lines of v0.4 are gone.
+    for old in [
+        "Model calls allowed per hour",
+        "Model calls allowed per day",
+    ] {
+        assert!(!help.contains(old), "'{old}' is still in: {help}");
+    }
+    assert!(help.lines().all(|l| l.len() <= 84), "{help}");
+}
