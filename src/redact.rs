@@ -654,12 +654,21 @@ static SECRET_FLAG: LazyLock<Regex> = LazyLock::new(|| {
 });
 static SECRET_ELEMENT: LazyLock<Regex> =
     LazyLock::new(|| regex(&format!(r"(?i)(<[a-z0-9_.:-]*{SECRET_KEYS}>)[^<]*")));
+/// Token formats by their issuer's prefix. Sources of the formats added after v0.4.1: GitLab's
+/// prefixes in <https://docs.gitlab.com/security/tokens/>; npm's `npm_`, with a six-character
+/// Base62 checksum and 178 bits of entropy (at least 30 random Base62 characters before it), in
+/// <https://github.blog/security/announcing-npms-new-access-token-format>; PyPI's pattern in
+/// <https://docs.pypi.org/api/secrets/>; Docker's `dckr_pat_` and `dckr_oat_` in
+/// <https://docs.docker.com/reference/api/ai-governance/latest/>.
 static KNOWN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     regex(concat!(
         r"\b(?:",
         r"gh[pousr]_[A-Za-z0-9]{36}",
         r"|github_pat_[A-Za-z0-9_]{22,}",
-        r"|glpat-[A-Za-z0-9_-]{20,}",
+        r"|gl(?:pat|dt|rtr?|cbt|ptt|ft|imt|agent|wt|soat|ffct|oas)-[A-Za-z0-9_-]{20,}",
+        r"|npm_[A-Za-z0-9]{36,}",
+        r"|pypi-[A-Za-z0-9_-]{85,}",
+        r"|dckr_(?:pat|oat)_[A-Za-z0-9_-]{10,}",
         r"|xox[abposr]-[A-Za-z0-9-]{10,}",
         r"|(?:AKIA|ASIA)[0-9A-Z]{16}",
         r"|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}",
@@ -837,6 +846,33 @@ mod tests {
                 "key sk-test-00000000000000000000000000",
                 "key <redacted:token>",
             ),
+            (
+                "runner glrt-00000000000000000000 registered",
+                "runner <redacted:token> registered",
+            ),
+            (
+                "deploy gldt-00000000000000000000 used",
+                "deploy <redacted:token> used",
+            ),
+            (
+                "npm publish npm_000000000000000000000000000000000000 failed",
+                "npm publish <redacted:token> failed",
+            ),
+            (
+                concat!(
+                    "upload pypi-0000000000000000000000000000000000000000000",
+                    "000000000000000000000000000000000000000000 rejected"
+                ),
+                "upload <redacted:token> rejected",
+            ),
+            (
+                "docker login -p dckr_pat_0000000000000000000000000",
+                "docker login -p <redacted:token>",
+            ),
+            (
+                "pull with dckr_oat_0000000000000000000000000 denied",
+                "pull with <redacted:token> denied",
+            ),
             ("mail admin@example.com now", "mail <redacted:email> now"),
             (
                 "-----BEGIN EXAMPLE KEY-----\nTm90IGEga2V5\n-----END EXAMPLE KEY-----",
@@ -845,6 +881,36 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(redact(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn known_token_prefixes_need_their_minimum_length() {
+        // Each prefix and the shortest tail it is redacted with; one character less stays.
+        let formats = [
+            ("glpat-", 20),
+            ("gldt-", 20),
+            ("glrt-", 20),
+            ("glrtr-", 20),
+            ("glcbt-", 20),
+            ("glptt-", 20),
+            ("glft-", 20),
+            ("glimt-", 20),
+            ("glagent-", 20),
+            ("glwt-", 20),
+            ("glsoat-", 20),
+            ("glffct-", 20),
+            ("gloas-", 20),
+            ("npm_", 36),
+            ("pypi-", 85),
+            ("dckr_pat_", 10),
+            ("dckr_oat_", 10),
+        ];
+        for (prefix, min) in formats {
+            let long = format!("use {prefix}{} now", "0".repeat(min));
+            assert_eq!(redact(&long), "use <redacted:token> now", "{long}");
+            let short = format!("use {prefix}{} now", "0".repeat(min - 1));
+            assert_eq!(redact(&short), short, "{short}");
         }
     }
 
@@ -903,6 +969,11 @@ mod tests {
             "at 10:05:00 the job finished with exit code 1",
             "java.lang.NullPointerException at com.example.App.main(App.java:12)",
             "read config.yaml and main.rs",
+            // Words that start like a known token prefix.
+            "npm_config_cache=/tmp/npm and npm_package_version 1.4.2",
+            "pip install from pypi-mirror or pypi-simple-index",
+            "the glrt- and gldt- prefixes, glft-feed-reader",
+            "docker login with a dckr_pat_ token",
         ];
         for line in lines {
             assert_eq!(redact(line), line, "{line}");
