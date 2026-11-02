@@ -103,7 +103,9 @@ release notes (`.github/release.yml`).
    imperative, lowercase start, no trailing period, up to 64 characters so that the header stays
    within 72 ([`AGENTS.md`](../../AGENTS.md#commits)). The suffix is seen on squash commits of
    other repositories but not mentioned in GitHub's documentation of the setting: confirm it on
-   the first merge and record it in the journal. Fix the title if needed:
+   the first merge and record it in the journal. The `pr title` check
+   (`.github/workflows/pr-title.yml`) checks these rules, except the imperative, and runs again
+   when the title is edited. Fix the title if needed:
 
    ```sh
    gh pr edit <number> --repo fedeam/kausa --title "fix(rules): <subject>"
@@ -121,7 +123,8 @@ release notes (`.github/release.yml`).
 4. **Check CI.** The `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)`,
    `kind (cluster)` and `kind (namespaced)` checks must be green (the ruleset on `main` requires
    them, once [Change the required checks](#change-the-required-checks) has replaced `kind` with
-   the last two):
+   the last two). `pr title` should be green too, but it is not a required check unless the
+   ruleset is changed to require it:
 
    ```sh
    gh pr checks <number> --repo fedeam/kausa
@@ -277,7 +280,9 @@ mode](../adr/0013-namespaced-install-mode.md)), so `kind` must give way to `kind
 Dependabot opens its pull requests on GitHub every week (`.github/dependabot.yml`), with the
 `dependencies` label and titles such as `build(deps): bump …`, `build(deps-dev): bump …` (a
 dev-dependency) or `ci(deps): bump …`. Review and merge them like any other pull request, then
-sync.
+sync. A title longer than 64 characters, or one that starts the subject with `Bump` (the first
+`rust` group pull request did), fails the `pr title` check: edit it as in step 2 of [Review and
+merge a pull request](#review-and-merge-a-pull-request).
 
 - **The commit message.** The squash dialog proposes the pull request body as the commit body,
   and Dependabot's carries release notes, a commit list and its commands. Before confirming,

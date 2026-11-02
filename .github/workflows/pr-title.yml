@@ -1,0 +1,72 @@
+name: PR title
+
+# Checks the pull request title, which becomes the commit header on main when the pull request is
+# squash-merged: Conventional Commits with a required scope, `type(scope): subject`, lowercase
+# start, no trailing period, at most 64 characters (CONTRIBUTING.md, "Issues and pull requests").
+# The check is "pr title". It is not required by the ruleset on main (docs/how-to/maintain.md).
+# Plain shell and no checkout: nothing from the pull request runs here, and the job gets no token
+# permissions.
+on:
+  pull_request:
+    # edited: a fixed title runs the check again. synchronize: each push gets its own result, so
+    # the check stays on the pull request's last commit.
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: pr title
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check the title
+        shell: bash
+        env:
+          # The title is untrusted text: it reaches the script through the environment, never
+          # through an expression in the script itself, so it cannot inject shell.
+          TITLE: ${{ github.event.pull_request.title }}
+          # ${#TITLE} counts characters, not bytes.
+          LC_ALL: C.UTF-8
+        run: |
+          set -eu
+          max=64
+          types='feat fix perf refactor style test docs build ci chore revert'
+          header='^([[:alpha:]]+)\(([^()[:space:]]+)\)!?: (.*)$'
+          status=0
+          fail() {
+            echo "::error title=Pull request title::$1"
+            status=1
+          }
+
+          if [ "${#TITLE}" -gt "$max" ]; then
+            fail "The title has ${#TITLE} characters; the limit is $max."
+          fi
+          if [[ $TITLE =~ $header ]]; then
+            type=${BASH_REMATCH[1]}
+            subject=${BASH_REMATCH[3]}
+            case " $types " in
+              *" $type "*) ;;
+              *) fail "Unknown type '$type'. Use one of: $types." ;;
+            esac
+            if [[ ! $subject =~ ^[^[:upper:][:space:]] ]]; then
+              fail "The subject must start with a lowercase letter, right after ': '."
+            fi
+            if [[ $subject == *. ]]; then
+              fail "The subject must not end with a period."
+            fi
+          else
+            fail "The title must be 'type(scope): subject', with a scope."
+          fi
+
+          if [ "$status" -ne 0 ]; then
+            echo "Title: $TITLE"
+            echo "Expected, for example: feat(rules): flag deleted persistent volume claims"
+            echo "The rules: CONTRIBUTING.md, \"Issues and pull requests\". Edit the title and"
+            echo "this check runs again."
+          fi
+          exit "$status"
