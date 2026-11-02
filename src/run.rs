@@ -167,6 +167,64 @@ impl Readiness {
     }
 }
 
+/// How long a watch error that repeats with the same text is folded. Once its backoff has grown,
+/// a watch retries every 30 seconds, so an error that lasts gives one line in ten; a new or
+/// changed error is still logged at once, and the counter sees every one.
+const WATCH_ERROR_PERIOD: Duration = Duration::from_secs(300);
+
+/// The watch error lines of one term: every error is counted in `kausa_watch_errors_total`, and
+/// logged the first time, when its text changes, and at most once per `WATCH_ERROR_PERIOD` while
+/// it repeats, with how many repeats were folded since the last line. A watch that works in
+/// between does not end the error: a `PrevKv=nil` error comes back after each relist
+/// (docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md).
+#[derive(Default)]
+struct WatchErrors {
+    /// Per watch, the text last logged, when, and the repeats folded since.
+    logged: HashMap<(Kind, WatchKey), (String, Instant, u64)>,
+}
+
+impl WatchErrors {
+    /// Says whether an error of `watch` with `text` at `now` is logged and, if so, how many
+    /// repeats were folded since its last line; `None` folds it.
+    fn report(&mut self, kind: Kind, watch: &WatchKey, text: &str, now: Instant) -> Option<u64> {
+        let key = (kind, watch.clone());
+        if let Some((last, at, folded)) = self.logged.get_mut(&key)
+            && last == text
+        {
+            if now.duration_since(*at) < WATCH_ERROR_PERIOD {
+                *folded += 1;
+                return None;
+            }
+            let count = *folded;
+            (*at, *folded) = (now, 0);
+            return Some(count);
+        }
+        self.logged.insert(key, (text.to_owned(), now, 0));
+        Some(0)
+    }
+
+    /// Logs `msg` for an error of `watch` at `now`, unless it is folded; `folded` is present only
+    /// when repeats were.
+    fn log(
+        &mut self,
+        msg: &str,
+        kind: Kind,
+        watch: &WatchKey,
+        error: &watcher::Error,
+        now: Instant,
+    ) -> io::Result<()> {
+        let text = error.to_string();
+        let Some(folded) = self.report(kind, watch, &text, now) else {
+            return Ok(());
+        };
+        let mut fields = json!({"namespace": watch, "error": text});
+        if folded > 0 {
+            fields["folded"] = json!(folded);
+        }
+        log::warn(msg, fields)
+    }
+}
+
 /// The error of a watch that ended: kausa stops, since a watcher with a backoff only ends when
 /// its stream does.
 fn ended(kind: Kind, watch: &WatchKey) -> RunError {
@@ -761,6 +819,7 @@ async fn lead<C: Cluster>(
         mut deployments,
     } = cluster.watch(&options.namespaces, options.rollouts);
     let mut readiness = Readiness::new(&options.namespaces, options.rollouts);
+    let mut watch_errors = WatchErrors::default();
     let mut state = State::default();
     let mut tracker = Tracker::new(options.settle);
     let mut ticker = tokio::time::interval(tick);
@@ -841,10 +900,7 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "pods")]);
-                    log::warn(
-                        "pod watch error",
-                        json!({"namespace": watch, "error": e.to_string()}),
-                    )?;
+                    watch_errors.log("pod watch error", Kind::Pods, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Pods, &watch, &e);
                 }
                 Some((watch, None)) => return Err(ended(Kind::Pods, &watch)),
@@ -860,10 +916,7 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "events")]);
-                    log::warn(
-                        "event watch error",
-                        json!({"namespace": watch, "error": e.to_string()}),
-                    )?;
+                    watch_errors.log("event watch error", Kind::Events, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Events, &watch, &e);
                 }
                 Some((watch, None)) => return Err(ended(Kind::Events, &watch)),
@@ -880,10 +933,7 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "deployments")]);
-                    log::warn(
-                        "deployment watch error",
-                        json!({"namespace": watch, "error": e.to_string()}),
-                    )?;
+                    watch_errors.log("deployment watch error", Kind::Deployments, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Deployments, &watch, &e);
                 }
                 Some((watch, None)) => return Err(ended(Kind::Deployments, &watch)),
@@ -2068,6 +2118,34 @@ mod tests {
         let mut readiness = Readiness::new(&["shop".to_owned()], false);
         assert!(!readiness.listed(Kind::Pods, &ns("shop")));
         assert!(readiness.listed(Kind::Events, &ns("shop")));
+    }
+
+    #[test]
+    fn a_repeated_watch_error_is_folded_for_a_period() {
+        let mut errors = WatchErrors::default();
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut report =
+            |kind, watch: &WatchKey, text, seconds| errors.report(kind, watch, text, at(seconds));
+        // The first is logged, and a repeat is folded.
+        assert_eq!(report(Kind::Pods, &None, "a", 0), Some(0));
+        assert_eq!(report(Kind::Pods, &None, "a", 30), None);
+        assert_eq!(report(Kind::Pods, &None, "a", 60), None);
+        // Another watch, kind or namespace is its own error, logged at once.
+        assert_eq!(report(Kind::Events, &None, "a", 60), Some(0));
+        assert_eq!(report(Kind::Pods, &ns("shop"), "a", 60), Some(0));
+        // A repeat a period after the last line is logged, with the repeats folded since.
+        assert_eq!(report(Kind::Pods, &None, "a", 299), None);
+        assert_eq!(report(Kind::Pods, &None, "a", 300), Some(3));
+        assert_eq!(report(Kind::Pods, &None, "a", 330), None);
+        // The next line counts only the repeats since the last one.
+        assert_eq!(report(Kind::Pods, &None, "a", 600), Some(1));
+        // A changed text is logged at once and starts a new count.
+        assert_eq!(report(Kind::Pods, &None, "b", 631), Some(0));
+        assert_eq!(report(Kind::Pods, &None, "b", 640), None);
+        assert_eq!(report(Kind::Pods, &None, "a", 641), Some(0));
+        // A repeat that comes after a quiet period has nothing folded.
+        assert_eq!(report(Kind::Pods, &None, "a", 1300), Some(0));
     }
 
     #[test]

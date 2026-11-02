@@ -123,9 +123,10 @@ add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md)).
   outside the chart, or the read-only proxy of [Try kausa against a cluster with a local
   model](try-with-a-local-model.md) without the Deployment paths, gets `403` on the Deployment
   watch: kausa explains everything else but is never Ready, `helm upgrade --wait` times out, and
-  `deployment watch error` lines whose `error` says `deployments.apps is forbidden` appear at most
-  every 30 seconds. The chart's own upgrade needs nothing more: a missing `rollouts` value, as
-  `--reuse-values` gives from a v0.3 release, means on.
+  `deployment watch error` lines whose `error` says `deployments.apps is forbidden` appear: the
+  first at once, then one every 5 minutes at most, with the repeats in between in `folded`. The
+  chart's own upgrade needs nothing more: a missing `rollouts` value, as `--reuse-values` gives
+  from a v0.3 release, means on.
 - **RBAC made outside the chart** adds this rule to the ClusterRole, or to the Role of each
   watched namespace:
 

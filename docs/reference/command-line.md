@@ -160,7 +160,7 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 |---|---|---|
 | `started` | info | `version`, `server` (the API server's version), `settle_seconds`, `namespaces` (the watched namespaces, sorted, or `null` for the whole cluster), `rollouts` (`true` while Deployments are watched, `false` with `--no-rollouts`), `notifications` (`{"format", "host"}`, the webhook's host only, with no port, path or query, or `null` when they are off), `leader_lease` (`"<namespace>/<name>"`, the flag's value, or `null` without `--leader-lease`) |
 | `incident` | info | See below |
-| `pod watch error`, `event watch error`, `deployment watch error` | warn | `namespace` (the namespace of the failing watch, or `null` for the cluster-wide one), `error` (kube-rs's text); the watch retries with backoff, from 0.8 up to 30 seconds. A refusal (`403`) drops the records that watch brought in, until it lists again |
+| `pod watch error`, `event watch error`, `deployment watch error` | warn | `namespace` (the namespace of the failing watch, or `null` for the cluster-wide one), `error` (kube-rs's text), and `folded` (how many repeats of that error were not logged since its previous line), only when some were. The watch retries with backoff, from 0.8 up to 30 seconds. A watch's (kind and namespace) first error is logged, and so is one whose text differs from that watch's last line; the same text again is logged at most once every 5 minutes, even if the watch worked in between. Every error is counted in `kausa_watch_errors_total`, including repeats folded after an error's last line, which no line reports. A refusal (`403`) drops the records that watch brought in, until it lists again |
 | `owner lookup failed` | warn | `namespace`, `pod`, `job` or `replicaset` (the object a Pod or an event is about), `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's or the event's next update), the incident names the ReplicaSet or Job instead |
 | `stopped` | info | |
 | `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
@@ -201,13 +201,16 @@ An `incident` line, with invented values:
 ```
 
 A `started` line with `--namespace shop --namespace payments`, and a watch error of one of those
-namespaces, with invented values:
+namespaces that lasts, with invented values: the second line comes 5 minutes after the first, and
+folds the 9 repeats in between.
 
 ```json
 {"ts":"2026-10-28T12:00:00Z","level":"info","msg":"started","namespaces":["payments","shop"],
  "rollouts":true,"server":"v1.36.4","settle_seconds":60,"version":"0.4.0"}
 {"ts":"2026-10-28T12:00:01Z","level":"warn","msg":"pod watch error","error":"<kube-rs's text>",
  "namespace":"payments"}
+{"ts":"2026-10-28T12:05:01Z","level":"warn","msg":"pod watch error","error":"<kube-rs's text>",
+ "folded":9,"namespace":"payments"}
 ```
 
 An `incident` line of a stalled rollout (`D014`), with invented values: it is about the
