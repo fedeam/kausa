@@ -76,22 +76,21 @@ with its corpus measured once.
 
 ### Decisions
 
-- Everything as accepted in 0022. On the maintainer's instruction no hosted provider was called:
-  the `gemini-3.5-flash-lite` column is left to the maintainer, with the same script and
-  `KAUSA_API_KEY`.
+- Everything as accepted in 0022. The team called no hosted provider; the maintainer's side ran
+  `gemini-3.5-flash-lite` afterwards with the same script and `KAUSA_API_KEY`, on the change of
+  0022 only: it followed none of the thirteen injections, and the answer pass replaced nothing.
 
 ### Hypotheses
 
 - Supported once: `temperature: 0` made Ollama repeat its answer for the same request (21 of 22
   answers identical across the two builds; the other had a different request).
 - Not supported by `qwen3:0.6b`: models assemble injected pieces often enough for the pass to
-  matter (it joined none). Open until the hosted column.
+  matter (it joined none), nor by `gemini-3.5-flash-lite`, which followed no injection at all.
 - Open: ClusterFuzzLite unpacks `$OUT/<target>_seed_corpus.zip` and its builder has `zip`; the
   first `cflite.yml` run on the pull request settles it.
 
 ### Follow-ups
 
-- The hosted column of the measurement (`gemini-3.5-flash-lite`), run by the maintainer.
 - `URL_HOST` in any case (`R013`), and bare hosts under unlisted suffixes.
 - The loopback exemption on answers, if a benign answer loses `0.0.0.0` or `127.0.0.1`.
 - An example alert on `kausa_answer_redactions_total`, once the benign side shows which rules
