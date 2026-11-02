@@ -173,8 +173,10 @@ impl Readiness {
 const WATCH_ERROR_PERIOD: Duration = Duration::from_secs(300);
 
 /// The watch error lines of one term: every error is counted in `kausa_watch_errors_total`, and
-/// logged when it starts, when its text changes, and at most once per `WATCH_ERROR_PERIOD` while
-/// it repeats, with how many repeats were folded since the last line.
+/// logged the first time, when its text changes, and at most once per `WATCH_ERROR_PERIOD` while
+/// it repeats, with how many repeats were folded since the last line. A watch that works in
+/// between does not end the error: a `PrevKv=nil` error comes back after each relist
+/// (docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md).
 #[derive(Default)]
 struct WatchErrors {
     /// Per watch, the text last logged, when, and the repeats folded since.
@@ -2136,12 +2138,14 @@ mod tests {
         assert_eq!(report(Kind::Pods, &None, "a", 299), None);
         assert_eq!(report(Kind::Pods, &None, "a", 300), Some(3));
         assert_eq!(report(Kind::Pods, &None, "a", 330), None);
+        // The next line counts only the repeats since the last one.
+        assert_eq!(report(Kind::Pods, &None, "a", 600), Some(1));
         // A changed text is logged at once and starts a new count.
-        assert_eq!(report(Kind::Pods, &None, "b", 331), Some(0));
-        assert_eq!(report(Kind::Pods, &None, "b", 340), None);
-        assert_eq!(report(Kind::Pods, &None, "a", 341), Some(0));
+        assert_eq!(report(Kind::Pods, &None, "b", 631), Some(0));
+        assert_eq!(report(Kind::Pods, &None, "b", 640), None);
+        assert_eq!(report(Kind::Pods, &None, "a", 641), Some(0));
         // A repeat that comes after a quiet period has nothing folded.
-        assert_eq!(report(Kind::Pods, &None, "a", 1000), Some(0));
+        assert_eq!(report(Kind::Pods, &None, "a", 1300), Some(0));
     }
 
     #[test]
