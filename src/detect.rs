@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn all_lists_every_detection() {
-        // A new variant breaks this match, so it cannot be left out of `ALL` silently.
+        // A new variant breaks this match, a reminder to add it to `ALL` too.
         for detection in ALL {
             match detection {
                 Detection::CrashLoop
@@ -323,6 +323,19 @@ mod tests {
             discriminants,
             (0..=Detection::RolloutStalled as usize).collect::<Vec<_>>()
         );
+        // A variant after `RolloutStalled` shifts nothing, but `Detection::id` gives it an id: the
+        // ids of `ALL` are the string literals `"D…"` before the tests.
+        let source = include_str!("detect.rs");
+        let code = &source[..source.find("#[cfg(test)]").unwrap()];
+        let mut literals: Vec<_> = code
+            .split('"')
+            .filter(|s| {
+                s.len() == 4 && s.starts_with('D') && s[1..].bytes().all(|b| b.is_ascii_digit())
+            })
+            .collect();
+        literals.sort();
+        let ids: Vec<_> = ALL.iter().map(|d| d.id()).collect();
+        assert_eq!(literals, ids);
     }
 
     #[test]
