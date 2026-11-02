@@ -107,8 +107,10 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
   scope: `type(scope): subject`, for example `feat(rules): flag deleted persistent volume claims`.
   Types: `feat`, `fix`, `perf`, `refactor`, `style`, `test`, `docs`, `build`, `ci`, `chore`,
   `revert`. Subject in the imperative, lowercase start, no trailing period, title up to 64
-  characters, so that the header with the number stays within 72. The maintainer may edit the
-  title before merging.
+  characters, so that the header with the number stays within 72. A breaking change takes `!`
+  before the colon. The `pr title` check (`.github/workflows/pr-title.yml`) checks the type, the
+  scope, the start and end of the subject and the length, and runs again when you edit the
+  title. The maintainer may edit the title before merging.
 - **The description** says why the change is needed: it becomes the body of the commit.
 - **One logical change per pull request.**
 - **Tests come with the change.** New functionality and bug fixes add automated tests in the
@@ -119,8 +121,10 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
 - **CI.** For every pull request, GitHub Actions run the checks of `docker build --target ci .`
   on linux/amd64 and linux/arm64, build the image on both, and run the end-to-end test in kind;
   the `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)`, `kind (cluster)` and
-  `kind (namespaced)` checks have to pass before merging. For a first contribution, the workflows wait until the maintainer has read the pull request and
-  approved the run. Run the checks yourself first ([Build and test](#build-and-test)).
+  `kind (namespaced)` checks have to pass before merging. The `pr title` check is not among
+  them, but a title that fails it is fixed before merging. For a first contribution, the
+  workflows wait until the maintainer has read the pull request and approved the run. Run the
+  checks yourself first ([Build and test](#build-and-test)).
 - **After the merge** the maintainer copies `main` to a private Git server where the same build
   runs again on linux/arm64, as a backstop. If it fails there, the maintainer opens an issue on
   GitHub that links your pull request, and the fix is a new pull request.
