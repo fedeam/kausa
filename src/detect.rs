@@ -95,16 +95,22 @@ impl Detection {
     /// states, the Pod's scheduling condition, its eviction; from the Deployment: its `Progressing`
     /// condition), rather than an event.
     pub fn is_state(self) -> bool {
-        matches!(
-            self,
-            Detection::CrashLoop
-                | Detection::ImagePull
-                | Detection::OutOfMemory
-                | Detection::ContainerCreate
-                | Detection::Unschedulable
-                | Detection::PodEvicted
-                | Detection::RolloutStalled
-        )
+        match self {
+            Detection::CrashLoop => true,
+            Detection::ImagePull => true,
+            Detection::OutOfMemory => true,
+            Detection::ContainerCreate => true,
+            Detection::Unschedulable => true,
+            Detection::ProbeFailure => false,
+            Detection::VolumeFailure => false,
+            Detection::JobFailed => false,
+            Detection::PodEvicted => true,
+            Detection::SandboxCreate => false,
+            Detection::PodCreate => false,
+            Detection::ClaimProvisioning => false,
+            Detection::AutoscalerMetrics => false,
+            Detection::RolloutStalled => true,
+        }
     }
 }
 
