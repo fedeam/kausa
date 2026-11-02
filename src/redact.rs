@@ -885,6 +885,36 @@ mod tests {
     }
 
     #[test]
+    fn known_token_prefixes_need_their_minimum_length() {
+        // Each prefix and the shortest tail it is redacted with; one character less stays.
+        let formats = [
+            ("glpat-", 20),
+            ("gldt-", 20),
+            ("glrt-", 20),
+            ("glrtr-", 20),
+            ("glcbt-", 20),
+            ("glptt-", 20),
+            ("glft-", 20),
+            ("glimt-", 20),
+            ("glagent-", 20),
+            ("glwt-", 20),
+            ("glsoat-", 20),
+            ("glffct-", 20),
+            ("gloas-", 20),
+            ("npm_", 36),
+            ("pypi-", 85),
+            ("dckr_pat_", 10),
+            ("dckr_oat_", 10),
+        ];
+        for (prefix, min) in formats {
+            let long = format!("use {prefix}{} now", "0".repeat(min));
+            assert_eq!(redact(&long), "use <redacted:token> now", "{long}");
+            let short = format!("use {prefix}{} now", "0".repeat(min - 1));
+            assert_eq!(redact(&short), short, "{short}");
+        }
+    }
+
+    #[test]
     fn addresses_are_redacted_and_ports_kept() {
         assert_eq!(
             redact("connect ECONNREFUSED 192.0.2.10:5432"),
