@@ -36,7 +36,7 @@ Options of `kausa run`:
 
 | Option | What it does |
 |---|---|
-| `--settle-seconds <N>` | How long a failure has to persist before it is an incident, from `0` to `3600`; `60` by default. A failed Job (`D008`) is an incident at once, whatever the value |
+| `--settle-seconds <N>` | How long a failure has to persist before it is an incident, from `0` to `3600`; `60` by default. A failed Job (`D008`), and a CronJob that cannot create its Jobs (a `D011` event about the CronJob itself), is an incident at once, whatever the value; a Job of a CronJob that cannot create its Pods waits like any other event |
 | `--namespace <NAME>` | Watch only this namespace: one Pod watch, one Warning event watch and, unless `--no-rollouts`, one Deployment watch in it. Repeat it for more, one name each time, up to 32; the order does not matter. Without it, kausa watches the whole cluster (one watch of each kind across all namespaces). The scope comes only from this flag, never from the kubeconfig's context or the service account's namespace |
 | `--no-rollouts` | Do not watch Deployments, so a rollout past its progress deadline (`D014`) is not explained. The watch is on by default and needs `list` and `watch` on `deployments`; turn it off when kausa's role does not grant them. Independent of `--endpoint` and `--dry-run` |
 | `--endpoint <URL>` | The base URL of an OpenAI-compatible endpoint, such as `https://api.example.com/v1` or `http://127.0.0.1:11434/v1` for Ollama. Each incident's redacted context is sent to `<URL>/chat/completions` and the answer is logged as an explanation. Needs `--model` |

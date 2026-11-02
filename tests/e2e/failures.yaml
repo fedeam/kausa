@@ -4,6 +4,9 @@
 #   A readiness gate nobody sets keeps its Pod from being Ready, so its rollout also passes a 20 s
 #   progress deadline, which D001 explains first: no D014.
 # - failing-job: a Job whose only Pod fails with the same argument (D008).
+# - policy-job: a Job whose podFailurePolicy fails it on the same exit code 2 at the first failed
+#   Pod (D008, reason PodFailurePolicy). Its backoffLimit of 6 leaves retries, so the reason cannot
+#   be BackoffLimitExceeded.
 # - stranded: a Deployment whose Pod cannot be scheduled (D005).
 # - stalled: a Deployment whose Pod is held by a scheduling gate nobody removes, so it is never
 #   scheduled and nothing fails. Only its rollout, past a 20 s deadline, explains it (D014).
@@ -59,6 +62,31 @@ spec:
       restartPolicy: Never
       containers:
         - name: task
+          image: kausa:e2e
+          imagePullPolicy: Never
+          args: ["--no-such-flag"]
+---
+# The FailJob rule fails the Job at its first Pod's exit code 2, with retries left (D008, reason
+# PodFailurePolicy). The note names the Pod and the container, which the request must not carry.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: policy-job
+  namespace: e2e-shop
+spec:
+  backoffLimit: 6
+  podFailurePolicy:
+    rules:
+      - action: FailJob
+        onExitCodes:
+          containerName: e2e-policy-task
+          operator: In
+          values: [2]
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: e2e-policy-task
           image: kausa:e2e
           imagePullPolicy: Never
           args: ["--no-such-flag"]

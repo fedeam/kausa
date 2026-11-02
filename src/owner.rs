@@ -151,6 +151,22 @@ mod tests {
     }
 
     #[test]
+    fn a_cronjob_is_its_own_top_owner_with_no_read() {
+        // A CronJob's own event (`FailedCreate` when the API server refuses its Job, D011) is about
+        // the CronJob: no hop, so no read and no new permission. The lookup would name another
+        // owner if kausa asked it.
+        let cron = owner("batch/v1", "CronJob", "report");
+        assert_eq!(Hop::of(&cron), None);
+        let fake = Fake(HashMap::from([(
+            ("shop/job".into(), "report".into()),
+            Ok(Some(owner("example.com/v1", "Widget", "w"))),
+        )]));
+        let (top, error) = block_on(top_owner(&fake, "shop", Some(&cron), &cron));
+        assert_eq!(top, cron);
+        assert_eq!(error, None);
+    }
+
+    #[test]
     fn a_failed_lookup_stops_at_the_replicaset_and_reports_the_error() {
         let fake = Fake(HashMap::from([(
             ("shop/rs".into(), "api-1".into()),

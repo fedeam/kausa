@@ -514,6 +514,28 @@ impl Redactor {
                 }
             })
             .into_owned();
+        out = JOB_POLICY_NAMES
+            .replace_all(&out, |c: &Captures<'_>| {
+                // The container and the Pod of a Job's `podFailurePolicy` note; the namespace
+                // between them is left to `R002`.
+                let mut name = |found: &str| {
+                    if ours(found) {
+                        found.to_owned()
+                    } else {
+                        n += 1;
+                        "<redacted:name>".to_owned()
+                    }
+                };
+                if c.get(1).is_some() {
+                    let container = name(&c[2]);
+                    let pod = name(&c[4]);
+                    format!("{}{container}{}{pod}{}", &c[1], &c[3], &c[5])
+                } else {
+                    let pod = name(&c[7]);
+                    format!("{}{pod}{}", &c[6], &c[8])
+                }
+            })
+            .into_owned();
         self.tally(pass, "R003", n);
         out
     }
@@ -815,6 +837,16 @@ static KUBERNETES_NAMESPACED: LazyLock<Regex> =
     LazyLock::new(|| regex(r"(?i)\b(secret\s+|configmap\s+)([a-z0-9.-]+)/([a-z0-9.-]+)"));
 static SERVICE_ACCOUNT_USER: LazyLock<Regex> =
     LazyLock::new(|| regex(r#"(?i)(system:serviceaccount:[^:\s"']+:)([a-z0-9.-]+)"#));
+/// The container and the Pod in the Job controller's `podFailurePolicy` notes, in their two
+/// formats: `Container <container> for pod <namespace>/<pod> failed with exit code <n> matching
+/// <action> rule at index <i>` and `Pod <namespace>/<pod> has condition <type> matching <action>
+/// rule at index <i>` (`pkg/controller/job/pod_failure_policy.go:57` and `:74` at v1.36.4). A
+/// `D008` incident gathers no Pod, so neither name is registered.
+static JOB_POLICY_NAMES: LazyLock<Regex> = LazyLock::new(|| {
+    regex(
+        r"\b(?:(Container )([^\s/]+)( for pod [^\s/]+/)([^\s/]+)( failed with exit code )|(Pod [^\s/]+/)([^\s/]+)( has condition ))",
+    )
+});
 static HOSTNAME: LazyLock<Regex> = LazyLock::new(|| {
     regex(
         r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:svc\.cluster\.local|home\.arpa|com|net|org|io|dev|app|cloud|ai|co|me|info|biz|us|uk|de|fr|es|it|nl|ar|br|mx|cl|eu|local|lan|internal|corp|svc)\b",
@@ -1573,6 +1605,79 @@ mod tests {
                 out.contains(r#"secret "<redacted:name>""#),
                 "case {case}: no redacted name"
             );
+        }
+    }
+
+    // Acceptance tests for the names in the Job controller's `podFailurePolicy` notes (a new case
+    // of `R003`), written before the code. A D008 incident gathers no Pod, so the container and
+    // the Pod these notes name are no registered names (pkg/controller/job/pod_failure_policy.go:57
+    // and :74 at v1.36.4). Names invented.
+
+    #[test]
+    fn names_in_job_pod_failure_policy_notes_are_redacted() {
+        for (case, (line, expected, replaced)) in [
+            (
+                "Container exporter for pod shop/report-29000000-x7k2p failed with exit code 42 \
+                 matching FailJob rule at index 0",
+                "Container <redacted:name> for pod namespace-1/<redacted:name> failed with exit \
+                 code 42 matching FailJob rule at index 0",
+                2,
+            ),
+            (
+                "Container db-migrate for pod shop/migrate-x7k2p failed with exit code 2 \
+                 matching Ignore rule at index 3",
+                "Container <redacted:name> for pod namespace-1/<redacted:name> failed with exit \
+                 code 2 matching Ignore rule at index 3",
+                2,
+            ),
+            (
+                "Pod shop/migrate-q9w8e has condition DisruptionTarget matching FailJob rule at \
+                 index 1",
+                "Pod namespace-1/<redacted:name> has condition DisruptionTarget matching FailJob \
+                 rule at index 1",
+                1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut r = Redactor::new();
+            r.name(NameKind::Namespace, "shop");
+            let out = r.text(line);
+            // The messages name the case only, never the text (CodeQL rust/cleartext-logging).
+            assert!(out == expected, "case {case}: not the expected redaction");
+            assert_eq!(r.counts().get("R003"), Some(&replaced), "case {case}");
+        }
+        // With no name registered, the container and the Pod still do not pass.
+        let out = redact(
+            "Container exporter for pod shop/report-29000000-x7k2p failed with exit code 42 \
+             matching FailJob rule at index 0",
+        );
+        for (case, name) in ["exporter", "report-29000000", "x7k2p"].iter().enumerate() {
+            assert!(!out.contains(name), "case {case}: a name was not redacted");
+        }
+        assert!(
+            out.ends_with(" failed with exit code 42 matching FailJob rule at index 0"),
+            "the words after the names changed"
+        );
+    }
+
+    #[test]
+    fn the_lines_around_pod_failure_policy_notes_stay() {
+        // The kubelet's `ErrImageNeverPull` message (its image is the `R002` case of an image),
+        // the Job controller's fixed notes, and other lines that start with `Container` or `Pod`.
+        for line in [
+            "Container image \"busybox:x\" is not present with pull policy of Never",
+            "Job has failed indexes",
+            "Job has exceeded the specified maximal number of failed indexes",
+            "Job has reached the specified backoff limit",
+            "Job was active longer than specified deadline",
+            "Container started",
+            "Container exited with exit code 1",
+            "Pod sandbox changed, it will be killed and re-created.",
+            "Pod was active on the node longer than the specified deadline",
+        ] {
+            assert_eq!(redact(line), line, "{line}");
         }
     }
 

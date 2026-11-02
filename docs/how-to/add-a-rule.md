@@ -6,7 +6,8 @@ in [Contributing to kausa](../../CONTRIBUTING.md#propose-a-rule); the rules them
 [Detection and redaction rules](../reference/rules.md).
 
 Status as of 2026-11-02: fourteen detection rules (`D001` to `D014`) and fourteen redaction rules
-(`R001` to `R014`); the paths below are the ones in the code today.
+(`R001` to `R014`), after the new cases of `D002`, `D004`, `D008`, `D011` and `R003` of
+2026-11-02; the paths below are the ones in the code today.
 
 ## Before you start
 
@@ -64,6 +65,17 @@ Status as of 2026-11-02: fourteen detection rules (`D001` to `D014`) and fourtee
    the same namespace, owner kind and owner name was emitted, and deferred while one is pending
    but not emitted, so a signal that never settles delays it but cannot silence it. Test the
    same-tick case, a signal that never settles, and another owner of the same name.
+
+   **A rule that takes precedence in `detect_container`.** A container matches at most one
+   detection, so a more specific reading of a state that another rule also matches gets its own
+   arm, placed before the broader one: `D003` (`CrashLoopBackOff` whose last termination is
+   `OOMKilled`) and `D004` (`CrashLoopBackOff` whose last termination is `StartError`) both come
+   before the plain `CrashLoopBackOff` arm of `D001`. Test the precedence both ways: the specific
+   last termination gives the new rule, and any other keeps the broader one. If the container's
+   sample alternates between states (a waiting reason and the back-off), give the signal one
+   reason in `collect_signals` and a fingerprint text that does not change with the state
+   (`incident_fingerprint` in `src/incident.rs`), and test that both states give one incident and
+   one fingerprint.
 4. **Document it**: a row in the table of [Detection and redaction
    rules](../reference/rules.md#detection-rules) (id, name, the signal, whether it reads logs), and
    a line under `Unreleased` in [`CHANGELOG.md`](../../CHANGELOG.md). The test
@@ -114,6 +126,12 @@ before needs an ADR.
 - Optionally, run kausa with `--dry-run` against a test cluster with a workload that fails the
   new way ([Try kausa against a cluster with a local model](try-with-a-local-model.md)), and read
   the `incident` and `request` lines: the detection id, and the redacted text.
+- For a detection rule, or a new case of one, add the failure to the known-cause corpus: a seeded
+  failure in `tests/bench/seeded-failures.yaml` (invented names, busybox by its pinned digest, a
+  comment with the detection and the cause), and an entry in `tests/bench/known-causes.json` with
+  the cause and its rubric (`cause_all`, `first_step_any`, `confidence_ok`), written before any
+  model is asked. `tests/bench/score.py` grades a model's answers against it ([Explanation quality
+  of local models against known causes](../research/2026-11-02-explanation-quality.md)).
 
 ## If something fails
 

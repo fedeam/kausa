@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test: kausa installed with its Helm chart in a kind cluster, against a fake model
-# endpoint, with five seeded failures. It checks the Events, what left the cluster, the RBAC
+# endpoint, with six seeded failures. It checks the Events, what left the cluster, the RBAC
 # objects and what they grant, and the metrics. Needs docker, kind, kubectl, helm and python3;
 # KIND_NODE_IMAGE names the node image (pinned in .github/workflows/e2e.yml). It creates the
 # cluster kausa-e2e and deletes it at the end. See docs/how-to/develop.md.
@@ -843,20 +843,23 @@ fi
 for _ in $(seq 1 60); do
   deployment_note=$(explained Deployment crasher)
   job_note=$(explained Job failing-job)
+  policy_note=$(explained Job policy-job)
   stranded_note=$(explained Deployment stranded)
   stalled_note=$(explained Deployment stalled)
   refused_note=$(explained Deployment refused)
-  [ -n "$deployment_note" ] && [ -n "$job_note" ] && [ -n "$stranded_note" ] &&
-    [ -n "$stalled_note" ] && [ -n "$refused_note" ] && break
+  [ -n "$deployment_note" ] && [ -n "$job_note" ] && [ -n "$policy_note" ] &&
+    [ -n "$stranded_note" ] && [ -n "$stalled_note" ] && [ -n "$refused_note" ] && break
   sleep 5
 done
 [ -n "$deployment_note" ] || fail "no Explained Event about Deployment crasher"
 [ -n "$job_note" ] || fail "no Explained Event about Job failing-job"
+[ -n "$policy_note" ] || fail "no Explained Event about Job policy-job"
 [ -n "$stranded_note" ] || fail "no Explained Event about Deployment stranded"
 [ -n "$stalled_note" ] || fail "no Explained Event about Deployment stalled"
 [ -n "$refused_note" ] || fail "no Explained Event about Deployment refused"
 echo "Deployment crasher: $deployment_note"
 echo "Job failing-job: $job_note"
+echo "Job policy-job: $policy_note"
 echo "Deployment stranded: $stranded_note"
 echo "Deployment stalled: $stalled_note"
 echo "Deployment refused: $refused_note"
@@ -884,6 +887,42 @@ explanations_of Deployment crasher D001 apps/v1
 deployment_history=$history_names
 explanations_of Job failing-job D008 batch/v1
 echo "Explanations: $deployment_history $history_names"
+# policy-job failed by its podFailurePolicy, with retries left: D008 with the reason
+# PodFailurePolicy, not BackoffLimitExceeded.
+explanations_of Job policy-job D008 batch/v1
+echo "Explanations: $history_names (policy-job)"
+# policy-job's incidents, in the log explanations_of read: D008, about the Job, with the Job
+# controller's PodFailurePolicy note as the sample, and no other rule about it.
+python3 -c '
+import json, sys
+target, work = sys.argv[1:3]
+
+def fail(message):
+    sys.exit("FAIL: the D008 incident of policy-job: " + message)
+
+owner = {"apiVersion": "batch/v1", "kind": "Job", "name": "policy-job"}
+found = []
+for line in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if (isinstance(entry, dict) and entry.get("msg") == "incident"
+            and entry.get("namespace") == target and entry.get("owner") == owner):
+        found.append(entry)
+if not found:
+    fail("none in the log")
+for entry in found:
+    sample = entry.get("sample") or {}
+    if entry.get("detection") != "D008":
+        fail("an incident about it has detection %s" % json.dumps(entry.get("detection")))
+    if sample.get("reason") != "PodFailurePolicy":
+        fail("sample.reason %s" % json.dumps(sample.get("reason")))
+    message = sample.get("message")
+    if not isinstance(message, str) or "matching FailJob rule at index 0" not in message:
+        fail("sample.message does not say matching FailJob rule at index 0")
+print("policy-job: %d D008 incident, sample.reason PodFailurePolicy" % len(found))
+' "$TARGET" "$WORK"
 # The stalled rollouts (docs/adr/0018-stuck-rollouts.md): stalled is explained by D014, the only
 # rule its Pod meets, and refused by D011, its ReplicaSet's FailedCreate.
 explanations_of Deployment stalled D014 apps/v1
@@ -1003,7 +1042,9 @@ done
 
 # What left the cluster: requests were sent, and none holds a real name.
 [ -s "$WORK/requests.jsonl" ] || fail "the fake endpoint received no request"
-for name in "$TARGET" "$OTHER" crasher failing-job stranded stalled refused; do
+# One line, all names on it: tests/chart/render.sh reads the list from it.
+for name in "$TARGET" "$OTHER" crasher failing-job policy-job e2e-policy-task stranded stalled refused
+do
   if grep -q -- "$name" "$WORK/requests.jsonl"; then fail "a request contains '$name'"; fi
 done
 # The richer context (docs/adr/0017-richer-context-for-the-model.md): crasher's probe path without
@@ -1081,6 +1122,47 @@ for context in contexts["D005"]:
 print("requests: %d D001 and %d D005 with their own fields"
       % (len(contexts["D001"]), len(contexts["D005"])))
 ' "$WORK/requests.jsonl"
+# The D008 request for policy-job carries the Job controller's PodFailurePolicy note, with the rule
+# it matched and without the Job's, the Pod's or the container's name (R003). Failure messages
+# name the check, never what the request holds.
+python3 -c '
+import json, sys
+
+def fail(message):
+    sys.exit("FAIL: the PodFailurePolicy request: " + message)
+
+found = 0
+for line in open(sys.argv[1]):
+    try:
+        request = json.loads(line)
+    except ValueError:
+        fail("requests.jsonl holds a line that is not JSON")
+    for message in (request.get("messages") or []) if isinstance(request, dict) else []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        try:
+            context = json.loads(message["content"])["untrusted_cluster_data"]
+            rule = context["detection"]["id"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if rule != "D008":
+            continue
+        for event in context.get("warning_events") or []:
+            if not isinstance(event, dict) or event.get("reason") != "PodFailurePolicy":
+                continue
+            found += 1
+            note = event.get("message")
+            if not isinstance(note, str):
+                fail("a PodFailurePolicy event has no message")
+            if "matching FailJob rule at index 0" not in note:
+                fail("a PodFailurePolicy message lacks the matched rule")
+            for name in ("policy-job", "e2e-policy-task"):
+                if name in note:
+                    fail("a PodFailurePolicy message names " + name)
+if not found:
+    fail("no D008 request has a warning event with the reason PodFailurePolicy")
+print("the PodFailurePolicy request: %d event, the rule kept, no real name" % found)
+' "$WORK/requests.jsonl"
 # The request for stalled's D014 carries the rollout's replica counts and nothing else of it: no
 # Pod, no log tail, and no text (docs/reference/data-sent-to-the-provider.md).
 python3 -c '
@@ -1124,7 +1206,7 @@ print("the D014 request: %d, a rollout of %d counts, no Pod and no log tail" % (
 
 # The notifications (docs/adr/0015-notifications.md). The fake receiver answered the first one 503,
 # which kausa sends again 30 seconds later, and one per failing workload is due: crasher,
-# failing-job, stranded, stalled and refused.
+# failing-job, policy-job, stranded, stalled and refused.
 hooks_answered() {
   python3 -c '
 import json, sys
@@ -1140,10 +1222,10 @@ print(count)
 answered=0
 for _ in $(seq 1 60); do
   answered=$(hooks_answered)
-  [ "$answered" -ge 5 ] && break
+  [ "$answered" -ge 6 ] && break
   sleep 2
 done
-[ "$answered" -ge 5 ] || fail "the webhook answered $answered notifications 200 in 120 seconds"
+[ "$answered" -ge 6 ] || fail "the webhook answered $answered notifications 200 in 120 seconds"
 k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
 k -n "$TARGET" get "$EXPLANATIONS" -o json > "$WORK/explanations.json"
 kausa_log
@@ -1274,6 +1356,7 @@ for body in bodies:
         fail("a notification about namespace " + body["object"]["namespace"])
 for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1"),
                                       ("Job", "failing-job", "D008", "batch/v1"),
+                                      ("Job", "policy-job", "D008", "batch/v1"),
                                       ("Deployment", "stranded", "D005", "apps/v1"),
                                       ("Deployment", "stalled", "D014", "apps/v1")):
     mine = [b for b in bodies if (b["object"]["kind"], b["object"]["name"]) == (kind, name)]
@@ -1307,22 +1390,22 @@ for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1
             or not isinstance(steps[1], str) or not re.fullmatch(REDACTED_STEP, steps[1])):
         fail("%s %s: the steps are not the answer'"'"'s, the second one redacted" % (kind, name))
 print("notifications: %d POSTs, the first answered 503; one v1 body each for crasher, "
-      "failing-job, stranded and stalled" % len(hooks))
+      "failing-job, policy-job, stranded and stalled" % len(hooks))
 ' "$TARGET" "$OTHER" "$WORK" "$gateway" "$HOOK_PATH" "$FAKE_BEARER" "$FAKE_BOT"
 # The counters, once kausa has handled the answers the receiver logged.
 counted=""
 for _ in $(seq 1 10); do
   metrics=$(kausa_metrics)
-  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 5' |
+  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 6' |
     grep -q . && echo "$metrics" | grep -E '^kausa_notifications_retried_total [1-9]' >/dev/null
   then
     counted=yes && break
   fi
   sleep 2
 done
-[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 5, or" \
+[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 6, or" \
   "kausa_notifications_retried_total under 1"
-echo "notifications: at least 5 sent and 1 retried"
+echo "notifications: at least 6 sent and 1 retried"
 
 # The grant is the table in docs/reference/permissions.md.
 sa="system:serviceaccount:$NAMESPACE:kausa"
@@ -1431,7 +1514,7 @@ if [ "$REPLICAS" = 2 ]; then
   # reportingInstance, and the standby logged no incident, explanation, notification or sweep, and
   # neither token. It still answers standby.
   [ "$(holder)" = "$first_leader" ] || fail "the Lease changed holder before any handover"
-  [ "$(kausa_events "$TARGET")" -ge 5 ] || fail "fewer Events in $TARGET than failing workloads"
+  [ "$(kausa_events "$TARGET")" -ge 6 ] || fail "fewer Events in $TARGET than failing workloads"
   [ "$(others_reported "$first_leader")" = 0 ] ||
     fail "an Event in $TARGET reported by another Pod than the Lease holder"
   kausa_log "pod/$first_standby"

@@ -11,11 +11,12 @@ use crate::record::{ContainerRecord, DeploymentRecord, EventRecord, PodRecord};
 pub enum Detection {
     /// `D001`: the container is waiting in `CrashLoopBackOff`.
     CrashLoop,
-    /// `D002`: the image cannot be pulled.
+    /// `D002`: the image cannot be pulled (or, with `imagePullPolicy: Never`, cannot be used).
     ImagePull,
     /// `D003`: the container was killed for exceeding its memory limit.
     OutOfMemory,
-    /// `D004`: the container cannot be created (a missing Secret or ConfigMap key, for example).
+    /// `D004`: the container cannot be created (a missing Secret or ConfigMap key, for example) or
+    /// its process cannot be started (a missing or non-executable entrypoint).
     ContainerCreate,
     /// `D005`: the Pod cannot be scheduled.
     Unschedulable,
@@ -31,8 +32,8 @@ pub enum Detection {
     /// `D010`: the runtime cannot create the Pod's sandbox (a missing `RuntimeClass` handler, or a
     /// network plugin that fails to set up the Pod's network).
     SandboxCreate,
-    /// `D011`: a workload controller cannot create its Pods, because the API server refuses them
-    /// (a quota, an admission webhook or Pod Security admission).
+    /// `D011`: a workload controller cannot create its Pods, or a CronJob its Jobs, because the API
+    /// server refuses them (a quota, an admission webhook or Pod Security admission).
     PodCreate,
     /// `D012`: a PersistentVolumeClaim cannot be provisioned (a StorageClass that does not exist,
     /// or a request the provisioner refuses).
@@ -71,14 +72,14 @@ impl Detection {
             Detection::CrashLoop => "crash loop",
             Detection::ImagePull => "image cannot be pulled",
             Detection::OutOfMemory => "out of memory",
-            Detection::ContainerCreate => "container cannot be created",
+            Detection::ContainerCreate => "container cannot be created or started",
             Detection::Unschedulable => "pod cannot be scheduled",
             Detection::ProbeFailure => "probe failures",
             Detection::VolumeFailure => "volume cannot be attached or mounted",
             Detection::JobFailed => "job failed",
             Detection::PodEvicted => "pod evicted",
             Detection::SandboxCreate => "pod sandbox cannot be created",
-            Detection::PodCreate => "workload cannot create pods",
+            Detection::PodCreate => "workload cannot create pods or jobs",
             Detection::ClaimProvisioning => "volume claim cannot be provisioned",
             Detection::AutoscalerMetrics => "autoscaler cannot get metrics",
             Detection::RolloutStalled => "rollout does not progress",
@@ -157,18 +158,43 @@ pub fn detect_rollout(d: &DeploymentRecord) -> bool {
 }
 
 /// The detection that a container's state matches, if any. A container matches at most one: an
-/// out-of-memory kill takes precedence over the crash loop it causes.
+/// out-of-memory kill takes precedence over the crash loop it causes, and so does a process the
+/// runtime could not start (last termination `StartError`), which is `D004`.
 pub fn detect_container(container: &ContainerRecord) -> Option<Detection> {
     let oom = |reason: &Option<String>| reason.as_deref() == Some("OOMKilled");
     match container.waiting_reason.as_deref() {
         Some("CrashLoopBackOff") if oom(&container.last_termination_reason) => {
             Some(Detection::OutOfMemory)
         }
+        // A container whose process the runtime cannot start (a missing or non-executable
+        // entrypoint) waits in `RunContainerError` (below) most of the time and in
+        // `CrashLoopBackOff` between restarts, its last termination `StartError` either way (seen
+        // on kind, Kubernetes v1.36.4, on 2026-11-02: `RunContainerError` in 114 of 126 samples
+        // over 6 minutes; why it dominates is a hypothesis, not traced). The back-off is the same
+        // failure, so it stays `D004`: one incident, and no log of a container that never ran.
+        // The back-off, with its `BackOff` event:
+        // pkg/kubelet/kuberuntime/kuberuntime_manager.go:1934-1961 at v1.36.4.
+        Some("CrashLoopBackOff")
+            if container.last_termination_reason.as_deref() == Some("StartError") =>
+        {
+            Some(Detection::ContainerCreate)
+        }
         Some("CrashLoopBackOff") => Some(Detection::CrashLoop),
-        Some("ErrImagePull" | "ImagePullBackOff" | "InvalidImageName") => {
+        // `ErrImageNeverPull`: `imagePullPolicy: Never` and an image the node cannot use. The
+        // kubelet returns the same reason whether the image is absent or present but not usable
+        // with the Pod's credentials (pkg/kubelet/images/types.go:38 and image_manager.go:150-159
+        // at v1.36.4), so it does not say the image is missing.
+        Some("ErrImagePull" | "ImagePullBackOff" | "InvalidImageName" | "ErrImageNeverPull") => {
             Some(Detection::ImagePull)
         }
-        Some("CreateContainerConfigError" | "CreateContainerError") => {
+        // `RunContainerError`: the runtime created the container but cannot start its process
+        // (pkg/kubelet/container/sync_result.go:87 at v1.36.4). The kubelet writes a Warning
+        // `Failed` event `Error: <runtime message>` on the Pod
+        // (pkg/kubelet/kuberuntime/kuberuntime_container.go:292-296), and the waiting reason it
+        // keeps in its reason cache overrides the terminated state
+        // (pkg/kubelet/kubelet_pods.go:2731-2748), so `state.terminated` never appears and the
+        // restart-count path below never sees it.
+        Some("CreateContainerConfigError" | "CreateContainerError" | "RunContainerError") => {
             Some(Detection::ContainerCreate)
         }
         // A container that does not restart (`restartPolicy: Never` or `OnFailure` in a Job's Pod
@@ -214,15 +240,32 @@ pub fn detect_event(event: &EventRecord) -> Option<Detection> {
         // `ContainerCreating`, which is no failure state (seen on kind, Kubernetes 1.37, with a
         // `RuntimeClass` whose handler the nodes lack, on 2026-10-28).
         ("Pod", "FailedCreatePodSandBox") => Some(Detection::SandboxCreate),
-        // The Job controller emits these as Warning events on the Job when it marks it failed
-        // (pkg/controller/job/job_controller.go, checked on 2026-10-26).
-        ("Job", "BackoffLimitExceeded" | "DeadlineExceeded") => Some(Detection::JobFailed),
+        // The Job controller's `recordJobFinished` writes the reason of the Job's `Failed`
+        // condition as a Warning event on the Job (pkg/controller/job/job_controller.go:1666 at
+        // v1.36.4). The reason is one of these five (pkg/apis/batch/types.go:622-633):
+        // `PodFailurePolicy` when a Pod matches a `FailJob` rule of its `podFailurePolicy`
+        // (:1081), `MaxFailedIndexesExceeded` and `FailedIndexes` for an indexed Job with a
+        // per-index backoff limit (:1107, :1109). Exact, case-sensitive comparisons; the interim
+        // `FailureTarget` condition writes no event (seen on kind, Kubernetes v1.36.4, on
+        // 2026-11-02).
+        (
+            "Job",
+            "BackoffLimitExceeded"
+            | "DeadlineExceeded"
+            | "PodFailurePolicy"
+            | "MaxFailedIndexesExceeded"
+            | "FailedIndexes",
+        ) => Some(Detection::JobFailed),
         // The ReplicaSet, Job and DaemonSet controllers (through the shared Pod control,
         // `FailedCreatePodReason` in pkg/controller/controller_utils.go) and the StatefulSet
         // controller (pkg/controller/statefulset/stateful_pod_control.go) emit it on themselves
         // when the API server refuses a Pod; no Pod exists to be about (seen on kind, Kubernetes
-        // 1.37, with a ResourceQuota and Pod Security admission, on 2026-10-28).
-        ("ReplicaSet" | "Job" | "StatefulSet" | "DaemonSet", "FailedCreate") => {
+        // 1.37, with a ResourceQuota and Pod Security admission, on 2026-10-28). The CronJob
+        // controller emits it on the CronJob when the API server refuses the Job of a scheduled
+        // time (pkg/controller/cronjob/cronjob_controllerv2.go:640 at v1.36.4); no Job exists to
+        // be about (seen on kind, Kubernetes v1.36.4, with a ResourceQuota `count/jobs.batch: "0"`,
+        // on 2026-11-02).
+        ("ReplicaSet" | "Job" | "StatefulSet" | "DaemonSet" | "CronJob", "FailedCreate") => {
             Some(Detection::PodCreate)
         }
         // The PersistentVolume controller (`provisionClaim` in
@@ -379,14 +422,23 @@ mod tests {
             detect_container(&waiting("CrashLoopBackOff")),
             Some(Detection::CrashLoop)
         );
-        for reason in ["ErrImagePull", "ImagePullBackOff", "InvalidImageName"] {
+        for reason in [
+            "ErrImagePull",
+            "ImagePullBackOff",
+            "InvalidImageName",
+            "ErrImageNeverPull",
+        ] {
             assert_eq!(
                 detect_container(&waiting(reason)),
                 Some(Detection::ImagePull),
                 "{reason}"
             );
         }
-        for reason in ["CreateContainerConfigError", "CreateContainerError"] {
+        for reason in [
+            "CreateContainerConfigError",
+            "CreateContainerError",
+            "RunContainerError",
+        ] {
             assert_eq!(
                 detect_container(&waiting(reason)),
                 Some(Detection::ContainerCreate),
@@ -594,11 +646,12 @@ mod tests {
         // The ReplicaSet, Job and DaemonSet controllers write `FailedCreate` on themselves when
         // the API server refuses a Pod (a quota, an admission webhook, Pod Security admission),
         // and the StatefulSet controller writes it on the StatefulSet; no Pod exists to be about.
-        for kind in ["ReplicaSet", "Job", "StatefulSet", "DaemonSet"] {
+        // The CronJob controller writes it on the CronJob when the API server refuses its Job.
+        for kind in ["ReplicaSet", "Job", "StatefulSet", "DaemonSet", "CronJob"] {
             let detection = detect_event(&event(kind, "FailedCreate"));
             assert_eq!(detection.map(Detection::id), Some("D011"), "{kind}");
             let detection = detection.expect("a detection");
-            assert_eq!(detection.name(), "workload cannot create pods");
+            assert_eq!(detection.name(), "workload cannot create pods or jobs");
             settled_event_without_logs(detection);
         }
         // Not D011: the same reason about a Pod or a Deployment (its ReplicaSet reports the
@@ -610,6 +663,169 @@ mod tests {
         assert_eq!(
             detect_event(&event("Job", "BackoffLimitExceeded")).map(Detection::id),
             Some("D008")
+        );
+    }
+
+    // Acceptance tests for the coverage gaps of v0.5 (no ADR), written before the code.
+    // Every case was reproduced on kind (Kubernetes v1.36.4) on 2026-11-02; the reasons are the
+    // upstream constants at v1.36.4 (pkg/apis/batch/types.go:622-633,
+    // pkg/controller/cronjob/cronjob_controllerv2.go:640, pkg/kubelet/images/types.go:38,
+    // pkg/kubelet/container/sync_result.go:87).
+
+    #[test]
+    fn every_failed_condition_reason_of_a_job_is_d008() {
+        // `recordJobFinished` writes the reason of the Job's `Failed` condition as a Warning on the
+        // Job, whichever of the five it is.
+        for reason in [
+            "BackoffLimitExceeded",
+            "DeadlineExceeded",
+            "PodFailurePolicy",
+            "MaxFailedIndexesExceeded",
+            "FailedIndexes",
+        ] {
+            let detection = detect_event(&event("Job", reason));
+            assert_eq!(detection.map(Detection::id), Some("D008"), "{reason}");
+            let detection = detection.expect("a detection");
+            assert_eq!(detection.name(), "job failed");
+            // A failed Job is final, an event, and its first failed Pod's log is read.
+            assert!(!detection.settles(), "{reason}");
+            assert!(!detection.is_state(), "{reason}");
+            assert!(reads_logs(detection), "{reason}");
+        }
+        // Not D008: the Job's other reasons (a success, the interim `FailureTarget` condition), a
+        // reason in another case, and the same reasons about another kind.
+        for (kind, reason) in [
+            ("Job", "TooManySucceededPods"),
+            ("Job", "Completed"),
+            ("Job", "FailureTarget"),
+            ("Job", "podfailurepolicy"),
+            ("Job", "failedindexes"),
+            ("CronJob", "PodFailurePolicy"),
+            ("CronJob", "BackoffLimitExceeded"),
+            ("Pod", "FailedIndexes"),
+            ("Pod", "PodFailurePolicy"),
+        ] {
+            assert_eq!(detect_event(&event(kind, reason)), None, "{kind} {reason}");
+        }
+    }
+
+    #[test]
+    fn a_cronjob_that_cannot_create_its_job_is_d011() {
+        let detection = detect_event(&event("CronJob", "FailedCreate"));
+        assert_eq!(detection.map(Detection::id), Some("D011"));
+        let detection = detection.expect("a detection");
+        assert_eq!(detection.name(), "workload cannot create pods or jobs");
+        settled_event_without_logs(detection);
+        // Not D011: the CronJob controller's other Warning reasons, and the reason in another
+        // case.
+        for (kind, reason) in [
+            ("CronJob", "FailedDelete"),
+            ("CronJob", "UnexpectedJob"),
+            ("CronJob", "failedcreate"),
+            ("Job", "failedcreate"),
+        ] {
+            assert_eq!(detect_event(&event(kind, reason)), None, "{kind} {reason}");
+        }
+    }
+
+    #[test]
+    fn an_image_the_policy_never_pulls_is_d002() {
+        // `ErrImageNeverPull`: `imagePullPolicy: Never` and an image the node cannot use, absent
+        // or present but not usable with the Pod's credentials (image_manager.go:150-159).
+        let detection = detect_container(&waiting("ErrImageNeverPull"));
+        assert_eq!(detection, Some(Detection::ImagePull));
+        let detection = detection.expect("a detection");
+        assert_eq!(detection.name(), "image cannot be pulled");
+        assert!(detection.settles());
+        assert!(detection.is_state());
+        assert!(!reads_logs(detection));
+        // Exact: another case is no reason the kubelet writes.
+        assert_eq!(detect_container(&waiting("errimageneverpull")), None);
+    }
+
+    /// A container waiting in `reason` whose last termination was `last`.
+    fn waiting_after(reason: &str, last: &str) -> ContainerRecord {
+        ContainerRecord {
+            last_termination_reason: Some(last.into()),
+            last_termination_exit_code: Some(128),
+            restart_count: 4,
+            ..waiting(reason)
+        }
+    }
+
+    #[test]
+    fn a_container_that_cannot_start_is_d004() {
+        // The runtime cannot start the container's process (a missing or non-executable
+        // entrypoint): the kubelet reports `RunContainerError` most of the time and
+        // `CrashLoopBackOff` in between, the last termination `StartError` either way.
+        for container in [
+            waiting("RunContainerError"),
+            waiting_after("RunContainerError", "StartError"),
+            waiting_after("CrashLoopBackOff", "StartError"),
+        ] {
+            let detection = detect_container(&container);
+            assert_eq!(detection, Some(Detection::ContainerCreate), "{container:?}");
+        }
+        let detection = Detection::ContainerCreate;
+        assert_eq!(detection.id(), "D004");
+        assert_eq!(detection.name(), "container cannot be created or started");
+        assert!(detection.settles());
+        assert!(detection.is_state());
+        // No log: the container never ran.
+        assert!(!reads_logs(detection));
+    }
+
+    #[test]
+    fn only_a_start_error_takes_the_crash_loop_to_d004() {
+        // The precedence of `StartError` sits with the out-of-memory kill's; any other last
+        // termination keeps the crash loop.
+        assert_eq!(
+            detect_container(&waiting_after("CrashLoopBackOff", "OOMKilled")),
+            Some(Detection::OutOfMemory)
+        );
+        for last in ["Error", "Completed", "ContainerCannotRun", "startError"] {
+            assert_eq!(
+                detect_container(&waiting_after("CrashLoopBackOff", last)),
+                Some(Detection::CrashLoop),
+                "{last}"
+            );
+        }
+        assert_eq!(
+            detect_container(&waiting("CrashLoopBackOff")),
+            Some(Detection::CrashLoop)
+        );
+        // Not changed (never observed: `state.terminated` did not appear in any sample): a
+        // terminated `StartError` after restarts stays on the restart-count path, a crash loop.
+        let terminated = ContainerRecord {
+            terminated_reason: Some("StartError".into()),
+            terminated_exit_code: Some(128),
+            restart_count: 3,
+            ..Default::default()
+        };
+        assert_eq!(detect_container(&terminated), Some(Detection::CrashLoop));
+    }
+
+    #[test]
+    fn a_container_that_cannot_start_stays_d004_in_a_failed_pod() {
+        // Unlike a crash loop, which a Pod in phase `Failed` never runs again.
+        let pod = PodRecord {
+            phase: Some("Failed".into()),
+            containers: vec![
+                waiting("RunContainerError"),
+                waiting_after("CrashLoopBackOff", "StartError"),
+            ],
+            ..Default::default()
+        };
+        for container in &pod.containers {
+            assert_eq!(
+                detect_pod_container(&pod, container),
+                Some(Detection::ContainerCreate),
+                "{container:?}"
+            );
+        }
+        assert_eq!(
+            detect_pod_container(&pod, &waiting_after("CrashLoopBackOff", "Error")),
+            None
         );
     }
 

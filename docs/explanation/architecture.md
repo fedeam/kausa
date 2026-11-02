@@ -109,18 +109,20 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 - **Detection** is a fixed set of rules over the Pod records and events, listed in [Detection and
   redaction rules](../reference/rules.md): crash loops, image pull failures, out-of-memory kills,
-  container creation errors, scheduling failures, probe failures, volume failures, failed Jobs,
-  evicted Pods, Pod sandboxes that cannot be created, workloads whose Pods are refused, claims that
+  containers that cannot be created or started, scheduling failures, probe failures, volume
+  failures, failed Jobs, evicted Pods, Pod sandboxes that cannot be created, workloads whose Pods
+  (or, for a CronJob, Jobs) are refused, claims that
   cannot be provisioned, autoscalers without metrics, and Deployments past their progress
   deadline. A container matches at most one
-  detection, the most specific one (`D003` before `D001`), before grouping.
+  detection, the most specific one (`D003` and `D004` before `D001`), before grouping.
 - **Settle window.** A failure has to persist for a while (60 seconds by default) before it
   becomes an incident. Every five seconds kausa turns its records into signals: states (a failing
   container, a Pod that cannot be scheduled, a Pod evicted in the last 10 minutes) and recent Warning events. A state settles when it
   has been present over the window, and is forgotten only after 330 seconds without it, so a
   crash loop that runs between back-offs stays one incident. An event settles when the same event
   happens again a window after it was first seen; events of different Pods never add up. A failed
-  Job settles at once. A stalled rollout (`D014`) is decided after the other signals of the same
+  Job settles at once, and so does a CronJob that cannot create its Jobs (`D011`), whose events
+  would never settle. A stalled rollout (`D014`) is decided after the other signals of the same
   check and yields to an explained incident of the same Deployment, so a crash-looping or refused
   rollout is explained once, by the rule that names its cause. The exact rules: [Detection and
   redaction rules](../reference/rules.md).
@@ -131,7 +133,7 @@ produces the same incident, the same fingerprint and the same request bytes.
   through kinds it may `get` (ReplicaSet, Job). When the next owner is of another kind, including
   a custom resource, that owner reference is the top-level owner. It is named in the incident key
   and in `regarding` from the reference alone (apiVersion, kind, name, uid), without reading the
-  object. Owner lookups have a 5-second timeout and are cached for ten minutes; a Pod's owner is
+  object, and so is a CronJob in an event's `regarding` (`D011`). Owner lookups have a 5-second timeout and are cached for ten minutes; a Pod's owner is
   resolved again when its controller reference changes. A lookup that fails (a deleted ReplicaSet,
   an API error, a timeout) stops the chain at the ReplicaSet or Job, is logged, and is retried on
   the Pod's next update after 30 seconds.

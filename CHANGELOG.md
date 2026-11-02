@@ -30,6 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An `explanations waiting` log line (`reason`, `queued`, `next_call_in_seconds`), once when
   incidents start waiting for the budget, and a `waiting_for_budget` field on `explanation
   dropped` ([0021](docs/adr/0021-refill-the-call-budget.md)).
+- `D008` also explains a Job failed by its `podFailurePolicy` (`PodFailurePolicy`) and an indexed
+  Job with failed indexes (`MaxFailedIndexesExceeded`, `FailedIndexes`): every reason the Job
+  controller gives a failed Job.
+- `D011` also explains a CronJob whose Jobs the API server refuses (a quota, an admission webhook),
+  from its `FailedCreate` event; the CronJob is the incident's object.
+- `D002` also explains `ErrImageNeverPull`: `imagePullPolicy: Never` and an image the node cannot
+  use, absent or not usable with the Pod's credentials.
+- `D004` also explains a container whose process the runtime cannot start (`RunContainerError`,
+  and `CrashLoopBackOff` after a `StartError`), such as an entrypoint missing from the image.
+- `R003` redacts the container and the Pod named in the Job controller's `podFailurePolicy` notes.
+- A known-cause corpus in `tests/bench/`: a seeded failure for every detection
+  (`seeded-failures.yaml`), its cause written down before any model ran (`known-causes.json`), and
+  `score.py`, which replays dry-run requests against an endpoint and grades the answers with a
+  fixed rubric; first results in
+  [Explanation quality of local models against known causes](docs/research/2026-11-02-explanation-quality.md).
 
 ### Changed
 
@@ -58,6 +73,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Pod, Event and Deployment watches list in pages of 50 objects instead of 500, which bounds
   the memory a page of large objects takes while it is decoded, for about ten times the list
   requests ([List pages](docs/research/2026-11-02-list-pages.md)).
+- `D004` is named `container cannot be created or started` and `D011` `workload cannot create pods
+  or jobs`; the names are in requests to the model, in Events and in the `detection.name` of
+  notifications.
+- A container waiting in `CrashLoopBackOff` whose last termination is `StartError` is `D004`, not
+  `D001`, as `OOMKilled` is `D003`: one incident with no log read, since the container never ran.
+- `D011` about a CronJob itself is an incident at once instead of waiting for the settle window,
+  which the CronJob controller's events would never pass. A Job of a CronJob whose Pods are
+  refused still waits for the window.
 
 ### Fixed
 

@@ -77,7 +77,7 @@ Everything else is around it: `main.rs` parses the flags, `log.rs` writes kausa'
 | `tests/chart/render.sh` | Chart checks with helm alone: both scopes, the rules against the v0.1.0 chart, each notification format, `NOTES.txt`, every refusal | The chart changes |
 | `tests/e2e/` | The kind test, once per `rbac.scope` (`KAUSA_E2E_SCOPE`) and once more namespaced with a standby (`KAUSA_E2E_REPLICAS=2`: graceful, frozen and fail-closed handovers): chart, Events, what leaves the cluster (to the fake model and the fake webhook), the ClusterRole or the Roles and what they grant, an unlisted and a refusing namespace, metrics | The chart or what kausa writes changes |
 | `fuzz/`, `.clusterfuzzlite/` | Fuzz targets for redaction (with the answer pass, `restore` and `restore_only`), answer validation, the history's merge and the notification bodies (`notification`), run by ClusterFuzzLite; seed corpora for `redact` and `validate` in `fuzz/seeds/<target>/`, zipped by `.clusterfuzzlite/build.sh` | A parser of untrusted text changes, or a new one is added |
-| `tests/bench/` | Seeded failures and the token-counting proxy of the benchmarks | A benchmark is repeated |
+| `tests/bench/` | The benchmarks, kept out of CI: the seeded failures (one or more per detection), their known causes with a fixed rubric (`known-causes.json`), the scorer that replays dry-run requests against an endpoint and grades the answers (`score.py`, no model as judge), the token-counting proxy and the scale scripts | A benchmark is repeated, or a detection is added or changed (its seeded failure and known cause) |
 
 Unit tests live next to the code, in each file's `tests` module.
 

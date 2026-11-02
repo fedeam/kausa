@@ -170,6 +170,77 @@ Hypotheses still open, none checked here:
   depends on it.
 - H5: the `pod` label in the example alert `KausaDailyCallBudgetSpent` depends on the scrape
   configuration.
+## Later the same day: detection coverage and a known-cause corpus
+
+**Request.** One of the four v0.5 themes the maintainer approved on 2026-11-02, without an
+ADR: close the detection gaps for a Job's other failure reasons, a CronJob that cannot create its Jobs,
+`ErrImageNeverPull` and a container that cannot start, and build a known-cause corpus that grades
+explanations.
+
+**What was done.**
+
+- Each candidate was reproduced first on kind (Kubernetes v1.36.4) and read in the Kubernetes
+  source at `v1.36.4`. `D008` matches the five reasons of a Job's `Failed` condition, `D011` a
+  CronJob's `FailedCreate` (renamed `workload cannot create pods or jobs`), `D002`
+  `ErrImageNeverPull`, and `D004` `RunContainerError` and a `CrashLoopBackOff` whose last
+  termination is `StartError` (renamed `container cannot be created or started`). No id, permission
+  or request field was added; `PROMPT_VERSION` and the prompt are unchanged.
+- `R003` redacts the container and the Pod of the Job controller's two `podFailurePolicy` note
+  formats: a `D008` incident gathers no Pod, so neither is a registered name and the container's
+  name would have reached the model.
+- The fingerprint replaces the Pod named in a `PodFailurePolicy` note (generated names, as for
+  `D011`), and uses the container's name for a start failure, whose sample alternates between the
+  runtime's message and the back-off message.
+- The kind test seeds `policy-job`, a Job failed by its `podFailurePolicy` with retries left, and
+  checks its incident, its redacted request and its notification. It does not seed the CronJob: a
+  `count/jobs.batch` quota in its namespace would refuse the test's other Jobs, a namespace of its
+  own would change the scope lists and RBAC assertions, and its first event can wait 60 seconds.
+- `tests/bench/` got one seeded failure per detection (20 entries), their causes and a keyword
+  rubric in `known-causes.json`, committed before any model ran, and `score.py`, which replays a
+  dry-run's requests against an endpoint and grades the answers with no model as judge.
+- The corpus ran once: one kind cluster with its own kubeconfig (the shared Docker disk had 4.9 GB
+  free; the default kubeconfig's checksum was the same before and after; the cluster and its
+  kubeconfig were deleted and nothing was pruned), `kausa run --dry-run`, then Ollama 0.9.2 on the
+  same machine. Every seeded failure gave its request. `qwen3:4b` passed every criterion on 15 of
+  20 entries, `qwen3:0.6b` on 10 ([Explanation quality of local models against known
+  causes](../research/2026-11-02-explanation-quality.md)). No hosted model was called.
+
+**Decisions.**
+
+- No ADR: rules and a corpus, with no new permission, flag or field (the `D009`-`D013` precedent).
+- `D011` keyed to a CronJob does not wait for the settle window. On kind the CronJob controller
+  wrote one series of 14 events in 41 seconds for the first scheduled time and then one new event
+  per scheduled time, so no event would ever settle under the 60-second window, and an hourly
+  CronJob's next event comes after the last one is stale. A Job of a CronJob whose Pods are refused
+  is keyed to the CronJob, so it is an incident at once too.
+- Corrected in review the same day: the exemption follows the event's `regarding`, not the key. A
+  Job of a CronJob whose Pods are refused waits for the window again, as before this branch: the
+  Job controller keeps retrying while the Job is active, and a refusal that fixes itself must not
+  become an incident.
+- The threat model does not change: a forged `FailedCreate` about a CronJob is an incident at once,
+  as a forged failed-Job event already was, and costs one call within the budget.
+- `qwen3:4b` is the minimum local model the how-to recommends, on one run.
+
+**Hypotheses checked.**
+
+- Confirmed: the Job controller writes every `Failed` reason as a Warning on the Job; the CronJob
+  controller writes `FailedCreate` on the CronJob; a CronJob in `regarding` is its own top-level
+  owner with no change to `src/run.rs` or `src/owner.rs` (unit tests, and the corpus run's `report`
+  incident); the log of a `PodFailurePolicy` Job's failed Pod is read (the corpus request carried
+  it); the `PodFailurePolicy` fingerprint is stable across reruns (unit tests).
+- Not checked: why the kubelet reports `RunContainerError` rather than `CrashLoopBackOff` most of
+  the time; a Job whose name is truncated in its Pods' names (its fingerprint may change per
+  rerun).
+
+**Follow-ups.**
+
+- Done the same day: the hosted column of the research note, `gemini-3.5-flash-lite` through
+  `score.py --endpoint --model` with `KAUSA_API_KEY`: 16 of 20 entries passed everything, one
+  answer lost to the free tier's `429`.
+- The human pass over the answers, pending for the maintainer; an agent read-through found three
+  rubric gaps, kept as committed.
+- A hints ADR only if more runs confirm that small models miss known signatures and invent objects
+  for incidents with no Pod.
 
 ## Later the same day: the budget case counted a call in the wrong life
 

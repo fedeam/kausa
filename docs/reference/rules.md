@@ -4,14 +4,17 @@ The deterministic rules kausa applies before any language model call: detection 
 is an incident and how failures are grouped, and redaction rules decide what never leaves the
 cluster.
 
-Status as of 2026-10-29: the **detection rules, grouping and fingerprint are implemented** (first
+Status as of 2026-11-02: the **detection rules, grouping and fingerprint are implemented** (first
 implementation weekend, `src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`), and so are the
 redaction rules and the log reading of the "Logs read" column (second weekend); `D009` and `D010`
 and the changes to `D001` and `D005` came on 2026-10-28, and `D011` to `D013` and the new cases of
 `R003` on 2026-10-29, all from failures reproduced in kind; `D014`, from a watch on Deployments,
 also on 2026-10-29 ([0018. Explain a Deployment past its progress deadline (`D014`) from a
 Deployment watch that is on by default, and add nothing for StatefulSets or
-DaemonSets](../adr/0018-stuck-rollouts.md)). Ids, triggers and
+DaemonSets](../adr/0018-stuck-rollouts.md)); and on 2026-11-02, from failures reproduced in kind
+(Kubernetes v1.36.4), `ErrImageNeverPull` in `D002`, a container that cannot start in `D004`, the
+Job's other failure reasons in `D008`, a CronJob in `D011` and a new case of `R003`, with no new id
+([below](#the-coverage-additions-of-2026-11-02)). Ids, triggers and
 defaults may change until v0.1 is released; after that an id is never reused. How the rules fit in
 the pipeline: [Architecture](../explanation/architecture.md). Why redaction works this way: [0008.
 Send only allowlisted, redacted data to one OpenAI-compatible
@@ -21,7 +24,7 @@ endpoint](../adr/0008-data-leaving-the-cluster.md).
 
 A detection matches a signal: a **state** read from a Pod at every check (a container state, the
 Pod's scheduling condition, or its eviction) or from a Deployment (its `Progressing` condition), or a Warning **event** about a Pod, a Job, a workload
-controller (a ReplicaSet, a StatefulSet or a DaemonSet), a PersistentVolumeClaim or a
+controller (a ReplicaSet, a StatefulSet or a DaemonSet), a CronJob, a PersistentVolumeClaim or a
 HorizontalPodAutoscaler. The failure must
 persist through the **settle window** (60 seconds by default, `--settle-seconds`) before it becomes
 an incident, so a container that restarts once and recovers is not explained:
@@ -36,7 +39,12 @@ an incident, so a container that restarts once and recovers is not explained:
   readiness probe each is not an incident. An event counts as a signal for 10 minutes after it last
   happened (hypothesis behind the value, to verify on a live cluster: client-go's event recorder
   updates a repeated event about every 5 minutes at most).
-- **A failed Job** is final and is an incident at once.
+- **A failed Job** is final and is an incident at once, and so is a CronJob that cannot create
+  its Jobs (a `D011` event whose `regarding` is the CronJob). The CronJob controller writes one
+  short series per scheduled time, which would never settle
+  ([below](#the-coverage-additions-of-2026-11-02)). A Job of a CronJob whose Pods are refused is
+  keyed to the CronJob too, but its events follow the event rule: the Job controller keeps
+  retrying while the Job is active.
 
 Pods of the same top-level owner with the same detection form one incident, logged once while it
 lasts and again only if it clears and comes back. The incident lists every Pod seen failing while
@@ -47,16 +55,16 @@ Pods failing when it settles.
 | Id | Failure | Signal | Logs read |
 |---|---|---|---|
 | `D001` | Crash loop | Container waiting with reason `CrashLoopBackOff`, or terminated with any reason but `Completed` after at least one restart (between restarts the kubelet reports it as terminated for much of each back-off), in a Pod that is not in phase `Failed` | Yes: the previous instance while the container runs or waits again, otherwise the terminated one |
-| `D002` | Image cannot be pulled | Container waiting with `ErrImagePull`, `ImagePullBackOff` or `InvalidImageName` | No |
+| `D002` | Image cannot be pulled | Container waiting with `ErrImagePull`, `ImagePullBackOff`, `InvalidImageName` or `ErrImageNeverPull` (`imagePullPolicy: Never` and an image the node cannot use: absent, or present but not usable with the Pod's credentials) | No |
 | `D003` | Out of memory | Container waiting in `CrashLoopBackOff` whose last termination is `OOMKilled`, or terminated with `OOMKilled` and not restarted | Yes, previous container if it restarted, otherwise the terminated one |
-| `D004` | Container cannot be created | Container waiting with `CreateContainerConfigError` or `CreateContainerError` | No |
+| `D004` | Container cannot be created or started | Container waiting with `CreateContainerConfigError`, `CreateContainerError` or `RunContainerError` (the runtime cannot start the container's process), or waiting in `CrashLoopBackOff` whose last termination is `StartError` (the same failure between two attempts; takes precedence over `D001`) | No |
 | `D005` | Pod cannot be scheduled | The Pod still `Pending`, with its `PodScheduled` condition `False` for reason `Unschedulable`, or `SchedulerError` when a scheduler plugin failed for it (a volume that cannot be bound); never `SchedulingGated` | No |
 | `D006` | Probe failures | Warning event `Unhealthy` for a readiness, liveness or startup probe, happening again a settle window after it was first seen | No |
 | `D007` | Volume cannot be attached or mounted | Warning event `FailedMount` or `FailedAttachVolume` | No |
-| `D008` | Job failed | Warning event `BackoffLimitExceeded` or `DeadlineExceeded` about the Job | Yes, the terminated container of one failed Pod of the Job (the first by name) |
+| `D008` | Job failed | Warning event `BackoffLimitExceeded`, `DeadlineExceeded`, `PodFailurePolicy`, `MaxFailedIndexesExceeded` or `FailedIndexes` about the Job (every reason of a Job's `Failed` condition) | Yes, the terminated container of one failed Pod of the Job (the first by name) |
 | `D009` | Pod evicted | The Pod in phase `Failed` with `status.reason` `Evicted` (its containers' `ephemeral-storage` limits, an `emptyDir` `sizeLimit`, or node pressure; the status message says which), failed in the last 10 minutes, unless the message starts with `Pod was rejected:` | No |
 | `D010` | Pod sandbox cannot be created | Warning event `FailedCreatePodSandBox` about a Pod | No |
-| `D011` | Workload cannot create Pods | Warning event `FailedCreate` about a ReplicaSet, a Job, a StatefulSet or a DaemonSet (a quota, an admission webhook or Pod Security admission refused the Pod) | No |
+| `D011` | Workload cannot create Pods or Jobs | Warning event `FailedCreate` about a ReplicaSet, a Job, a StatefulSet, a DaemonSet or a CronJob (a quota, an admission webhook or Pod Security admission refused the Pod, or the CronJob's Job). About a CronJob itself (not a Job of a CronJob), it is an incident at once | No |
 | `D012` | Volume claim cannot be provisioned | Warning event `ProvisioningFailed` about a PersistentVolumeClaim | No |
 | `D013` | Autoscaler cannot get metrics | Warning event `FailedGetResourceMetric`, `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` about a HorizontalPodAutoscaler | No |
 | `D014` | Rollout does not progress | A Deployment whose `Progressing` condition is `False` with reason `ProgressDeadlineExceeded` (exact case), that is not paused, and whose `status.observedGeneration` is at least `metadata.generation` (both present); a state, about the Deployment itself. Yields to an explained incident of the same Deployment (below). Off with `--no-rollouts` | No |
@@ -95,9 +103,10 @@ reading the object. An event about an object other than a Pod (`D008`, `D011` to
 no Pod: its incident is about that object's top-level owner, found the same way from the object
 itself (a ReplicaSet's Deployment, a Job's CronJob), and a StatefulSet, a DaemonSet, a
 PersistentVolumeClaim or a HorizontalPodAutoscaler is its own top-level owner, named from the
-event's `regarding`; no new permission is needed. A container matches at most one detection, the
+event's `regarding`; no new permission is needed. A CronJob in an event's `regarding` (`D011`) is its own top-level owner: kausa reads nothing to
+find it, as for a StatefulSet. A container matches at most one detection, the
 most specific one: `D003` takes precedence over `D001` when the last termination is `OOMKilled`,
-before grouping. No
+and `D004` when it is `StartError`, before grouping. No
 container of a Pod in phase `Failed` is a crash loop: such a Pod runs no container again, and a
 container that had restarted before the kubelet evicted the Pod or ended it at its
 `activeDeadlineSeconds` stays terminated (`Error`, exit code 137) after a restart (seen on kind,
@@ -257,12 +266,16 @@ The **fingerprint** hashes the detection id, the namespace, the owner's kind and
 that stays the same for the same failure: the example's message without the prefix
 `(combined from similar events): ` of an aggregated event (so that the kubelet's first `D010`
 events and the event that folds them have one fingerprint), with the names of the incident's
-Pods (and, for `D011`, of the Pods the controller tried to create, which start with the top-level
-owner's name), UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
+Pods (and, for `D011`, of the Pods the controller tried to create or the Job of a CronJob's
+scheduled time, and, for `D008`, of the Pod a `PodFailurePolicy` note names, all of which start
+with the top-level owner's name), UUIDs, Go durations (the kubelet's growing back-off: `40s`, `2m40s`, `5m0s`), hexadecimal runs
 and other numbers normalized; for `D002`, whose message alternates between `ErrImagePull` and
 `ImagePullBackOff`, the image reference instead; for `D001` and `D003`, whose example is the
 container waiting in `CrashLoopBackOff` (with the back-off message) or terminated between restarts
-(with none) depending on when kausa looks, the container's name; for `D014`, the text
+(with none) depending on when kausa looks, the container's name, and so for a `D004` container
+that cannot start, whose example alternates between `RunContainerError` (the runtime's message)
+and `CrashLoopBackOff` (the back-off message) and is logged with the reason `RunContainerError`
+either way; for `D014`, the text
 `revision <n>`, `<n>` the Deployment's `deployment.kubernetes.io/revision` annotation when it
 parses as an unsigned integer (the text is empty otherwise), hashed as is, not normalized, so each
 rollout has its own fingerprint, stable across restarts. It is computed before redaction and never
@@ -270,6 +283,91 @@ sent to the model; it is in kausa's log, the names of its Events and Explanation
 notifications on, every notification ([Data sent in
 notifications](data-sent-in-notifications.md#the-fingerprint)). It also keys the deduplication
 cache.
+
+### The coverage additions of 2026-11-02
+
+Each change below was reproduced on kind (Kubernetes v1.36.4) on 2026-11-02, and each citation is
+the Kubernetes source at the tag `v1.36.4`. No id was added, and no permission or request field.
+
+**`D008`: every reason of a Job's `Failed` condition.** The Job controller's `recordJobFinished`
+writes the reason and message of the Job's `Failed` condition as a Warning event on the Job
+(`pkg/controller/job/job_controller.go:1666`), and the reason is one of five
+(`pkg/apis/batch/types.go:622-633`): `BackoffLimitExceeded`, `DeadlineExceeded`,
+`PodFailurePolicy` (a failed Pod matched a `FailJob` rule of the Job's `podFailurePolicy`,
+`job_controller.go:1081`), and `MaxFailedIndexesExceeded` and `FailedIndexes` (an indexed Job with
+`backoffLimitPerIndex`, `:1107` and `:1109`). On kind each came once (count 1), with the
+condition's message: `Container <container> for pod <namespace>/<pod> failed with exit code <n>
+matching FailJob rule at index <i>` (`pkg/controller/job/pod_failure_policy.go:57`; a rule on a Pod
+condition writes `Pod <namespace>/<pod> has condition <type> matching <action> rule at index <i>`,
+`:74`, not reproduced), or the fixed `Job has exceeded the specified maximal number of failed
+indexes` and `Job has failed indexes`. The interim `FailureTarget` condition writes no event. The
+failed Pods are kept (phase `Failed`, terminated `Error`, no restart), so the log of the first
+failed Pod is read as for the other reasons. A `D008` incident gathers no Pod, so the container and
+the Pod in a `PodFailurePolicy` note are no registered names: `R003` redacts them, and the
+fingerprint replaces the Pod's generated name (`<job>-<suffix>`, or `<cronjob>-<n>-<suffix>` when
+the owner is the Job's CronJob), so a rerun or the next scheduled time keeps the fingerprint.
+Which indexes failed is only in the Job's status, which kausa does not read.
+
+**`D011` about a CronJob.** The CronJob controller writes `FailedCreate` on the CronJob, `Error
+creating job: <error>`, when the API server refuses the Job of a scheduled time
+(`pkg/controller/cronjob/cronjob_controllerv2.go:640`). With a ResourceQuota `count/jobs.batch:
+"0"` and a schedule of every minute, the first scheduled time gave one event whose series reached
+count 14 in 41 seconds, the controller retrying the same Job name (`jobs.batch "<cronjob>-<n>" is
+forbidden: exceeded quota: <quota>, requested: count/jobs.batch=1, …`), and each later scheduled
+time gave a new event, count 1, naming a new Job. The CronJob's status stayed empty and no Job or
+Pod existed. Under the event rule of the settle window this would never be an incident: the first
+series ends before a 60-second window, each later event is a new object seen once, and an hourly
+CronJob's next event comes after the last one is no longer fresh (10 minutes). So a `D011` event
+whose `regarding` is the CronJob does not wait for the settle window, like a failed Job; it is
+forgotten as before, once no fresh event remains. The exemption follows the event's object, not
+the incident's key: a Job of a CronJob whose Pods are refused is keyed to the CronJob too (Job →
+CronJob), but the Job controller keeps retrying its Pods while the Job is active, so its events
+wait for the window as before, and a refusal that fixes itself (an admission webhook down for a
+few seconds) is no incident. The CronJob is named from `regarding`, with no read and no new
+permission, and the Job's numbered name counts as a generated name in the fingerprint, so
+every scheduled time has the same fingerprint. The note names a Job and a quota, which `R003`
+redacts (the qualified resource `jobs.batch "<name>"` and `exceeded quota: <name>`).
+
+**`D002` and `ErrImageNeverPull`.** With `imagePullPolicy: Never` and an image the node cannot use,
+the container waits with `ErrImageNeverPull` (`pkg/kubelet/images/types.go:38`) and the message
+`Container image "<image>" is not present with pull policy of Never` (48 of 48 samples over 4
+minutes, the Pod `Pending`, no restart). The kubelet returns the same reason when the image is
+present but the Pod's credentials cannot use it (`pkg/kubelet/images/image_manager.go:150-159`), so
+the rule does not say the image is absent. The fingerprint text is the image reference, as for the
+other reasons of `D002`; the image in the message gets the same placeholder as the `image` field,
+and the request carries `image_pull_policy` `Never`.
+
+**`D004` and a container that cannot start.** When the runtime creates the container but cannot
+start its process (an entrypoint that does not exist or is not executable), the kubelet writes the
+Warning `Failed` event `Error: <runtime message>` and returns `RunContainerError`
+(`pkg/kubelet/container/sync_result.go:87`,
+`pkg/kubelet/kuberuntime/kuberuntime_container.go:292-296`). The waiting reason it keeps in its
+cache overrides the terminated state (`pkg/kubelet/kubelet_pods.go:2731-2748`): the container
+shows waiting `RunContainerError` with last termination `StartError` (exit code 128), and, while
+it backs off, `CrashLoopBackOff` with the same last termination
+(`pkg/kubelet/kuberuntime/kuberuntime_manager.go:1934-1961`); `state.terminated` never appeared.
+Over 6 minutes the waiting reason was `RunContainerError` in 114 of 126 samples, and
+`CrashLoopBackOff` first came about 2 minutes 46 seconds after the Pod was created. Before, `D001`
+caught it late and only through the `CrashLoopBackOff` samples, and read the log of a container
+that never ran. Now both states are `D004`: `CrashLoopBackOff` with last termination `StartError`
+takes precedence over `D001`, as `OOMKilled` does for `D003`, so it is one incident, settled as a
+state, with no log read. Its sample is logged with the reason `RunContainerError` whichever state
+it was, and its fingerprint text is the container's name. The waiting message (redacted, and sent
+as for any Pod before) can name the executable path the runtime could not start.
+
+**Non-findings and hypotheses.**
+
+- A container terminated with `StartError` after a restart, on the restart-count path of `D001`,
+  stays `D001`: it never appeared on kind (the waiting reason overrides it).
+- Why the kubelet reports `RunContainerError` rather than `CrashLoopBackOff` most of the time is a
+  hypothesis, not traced.
+- A Job whose name is long enough that the generated names of its Pods truncate it has Pods whose
+  names do not start with `<job>-`, so the Pod in its `PodFailurePolicy` note is not replaced in the
+  fingerprint text, and each rerun may get a fingerprint of its own (hypothesis from the
+  generated-name rule, not reproduced).
+- Lifecycle-hook failures (`FailedPostStartHook`, `FailedPreStopHook`) stay out of scope: their
+  notes quote the hook's command, which [0008. Send only allowlisted, redacted data to one
+  OpenAI-compatible endpoint](../adr/0008-data-leaving-the-cluster.md) keeps from the model.
 
 ## Redaction rules
 
@@ -290,7 +388,7 @@ format](command-line.md)).
 |---|---|---|
 | `R001` | Fields outside the allowlist | Never serialized. A resource quantity (a request or a limit) is kept only if it is at most 32 bytes and in the Kubernetes quantity grammar, otherwise sent as `null`; pull policies, probe handlers, scheduling operators and effects are mapped to closed sets |
 | `R002` | Known names | The namespace, the owner, the incident's Pods, their containers, nodes and service accounts, and the registry host and path of images outside the public registries (`docker.io`, `ghcr.io`, `quay.io`, `registry.k8s.io`, `gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`; an image with no registry is from Docker Hub), replaced by stable placeholders (`namespace-1`, `deployment-1`, `pod-1`, `container-1`, `node-1`, `serviceaccount-1`, `registry-1`, `image-1`; `object-1` for a custom resource's kind) wherever they appear as words, in any ASCII case: a hyphen, dot, slash, underscore or percent escape is a word boundary, so a Deployment's name is replaced inside its ReplicaSet's name and in `PAYMENTS_SERVICE_HOST` too. Mapped back in the answer in one pass, also when the model capitalizes them |
-| `R003` | Names in Kubernetes messages | The quoted name after `secret`, `configmap`, `persistentvolumeclaim`, `pvc`, `serviceaccount`, `service`, `pod`, `container` or `StorageClass` (singular or plural, single or double quotes, every name of a list such as `containers "a", "b"`): `secret "<redacted:name>" not found`, `pods "<redacted:name>" is forbidden`; the quoted name after a resource qualified by its API group: `deployments.apps "<redacted:name>" not found`, `storageclass.storage.k8s.io "<redacted:name>" not found`; the quota's name in `exceeded quota: <name>`; the name in `Secret <namespace>/<name>` and `ConfigMap <namespace>/<name>`; the name in `system:serviceaccount:<namespace>:<name>`. The names after `pod`, `container`, `StorageClass`, a qualified resource and in a list are a second pass over the output of the first (the six kinds before them, one quoted name each), and contain no whitespace, so a quote left open cannot hide a name the first pass catches |
+| `R003` | Names in Kubernetes messages | The quoted name after `secret`, `configmap`, `persistentvolumeclaim`, `pvc`, `serviceaccount`, `service`, `pod`, `container` or `StorageClass` (singular or plural, single or double quotes, every name of a list such as `containers "a", "b"`): `secret "<redacted:name>" not found`, `pods "<redacted:name>" is forbidden`; the quoted name after a resource qualified by its API group: `deployments.apps "<redacted:name>" not found`, `storageclass.storage.k8s.io "<redacted:name>" not found`; the quota's name in `exceeded quota: <name>`; the name in `Secret <namespace>/<name>` and `ConfigMap <namespace>/<name>`; the name in `system:serviceaccount:<namespace>:<name>`; the container and the Pod in the Job controller's `podFailurePolicy` notes, `Container <redacted:name> for pod <namespace>/<redacted:name> failed with exit code <n> matching <action> rule at index <i>` and `Pod <namespace>/<redacted:name> has condition <type> matching <action> rule at index <i>` (since 2026-11-02: a `D008` incident gathers no Pod, so neither name is registered). The names after `pod`, `container`, `StorageClass`, a qualified resource and in a list are a second pass over the output of the first (the six kinds before them, one quoted name each), and contain no whitespace, so a quote left open cannot hide a name the first pass catches |
 | `R004` | IP addresses | IPv4 addresses, and IPv6 addresses that parse as such once the colons around them are dropped (so `10:05:00` and `Foo::Bar` stay); the port after them is kept |
 | `R005` | Email addresses | `local@domain.tld` |
 | `R006` | Credentials in URLs | The user information of a URL, empty user and passwords with `@` or `/` included: `postgres://<redacted:userinfo>@db:5432`, `redis://<redacted:userinfo>@redis:6379`. The host is left to `R013` |
