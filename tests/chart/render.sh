@@ -7,7 +7,9 @@
 # (docs/adr/0019-high-availability.md), and checks the rendered objects, the rules, the
 # Deployment's arguments and volumes, the NetworkPolicy, NOTES.txt, the budget's flags and comments
 # (docs/adr/0021-refill-the-call-budget.md), and every refusal of kausa.validate with its exact
-# message.
+# message. It also checks, with helm alone, that the detections of v0.5's coverage gaps need no new
+# permission, and the seeded failure the kind test adds for them (tests/e2e/failures.yaml and
+# tests/e2e/run.sh).
 # Needs helm, git and coreutils only, and never contacts a cluster (KUBECONFIG points nowhere).
 # Run it from anywhere: tests/chart/render.sh. It prints one line per check and exits 1 if any
 # failed.
@@ -2164,6 +2166,116 @@ refuse replicas-file-1.5 "$(not_replicas 1.5)" "${HA_CL[@]}" -f "$VALUES_FLOAT"
 refuse replicas-file-1.5-namespaced "$(not_replicas 1.5)" "${HA_NS[@]}" -f "$VALUES_FLOAT"
 refuse replicas-json-2.5 "$(not_replicas 2.5)" "${HA_CL[@]}" --set-json replicaCount=2.5
 refuse replicas-json-true "$(not_replicas true)" "${HA_CL[@]}" --set-json replicaCount=true
+
+# --- The coverage gaps of v0.5 (no ADR) ------------------------------------------------
+
+# D011 about a CronJob and D008's new reasons need no new permission: a CronJob in an event's
+# `regarding` is its own top-level owner, and the only batch hop is Job -> CronJob, a `get` of the
+# Job. No rule names cronjobs, in either scope, with one replica or two, and every batch rule is
+# `get` on jobs alone.
+# coverage_rules NAME ARGS...: renders with ARGS and checks the rules of the ClusterRole and Roles.
+coverage_rules() {
+  local name=$1 out="$WORK/coverage-$1" since=$FAILURES
+  shift
+  if ! render "$out" "$RELEASE" "$CHART" "$@"; then
+    fail "coverage/$name does not render: $(cat "$out.err")"
+    return 0
+  fi
+  rules_of "$out" >"$out.rules"
+  if grep -qi cronjob "$out.rules"; then
+    fail "coverage/$name: a rule names cronjobs: $(cat "$out.rules")"
+  fi
+  if ! grep -qx 'resources:\["jobs"\]' "$out.rules"; then
+    fail "coverage/$name: no rule on jobs, the Job -> CronJob hop"
+  fi
+  awk '/^-apiGroups:/ { group = $0; next }
+       group == "-apiGroups:[\"batch\"]" && /^(resources|verbs):/ { print }' "$out.rules" |
+    sort -u >"$out.batch"
+  printf '%s\n' 'resources:["jobs"]' 'verbs:["get"]' >"$out.batch-expected"
+  if ! diff -u "$out.batch-expected" "$out.batch" >"$out.batch-diff"; then
+    fail "coverage/$name: the batch rules are not get on jobs: $(cat "$out.batch-diff")"
+  fi
+  passed "$since" "coverage/$name: no rule names cronjobs, batch is get on jobs"
+}
+coverage_rules cluster "${HA_CL[@]}"
+coverage_rules namespaced "${HA_NS[@]}"
+coverage_rules cluster-standby "${HA_CL[@]}" --set replicaCount=2
+coverage_rules namespaced-standby "${HA_NS[@]}" --set replicaCount=2
+coverage_rules cluster-endpoint-history "${HA_CL[@]}" "${ENDPOINT[@]}" "${HISTORY_ON[@]}"
+
+# The kind test seeds a Job failed by its podFailurePolicy (D008, reason PodFailurePolicy), with
+# backoffLimit 6 so that the reason cannot be BackoffLimitExceeded, and no CronJob or ResourceQuota:
+# a count/jobs.batch quota in e2e-shop would refuse the other Jobs. The manifest is read with helm
+# (fromYaml in a throwaway chart), so its layout is free; tests/e2e/run.sh is only read.
+E2E="$ROOT/tests/e2e"
+SEEDED="$WORK/e2e-seeded"
+mkdir -p "$SEEDED/templates"
+printf '%s\n' 'apiVersion: v2' 'name: e2e-seeded' 'version: 0.0.0' >"$SEEDED/Chart.yaml"
+cp "$E2E/failures.yaml" "$SEEDED/failures.yaml"
+cat >"$SEEDED/templates/seeded.yaml" <<'TEMPLATE'
+{{- range $doc := regexSplit "(?m)^---[ \t]*$" (.Files.Get "failures.yaml") -1 }}
+{{- $o := fromYaml $doc }}
+{{- if $o.kind }}
+# kind {{ $o.kind }} {{ dig "metadata" "namespace" "" $o }}/{{ dig "metadata" "name" "" $o }}
+{{- end }}
+{{- if and (eq (toString $o.kind) "Job") (eq (dig "metadata" "name" "" $o) "policy-job") }}
+{{- $spec := $o.spec }}
+{{- $pod := $spec.template.spec }}
+{{- $containers := list }}
+{{- range $pod.containers }}
+{{- $containers = append $containers (dict "name" .name "image" .image "imagePullPolicy" .imagePullPolicy "args" .args) }}
+{{- end }}
+# policy-job {{ dict "namespace" $o.metadata.namespace "backoffLimit" $spec.backoffLimit "podFailurePolicy" $spec.podFailurePolicy "restartPolicy" $pod.restartPolicy "containers" $containers | toJson }}
+{{- end }}
+{{- end }}
+TEMPLATE
+since=$FAILURES
+if ! render "$SEEDED/out" e2e-seeded "$SEEDED"; then
+  fail "e2e/failures.yaml cannot be read: $(cat "$SEEDED/out.err")"
+else
+  grep '^# kind ' "$SEEDED/out" | sed 's/^# kind //' >"$SEEDED/kinds"
+  [ "$(grep -cx 'Job e2e-shop/policy-job' "$SEEDED/kinds" || true)" = 1 ] ||
+    fail "e2e/failures.yaml: not exactly one Job policy-job in e2e-shop"
+  if grep -Eq '^(CronJob|ResourceQuota) ' "$SEEDED/kinds"; then
+    fail "e2e/failures.yaml: seeds a CronJob or a ResourceQuota: $(cat "$SEEDED/kinds")"
+  fi
+  # The seeded objects before this change stay.
+  for object in 'Namespace /e2e-shop' 'Deployment e2e-shop/crasher' 'Job e2e-shop/failing-job' \
+    'Deployment e2e-shop/stranded' 'Deployment e2e-shop/stalled' 'Deployment e2e-shop/refused'; do
+    grep -qxF "$object" "$SEEDED/kinds" || fail "e2e/failures.yaml: $object is gone"
+  done
+  POLICY_JOB='{"backoffLimit":6,"containers":[{"args":["--no-such-flag"],"image":"kausa:e2e","imagePullPolicy":"Never","name":"e2e-policy-task"}],"namespace":"e2e-shop","podFailurePolicy":{"rules":[{"action":"FailJob","onExitCodes":{"containerName":"e2e-policy-task","operator":"In","values":[2]}}]},"restartPolicy":"Never"}'
+  got=$(sed -n 's/^# policy-job //p' "$SEEDED/out")
+  [ "$got" = "$POLICY_JOB" ] ||
+    fail "e2e/failures.yaml: policy-job is not the contract's Job: expected $POLICY_JOB, got ${got:-nothing}"
+  grep -q '^# - policy-job: ' "$E2E/failures.yaml" ||
+    fail "e2e/failures.yaml: no '# - policy-job: ' bullet in the header comment"
+fi
+passed "$since" "e2e/failures.yaml: policy-job fails by its podFailurePolicy, no CronJob or quota"
+
+# tests/e2e/run.sh: the Job is explained as D008, its incident's sample.reason is PodFailurePolicy,
+# its request carries the note without its real names, its names are in the leak loop, it is
+# notified once, and the notifications sent count it (one per failing workload, now six).
+since=$FAILURES
+RUN_SH="$E2E/run.sh"
+bash -n "$RUN_SH" || fail "e2e/run.sh: bash -n fails"
+grep -Eq '^[[:space:]]*explanations_of Job policy-job D008 batch/v1[[:space:]]*$' "$RUN_SH" ||
+  fail "e2e/run.sh: no 'explanations_of Job policy-job D008 batch/v1'"
+# shellcheck disable=SC2016 # the words are run.sh's own text, not to be expanded
+for words in PodFailurePolicy 'matching FailJob rule at index 0' \
+  '("Job", "policy-job", "D008", "batch/v1")' '{outcome=\"sent\"}" && $2 >= 6'; do
+  grep -qF -- "$words" "$RUN_SH" || fail "e2e/run.sh: no '$words'"
+done
+# shellcheck disable=SC2016 # the same
+leak_loop=$(grep -E '^for name in "\$TARGET" "\$OTHER" ' "$RUN_SH" || true)
+[ -n "$leak_loop" ] || fail "e2e/run.sh: no real-name leak loop"
+for name in crasher failing-job stranded stalled refused policy-job e2e-policy-task; do
+  case " $leak_loop " in
+    *" $name "* | *" $name;"*) ;;
+    *) fail "e2e/run.sh: $name is not in the real-name leak loop" ;;
+  esac
+done
+passed "$since" "e2e/run.sh: policy-job is explained, redacted, leak-checked and notified"
 
 # --- Refill budget (docs/adr/0021-refill-the-call-budget.md) ------------------------------------
 

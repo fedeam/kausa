@@ -42,7 +42,7 @@ The kind test checks that the `kubectl auth can-i` lists stay the same with noti
 |---|---|---|---|
 | `""` (core) | `pods` | `get`, `list`, `watch` | Container states, restart counts, phase, owner references |
 | `""` (core) | `pods/log` | `get` | The last lines of the failed container (the previous instance if it restarted) for crash-type and Job detections. Only while log collection is on |
-| `events.k8s.io` | `events` | `list`, `watch` | Warning events about Pods, Jobs, ReplicaSets, StatefulSets, DaemonSets, PersistentVolumeClaims and HorizontalPodAutoscalers (the objects themselves are never read) |
+| `events.k8s.io` | `events` | `list`, `watch` | Warning events about Pods, Jobs, ReplicaSets, StatefulSets, DaemonSets, CronJobs, PersistentVolumeClaims and HorizontalPodAutoscalers (the objects themselves are never read) |
 | `events.k8s.io` | `events` | `create`, `patch` | Write the explanation, and update its series count when the incident repeats |
 | `apps` | `replicasets` | `get` | Follow a ReplicaSet's owner reference to its Deployment, for a Pod or for an event about the ReplicaSet (`D011`) |
 | `apps` | `deployments` | `list`, `watch` | The Deployment watch: a Deployment's `Progressing` condition, generation, revision and replica counts, for a rollout past its progress deadline (`D014`). Each Deployment is reduced at once to those fields, and kept only while it matches. Only while `rollouts` is on (the default); `rollouts: false` removes the row and passes `--no-rollouts`. No `get` |

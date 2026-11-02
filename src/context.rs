@@ -298,6 +298,7 @@ mod tests {
             owner: owner.clone(),
             observed_at: Timestamp::UNIX_EPOCH,
             event: None,
+            regarding_kind: None,
             pod: Some("api-7d9c8b6f4d-2xkqp".into()),
             container: Some("api".into()),
             image: None,
@@ -655,6 +656,7 @@ mod tests {
             owner: owner.clone(),
             observed_at: Timestamp::UNIX_EPOCH,
             event: Some((first.uid.clone(), None)),
+            regarding_kind: Some(first.regarding.kind.clone()),
             pod: None,
             container: None,
             image: None,
@@ -833,6 +835,173 @@ mod tests {
             &["shop", "checkout", "storefront"],
             &["not found", "unable to get metrics for resource cpu"],
         );
+    }
+
+    // Acceptance tests for the coverage gaps of v0.5 (no ADR), written before the code.
+    // The notes follow what the Job and CronJob controllers and the kubelet wrote on kind
+    // (Kubernetes v1.36.4, 2026-11-02); names are invented.
+
+    #[test]
+    fn a_d008_pod_failure_policy_note_reaches_the_model_redacted() {
+        // A D008 incident gathers no Pod, so neither the container nor the Pod the note names is
+        // a registered name (pkg/controller/job/pod_failure_policy.go:57 and :74 at v1.36.4).
+        let (context, messages) = about(
+            ("batch/v1", "CronJob", "report"),
+            ("batch/v1", "Job", "report-29000000"),
+            &[(
+                "PodFailurePolicy",
+                "Container exporter for pod shop/report-29000000-x7k2p failed with exit code 42 \
+                 matching FailJob rule at index 0",
+            )],
+        );
+        assert_eq!(context["detection"]["id"], "D008");
+        assert_eq!(
+            context["workload"],
+            json!({"kind": "CronJob", "name": "cronjob-1", "namespace": "namespace-1"})
+        );
+        redacted(
+            &context,
+            &messages,
+            &["shop", "report", "29000000", "x7k2p", "exporter"],
+            &["failed with exit code 42 matching FailJob rule at index 0"],
+        );
+        assert_eq!(
+            messages[0],
+            "Container <redacted:name> for pod namespace-1/<redacted:name> failed with exit code \
+             42 matching FailJob rule at index 0"
+        );
+        // The rule on a Pod condition, about a Job of its own, whose name the container's
+        // contains.
+        let (context, messages) = about(
+            ("batch/v1", "Job", "migrate"),
+            ("batch/v1", "Job", "migrate"),
+            &[
+                (
+                    "PodFailurePolicy",
+                    "Container db-migrate for pod shop/migrate-x7k2p failed with exit code 2 \
+                     matching FailJob rule at index 0",
+                ),
+                (
+                    "PodFailurePolicy",
+                    "Pod shop/migrate-q9w8e has condition DisruptionTarget matching FailJob rule \
+                     at index 1",
+                ),
+            ],
+        );
+        redacted(
+            &context,
+            &messages,
+            &["shop", "migrate", "x7k2p", "q9w8e"],
+            &[
+                "failed with exit code 2 matching FailJob rule at index 0",
+                "has condition DisruptionTarget matching FailJob rule at index 1",
+            ],
+        );
+        assert_eq!(
+            messages,
+            [
+                "Container <redacted:name> for pod namespace-1/<redacted:name> failed with exit \
+                 code 2 matching FailJob rule at index 0",
+                "Pod namespace-1/<redacted:name> has condition DisruptionTarget matching FailJob \
+                 rule at index 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_fixed_notes_of_indexed_jobs_reach_the_model_as_they_are() {
+        let fixed = [
+            (
+                "MaxFailedIndexesExceeded",
+                "Job has exceeded the specified maximal number of failed indexes",
+            ),
+            ("FailedIndexes", "Job has failed indexes"),
+        ];
+        let (context, messages) = about(
+            ("batch/v1", "Job", "migrate"),
+            ("batch/v1", "Job", "migrate"),
+            &fixed,
+        );
+        assert_eq!(context["detection"]["id"], "D008");
+        let reasons: Vec<_> = context["warning_events"]
+            .as_array()
+            .expect("the warning events")
+            .iter()
+            .map(|e| e["reason"].as_str().expect("a reason"))
+            .collect();
+        assert_eq!(reasons, ["MaxFailedIndexesExceeded", "FailedIndexes"]);
+        assert_eq!(messages, fixed.map(|(_, note)| note));
+    }
+
+    #[test]
+    fn a_cronjob_that_cannot_create_its_job_reaches_the_model_redacted() {
+        // The CronJob controller names the Job of the scheduled time and the quota
+        // (pkg/controller/cronjob/cronjob_controllerv2.go:640 at v1.36.4).
+        let cron = ("batch/v1", "CronJob", "report");
+        let (context, messages) = about(
+            cron,
+            cron,
+            &[(
+                "FailedCreate",
+                "Error creating job: jobs.batch \"report-29000000\" is forbidden: exceeded quota: \
+                 no-jobs, requested: count/jobs.batch=1, used: count/jobs.batch=0, limited: \
+                 count/jobs.batch=0",
+            )],
+        );
+        assert_eq!(context["detection"]["id"], "D011");
+        assert_eq!(
+            context["detection"]["name"],
+            "workload cannot create pods or jobs"
+        );
+        assert_eq!(
+            context["workload"],
+            json!({"kind": "CronJob", "name": "cronjob-1", "namespace": "namespace-1"})
+        );
+        redacted(
+            &context,
+            &messages,
+            &["shop", "report", "29000000", "no-jobs"],
+            &["is forbidden: exceeded quota"],
+        );
+        assert!(
+            messages[0].contains("limited: count/jobs.batch=0"),
+            "the quota's numbers are missing"
+        );
+    }
+
+    #[test]
+    fn an_image_the_policy_never_pulls_reaches_the_model_as_its_placeholder() {
+        // The kubelet's message names the image; it is sent only as the image field's
+        // placeholder, and the message does not say why the node cannot use the image
+        // (pkg/kubelet/images/image_manager.go:150-159 at v1.36.4).
+        let mut pod = gathered().pods.remove(0);
+        pod.phase = Some("Pending".into());
+        let container = &mut pod.containers[0];
+        container.waiting_reason = Some("ErrImageNeverPull".into());
+        container.waiting_message = Some(
+            "Container image \"registry.example.com/shop/api:1.4.2\" is not present with pull \
+             policy of Never"
+                .into(),
+        );
+        container.image_pull_policy = Some("Never");
+        container.restart_count = 0;
+        container.last_termination_exit_code = None;
+        let (context, _) = build(&with_pods(Detection::ImagePull, vec![pod]));
+        assert_eq!(context["detection"]["id"], "D002");
+        assert_eq!(context["detection"]["name"], "image cannot be pulled");
+        let sent = &context["pods"][0]["containers"][0];
+        assert_eq!(sent["waiting_reason"], "ErrImageNeverPull");
+        assert_eq!(sent["image_pull_policy"], "Never");
+        let image = sent["image"].as_str().expect("an image");
+        assert_eq!(image, "registry-1/image-1:1.4.2");
+        assert_eq!(
+            sent["waiting_message"],
+            format!("Container image \"{image}\" is not present with pull policy of Never")
+        );
+        let text = context.to_string();
+        for leaked in ["registry.example.com", "shop/api", "\"shop\""] {
+            assert!(!text.contains(leaked), "{leaked} was sent");
+        }
     }
 
     // Acceptance tests for docs/adr/0017-richer-context-for-the-model.md, written before the
@@ -1322,6 +1491,7 @@ mod tests {
             owner: owner.clone(),
             observed_at: Timestamp::UNIX_EPOCH,
             event: None,
+            regarding_kind: None,
             pod: None,
             container: None,
             image: None,

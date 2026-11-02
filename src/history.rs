@@ -1009,6 +1009,7 @@ mod tests {
                 owner: owner.clone(),
                 observed_at: Timestamp::UNIX_EPOCH,
                 event: None,
+                regarding_kind: None,
                 pod: Some("api-7d9c8b6f4d-2xkqp".into()),
                 container: Some("api".into()),
                 image: None,

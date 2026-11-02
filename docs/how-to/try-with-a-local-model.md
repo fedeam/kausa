@@ -17,8 +17,8 @@ watch, released in v0.4.0, adds a path to the proxy of step 2 (two with
   Deployments (unless `--no-rollouts`), the metadata of ReplicaSets and Jobs, and the logs of
   failed containers, and writes Events
   ([Permissions](../reference/permissions.md)). To keep it strictly read-only, add `--no-events`.
-- [Ollama](https://ollama.com) installed, and a model pulled (`ollama pull qwen3:0.6b` is about
-  500 MB; a larger model explains better).
+- [Ollama](https://ollama.com) installed, and a model pulled (`ollama pull qwen3:4b` is about
+  2.5 GB, `qwen3:0.6b` about 500 MB; see [Which model is good enough](#which-model-is-good-enough)).
 - kausa built from source ([Set up a development environment and run the
   checks](develop.md)): `cargo build --locked --release`.
 
@@ -107,6 +107,18 @@ watch, released in v0.4.0, adds a path to the proxy of step 2 (two with
    `curl -s 127.0.0.1:9090/metrics` shows the counters.
 
 5. **Stop** kausa with Ctrl-C, then the proxy and the model server.
+
+## Which model is good enough
+
+Use `qwen3:4b` or a larger model; `qwen3:0.6b` only to see the flow work. On 2026-11-02 both ran
+against 20 seeded failures with a known cause, at least one per detection, graded by a fixed
+keyword rubric ([Explanation quality of local models against known
+causes](../research/2026-11-02-explanation-quality.md)): `qwen3:4b` passed every criterion on 15
+of 20 and `qwen3:0.6b` on 10, both always with valid JSON. `qwen3:0.6b` named wrong causes for
+plain signatures (a missing ConfigMap key read as CPU) and invented objects; `qwen3:4b` missed
+causes that sat in a failed Job's log. Once each, an order of magnitude: one run per model, not a
+benchmark. To grade another model the same way, replay a dry-run's requests with
+`tests/bench/score.py` (its header shows how).
 
 ## Verify
 

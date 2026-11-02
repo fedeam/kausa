@@ -46,6 +46,9 @@ pub struct Signal {
     pub observed_at: Timestamp,
     /// For an event, its UID and, when its own series shows it repeated, when it first happened.
     pub event: Option<(String, Option<Timestamp>)>,
+    /// For an event, the kind of the object it is about (`regarding`), which may not be the
+    /// owner's: a Job's event is keyed to its CronJob. `None` for a state.
+    pub regarding_kind: Option<String>,
     pub pod: Option<String>,
     pub container: Option<String>,
     pub image: Option<String>,
@@ -92,6 +95,7 @@ pub fn collect_signals(
                 owner: pod.owner.clone(),
                 observed_at: now,
                 event: None,
+                regarding_kind: None,
                 pod: Some(record.name.clone()),
                 container: container.map(str::to_owned),
                 image,
@@ -135,11 +139,19 @@ pub fn collect_signals(
                     .or(container.terminated_exit_code);
                 ("OOMKilled".to_owned(), code)
             } else {
-                let reason = container
-                    .waiting_reason
-                    .clone()
-                    .or_else(|| container.terminated_reason.clone())
-                    .unwrap_or_default();
+                let waiting = container.waiting_reason.as_deref();
+                // A process the runtime cannot start: one reason, whichever of its two waiting
+                // states the kubelet reports (`detect_container`), as `OOMKilled` for D003.
+                let reason = if detection == Detection::ContainerCreate
+                    && matches!(waiting, Some("RunContainerError" | "CrashLoopBackOff"))
+                {
+                    "RunContainerError".to_owned()
+                } else {
+                    waiting
+                        .map(str::to_owned)
+                        .or_else(|| container.terminated_reason.clone())
+                        .unwrap_or_default()
+                };
                 let code = container
                     .terminated_exit_code
                     .or(container.last_termination_exit_code);
@@ -194,6 +206,7 @@ pub fn collect_signals(
             owner,
             observed_at: last_seen,
             event: Some((record.uid.clone(), series_first)),
+            regarding_kind: Some(regarding.kind.clone()),
             pod,
             container: None,
             image: None,
@@ -225,6 +238,7 @@ pub fn rollout_signals(rollouts: &[&DeploymentRecord], now: Timestamp) -> Vec<Si
                 owner,
                 observed_at: now,
                 event: None,
+                regarding_kind: None,
                 pod: None,
                 container: None,
                 image: None,
@@ -292,6 +306,23 @@ fn owner_of(key: &IncidentKey) -> (String, String, String) {
     )
 }
 
+/// Whether the signals of `key` have to persist through the settle window before they are an
+/// incident: as its detection says, except that a CronJob that cannot create its Jobs (a `D011`
+/// event whose `regarding` is the CronJob) is an incident at once, like a failed Job. The CronJob
+/// controller retries the Job of one scheduled time for about 40 s in one event's series, then
+/// writes one new event per scheduled time, naming a new Job (seen on kind, Kubernetes v1.36.4, on
+/// 2026-11-02): with the default 60 s window no event would ever settle, and an hourly CronJob's
+/// next event comes after the last one is no longer fresh. The exemption follows the event's
+/// object, not the key: a Job of a CronJob whose Pods are refused is keyed to the CronJob too, but
+/// the Job controller keeps retrying while the Job is active, so its events still settle.
+fn settles(key: &IncidentKey, group: &[Signal]) -> bool {
+    key.detection.settles()
+        && !(key.detection == Detection::PodCreate
+            && group
+                .iter()
+                .any(|signal| signal.regarding_kind.as_deref() == Some("CronJob")))
+}
+
 /// Tracks failures from one check to the next and says when one becomes an incident.
 #[derive(Debug)]
 pub struct Tracker {
@@ -319,7 +350,9 @@ impl Tracker {
     /// - An event settles when the same event happened again at least a settle window after it
     ///   was first seen, by kausa or in its own series. Events of different Pods never add up.
     ///   It is forgotten as soon as no recent event remains.
-    /// - A failed Job settles at once.
+    /// - A failed Job settles at once, and so does a CronJob that cannot create its Jobs (a `D011`
+    ///   event about the CronJob itself). A Job of a CronJob that cannot create its Pods is an
+    ///   event like any other.
     ///
     /// A stalled rollout (`D014`) yields to an explained incident of the same Deployment. Every
     /// other key is decided first, so the order of the keys does not matter; then a `D014` that
@@ -472,7 +505,7 @@ impl Tracker {
         last_seen: Timestamp,
         group: &[Signal],
     ) -> bool {
-        if !key.detection.settles() {
+        if !settles(key, group) {
             return true;
         }
         if key.detection.is_state() {
@@ -497,17 +530,26 @@ impl Tracker {
 /// `ImagePullBackOff`: there it is the image reference. A crash loop or an out-of-memory kill
 /// alternates too, between waiting in `CrashLoopBackOff` (with the back-off message) and
 /// terminated (with none), so which one the sample is depends on when kausa looked: there the
-/// text is the container's name. For a stalled rollout it is the message as it is, `revision <n>`
-/// or empty, since `normalize` would turn every revision into the same text. For a workload that cannot create Pods, the names of the Pods
-/// its controller tried to create count as the incident's Pods too.
+/// text is the container's name, and so it is for a container whose process cannot start (`D004`
+/// with reason `RunContainerError`), whose message alternates between the runtime's and the
+/// back-off's. For a stalled rollout it is the message as it is, `revision <n>`
+/// or empty, since `normalize` would turn every revision into the same text. For a workload that
+/// cannot create Pods or Jobs, the names of the Pods its controller tried to create (or, for a
+/// CronJob, of the Job of each scheduled time) count as the incident's Pods too, and so, for a
+/// failed Job, do the names of its Pods in the note (a `PodFailurePolicy` note names the Pod that
+/// matched the rule, whose name changes with each scheduled time of a CronJob or each rerun of a
+/// Job).
 fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<String>) -> String {
     let mut names: Vec<&str> = pods.iter().map(String::as_str).collect();
-    if key.detection == Detection::PodCreate {
+    if matches!(key.detection, Detection::PodCreate | Detection::JobFailed) {
         names.extend(generated_names(&sample.message, &key.owner_name));
     }
     let text = match key.detection {
         Detection::ImagePull => sample.image.clone().unwrap_or_default(),
         Detection::CrashLoop | Detection::OutOfMemory => {
+            sample.container.clone().unwrap_or_default()
+        }
+        Detection::ContainerCreate if sample.reason == "RunContainerError" => {
             sample.container.clone().unwrap_or_default()
         }
         Detection::RolloutStalled => sample.message.clone(),
@@ -523,9 +565,13 @@ fn incident_fingerprint(key: &IncidentKey, sample: &Signal, pods: &BTreeSet<Stri
 }
 
 /// The names in `message` that start with `owner` and a hyphen: the Pods a controller tried to
-/// create and the API server refused (`D011`). Their suffix is generated (a ReplicaSet's or a
-/// Job's Pods) or an ordinal (a StatefulSet's), and the Pod never existed, so it is no part of
-/// what failed. A name is a run of the characters of a Kubernetes name, `[a-z0-9.-]`.
+/// create and the API server refused (`D011`; for a CronJob, the Job `<cronjob>-<n>` of a
+/// scheduled time), and the Pod a failed Job's `PodFailurePolicy` note names (`D008`:
+/// `<job>-<suffix>`, or `<cronjob>-<n>-<suffix>` when the owner is the Job's CronJob). Their
+/// suffix is generated (a ReplicaSet's or a Job's Pods), an ordinal (a StatefulSet's) or the
+/// scheduled time (a CronJob's Jobs); a refused Pod or Job never existed, and a Job's failed Pod
+/// is replaced by another name at the next run, so the name is no part of what failed. A name is
+/// a run of the characters of a Kubernetes name, `[a-z0-9.-]`.
 fn generated_names<'a>(message: &'a str, owner: &str) -> Vec<&'a str> {
     if owner.is_empty() {
         return Vec::new();
@@ -2065,6 +2111,7 @@ mod tests {
                 },
                 observed_at: t(10),
                 event: None,
+                regarding_kind: None,
                 pod: None,
                 container: None,
                 image: None,
@@ -2370,5 +2417,530 @@ mod tests {
             fingerprint_of(&stalled("shop", "checkout", None), 0),
             fingerprint("D014", "shop", "Deployment", "checkout", "")
         );
+    }
+
+    // Acceptance tests for the coverage gaps of v0.5 (no ADR), written before the code.
+    // The shapes follow what the Job and CronJob controllers and the kubelet wrote on kind
+    // (Kubernetes v1.36.4, 2026-11-02); names and numbers are invented.
+
+    /// The Job controller's note when a `podFailurePolicy` `FailJob` rule matches a container's
+    /// exit code (pkg/controller/job/pod_failure_policy.go:57 at v1.36.4).
+    fn policy_note(container: &str, pod: &str, code: i32) -> String {
+        format!(
+            "Container {container} for pod shop/{pod} failed with exit code {code} matching \
+             FailJob rule at index 0"
+        )
+    }
+
+    /// The CronJob controller's note when the API server refuses the Job of a scheduled time
+    /// (pkg/controller/cronjob/cronjob_controllerv2.go:640 at v1.36.4).
+    fn job_refusal(job: &str) -> String {
+        format!(
+            "Error creating job: jobs.batch \"{job}\" is forbidden: exceeded quota: no-jobs, \
+             requested: count/jobs.batch=1, used: count/jobs.batch=0, limited: \
+             count/jobs.batch=0"
+        )
+    }
+
+    const CRONJOB: (&str, &str, &str) = ("batch/v1", "CronJob", "report");
+
+    #[test]
+    fn every_failed_condition_reason_of_a_job_is_an_incident_at_once() {
+        for (reason, note) in [
+            (
+                "PodFailurePolicy",
+                policy_note("exporter", "migrate-x7k2p", 42),
+            ),
+            (
+                "MaxFailedIndexesExceeded",
+                "Job has exceeded the specified maximal number of failed indexes".to_owned(),
+            ),
+            ("FailedIndexes", "Job has failed indexes".to_owned()),
+            (
+                "BackoffLimitExceeded",
+                "Job has reached the specified backoff limit".to_owned(),
+            ),
+            (
+                "DeadlineExceeded",
+                "Job was active longer than specified deadline".to_owned(),
+            ),
+        ] {
+            let events = [(
+                event_about(
+                    "e1",
+                    ("batch/v1", "Job", "migrate"),
+                    reason,
+                    &note,
+                    (t(0), t(0), 1),
+                ),
+                None,
+            )];
+            let mut tracker = Tracker::new(SETTLE);
+            let incidents = tracker.tick(t(1), collect_signals(&[], &views(&events), t(1), FRESH));
+            assert_eq!(incidents.len(), 1, "{reason}");
+            let incident = &incidents[0];
+            assert_eq!(incident.key.detection, Detection::JobFailed, "{reason}");
+            assert_eq!(
+                (
+                    incident.key.owner_kind.as_str(),
+                    incident.key.owner_name.as_str()
+                ),
+                ("Job", "migrate")
+            );
+            // The `incident` log line's `sample.reason` is the event's.
+            assert_eq!(incident.sample.reason, reason);
+            assert_eq!(incident.sample.message, note);
+            assert!(incident.pods.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_d008_fingerprint_does_not_depend_on_the_generated_pod_name() {
+        // The `PodFailurePolicy` note names the failed Pod, whose suffix is generated: the next
+        // scheduled time of a CronJob, or a rerun of a Job, fails the same way under another
+        // name. A D008 incident gathers no Pod, so the name is not one of its Pods.
+        let fingerprint = |job: &str, owner: Option<OwnerRef>, note: &str| {
+            let events = [(
+                event_about(
+                    "e1",
+                    ("batch/v1", "Job", job),
+                    "PodFailurePolicy",
+                    note,
+                    (t(0), t(0), 1),
+                ),
+                owner,
+            )];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            tracker
+                .tick(t(0), collect_signals(&[], &views(&events), t(0), FRESH))
+                .first()
+                .expect("a D008 incident")
+                .fingerprint
+                .clone()
+        };
+        let report = Some(cronjob("report"));
+        assert_eq!(
+            fingerprint(
+                "report-29000000",
+                report.clone(),
+                &policy_note("exporter", "report-29000000-x7k2p", 42)
+            ),
+            fingerprint(
+                "report-29000001",
+                report.clone(),
+                &policy_note("exporter", "report-29000001-b6n3s", 42)
+            ),
+        );
+        assert_eq!(
+            fingerprint(
+                "migrate",
+                None,
+                &policy_note("db-migrate", "migrate-x7k2p", 2)
+            ),
+            fingerprint(
+                "migrate",
+                None,
+                &policy_note("db-migrate", "migrate-q9w8e", 2)
+            ),
+        );
+        // Another container failing is another failure.
+        assert_ne!(
+            fingerprint(
+                "report-29000000",
+                report.clone(),
+                &policy_note("exporter", "report-29000000-x7k2p", 42)
+            ),
+            fingerprint(
+                "report-29000000",
+                report,
+                &policy_note("loader", "report-29000000-x7k2p", 42)
+            ),
+        );
+    }
+
+    #[test]
+    fn a_cronjob_that_cannot_create_its_job_is_one_incident_at_once() {
+        // A ResourceQuota with `count/jobs.batch: "0"`: the CronJob controller retried the Job
+        // of the first scheduled time for 41 s (one event, count 14), then wrote one event per
+        // scheduled time, each naming a new Job. With a 60 s settle window and events of their
+        // own, it would never settle; it is an incident at once, like a failed Job.
+        let report = cronjob("report");
+        let a = |last: i64, count: i32| {
+            event_about(
+                "e-a",
+                CRONJOB,
+                "FailedCreate",
+                &job_refusal("report-29000000"),
+                (t(0), t(last), count),
+            )
+        };
+        let b = event_about(
+            "e-b",
+            CRONJOB,
+            "FailedCreate",
+            &job_refusal("report-29000001"),
+            (t(82), t(82), 1),
+        );
+        let c = event_about(
+            "e-c",
+            CRONJOB,
+            "FailedCreate",
+            &job_refusal("report-29000002"),
+            (t(164), t(164), 1),
+        );
+        // `run.rs` resolves a CronJob in `regarding` to itself (no hop in `owner.rs`).
+        let with_owner = |events: Vec<EventRecord>| -> Vec<(EventRecord, Option<OwnerRef>)> {
+            events
+                .into_iter()
+                .map(|e| (e, Some(report.clone())))
+                .collect()
+        };
+        let mut tracker = Tracker::new(SETTLE);
+        let mut check = |events: Vec<EventRecord>, now: i64| {
+            let events = with_owner(events);
+            tracker.tick(t(now), collect_signals(&[], &views(&events), t(now), FRESH))
+        };
+        let first = check(vec![a(0, 1)], 1);
+        assert_eq!(first.len(), 1, "{first:?}");
+        let incident = &first[0];
+        assert_eq!(incident.key.detection.id(), "D011");
+        assert_eq!(
+            (
+                incident.key.namespace.as_str(),
+                incident.key.owner_kind.as_str(),
+                incident.key.owner_name.as_str()
+            ),
+            ("shop", "CronJob", "report")
+        );
+        assert_eq!(incident.owner, report);
+        assert!(incident.pods.is_empty());
+        assert_eq!(incident.sample.reason, "FailedCreate");
+        assert_eq!(incident.sample.pod, None);
+        // The rest of the series and the next scheduled times raise nothing while it lasts.
+        let later: Vec<usize> = [
+            (vec![a(20, 7)], 21),
+            (vec![a(41, 14)], 42),
+            (vec![a(41, 14), b.clone()], 83),
+            (vec![a(41, 14), b.clone(), c.clone()], 165),
+        ]
+        .into_iter()
+        .map(|(events, now)| check(events, now).len())
+        .collect();
+        assert_eq!(later, [0, 0, 0, 0]);
+        // Each scheduled time alone gives the same fingerprint: the Job's number is no part of
+        // what failed.
+        let fingerprint_of = |event: EventRecord, now: i64| {
+            let events = with_owner(vec![event]);
+            let mut tracker = Tracker::new(SETTLE);
+            tracker
+                .tick(t(now), collect_signals(&[], &views(&events), t(now), FRESH))
+                .first()
+                .expect("a D011 incident")
+                .fingerprint
+                .clone()
+        };
+        assert_eq!(fingerprint_of(a(41, 14), 42), incident.fingerprint);
+        assert_eq!(fingerprint_of(b, 83), incident.fingerprint);
+        assert_eq!(fingerprint_of(c, 165), incident.fingerprint);
+        // Without a resolved owner the CronJob is named from `regarding`: the same key and owner.
+        let alone = [(a(0, 1), None)];
+        let signals = collect_signals(&[], &views(&alone), t(1), FRESH);
+        assert_eq!(ids(&signals), ["D011"]);
+        assert_eq!(signals[0].key, incident.key);
+        assert_eq!(signals[0].owner, report);
+    }
+
+    #[test]
+    fn only_a_cronjob_own_refusal_skips_the_settle_window() {
+        // Both events are keyed to the CronJob's D011; only the one about the CronJob itself is an
+        // incident at once. The Job controller keeps retrying the Pods of an active Job, so a
+        // refusal that fixes itself (a webhook down for a moment) never repeats a window later.
+        let job_of_cronjob = |last: i64, count: i32| {
+            event_about(
+                "e-job",
+                ("batch/v1", "Job", "report-29000000"),
+                "FailedCreate",
+                &quota_refusal("report-29000000-m4q9z"),
+                (t(0), t(last), count),
+            )
+        };
+        let report = Some(cronjob("report"));
+        let mut tracker = Tracker::new(SETTLE);
+        let mut check = |event: EventRecord, now: i64| {
+            let events = [(event, report.clone())];
+            let signals = collect_signals(&[], &views(&events), t(now), FRESH);
+            assert_eq!(ids(&signals), ["D011"]);
+            assert_eq!(signals[0].key.owner_kind, "CronJob");
+            tracker.tick(t(now), signals)
+        };
+        assert!(check(job_of_cronjob(0, 1), 1).is_empty());
+        assert!(check(job_of_cronjob(30, 4), 31).is_empty());
+        // The same event repeated a window after it first happened: it settles.
+        let settled = check(job_of_cronjob(60, 7), 61);
+        assert_eq!(settled.len(), 1, "{settled:?}");
+        assert_eq!(settled[0].key.detection.id(), "D011");
+        assert_eq!(settled[0].key.owner_kind, "CronJob");
+        // The CronJob's own refusal of a Job does not wait.
+        let events = [(
+            event_about(
+                "e-cronjob",
+                CRONJOB,
+                "FailedCreate",
+                &job_refusal("report-29000000"),
+                (t(0), t(0), 1),
+            ),
+            report,
+        )];
+        let mut tracker = Tracker::new(SETTLE);
+        let incidents = tracker.tick(t(1), collect_signals(&[], &views(&events), t(1), FRESH));
+        assert_eq!(incidents.len(), 1, "{incidents:?}");
+        assert_eq!(incidents[0].key.owner_kind, "CronJob");
+        // Every other owner of a D011 still waits for the window: a Job of its own and a
+        // ReplicaSet's Deployment.
+        for (about, owner) in [
+            (("batch/v1", "Job", "migrate"), None),
+            (REPLICASET, Some(owner("Deployment", "checkout"))),
+        ] {
+            let events = [(
+                event_about(
+                    "e1",
+                    about,
+                    "FailedCreate",
+                    &quota_refusal(&format!("{}-d98v6", about.2)),
+                    (t(0), t(0), 1),
+                ),
+                owner,
+            )];
+            let signals = collect_signals(&[], &views(&events), t(1), FRESH);
+            assert_eq!(ids(&signals), ["D011"], "{about:?}");
+            let mut tracker = Tracker::new(SETTLE);
+            assert!(tracker.tick(t(1), signals).is_empty(), "{about:?}");
+        }
+    }
+
+    /// The runtime's message when the container's entrypoint does not exist.
+    const NO_ENTRYPOINT: &str = "failed to create containerd task: failed to create shim task: \
+        OCI runtime create failed: runc create failed: unable to start container process: error \
+        during container init: exec: \"/kausa-no-such-binary\": stat /kausa-no-such-binary: no \
+        such file or directory";
+
+    /// The Pod `api-1-a` whose container `api` cannot start: waiting in `waiting` (the runtime's
+    /// message with `RunContainerError`, the back-off message with `CrashLoopBackOff`), its last
+    /// termination `StartError` with exit code 128.
+    fn cannot_start(waiting: &str, runtime_message: &str) -> PodRecord {
+        let mut record = pod("api-1-a", "Running", Some(waiting));
+        let container = &mut record.containers[0];
+        container.waiting_message = Some(if waiting == "CrashLoopBackOff" {
+            "back-off 40s restarting failed container=api pod=api-1-a_shop(uid-api-1-a)".to_owned()
+        } else {
+            runtime_message.to_owned()
+        });
+        container.last_termination_reason = Some("StartError".into());
+        container.last_termination_exit_code = Some(128);
+        container.restart_count = 4;
+        record
+    }
+
+    #[test]
+    fn a_container_that_cannot_start_is_a_d004_signal_named_run_container_error() {
+        let deploy = owner("Deployment", "api");
+        for waiting in ["RunContainerError", "CrashLoopBackOff"] {
+            let record = cannot_start(waiting, NO_ENTRYPOINT);
+            let views = [PodView {
+                record: &record,
+                owner: &deploy,
+            }];
+            let signals = collect_signals(&views, &[], t(0), FRESH);
+            assert_eq!(ids(&signals), ["D004"], "{waiting}");
+            let signal = &signals[0];
+            assert_eq!(signal.reason, "RunContainerError", "{waiting}");
+            assert_eq!(
+                Some(&signal.message),
+                record.containers[0].waiting_message.as_ref(),
+                "{waiting}"
+            );
+            assert_eq!(signal.container.as_deref(), Some("api"));
+        }
+        // The other D004 signals keep their waiting reason.
+        let mut config = pod("api-1-a", "Pending", Some("CreateContainerConfigError"));
+        config.containers[0].waiting_message =
+            Some("couldn't find key db-url in ConfigMap shop/settings".into());
+        let views = [PodView {
+            record: &config,
+            owner: &deploy,
+        }];
+        let signals = collect_signals(&views, &[], t(0), FRESH);
+        assert_eq!(ids(&signals), ["D004"]);
+        assert_eq!(signals[0].reason, "CreateContainerConfigError");
+    }
+
+    #[test]
+    fn a_container_that_cannot_start_is_one_d004_incident_settled_like_a_state() {
+        // Over the settle window the kubelet alternates between the two states: one incident,
+        // D004, and no crash loop.
+        let deploy = owner("Deployment", "api");
+        let mut tracker = Tracker::new(SETTLE);
+        let mut found = Vec::new();
+        for (i, at) in (0..=60).step_by(5).enumerate() {
+            let waiting = if i % 3 == 2 {
+                "CrashLoopBackOff"
+            } else {
+                "RunContainerError"
+            };
+            let record = cannot_start(waiting, NO_ENTRYPOINT);
+            let views = [PodView {
+                record: &record,
+                owner: &deploy,
+            }];
+            let incidents = tracker.tick(t(at), collect_signals(&views, &[], t(at), FRESH));
+            assert!(at == 60 || incidents.is_empty(), "at {at}: {incidents:?}");
+            found.extend(incidents);
+        }
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].key.detection, Detection::ContainerCreate);
+        assert_eq!(found[0].first_seen, t(0));
+        assert!(!reads_logs(Detection::ContainerCreate));
+    }
+
+    #[test]
+    fn a_container_that_cannot_start_has_one_fingerprint_whichever_state_is_the_sample() {
+        let deploy = owner("Deployment", "api");
+        let fingerprint_of = |record: &PodRecord| {
+            let views = [PodView {
+                record,
+                owner: &deploy,
+            }];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            let incidents = tracker.tick(t(0), collect_signals(&views, &[], t(0), FRESH));
+            let incident = incidents.first().expect("a D004 incident");
+            assert_eq!(incident.key.detection, Detection::ContainerCreate);
+            incident.fingerprint.clone()
+        };
+        let runtime = fingerprint_of(&cannot_start("RunContainerError", NO_ENTRYPOINT));
+        assert_eq!(
+            fingerprint_of(&cannot_start("CrashLoopBackOff", NO_ENTRYPOINT)),
+            runtime
+        );
+        // The text is the container's name, as for D001 and D003.
+        assert_eq!(
+            runtime,
+            fingerprint("D004", "shop", "Deployment", "api", "api")
+        );
+    }
+
+    #[test]
+    fn an_image_the_policy_never_pulls_is_fingerprinted_by_its_reference() {
+        let deploy = owner("Deployment", "api");
+        let run = |waiting: &str, message: &str| {
+            let mut record = pod("api-1-a", "Pending", Some(waiting));
+            record.containers[0].waiting_message = Some(message.to_owned());
+            let views = [PodView {
+                record: &record,
+                owner: &deploy,
+            }];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            let incidents = tracker.tick(t(0), collect_signals(&views, &[], t(0), FRESH));
+            let incident = incidents.first().expect("a D002 incident");
+            (
+                incident.key.detection,
+                incident.sample.reason.clone(),
+                incident.fingerprint.clone(),
+            )
+        };
+        let (detection, reason, never) = run(
+            "ErrImageNeverPull",
+            "Container image \"registry.example.com/shop/api:1.4.2\" is not present with pull \
+             policy of Never",
+        );
+        assert_eq!(detection, Detection::ImagePull);
+        assert_eq!(reason, "ErrImageNeverPull");
+        assert_eq!(never, run("ErrImagePull", "rpc error: code = NotFound").2);
+        assert_eq!(
+            never,
+            fingerprint(
+                "D002",
+                "shop",
+                "Deployment",
+                "api",
+                "registry.example.com/shop/api:1.4.2"
+            )
+        );
+    }
+
+    #[test]
+    fn the_fingerprints_of_existing_failures_are_unchanged() {
+        // Goldens computed before the coverage changes (v0.4.1 and the good first issues): a
+        // repeated incident must keep reusing its explanation. Never update one to pass.
+        let deploy = owner("Deployment", "api");
+        let of_pod = |record: PodRecord| {
+            let views = [PodView {
+                record: &record,
+                owner: &deploy,
+            }];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            let incidents = tracker.tick(t(0), collect_signals(&views, &[], t(0), FRESH));
+            let incident = incidents.first().expect("an incident");
+            (incident.key.detection.id(), incident.fingerprint.clone())
+        };
+        let of_event = |event: EventRecord, owner: Option<OwnerRef>| {
+            let events = [(event, owner)];
+            let mut tracker = Tracker::new(SignedDuration::ZERO);
+            let incidents = tracker.tick(t(0), collect_signals(&[], &views(&events), t(0), FRESH));
+            let incident = incidents.first().expect("an incident");
+            (incident.key.detection.id(), incident.fingerprint.clone())
+        };
+        let mut crash = pod("api-1-a", "Running", Some("CrashLoopBackOff"));
+        crash.containers[0].last_termination_reason = Some("Error".into());
+        let mut oom = pod("api-1-a", "Running", Some("CrashLoopBackOff"));
+        oom.containers[0].last_termination_reason = Some("OOMKilled".into());
+        let mut pull = pod("api-1-a", "Pending", Some("ErrImagePull"));
+        pull.containers[0].waiting_message = Some("rpc error: code = NotFound".into());
+        let mut config = pod("api-1-a", "Pending", Some("CreateContainerConfigError"));
+        config.containers[0].waiting_message =
+            Some("couldn't find key db-url in ConfigMap shop/settings".into());
+        let mut create = pod("api-1-a", "Pending", Some("CreateContainerError"));
+        create.containers[0].waiting_message =
+            Some("Error: failed to reserve container name \"api_api-1-a_shop_0\"".into());
+        let backoff = event_about(
+            "e1",
+            ("batch/v1", "Job", "report-29000000"),
+            "BackoffLimitExceeded",
+            "Job has reached the specified backoff limit",
+            (t(0), t(0), 1),
+        );
+        let refused = event_about(
+            "e1",
+            REPLICASET,
+            "FailedCreate",
+            &quota_refusal("checkout-7fffb9bf5c-d98v6"),
+            (t(0), t(0), 1),
+        );
+        let found = [
+            of_pod(crash),
+            of_pod(pull),
+            of_pod(oom),
+            of_pod(config),
+            of_pod(create),
+            of_event(backoff, Some(cronjob("report"))),
+            of_event(refused, Some(owner("Deployment", "checkout"))),
+        ];
+        let expected = [
+            ("D001", "38c050655df35c17"),
+            ("D002", "874e9389b5564193"),
+            ("D003", "6c8bb7d7636d8409"),
+            ("D004", "3f2c307b363d352b"),
+            ("D004", "66d84da307146e55"),
+            ("D008", "a2052ddf854f6bb5"),
+            ("D011", "da966eeffe498964"),
+        ];
+        for (case, ((id, fingerprint), (expected_id, golden))) in
+            found.iter().zip(expected).enumerate()
+        {
+            assert_eq!(
+                (*id, fingerprint.as_str()),
+                (expected_id, golden),
+                "case {case}"
+            );
+        }
     }
 }
