@@ -5,7 +5,7 @@ an existing one. What a rule needs to be accepted (an id, evidence, fixtures, ex
 in [Contributing to kausa](../../CONTRIBUTING.md#propose-a-rule); the rules themselves are in
 [Detection and redaction rules](../reference/rules.md).
 
-Status as of 2026-10-30: fourteen detection rules (`D001` to `D014`) and fourteen redaction rules
+Status as of 2026-11-02: fourteen detection rules (`D001` to `D014`) and fourteen redaction rules
 (`R001` to `R014`); the paths below are the ones in the code today.
 
 ## Before you start
@@ -21,8 +21,9 @@ Status as of 2026-10-30: fourteen detection rules (`D001` to `D014`) and fourtee
 ## Add a detection rule
 
 1. **Name it** in `src/detect.rs`: a new variant of `Detection`, with a doc comment that starts
-   with its id (`/// \`D009\`: …`), and its arms in `Detection::id` and `Detection::name`. Then
-   decide, for the new variant:
+   with its id (`/// \`D009\`: …`), its arms in `Detection::id` and `Detection::name`, and its
+   place in `ALL`, the list of every detection in the tests module. Then decide, for the new
+   variant:
    - `Detection::settles`: whether it must persist through the settle window (everything but a
      final failure such as a failed Job);
    - `Detection::is_state`: whether the signal is a state read from the Pod at every check
@@ -65,7 +66,8 @@ Status as of 2026-10-30: fourteen detection rules (`D001` to `D014`) and fourtee
    same-tick case, a signal that never settles, and another owner of the same name.
 4. **Document it**: a row in the table of [Detection and redaction
    rules](../reference/rules.md#detection-rules) (id, name, the signal, whether it reads logs), and
-   a line under `Unreleased` in [`CHANGELOG.md`](../../CHANGELOG.md).
+   a line under `Unreleased` in [`CHANGELOG.md`](../../CHANGELOG.md). The test
+   `every_id_is_in_the_rules_reference` fails until the table's ids match the code's, in order.
 
 ## Add a redaction rule
 
@@ -86,7 +88,9 @@ Status as of 2026-10-30: fourteen detection rules (`D001` to `D014`) and fourtee
    look alike and must stay (in `ordinary_lines_stay`: version strings, hashes in paths,
    timestamps), and the count in `counts_say_what_each_rule_replaced` if it is a new id.
 5. **Document it**: its row in the table of [Detection and redaction
-   rules](../reference/rules.md#redaction-rules), and a line in the Changelog.
+   rules](../reference/rules.md#redaction-rules), and a line in the Changelog. The test
+   `every_counted_id_is_in_the_rules_reference` fails until the table lists every id that
+   `src/redact.rs` counts, and no other.
 
 A redaction rule may only make kausa send less. A change that lets through a value a rule caught
 before needs an ADR.

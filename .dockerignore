@@ -13,6 +13,8 @@
 !LICENSE-MIT
 !LICENSE-APACHE
 !LICENSES/
+# The rules reference, which the tests of src/detect.rs and src/redact.rs compare with the code.
+!docs/reference/rules.md
 # The fuzz targets and the image ClusterFuzzLite builds them in (.clusterfuzzlite/Dockerfile
 # uses this same context).
 !fuzz/
