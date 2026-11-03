@@ -1109,8 +1109,10 @@ const DEDUP_GAUGE: &str = "kausa_dedup_cache_entries";
 /// a model (a dry run has none to show). Those of docs/adr/0020-check-the-endpoint.md: the
 /// endpoint's state always (closed without one), and its last success only with a model. The build
 /// info always, the records and the owner cache at 0 until a term holds some, and the
-/// deduplication cache at 0 only with a model.
+/// deduplication cache at 0 only with a model. The counters with fixed labels at 0 in each mode
+/// that can count them (`show_zero_counters`).
 fn show_start(metrics: &Metrics, options: &Options, shared: Option<&Shared<'_>>, now: Instant) {
+    show_zero_counters(metrics, options);
     metrics.set_gauge(
         "kausa_build_info",
         &[
@@ -1127,6 +1129,55 @@ fn show_start(metrics: &Metrics, options: &Options, shared: Option<&Shared<'_>>,
             show_budget(metrics, &shared.budget.borrow(), now);
             metrics.set_gauge(explain::LAST_SUCCESS_GAUGE, &[], 0);
             metrics.set_gauge(DEDUP_GAUGE, &[], 0);
+        }
+    }
+}
+
+/// Adds 0 to each series of the counters with fixed labels that this mode can count, so that each
+/// shows from the start: the watch counters always (deployments only with the Deployment watch),
+/// the model calls only with a model, the skips whenever kausa explains, the notifications with a
+/// webhook and the leadership changes with the Lease. Elsewhere a counter keeps its unlabelled 0.
+fn show_zero_counters(metrics: &Metrics, options: &Options) {
+    let watches: &[&str] = if options.rollouts {
+        &["pods", "events", "deployments"]
+    } else {
+        &["pods", "events"]
+    };
+    let settings = options.explain.as_ref();
+    let counters: [(&'static str, &str, &[&str], bool); 7] = [
+        ("kausa_watch_errors_total", "watch", watches, true),
+        ("kausa_watch_relists_total", "watch", watches, true),
+        ("kausa_watch_restarts_total", "watch", watches, true),
+        (
+            "kausa_model_calls_total",
+            "outcome",
+            &["ok", "error", "invalid"],
+            settings.is_some_and(|s| s.model.is_some()),
+        ),
+        (
+            "kausa_explanations_skipped_total",
+            "reason",
+            &explain::SKIP_REASONS,
+            settings.is_some(),
+        ),
+        (
+            "kausa_notifications_total",
+            "outcome",
+            &["sent", "failed", "dropped"],
+            settings.is_some_and(|s| s.notify.is_some()),
+        ),
+        (
+            "kausa_leadership_changes_total",
+            "to",
+            &["leader", "standby"],
+            options.leader_lease.is_some(),
+        ),
+    ];
+    for (name, label, values, shown) in counters {
+        if shown {
+            for value in values {
+                metrics.add(name, &[(label, value)], 0);
+            }
         }
     }
 }

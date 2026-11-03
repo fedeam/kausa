@@ -120,6 +120,16 @@ pub const ENDPOINT_UNAVAILABLE_NOTE: &str =
 pub const TOO_LARGE_NOTE: &str =
     "the endpoint refused the request as too large for the model: lower --max-input-tokens";
 
+/// Every reason `kausa_explanations_skipped_total` counts a skip with, as
+/// docs/reference/command-line.md lists them; `kausa run` shows each at 0 from its start.
+pub const SKIP_REASONS: [&str; 5] = [
+    "budget",
+    "context_too_large",
+    "endpoint",
+    "invalid_answer",
+    "endpoint_unavailable",
+];
+
 /// The gauge of the last call answered with a chat completion (docs/adr/0020-check-the-endpoint.md).
 pub const LAST_SUCCESS_GAUGE: &str = "kausa_model_last_success_timestamp_seconds";
 
