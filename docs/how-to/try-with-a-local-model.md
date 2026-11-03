@@ -32,7 +32,7 @@ watch, released in v0.4.0, adds a path to the proxy of step 2 (two with
    curl -s http://127.0.0.1:11434/v1/models
    ```
 
-   Then check it the way kausa calls it (from v0.5), with one synthetic request and no cluster:
+   Then check it the way kausa calls it (from v0.5.0), with one synthetic request and no cluster:
 
    ```sh
    ./target/release/kausa check-endpoint --endpoint http://127.0.0.1:11434/v1 --allow-http \

@@ -119,7 +119,7 @@ read-modify-write, all under a 10-second timeout:
 - Then entries whose `lastTime` is older than the cutoff are dropped, and the list is cut to 5.
 - `occurrences` goes up by one (saturating) and `status.lastTime` becomes `now`.
 
-**Entries are the redacted answer.** Since v0.5, summary, cause and steps pass the pattern
+**Entries are the redacted answer.** Since v0.5.0, summary, cause and steps pass the pattern
 redaction rules `R003`–`R014` before they are written here, as they do before the Event and the
 log; the unredacted answer is never stored. Entries written by v0.4.1 or earlier keep their text
 until `--history-days` ages them out. After an upgrade, a repeat whose text now redacts

@@ -27,7 +27,7 @@ chart on the GitHub release](../adr/0012-releases.md) and [0013. Offer a namespa
 one watch pair and one Role per listed namespace, and nothing
 cluster-wide](../adr/0013-namespaced-install-mode.md) and [0014. Keep each incident's full
 explanations in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md) and [0015. Post each new explanation to one optional webhook, as JSON, Slack or
-Telegram](../adr/0015-notifications.md). Since v0.5 (not released as of 2026-11-02), the values
+Telegram](../adr/0015-notifications.md). Since v0.5.0, the values
 `model.timeoutSeconds` and `endpointCheck.enabled`, the `helm test` Pod that runs `kausa
 check-endpoint` and its NetworkPolicy ([0020. Check the model endpoint on demand with `kausa
 check-endpoint` and `helm test`, and hold calls behind a breaker while it

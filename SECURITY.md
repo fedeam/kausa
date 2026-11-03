@@ -7,7 +7,7 @@ and where secrets live.
 
 ## Supported versions
 
-Status as of 2026-10-30: the latest release is v0.4.1. Until 1.0, only the latest release will
+Status as of 2026-11-03: the latest release is v0.5.0. Until 1.0, only the latest release will
 receive security fixes.
 
 ## Reporting a vulnerability
@@ -60,8 +60,9 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-10-30: v0.4.1 is released: v0.4.0's Deployment watch of `D014`, richer
-context for the model and optional standby replica, plus the Slack fix and `R014`. `kausa run`
+Status as of 2026-11-03: v0.5.0 is released: the redaction of the model's answer, the refilled
+call budget, the endpoint check and breaker, and wider detections, on top of v0.4's Deployment
+watch of `D014`, richer context for the model and optional standby replica. `kausa run`
 reads Pods,
 their logs (crash loops, out-of-memory kills and failed Jobs only), Events, the metadata of
 ReplicaSets and Jobs and, unless `--no-rollouts`, Deployments; it
@@ -95,7 +96,7 @@ chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availabilit
 provider over HTTPS (the distroless CA bundle with rustls) was tried on 2026-10-30. Starts were
 measured in kind with up to 10,000 Pods ([Thousands of
 Pods](docs/research/2026-10-28-thousands-of-pods.md), [List
-pages](docs/research/2026-11-02-list-pages.md)). Since v0.5 (not released as of 2026-11-02),
+pages](docs/research/2026-11-02-list-pages.md)). Since v0.5.0,
 `kausa check-endpoint`, which the chart runs as its `helm test`, sends one synthetic request to
 the endpoint on demand, and `kausa run` holds its calls behind a breaker while the endpoint fails
 ([0020. Check the model endpoint on demand with `kausa check-endpoint` and `helm test`, and hold
@@ -322,7 +323,7 @@ kausa must:
   showed them as plain text. In Telegram, a real post showed the joiners keeping mentions and
   commands inert and a URL staying a link ([Data sent in
   notifications](docs/reference/data-sent-in-notifications.md#what-slack-and-telegram-do-with-it)).
-  Injected text can also make a notification misleading, as with an Event. Since v0.5 a link in
+  Injected text can also make a notification misleading, as with an Event. Since v0.5.0 a link in
   the answer loses its query, and its host unless the host is on `R013`'s allowlist (`github.com`,
   `kubernetes.io`, the `example` domains, the public registries; path included, so
   `github.com/<anyone>/…` stays) or no rule recognizes it: an uppercase host, a bare host under a
