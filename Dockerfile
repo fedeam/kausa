@@ -164,6 +164,14 @@ RUN cargo audit
 # (docs/reference/helm-chart.md). Rendering runs no code from the chart's values. rbac.scope has no
 # default (docs/adr/0013-namespaced-install-mode.md), so every lint and render sets it.
 RUN helm lint --strict charts/kausa --set rbac.scope=cluster
+# Artifact Hub scans the image that artifacthub.io/images names, and the release checks it against
+# the tag; this check catches a mismatch in the pull request (docs/adr/0023-oci-chart-and-sbom.md).
+# The images list must be exactly one line, ghcr.io/fedeam/kausa at appVersion: another image, a
+# second line or another version fails.
+RUN set -eu; \
+    app=$(sed -n 's/^appVersion: //p' charts/kausa/Chart.yaml); \
+    images=$(sed -n 's/^[ -]*image: *//p' charts/kausa/Chart.yaml); \
+    [ "$images" = "ghcr.io/fedeam/kausa:$app" ] || { echo "artifacthub.io/images in charts/kausa/Chart.yaml names '$images', not ghcr.io/fedeam/kausa:$app (appVersion)" >&2; exit 1; }
 # Cluster scope: v0.1's value sets. The default render keeps the ClusterRole and its binding and
 # passes no --namespace.
 RUN set -eu; \
