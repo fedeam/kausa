@@ -128,6 +128,29 @@ RUN set -eu; \
     rm -rf /tmp/helm.tar.gz "/tmp/linux-$arch"; \
     helm version --short
 
+# promtool: checks and unit-tests the alerting rules (deploy/prometheus/, tests/prometheus/) and
+# lints the metrics exposition kausa renders (tests/golden/metrics.prom). It ships only inside the
+# Prometheus release archive. Checksums: sha256sums.txt in the release,
+# https://github.com/prometheus/prometheus/releases
+ARG PROMETHEUS_VERSION=3.15.1
+ARG PROMETHEUS_SHA256_AMD64=6a726885328ad9efebbf36e876ce2fb6225468a71fd1e7ce3ba666d5f4d97a84
+ARG PROMETHEUS_SHA256_ARM64=ceb6d21493c37ca0b4513b147642797c68cf39a0f50a444d50e1e80c74f21b26
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) sum="$PROMETHEUS_SHA256_AMD64" ;; \
+      arm64) sum="$PROMETHEUS_SHA256_ARM64" ;; \
+      *) echo "no pinned promtool for architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    name="prometheus-$PROMETHEUS_VERSION.linux-$arch"; \
+    curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 20 --retry 5 --retry-all-errors -o /tmp/prometheus.tar.gz \
+      "https://github.com/prometheus/prometheus/releases/download/v$PROMETHEUS_VERSION/$name.tar.gz"; \
+    echo "$sum  /tmp/prometheus.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/prometheus.tar.gz -C /tmp "$name/promtool"; \
+    install -m 0755 "/tmp/$name/promtool" /usr/local/bin/promtool; \
+    rm -rf /tmp/prometheus.tar.gz "/tmp/$name"; \
+    promtool --version
+
 # The checks run as an unprivileged user.
 RUN groupadd --gid 10001 ci \
  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin ci \
@@ -522,6 +545,12 @@ RUN set -eu; \
     refuse "networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook" --set rbac.scope=cluster $endpoint $on $np; \
     refuse "networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook" --set rbac.scope=cluster $endpoint $on $np --set-json 'networkPolicy.notifications.to=[]'; \
     rm -f /tmp/refusal
+# The alerting rules (docs/reference/alerts.md): valid and free of duplicates, then every alert's
+# unit tests; then the metrics exposition, which a test in src/metrics.rs pins to what kausa
+# renders. promtool reads these files and runs no code from the crate.
+RUN promtool check rules --lint=all --lint-fatal deploy/prometheus/kausa-alerts.yaml
+RUN promtool test rules tests/prometheus/kausa-alerts.test.yaml
+RUN promtool check metrics < tests/golden/metrics.prom
 RUN cargo clippy --locked --all-targets --all-features -- -D warnings
 RUN cargo test --locked --all-features
 

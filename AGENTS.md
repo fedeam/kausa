@@ -114,6 +114,9 @@ cargo fmt --all -- --check
 cargo deny --locked check
 cargo audit
 helm lint --strict charts/kausa --set rbac.scope=cluster
+promtool check rules --lint=all --lint-fatal deploy/prometheus/kausa-alerts.yaml
+promtool test rules tests/prometheus/kausa-alerts.test.yaml
+promtool check metrics < tests/golden/metrics.prom
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 docker build --target ci .
