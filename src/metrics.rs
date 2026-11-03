@@ -1498,4 +1498,150 @@ mod tests {
             golden.contains("kausa_build_info{version=\"0.0.0-golden\",prompt_version=\"2\"} 1\n")
         );
     }
+
+    /// One alert of deploy/prometheus/kausa-alerts.yaml, read line by line: the file is plain
+    /// YAML in one fixed layout, which promtool checks in the ci target.
+    #[derive(Debug, Default)]
+    struct Alert {
+        name: String,
+        expr: String,
+        labels: Vec<String>,
+        runbook_url: String,
+    }
+
+    fn indent(line: &str) -> usize {
+        line.len() - line.trim_start().len()
+    }
+
+    fn alerts(rules: &str) -> Vec<Alert> {
+        let lines: Vec<&str> = rules.lines().collect();
+        let mut alerts: Vec<Alert> = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim_start();
+            if let Some(name) = trimmed.strip_prefix("- alert: ") {
+                alerts.push(Alert {
+                    name: name.to_string(),
+                    ..Alert::default()
+                });
+            } else if let Some(alert) = alerts.last_mut() {
+                // The lines nested under this one: a block expression or the labels.
+                let nested = || {
+                    lines[i + 1..]
+                        .iter()
+                        .take_while(|l| l.trim().is_empty() || indent(l) > indent(line))
+                        .copied()
+                        .collect::<Vec<_>>()
+                };
+                if trimmed == "expr: |" {
+                    let block = nested();
+                    let cut = block
+                        .iter()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| indent(l))
+                        .min()
+                        .unwrap_or(0);
+                    alert.expr = block
+                        .iter()
+                        .map(|l| l.get(cut..).unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim_end()
+                        .to_string();
+                    i += block.len();
+                } else if let Some(expr) = trimmed.strip_prefix("expr: ") {
+                    alert.expr = expr.to_string();
+                } else if trimmed == "labels:" {
+                    let block = nested();
+                    alert.labels = block
+                        .iter()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    i += block.len();
+                } else if let Some(url) = trimmed.strip_prefix("runbook_url: ") {
+                    alert.runbook_url = url.to_string();
+                }
+            }
+            i += 1;
+        }
+        alerts
+    }
+
+    #[test]
+    fn the_alert_rules_read_only_kausas_metrics_and_each_has_its_section_in_alerts_md() {
+        let rules = include_str!("../deploy/prometheus/kausa-alerts.yaml");
+        let reference = include_str!("../docs/reference/alerts.md");
+        let alerts = alerts(rules);
+        assert_eq!(alerts.len(), 11, "the alerts of the rules file");
+
+        // Every metric a rule (or a comment) names is one kausa exports: a histogram also by its
+        // _bucket, _sum and _count series.
+        let mut known: Vec<String> = COUNTERS
+            .iter()
+            .chain(GAUGES.iter())
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for (name, _, _) in HISTOGRAMS {
+            for suffix in ["", "_bucket", "_sum", "_count"] {
+                known.push(format!("{name}{suffix}"));
+            }
+        }
+        let token = regex::Regex::new("kausa_[a-z_]+").unwrap();
+        let read: Vec<&str> = token.find_iter(rules).map(|m| m.as_str()).collect();
+        assert!(!read.is_empty());
+        for name in &read {
+            assert!(
+                known.iter().any(|k| k == name),
+                "{name} is in the rules file but kausa exports no such metric"
+            );
+        }
+
+        let headings: Vec<&str> = reference
+            .lines()
+            .filter_map(|l| l.strip_prefix("### "))
+            .collect();
+        for alert in &alerts {
+            let name = &alert.name;
+            assert_eq!(
+                alert.labels,
+                ["severity: warning"],
+                "{name}: severity: warning is the only label"
+            );
+            assert_eq!(
+                alert.runbook_url,
+                format!(
+                    "https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#{}",
+                    name.to_lowercase()
+                ),
+                "{name}: runbook_url"
+            );
+            assert!(
+                headings.contains(&name.as_str()),
+                "{name} has no ### {name} section in docs/reference/alerts.md"
+            );
+            // The section's expression is the rule's, as the file holds it.
+            let section = reference
+                .split_once(&format!("\n### {name}\n"))
+                .map(|(_, rest)| rest)
+                .unwrap_or_default();
+            let shown = section
+                .split_once("```promql\n")
+                .and_then(|(_, rest)| rest.split_once("\n```"))
+                .map(|(expr, _)| expr)
+                .unwrap_or_default();
+            assert!(!alert.expr.is_empty(), "{name} has no expr");
+            assert_eq!(
+                shown, alert.expr,
+                "{name}: the promql block of its section differs from the rules file"
+            );
+        }
+        for heading in headings.iter().filter(|h| h.starts_with("Kausa")) {
+            assert!(
+                alerts.iter().any(|a| a.name == *heading),
+                "### {heading} in docs/reference/alerts.md is no alert of the rules file"
+            );
+        }
+    }
 }
