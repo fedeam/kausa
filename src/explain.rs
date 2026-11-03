@@ -289,17 +289,17 @@ pub async fn run(
             .await
             .map(|()| Next::Done);
     }
+    let started = std::time::Instant::now();
     let result = model.complete(&body).await;
     // The breaker counts the call before the term check: the answer is true of the endpoint even
     // when the term ended during the call.
     let now = std::time::Instant::now();
+    let took = now.saturating_duration_since(started);
     record(shared, settings, result.as_ref().err(), now)?;
     let answer = match result {
         Ok(answer) => answer,
         Err(error) => {
-            shared
-                .metrics
-                .inc("kausa_model_calls_total", &[("outcome", "error")]);
+            called(shared, "error", took);
             if !error.reached {
                 shared.budget.borrow_mut().refund();
             }
@@ -348,18 +348,14 @@ pub async fn run(
     let explanation = match prompt::validate(&answer.content) {
         Ok(explanation) => explanation,
         Err(error) => {
-            shared
-                .metrics
-                .inc("kausa_model_calls_total", &[("outcome", "invalid")]);
+            called(shared, "invalid", took);
             let why = format!("invalid answer: {error}");
             return skip(settings, shared, &gathered, about, "invalid_answer", &why)
                 .await
                 .map(|()| Next::Done);
         }
     };
-    shared
-        .metrics
-        .inc("kausa_model_calls_total", &[("outcome", "ok")]);
+    called(shared, "ok", took);
     // The term ended while the model answered: the answer is dropped, not cached.
     if !shared.term.holds() {
         return Ok(Next::Done);
@@ -411,6 +407,18 @@ pub async fn run(
         notify::enqueue(shared, notify::queued(&gathered.incident, narrow))?;
     }
     Ok(Next::Done)
+}
+
+/// Counts a call to the model under its outcome (ok, error, invalid) and observes how long it
+/// took, so that the histogram's `_count` always equals `kausa_model_calls_total` per outcome.
+fn called(shared: &Shared<'_>, outcome: &str, took: Duration) {
+    let labels = [("outcome", outcome)];
+    shared.metrics.inc("kausa_model_calls_total", &labels);
+    shared.metrics.observe(
+        "kausa_model_call_duration_seconds",
+        &labels,
+        took.as_secs_f64(),
+    );
 }
 
 /// Records a call that ended at `now` in the breaker (`None`: a chat completion, valid or not)

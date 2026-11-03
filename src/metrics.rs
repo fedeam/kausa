@@ -1,8 +1,9 @@
 //! Prometheus metrics and health endpoints (docs/reference/command-line.md, "Metrics").
 //!
-//! Counters in memory, rendered in the text exposition format, and a minimal HTTP/1.1 responder
-//! for `GET /metrics`, `/healthz` and `/readyz`: kausa serves nothing else, so it needs no HTTP
-//! framework. Each connection is answered and closed, with a short timeout.
+//! Counters, gauges and one histogram in memory, rendered in the text exposition format, and a
+//! minimal HTTP/1.1 responder for `GET /metrics`, `/healthz` and `/readyz`: kausa serves nothing
+//! else, so it needs no HTTP framework. Each connection is answered and closed, with a short
+//! timeout.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -134,11 +135,35 @@ pub const GAUGES: [(&str, &str); 5] = [
     ),
 ];
 
+/// The upper bounds, in seconds, of the buckets of `kausa_model_call_duration_seconds`.
+pub const CALL_DURATION_BUCKETS: [f64; 11] = [
+    0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+];
+
+/// The histograms kausa exports, with their help text and bucket bounds, rendered after the
+/// gauges and only once observed.
+pub const HISTOGRAMS: [(&str, &str, &[f64]); 1] = [(
+    "kausa_model_call_duration_seconds",
+    "Duration of the calls to the model endpoint, by outcome (ok, error, invalid).",
+    &CALL_DURATION_BUCKETS,
+)];
+
+/// One series of a histogram: the observations in each bucket (not cumulative; the values past
+/// the last bound are in `count` only), their sum and their number.
+#[derive(Debug, Default)]
+struct Histogram {
+    counts: Vec<u64>,
+    sum: f64,
+    count: u64,
+}
+
 #[derive(Debug)]
 pub struct Metrics {
     counters: RefCell<BTreeMap<(&'static str, String), u64>>,
     /// The series of every gauge but `kausa_leader`, by name and labels; set, never added to.
     gauges: RefCell<BTreeMap<(&'static str, String), u64>>,
+    /// The series of the histograms, by name and labels.
+    histograms: RefCell<BTreeMap<(&'static str, String), Histogram>>,
     /// Set once, never cleared (docs/adr/0013-namespaced-install-mode.md).
     ready: Cell<bool>,
     /// Whether this process acts: it holds the Lease, or runs without --leader-lease.
@@ -151,6 +176,7 @@ impl Default for Metrics {
         Self {
             counters: RefCell::default(),
             gauges: RefCell::default(),
+            histograms: RefCell::default(),
             ready: Cell::new(false),
             leading: Cell::new(true),
         }
@@ -172,6 +198,27 @@ impl Metrics {
         self.gauges
             .borrow_mut()
             .insert((name, label_set(labels)), value);
+    }
+
+    /// Observes `value` in the histogram `name` with the given labels: the first bucket whose
+    /// bound is at least `value` counts it (none: only `+Inf`). An unknown name is a bug.
+    pub fn observe(&self, name: &'static str, labels: &[(&str, &str)], value: f64) {
+        let Some((_, _, bounds)) = HISTOGRAMS.iter().find(|(n, _, _)| *n == name) else {
+            debug_assert!(false, "unknown histogram {name}");
+            return;
+        };
+        let mut histograms = self.histograms.borrow_mut();
+        let series = histograms
+            .entry((name, label_set(labels)))
+            .or_insert_with(|| Histogram {
+                counts: vec![0; bounds.len()],
+                ..Histogram::default()
+            });
+        if let Some(bucket) = bounds.iter().position(|bound| value <= *bound) {
+            series.counts[bucket] += 1;
+        }
+        series.sum += value;
+        series.count += 1;
     }
 
     pub fn inc(&self, name: &'static str, labels: &[(&str, &str)]) {
@@ -221,6 +268,38 @@ impl Metrics {
             if push_series(&mut series, name, &gauges) {
                 out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
                 out.push_str(&series);
+            }
+        }
+        let histograms = self.histograms.borrow();
+        for (name, help, bounds) in HISTOGRAMS {
+            let mut any = false;
+            for ((n, labels), series) in histograms.iter() {
+                if *n != name {
+                    continue;
+                }
+                if !any {
+                    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} histogram\n"));
+                    any = true;
+                }
+                let sep = if labels.is_empty() { "" } else { "," };
+                let mut cumulative = 0;
+                for (bound, n) in bounds.iter().zip(&series.counts) {
+                    cumulative += n;
+                    out.push_str(&format!(
+                        "{name}_bucket{{{labels}{sep}le=\"{bound}\"}} {cumulative}\n"
+                    ));
+                }
+                let (count, sum) = (series.count, series.sum);
+                out.push_str(&format!(
+                    "{name}_bucket{{{labels}{sep}le=\"+Inf\"}} {count}\n"
+                ));
+                if labels.is_empty() {
+                    out.push_str(&format!("{name}_sum {sum}\n{name}_count {count}\n"));
+                } else {
+                    out.push_str(&format!(
+                        "{name}_sum{{{labels}}} {sum}\n{name}_count{{{labels}}} {count}\n"
+                    ));
+                }
             }
         }
         out
