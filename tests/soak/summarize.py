@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """The soak's report and verdicts (docs/how-to/run-the-soak.md): reads the samples-*.jsonl and
 cluster-*.jsonl files tests/soak/sample.py wrote in DIR, keeps the first --hours hours (168 by
-default) from the first sample, and prints, per Pod: coverage, restarts and termination reasons,
-working set (p50 and highest per day, highest overall), cAdvisor's highest usage, the growth slope
-and CPU (mean and p99 of the rates between samples); over both Pods: per day, the increase of
-kausa's counters (incidents, model calls by outcome, skipped and dropped explanations,
-notifications, watch errors by watch, any relist series, leadership and lease counters); the
-explanation queue's highest value and how often it was above 0; the budget's lowest per window; the
-minutes with the breaker open; and the range of the cluster's counts. Then one line per verdict of
-the decision rule, set on 2026-11-03 before any measurement:
+default) from the first sample, or from the first sample at or after --from, and prints, per Pod:
+coverage, the restarts in the window and termination reasons, working set (p50 and highest per day,
+highest overall), cAdvisor's highest usage, the growth slope and CPU (mean and p99 of the rates
+between samples); over both Pods: per day, the increase of kausa's counters (incidents, model calls
+by outcome, skipped and dropped explanations, notifications, watch errors by watch, any relist
+series, leadership and lease counters); the explanation queue's highest value and how often it was
+above 0; the budget's lowest per window; the minutes and episodes with the breaker open; and the
+range of the cluster's counts. Then one line per verdict of the decision rule, set on 2026-11-03
+before any measurement:
 
     S1 VALID|INVALID: <reason>
     S2 PASS|FAIL: <reason>
     S3 PASS|FAIL|INCONCLUSIVE: <reason>
 
 An INVALID soak decides nothing: run it again. Counter increases are taken per Pod name, so a
-restart starts a new series instead of a negative increase. --self-test runs the verdicts on
-synthetic samples and prints "self-test: ok". It reads files only: no cluster, no network. Python
-stdlib only; run it with python3 -I.
+restart starts a new series instead of a negative increase. A restart is a rise of a Pod's
+restartCount inside the window, over its value at the Pod's first sample there: a restart before the
+window does not count, so --from after it starts the 168-hour clock again. --self-test runs the
+verdicts on synthetic samples and prints "self-test: ok". It reads files only: no cluster, no
+network. Python stdlib only; run it with python3 -I.
 """
 
 import argparse
+import calendar
 import glob
 import json
 import math
@@ -40,6 +44,9 @@ SLOPE_FAIL = 0.5  # MiB per day
 LAST_DAY_RISE = 1 * MIB
 WARMUP_HOURS = 24
 BREAKER_DAYS = 4
+# Open samples less than this apart belong to one episode: one exercise (at most 60 minutes, then
+# at most one 30-minute hold) is one episode, whatever the breaker does inside it.
+EPISODE_GAP = 2 * 3600
 OK_CALL_DAYS = 6  # of 7
 CPU_FLAG = 100  # millicores; reported, not gated
 EXTENDED_HOURS = 336
@@ -93,12 +100,17 @@ def slope_per_day(points):
 
 
 class Window:
-    """The samples of the first HOURS hours from the first sample, by Pod name."""
+    """The samples of the first HOURS hours from the first sample (at or after SINCE, a Unix time,
+    when given), by Pod name."""
 
-    def __init__(self, rows, cluster, hours):
+    def __init__(self, rows, cluster, hours, since=None):
         self.hours = hours
-        timed = [r for r in rows if isinstance(r.get("ts"), (int, float))]
-        self.start = min((r["ts"] for r in timed), default=0)
+        timed = [
+            r
+            for r in rows
+            if isinstance(r.get("ts"), (int, float)) and (since is None or r["ts"] >= since)
+        ]
+        self.start = min((r["ts"] for r in timed), default=since or 0)
         self.end = self.start + hours * 3600
         self.rows = sorted((r for r in timed if r["ts"] < self.end), key=lambda r: r["ts"])
         self.cluster = [
@@ -151,6 +163,25 @@ class Window:
                         day[series] = day.get(series, 0) + delta
         return out
 
+    def restarts(self, pod):
+        """How far the Pod's restartCount rose over its value at its first sample in the window,
+        and that first value."""
+        counts = [r["restarts"] for r in self.pods[pod] if isinstance(r.get("restarts"), int)]
+        if not counts:
+            return 0, 0
+        return max(counts) - counts[0], counts[0]
+
+    def breaker_episodes(self):
+        """The episodes with the breaker open: runs of open samples less than EPISODE_GAP apart."""
+        episodes, last = 0, None
+        for ts, value in self.series_values(OPEN):
+            if value != 1:
+                continue
+            if last is None or ts - last >= EPISODE_GAP:
+                episodes += 1
+            last = ts
+        return episodes
+
     def series_values(self, series):
         return [
             (r["ts"], (r.get("kausa") or {}).get(series))
@@ -170,17 +201,16 @@ def s1(w):
             reasons.append(
                 "%s has %.0f%% of the 30-s slots, under 90%%" % (pod, 100 * w.coverage(pod))
             )
-    restarted = sorted(
-        {r["pod"] for rows in w.pods.values() for r in rows if (r.get("restarts") or 0) > 0}
-    )
+    restarted = sorted(pod for pod in w.pods if w.restarts(pod)[0] > 0)
     if restarted:
         reasons.append(
-            "restarts above 0 (%s): the 168-hour clock starts again" % ", ".join(restarted)
+            "restartCount rose in the window (%s): the 168-hour clock starts again, with --from"
+            " after the restart" % ", ".join(restarted)
         )
-    open_days = {w.day(ts) for ts, value in w.series_values(OPEN) if value == 1}
-    if len(open_days) < BREAKER_DAYS:
+    episodes = w.breaker_episodes()
+    if episodes < BREAKER_DAYS:
         reasons.append(
-            "the breaker was seen open on %d days, under %d" % (len(open_days), BREAKER_DAYS)
+            "the breaker was seen open in %d episodes, under %d" % (episodes, BREAKER_DAYS)
         )
     needed = int(math.ceil(OK_CALL_DAYS * w.days / 7))
     ok_days = [d for d, values in w.increases(lambda s: s == OK_CALLS).items() if values]
@@ -193,9 +223,9 @@ def s1(w):
     if reasons:
         return "INVALID", "; ".join(reasons)
     summary = "%g hours, two Pods, coverage at least 90%%, no restart" % w.hours
-    return "VALID", "%s, breaker open on %d days, ok calls on %d days" % (
+    return "VALID", "%s, breaker open in %d episodes, ok calls on %d days" % (
         summary,
-        len(open_days),
+        episodes,
         len(ok_days),
     )
 
@@ -313,13 +343,14 @@ def report(w):
     ]
     for pod, rows in sorted(w.pods.items()):
         lines.append("pod %s:" % pod)
-        restarts = max((r.get("restarts") or 0) for r in rows)
+        rose, at_start = w.restarts(pod)
         reasons = sorted(
             {r["last_terminated_reason"] for r in rows if r.get("last_terminated_reason")}
         )
         lines.append(
-            "  coverage %.1f%%, restarts %d, termination reasons: %s"
-            % (100 * w.coverage(pod), restarts, ", ".join(reasons) or "none")
+            "  coverage %.1f%%, restarts %d in the window (restartCount %d at its start),"
+            " termination reasons: %s"
+            % (100 * w.coverage(pod), rose, at_start, ", ".join(reasons) or "none")
         )
         by_day = {}
         for r in rows:
@@ -388,7 +419,10 @@ def report(w):
     if not budgets:
         lines.append("budget: not reported")
     open_minutes = {int(ts // 60) for ts, value in w.series_values(OPEN) if value == 1}
-    lines.append("breaker: open in %d sampled minutes" % len(open_minutes))
+    lines.append(
+        "breaker: open in %d sampled minutes, %d episodes"
+        % (len(open_minutes), w.breaker_episodes())
+    )
     for key in ("pods", "warning_events", "nodes"):
         values = [c[key] for c in w.cluster if c.get(key) is not None]
         lines.append(
@@ -419,17 +453,34 @@ def load(directory):
 # --- The self-test: the verdicts on synthetic samples of two Pods at 30-s intervals. ---
 
 
-def synthetic(case, hours=SOAK_HOURS):
+# The hours from the first sample at which the breaker opens for 10 minutes, per case: by default
+# hour 12 of window days 1 to 5. "varied" is a sampler started on a Tuesday at 18:00 and exercises
+# on Wednesday at 09:00, Thursday at 20:00, Friday at 10:00, Saturday at 22:00 and Sunday at 15:00:
+# window days 0, 2, 2, 4 and 4. "flap" opens three times, each time in four 10-minute bursts with
+# a minute between them.
+OPENINGS = {
+    "default": [24 * d + 12 for d in (1, 2, 3, 4, 5)],
+    "varied": [15, 50, 64, 100, 117],
+    "flap": [h + m / 60 for h in (36, 60, 84) for m in (0, 11, 22, 33)],
+}
+# With "from-6", the window starts this many hours after the first sample; its restart is at
+# hour 5.
+FROM_HOURS = 6
+
+
+def synthetic(case, hours=SOAK_HOURS, use_from=True):
     start = 1767225600  # 2026-01-01T00:00:00Z
     rate = {"grow-1": 1.0, "grow-0.3": 0.3}.get(case, 0.0)
+    span = hours + (FROM_HOURS if case == "from-6" else 0)
+    since = start + FROM_HOURS * 3600 if case == "from-6" and use_from else None
+    openings = OPENINGS.get(case, OPENINGS["default"])
     rows, cluster = [], []
-    for i in range(int(hours * 3600 // SLOT_SECONDS)):
+    for i in range(int(span * 3600 // SLOT_SECONDS)):
         ts = start + SLOT_SECONDS * i
         h = (ts - start) / 3600
         if case == "gap-40" and 40 <= h < 40 + 0.4 * hours:
             continue
-        day, hour = int(h // 24), h % 24
-        open_now = day in (1, 2, 3, 4, 5) and 12 <= hour < 12 + 10 / 60
+        open_now = any(o <= h < o + 10 / 60 for o in openings)
         if i % 20 == 0:
             cluster.append({"ts": ts, "pods": 100, "warning_events": 40, "nodes": 3})
         for n, pod in enumerate(("synthetic-1", "synthetic-2")):
@@ -437,6 +488,8 @@ def synthetic(case, hours=SOAK_HOURS):
             restarts, reason = 0, None
             if h >= 100 and n == 1 and case in ("restart", "oom"):
                 restarts, reason = 1, ("OOMKilled" if case == "oom" else "Error")
+            if n == 1 and (case == "restarted-before" or (case == "from-6" and h >= 5)):
+                restarts, reason = 1, "Error"
             kausa = {"kausa_leader": 1 - n}
             if n == 0:
                 kausa.update(
@@ -465,7 +518,7 @@ def synthetic(case, hours=SOAK_HOURS):
                     "errors": ["top"],
                 }
             )
-    return Window(rows, cluster, hours)
+    return Window(rows, cluster, hours, since)
 
 
 def self_test():
@@ -475,6 +528,10 @@ def self_test():
         ("grow-0.3", SOAK_HOURS, {"S3": "INCONCLUSIVE"}),
         ("gap-40", SOAK_HOURS, {"S1": "INVALID"}),
         ("restart", SOAK_HOURS, {"S1": "INVALID"}),
+        ("restarted-before", SOAK_HOURS, {"S1": "VALID"}),
+        ("from-6", SOAK_HOURS, {"S1": "VALID"}),
+        ("varied", SOAK_HOURS, {"S1": "VALID"}),
+        ("flap", SOAK_HOURS, {"S1": "INVALID"}),
         ("oom", SOAK_HOURS, {"S2": "FAIL"}),
         ("short", 10, {"S1": "INVALID"}),
     ]
@@ -492,12 +549,25 @@ def self_test():
             failures.append("grow-0.3: the S3 reason does not end with 'extend to 14 days'")
         if case == "short" and "shorter than 168 hours" not in got["S1"][1]:
             failures.append("short: the S1 reason does not say 'shorter than 168 hours'")
+        if case == "flap" and "in 3 episodes" not in got["S1"][1]:
+            failures.append("flap: the S1 reason does not say 'in 3 episodes'")
+    # "from-6" without --from: the restart at hour 5 is inside the window.
+    if s1(synthetic("from-6", use_from=False))[0] != "INVALID":
+        failures.append("from-6 without --from: S1 is not INVALID")
     for failure in failures:
         print("self-test: " + failure, file=sys.stderr)
     if failures:
         return 1
     print("self-test: ok")
     return 0
+
+
+def utc_time(value):
+    """A UTC time as the report prints it, YYYY-MM-DDTHH:MM:SSZ, as a Unix time."""
+    try:
+        return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        raise argparse.ArgumentTypeError("not a UTC time YYYY-MM-DDTHH:MM:SSZ: %r" % value)
 
 
 def main():
@@ -508,6 +578,13 @@ def main():
     parser.add_argument("dir", nargs="?", help="the directory tests/soak/sample.py wrote")
     parser.add_argument(
         "--hours", type=float, default=SOAK_HOURS, help="hours from the first sample (default 168)"
+    )
+    parser.add_argument(
+        "--from",
+        dest="since",
+        type=utc_time,
+        help="start the window at the first sample at or after this UTC time"
+        " (YYYY-MM-DDTHH:MM:SSZ), for example after a restart caused outside kausa",
     )
     parser.add_argument(
         "--self-test", action="store_true", help="run the verdicts on synthetic samples"
@@ -523,7 +600,10 @@ def main():
     if not rows:
         print("summarize.py: no samples-*.jsonl lines in that directory", file=sys.stderr)
         return 1
-    w = Window(rows, cluster, args.hours)
+    w = Window(rows, cluster, args.hours, args.since)
+    if not w.rows:
+        print("summarize.py: no samples at or after --from", file=sys.stderr)
+        return 1
     for line in report(w):
         print(line)
     if bad:

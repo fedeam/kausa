@@ -93,7 +93,10 @@ never print the cluster's server address, and write node indexes instead of node
 
    `--interval` sets the seconds between samples (30 by default).
 
-4. **Open the breaker once a day** on days 2 to 6, at different hours. `exercise.sh` makes the
+4. **Open the breaker once a day** on days 2 to 6, at different hours, at least 2 hours apart.
+   `summarize.py` counts episodes, not days: open samples less than 2 hours apart are one
+   episode, so one run of `exercise.sh` counts once whatever the breaker does inside it, and two
+   runs closer than that count once together. `exercise.sh` makes the
    fake endpoint answer 401 for the given minutes (10 by default, 1 to 60), creates a failing Job
    `soak-breaker-<UTC yyyymmddHHMM>` in `kausa-soak` so that a new incident calls the model, and
    then makes the endpoint answer again, also when it is interrupted:
@@ -109,12 +112,21 @@ never print the cluster's server address, and write node indexes instead of node
    restarts, working set, cAdvisor's highest usage, the growth slope and CPU; per day, the
    increase of kausa's counters; the queue, the budget and the minutes with the breaker open; and
    then the three verdict lines of the rule below (`--hours` is 168 by default; 336 when the
-   soak is extended):
+   soak is extended). The window starts at the first sample, or with `--from <UTC time>`
+   (`YYYY-MM-DDTHH:MM:SSZ`, as the report's `window:` line prints it) at the first sample at or
+   after that time:
 
    ```sh
    python3 -I tests/soak/summarize.py <out>
    python3 -I tests/soak/summarize.py <out> --hours 336
+   python3 -I tests/soak/summarize.py <out> --from 2026-11-10T08:00:00Z
    ```
+
+   A restart caused outside kausa (a node reboot, an eviction) makes S1 INVALID, and the
+   168-hour clock starts again after it: keep the sampler running, run the breaker exercise again
+   on days 2 to 6 of the new window, and after 168 more hours summarize with `--from` set after
+   the restart. A restart is a rise of the Pod's `restartCount` inside the window, so a count
+   already above 0 at the window's first sample does not count.
 
    `python3 -I tests/soak/summarize.py --self-test` checks the verdicts on synthetic samples
    without any file.
@@ -189,6 +201,13 @@ once numbers exist:
 `summarize.py` prints S1 as `VALID` or `INVALID`, S2 as `PASS` or `FAIL`, and S3 as `PASS`,
 `FAIL` or `INCONCLUSIVE` (its reason then ends with "extend to 14 days"); its thresholds are named
 constants with these values. It does not run the scale gate.
+
+How `summarize.py` reads two terms of S1, set on 2026-11-03 before any measurement: `restarts` 0
+means that no Pod's `restartCount` rises inside the window over its value at the Pod's first
+sample there (the clock starts again with `--from`, step 5); "4 of the 5 exercise days" means at
+least 4 episodes of the breaker open, an episode being the open samples less than 2 hours apart,
+because the window's days are 24-hour periods from its first sample and not calendar days, so
+five exercises run on five calendar days can fall on three of them.
 
 Two of S2's inputs are hypotheses until the soak reads them: that the cluster's kubelet serves
 cAdvisor's `container_memory_max_usage_bytes` and `container_oom_events_total`, and that on
