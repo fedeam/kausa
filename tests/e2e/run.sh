@@ -33,6 +33,16 @@
 # notification or an explanation log line, and that kausa_answer_redactions_total counts R004,
 # R013 and R014 and never R002.
 #
+# Both read kausa's own metrics before the first restart: kausa_build_info names the appVersion of
+# charts/kausa/Chart.yaml and prompt version 2, kausa_records counts at least one Pod, the series
+# kausa_watch_relists_total{watch="pods"} is there,
+# kausa_explanations_skipped_total{reason="budget"} reads 0 (counters with fixed labels start at
+# 0), the call-duration histogram's ok count equals kausa_model_calls_total{outcome="ok"} and is
+# at least 1, and kausa_dedup_cache_entries is at least 1. The namespaced scope's refused
+# namespace gives kausa_watch_restarts_total at least 1 for each of its watches (pods, events,
+# deployments), read from the not-Ready Pod; with two replicas, the standby reports its
+# kausa_build_info and kausa_records{kind="pods"} 0.
+#
 # Both watch Deployments (docs/adr/0018-stuck-rollouts.md): stalled, held by a scheduling gate, is
 # explained by D014 alone, and the request for it carries only the replica counts; crasher and
 # refused also pass their progress deadline, and before the first restart (after one, refused's
@@ -115,6 +125,11 @@ ELSEWHERE=e2e-elsewhere
 SETTLE=10
 # run.rs's TICK, in seconds: a settled incident is logged on the next tick.
 TICK=5
+# kausa_build_info's labels: the image is built from this checkout, whose crate version the
+# chart's appVersion repeats (the release checks it), and src/prompt.rs's PROMPT_VERSION.
+APP_VERSION=$(awk '$1 == "appVersion:" { gsub(/"/, "", $2); print $2 }' charts/kausa/Chart.yaml)
+[ -n "$APP_VERSION" ] || fail "no appVersion in charts/kausa/Chart.yaml"
+BUILD_LABELS="version=\"$APP_VERSION\",prompt_version=\"2\""
 WORK=$(mktemp -d)
 CONTEXT="kind-$CLUSTER"
 # The history's resource, its CustomResourceDefinition and its reader role.
@@ -1662,7 +1677,13 @@ if [ "$REPLICAS" = 2 ]; then
   done
   [ "$(pod_metric "$first_standby" kausa_leader)" = 0 ] ||
     fail "the standby's kausa_leader is not 0"
-  echo "two replicas: only the Lease holder wrote Events; the standby logged no incident"
+  # It never led: it holds no record, and it names its build like the leader.
+  [ "$(pod_metric "$first_standby" 'kausa_records{kind="pods"}')" = 0 ] ||
+    fail "the standby's kausa_records{kind=\"pods\"} is not 0"
+  [ "$(pod_metric "$first_standby" "kausa_build_info{$BUILD_LABELS}")" = 1 ] ||
+    fail "the standby has no kausa_build_info of the chart's appVersion and prompt version 2"
+  echo "two replicas: only the Lease holder wrote Events; the standby logged no incident," \
+    "holds no record and reports its build"
 fi
 
 # The metrics, through the API server's service proxy, which reaches only a Ready Pod (with two
@@ -1685,6 +1706,27 @@ echo "$metrics" | grep -E '^kausa_history_writes_total\{outcome="created"\} [1-9
 echo "$metrics" |
   awk '$1 == "kausa_incidents_total{detection=\"D014\"}" && $2 >= 1 { n++ } END { exit !n }' ||
   fail "kausa_incidents_total does not count stalled's D014"
+# kausa's own metrics, from the same scrape: the build, the records of the leader's term, the
+# relists and the budget's skips counted from the start (no budget skip so far), each ok model
+# call timed, and the explanations kept for repeated incidents.
+echo "$metrics" > "$WORK/metrics.txt"
+[ "$(metric_of "kausa_build_info{$BUILD_LABELS}" "$WORK/metrics.txt")" = 1 ] ||
+  fail "kausa_build_info does not name the chart's appVersion and prompt version 2"
+held=$(metric_of 'kausa_records{kind="pods"}' "$WORK/metrics.txt")
+[ "${held:-0}" -ge 1 ] || fail "kausa_records{kind=\"pods\"} is absent or 0"
+[ -n "$(metric_of 'kausa_watch_relists_total{watch="pods"}' "$WORK/metrics.txt")" ] ||
+  fail "no kausa_watch_relists_total{watch=\"pods\"} series"
+[ "$(metric_of 'kausa_explanations_skipped_total{reason="budget"}' "$WORK/metrics.txt")" = 0 ] ||
+  fail "kausa_explanations_skipped_total{reason=\"budget\"} is absent or not 0"
+timed=$(metric_of 'kausa_model_call_duration_seconds_count{outcome="ok"}' "$WORK/metrics.txt")
+calls_ok=$(metric_of 'kausa_model_calls_total{outcome="ok"}' "$WORK/metrics.txt")
+if [ -z "$timed" ] || [ "$timed" != "$calls_ok" ] || [ "$timed" -lt 1 ]; then
+  fail "kausa_model_call_duration_seconds_count{outcome=\"ok\"} ($timed) is 0 or differs from" \
+    "kausa_model_calls_total{outcome=\"ok\"} ($calls_ok)"
+fi
+cached=$(metric_of kausa_dedup_cache_entries "$WORK/metrics.txt")
+[ "${cached:-0}" -ge 1 ] || fail "kausa_dedup_cache_entries is absent or 0"
+echo "own metrics: build $APP_VERSION, $held Pods held, $timed ok calls timed, $cached cached"
 restarts=$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa \
   -o jsonpath='{.items[*].status.containerStatuses[0].restartCount}')
 if [ -z "$restarts" ] || [ -n "$(printf '%s' "$restarts" | tr -d ' 0')" ]; then
@@ -1928,8 +1970,23 @@ if [ "$SCOPE" = namespaced ] && [ "$REPLICAS" = 1 ]; then
   [ "$ready" = False ] || fail "the new kausa Pod is Ready ($ready) though $DENIED refuses it"
   restarts=$(k -n "$NAMESPACE" get "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')
   [ "$restarts" = 0 ] || fail "the new kausa Pod restarted $restarts times"
-  echo "$DENIED refused, its Deployment watch too: kausa is not Ready, did not restart and still" \
-    "explains $TARGET"
+  # Each watch of DENIED was refused (403) and got a new watcher: kausa_watch_restarts_total counts
+  # at least one for pods, events and deployments. From the Pod too, retried: a refusal repeats
+  # at the watcher's backoff.
+  short=""
+  for _ in $(seq 1 15); do
+    pod_get "${pod#pod/}" metrics > "$WORK/metrics.txt"
+    short=""
+    for watch in pods events deployments; do
+      renewed=$(metric_of "kausa_watch_restarts_total{watch=\"$watch\"}" "$WORK/metrics.txt")
+      [ "${renewed:-0}" -ge 1 ] || short="$short $watch"
+    done
+    [ -z "$short" ] && break
+    sleep 2
+  done
+  [ -z "$short" ] || fail "kausa_watch_restarts_total is absent or 0 for the watches:$short"
+  echo "$DENIED refused, its Deployment watch too: kausa is not Ready, did not restart, restarted" \
+    "each refused watch and still explains $TARGET"
 fi
 
 if [ "$REPLICAS" = 2 ]; then
