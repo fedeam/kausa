@@ -355,18 +355,14 @@ code](../adr/0019-high-availability.md)).
    configuration uses them). With `networkPolicy.metricsFrom`, allow your Prometheus to reach both
    Pods.
 
-4. **Alert** on nobody acting, or two, and on a Lease that changes hands too often:
-
-   ```text
-   sum(kausa_leader) != 1                                          for: 2m
-   increase(kausa_leadership_changes_total{to="leader"}[1h]) > 6
-   ```
-
-   Scope both to your release's Pods (for example by their `namespace` and `pod` labels). The
-   first fires when the Lease is held by someone else, has been deleted, or cannot be renewed (an
-   API server outage, a deleted `kausa-leader` RoleBinding): kausa then explains nothing, on
-   purpose, rather than act without the Lease. The second shows a Lease that flips, by failures or
-   by someone writing it.
+4. **Alert** on nobody acting, or two, and on a Lease that changes hands too often, with
+   [`KausaNoLeader`](../reference/alerts.md#kausanoleader) and
+   [`KausaLeaderFlapping`](../reference/alerts.md#kausaleaderflapping) of
+   [Alerts](../reference/alerts.md). Both add up a release's Pods by their `namespace` and `job`
+   labels; adjust that to your scrape configuration. The first fires when the Lease is held by
+   someone else, has been deleted, or cannot be renewed (an API server outage, a deleted
+   `kausa-leader` RoleBinding): kausa then explains nothing, on purpose, rather than act without
+   the Lease. The second shows a Lease that flips, by failures or by someone writing it.
 
 What to expect:
 
@@ -397,47 +393,15 @@ What to expect:
 - `kubectl get --raw /api/v1/namespaces/kausa/services/kausa-metrics:9090/proxy/metrics` shows
   the counters and the gauges; `kausa_endpoint_state{state="closed"} 1` while kausa calls its
   endpoint.
-- To hear when the budget holds explanations back, two example alerts on the gauges of [Command
-  line and log format](../reference/command-line.md#metrics):
-
-  ```yaml
-  - alert: KausaDailyCallBudgetSpent
-    expr: kausa_budget_calls_remaining{window="day"} == 0 and on (pod) kausa_leader == 1
-    for: 10m
-  - alert: KausaExplanationsBehind
-    expr: min_over_time(kausa_explanation_queue_length[45m]) > 0
-  ```
-
-  The first fires when the acting replica has spent its daily cap; it keeps to the leader because
-  a former leader that spent its day still reads 0. It assumes your scrape configuration gives
-  each series a `pod` label (a hypothesis: adjust the `on (pod)` to your labels). The second fires
-  when incidents have waited for 45 minutes without the queue ever emptying, room for a full
-  queue to drain after an upgrade at the defaults (13 calls of 120 seconds, plus the settle
-  window); a standby and a replica that stepped down read 0. `window="hour"` at 0 is normal under
-  load and is not worth an alert.
-- To hear when kausa stops calling its endpoint because it keeps failing (the breaker of [Command
-  line and log format](../reference/command-line.md#the-breaker)), an example alert:
-
-  ```yaml
-  - alert: KausaModelEndpointFailing
-    # The breaker has not been closed for 20 minutes, and a call failed in the last 45
-    # (the longest hold is 30 minutes, plus a probe of up to --model-timeout).
-    expr: |
-      max_over_time(kausa_endpoint_state{state="closed"}[20m]) == 0
-        and ignoring(state, outcome)
-      increase(kausa_model_calls_total{outcome="error"}[45m]) > 0
-    labels: {severity: warning}
-    annotations:
-      summary: kausa stopped calling its model endpoint; incidents wait or are skipped.
-      description: Read kausa's "endpoint unavailable" log line, then run helm test on the release.
-  ```
-
-  It fires about 20 minutes after the breaker opens and keeps firing while probes fail. It never
-  fires on a standby (always `closed`), nor on a quiet cluster that sits half open after an
-  outage, where no call fails; it resolves when a call closes the breaker, or 45 minutes after
-  the last failed call. A passing `helm test` does not resolve it: the test is another process.
-  The expression is a hypothesis until `promtool check rules` runs on it (not run as of
-  2026-11-02).
+- To hear when kausa itself needs attention, load the alerting rules
+  [`deploy/prometheus/kausa-alerts.yaml`](../../deploy/prometheus/kausa-alerts.yaml), which
+  [Alerts](../reference/alerts.md) explains alert by alert. Among them:
+  `KausaDailyCallBudgetSpent` fires when the acting replica has spent its daily call budget,
+  `KausaExplanationsBehind` when incidents have waited for 45 minutes without the queue ever
+  emptying, and `KausaModelEndpointFailing` when kausa has stopped calling its endpoint for 20
+  minutes because calls keep failing (the breaker of [Command line and log
+  format](../reference/command-line.md#the-breaker)); a passing `helm test` does not resolve the
+  last one, since the test is another process.
 
 ## If something fails
 
