@@ -187,19 +187,30 @@ impl Redactor {
         out = self.apply(&URL_USERINFO, "R006", out, pass, |c| {
             format!("{}<redacted:userinfo>@", &c[1])
         });
-        out = self.apply(&SECRET_KEY_VALUE, "R010", out, pass, |c| {
-            let value = &c[2];
-            let marker = if value.starts_with("\\\"") {
-                "\\\"<redacted:value>\\\""
-            } else if value.starts_with('"') {
-                "\"<redacted:value>\""
-            } else if value.starts_with('\'') {
-                "'<redacted:value>'"
-            } else {
-                "<redacted:value>"
-            };
-            format!("{}{marker}", &c[1])
-        });
+        // A kind before a quoted name (`volume "credentials" : secret "<name>" not found`) is not
+        // the key's value: it stays, so that `R003` redacts the name after it.
+        let kind_before_name = |c: &Captures<'_>| c.get(3).is_some() && KIND_WORD.is_match(&c[2]);
+        out = self.apply_unless(
+            &SECRET_KEY_VALUE,
+            "R010",
+            out,
+            pass,
+            kind_before_name,
+            |c| {
+                let value = &c[2];
+                let quoted_name = c.get(3).map_or("", |m| m.as_str());
+                let marker = if value.starts_with("\\\"") {
+                    "\\\"<redacted:value>\\\""
+                } else if value.starts_with('"') {
+                    "\"<redacted:value>\""
+                } else if value.starts_with('\'') {
+                    "'<redacted:value>'"
+                } else {
+                    "<redacted:value>"
+                };
+                format!("{}{marker}{quoted_name}", &c[1])
+            },
+        );
         out = self.apply(&SECRET_FLAG, "R010", out, pass, |c| {
             format!("{} <redacted:value>", &c[1])
         });
@@ -340,9 +351,25 @@ impl Redactor {
         pass: Pass,
         replacement: impl Fn(&Captures<'_>) -> String,
     ) -> String {
+        self.apply_unless(pattern, rule, text, pass, |_| false, replacement)
+    }
+
+    /// Like `apply`, but a match for which `keep` holds stays as it is and is not counted.
+    fn apply_unless(
+        &mut self,
+        pattern: &Regex,
+        rule: &'static str,
+        text: String,
+        pass: Pass,
+        keep: impl Fn(&Captures<'_>) -> bool,
+        replacement: impl Fn(&Captures<'_>) -> String,
+    ) -> String {
         let mut n = 0;
         let out = pattern
             .replace_all(&text, |c: &Captures<'_>| {
+                if keep(c) {
+                    return c[0].to_owned();
+                }
                 let replaced = replacement(c);
                 if pass == Pass::Request || replaced != c[0] {
                     n += 1;
@@ -766,10 +793,17 @@ static REQUEST_LINE_QUERY: LazyLock<Regex> = LazyLock::new(|| {
         r#"(\b(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE)[ \t]+/[^\s?#"'<>`\\]*)([?#][^\s"'<>`\\]*)"#,
     )
 });
+/// A secret's key and separator (group 1), its value (group 2) and a quoted Kubernetes name after
+/// it (group 3), kept as it is: no key or separator fits in it, so it hides no other `R010` match.
 static SECRET_KEY_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     regex(&format!(
-        r#"(?i)(\b[a-z0-9_.-]*{SECRET_KEYS}\b\\?["']?\s*(?:[:=]|%3[ad])\s*)(\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"',;&}}<\\]+)"#
+        r#"(?i)(\b[a-z0-9_.-]*{SECRET_KEYS}\b\\?["']?\s*(?:[:=]|%3[ad])\s*)(\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"',;&}}<\\]+)( ["'][a-z0-9][a-z0-9.-]*["'])?"#
     ))
+});
+/// A kind of `KUBERNETES_NAME`, alone: as a bare value before a quoted name, it is the start of
+/// `<kind> "<name>"`, which `R003` redacts, not a secret.
+static KIND_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    regex(r"(?i)^(?:secrets?|configmaps?|persistentvolumeclaims?|pvc|serviceaccounts?|services?)$")
 });
 static SECRET_FLAG: LazyLock<Regex> = LazyLock::new(|| {
     regex(&format!(
@@ -1367,6 +1401,59 @@ mod tests {
         r.text("a 192.0.2.1 b 192.0.2.2 mail x@example.com");
         assert_eq!(r.counts().get("R004"), Some(&2));
         assert_eq!(r.counts().get("R005"), Some(&1));
+    }
+
+    #[test]
+    fn a_volume_named_like_a_secret_key_does_not_hide_the_name_after_its_kind() {
+        // The kubelet's `FailedMount` note: a volume named after a secret key made `R010` take the
+        // kind for the key's value, so `R003` no longer saw `secret "<name>"` and the name stayed.
+        for volume in ["credentials", "api-token", "password", "auth", "db_secret"] {
+            for kind in ["secret", "configmap", "Secret", "serviceaccount"] {
+                let line = format!(
+                    r#"MountVolume.SetUp failed for volume "{volume}" : {kind} "kausa-no-such-object" not found"#
+                );
+                for pass in [Pass::Request, Pass::Answer] {
+                    let mut r = Redactor::new();
+                    let out = match pass {
+                        Pass::Request => r.text(&line),
+                        Pass::Answer => r.answer(&line),
+                    };
+                    // The messages name the case only, never the text (CodeQL
+                    // rust/cleartext-logging).
+                    assert_eq!(
+                        out,
+                        format!(
+                            r#"MountVolume.SetUp failed for volume "{volume}" : {kind} "<redacted:name>" not found"#
+                        ),
+                        "{volume} {kind}"
+                    );
+                    let counts = match pass {
+                        Pass::Request => r.counts(),
+                        Pass::Answer => r.answer_counts(),
+                    };
+                    assert_eq!(counts.get("R003"), Some(&1), "{volume} {kind}");
+                    assert_eq!(counts.get("R010"), None, "{volume} {kind}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_kind_word_is_still_a_value_without_a_quoted_name_and_a_quoted_name_hides_nothing() {
+        for (line, expected) in [
+            ("password=secret", "password=<redacted:value>"),
+            ("token: configmap,", "token: <redacted:value>,"),
+            (
+                r#"password: hunter2 "next""#,
+                r#"password: <redacted:value> "next""#,
+            ),
+            (
+                r#"token="a" "password=xyz""#,
+                r#"token="<redacted:value>" "password=<redacted:value>""#,
+            ),
+        ] {
+            assert_eq!(redact(line), expected);
+        }
     }
 
     #[test]
