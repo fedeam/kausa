@@ -280,7 +280,7 @@ check prints, and `endpoint unavailable` logs.
 | `no_content` | a `2xx` with a `choices` array whose first message has no string `content` (null, absent, another type, or no first element) | `rejected` | none | skipped at once (`endpoint`), with the fixed reason of its kind | the model answered without text: it refused, a filter removed it, or it spent kausa's 800 output tokens before answering (reason says which); with the check's synthetic request, try another model, or one that does not reason at length |
 | `rate_limited` | `429` without a quota code | `transient` | counts | one retry, after `Retry-After` | the provider limits the rate of this key: kausa waits and tries again |
 | `quota` | `402`, or `429` with the code `insufficient_quota` | `configuration` | opens | skipped at once (`endpoint`) | the provider's account has no quota or credit left: add credit, or use another key (model.apiKey.existingSecret, --api-key-file) |
-| `key` | `401`, `403` | `configuration` | opens | skipped at once (`endpoint`) | the endpoint refused the API key: check the Secret in model.apiKey.existingSecret (--api-key-file) and the key's permissions for this model |
+| `key` | `401`, `403`, or a `400` whose error is one of Google's Gemini API for a wrong or missing key (below) | `configuration` | opens | skipped at once (`endpoint`) | the endpoint refused the API key: check the Secret in model.apiKey.existingSecret (--api-key-file) and the key's permissions for this model |
 | `not_found` | `404`, `405`, `410` | `configuration` | opens | skipped at once (`endpoint`) | the model or the URL is wrong, or the model is no longer offered: check model.name (--model) and that model.endpoint is the base URL |
 | `too_large` | `413`, or another `4xx` with the code `context_length_exceeded` | `rejected` | none | skipped at once (`context_too_large`) | the model refuses a request of this size: lower budget.maxInputTokens (--max-input-tokens) or use a model with a larger context |
 | `rejected` | any other `4xx` (`400`, `409`, `415`, `422`, …) | `rejected` | none | skipped at once (`endpoint`) | with structured output: the endpoint refused the request: if it does not support structured output, set model.jsonSchema=false (--no-json-schema); see detail. With --no-json-schema: the endpoint refused the request: see detail |
@@ -293,8 +293,14 @@ How kausa reads an answer, and nothing more:
   it is a string of at most 64 bytes, and compared byte for byte with `insufficient_quota` (on a
   `429`) and `context_length_exceeded` (on another `4xx`). The first was answered by a hosted
   provider on 2026-10-30; the second is a hypothesis (a wrong entry only changes the skip reason,
-  since both rejected causes are neutral). Only a cause and a clamped delay come out of the body;
-  its start stays in `detail`, in kausa's log and the check's line only.
+  since both rejected causes are neutral). On a `400`, `error.status` and `error.message` are also
+  read, under the same limits, and compared byte for byte with the three pairs Google's Gemini API
+  answers through its OpenAI-compatible endpoint for a wrong key, of either format, and for no key
+  (captured on 2026-11-03): `INVALID_ARGUMENT` with `Please pass a valid API key`, `Invalid Auth
+  key.` or `Missing or invalid Authorization header.`; such a `400` is `key`. The whole message
+  must match: a `400` that quotes the request wraps it in the provider's own words, so a tenant's
+  text cannot make one. Only a cause and a clamped delay come out of the body; its start stays in
+  `detail`, in kausa's log and the check's line only.
 - **A `2xx`**: a string `choices[0].message.content`, even empty, is the answer, which the
   validation judges. Otherwise, with a `choices` array, it is `no_content`, and its kind comes
   from fixed keys only: `choices[0].message.refusal` present and not null is `the model answered

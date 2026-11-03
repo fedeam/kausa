@@ -220,3 +220,18 @@ the labels of a `maxUnavailable: 1` budget over two replicas made it allow 2 dis
   hosted-provider run in a journal entry, first an OpenAI reasoning model if a funded key exists
   (`max_completion_tokens`, [Architecture](../explanation/architecture.md), line 201). Docs: the
   references, how-tos, Architecture, SECURITY.md, ARCHITECTURE.md, AGENTS.md, README, CHANGELOG.
+
+Update 2026-11-03 ([#72](https://github.com/fedeam/kausa/issues/72)): Google's Gemini API answers
+a wrong or missing key through its OpenAI-compatible endpoint with a `400`, not a `401`, so under
+this decision it was `rejected`: the check's hint pointed at `--no-json-schema`, and `kausa run`
+skipped each incident instead of opening the breaker. Its bodies, captured on 2026-11-03, carry no
+`details[].reason` such as `API_KEY_INVALID` (the hypothesis of the issue), only `error.status`
+`INVALID_ARGUMENT`, which a malformed request also gets, and a message per case: `Please pass a
+valid API key` (a key not of the new format), `Invalid Auth key.` (the new format) and `Missing or
+invalid Authorization header.` (no key). On a `400` only, `error.status` and `error.message`, short
+strings as above, are now compared byte for byte with those three pairs (`KEY_ERRORS` in
+`src/model/pure.rs`), and a match is `key`. A `400` the request shapes still never counts: the one
+captured that quotes the request wraps it in Gemini's own words, and the whole message must match.
+If Google rewords a message, its `400` is `rejected` again, as before. The bodies are the unit
+tests' fixtures, and the `endpoint_error` fuzz target checks that a key error comes only from a
+listed pair.

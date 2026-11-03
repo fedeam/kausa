@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A wrong or missing API key for Google's Gemini API is `key`, a configuration error that opens
+  the breaker, instead of `rejected`: its OpenAI-compatible endpoint answers it with a `400`
+  (`INVALID_ARGUMENT`) and one of three fixed messages, which kausa now compares byte for byte. The
+  check's hint names the key instead of `--no-json-schema`
+  ([#72](https://github.com/fedeam/kausa/issues/72)).
+
 ## [0.5.0] - 2026-11-03
 
 The model's answer passes the pattern redaction rules before it is written anywhere (0022), the

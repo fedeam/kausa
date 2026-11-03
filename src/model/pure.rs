@@ -1,6 +1,6 @@
 //! Why a call to the model endpoint failed, from what the endpoint answered
-//! (docs/adr/0020-check-the-endpoint.md): the cause and its class from the status and two fixed
-//! keys of the error body, the content of a chat completion, and a clamped `Retry-After`.
+//! (docs/adr/0020-check-the-endpoint.md): the cause and its class from the status and fixed keys
+//! of the error body, the content of a chat completion, and a clamped `Retry-After`.
 //!
 //! Pure: no I/O, no clock and no `crate::` import, so that the fuzz target `endpoint_error`
 //! includes this file by path; it depends only on `std` and `serde_json`, and never panics.
@@ -27,7 +27,7 @@ pub enum Cause {
     RateLimited,
     /// `402`, or `429` with a code in [`QUOTA_CODES`].
     Quota,
-    /// `401` or `403`.
+    /// `401` or `403`, or a `400` with a key error in [`KEY_ERRORS`].
     Key,
     /// `404`, `405` or `410`.
     NotFound,
@@ -66,6 +66,21 @@ pub enum Class {
 /// The codes of a `429` that mean the account has no quota or credit left (seen on 2026-10-30).
 pub const QUOTA_CODES: &[&str] = &["insufficient_quota"];
 
+/// The `error.status` and `error.message` of a `400` that mean the API key is wrong or missing:
+/// Google's Gemini API answers so through its OpenAI-compatible endpoint, for a wrong key not of
+/// the new format, for one of the new format (`AQ.`), and for no key (bodies captured on
+/// 2026-11-03). Each message is the
+/// whole message, compared byte for byte: a provider that quotes the request in a `400` adds its
+/// own words around it, so a tenant's text cannot make one.
+pub const KEY_ERRORS: &[(&str, &str)] = &[
+    ("INVALID_ARGUMENT", "Please pass a valid API key"),
+    ("INVALID_ARGUMENT", "Invalid Auth key."),
+    (
+        "INVALID_ARGUMENT",
+        "Missing or invalid Authorization header.",
+    ),
+];
+
 /// The codes of a `4xx` that mean the request is too large for the model (a hypothesis, harmless:
 /// both `too_large` and `rejected` are neutral for the breaker).
 pub const TOO_LARGE_CODES: &[&str] = &["context_length_exceeded"];
@@ -76,7 +91,8 @@ pub const RETRY_AFTER_MIN: Duration = Duration::from_secs(30);
 /// The longest delay a `Retry-After` gives.
 pub const RETRY_AFTER_MAX: Duration = Duration::from_secs(600);
 
-/// The longest `error.code`, `error.type` or `finish_reason` that is compared, in bytes.
+/// The longest `error.code`, `error.type`, `error.status`, `error.message` or `finish_reason` that
+/// is compared, in bytes.
 pub const MAX_CODE_BYTES: usize = 64;
 
 /// The most digits of a `Retry-After` in seconds.
@@ -209,7 +225,8 @@ impl Class {
 }
 
 /// The cause of a non-`2xx` answer, from its status and, on a `429` or another `4xx`, the
-/// `error.code` and `error.type` of its body (of the first element when the body is an array).
+/// `error.code` and `error.type` of its body, or on a `400` its `error.status` and
+/// `error.message` (of the first element when the body is an array).
 /// A `2xx` is not an error: it gives `NotAnAnswer`, and [`completion`] reads it.
 pub fn classify(status: u16, body: &[u8]) -> Cause {
     match status {
@@ -222,6 +239,7 @@ pub fn classify(status: u16, body: &[u8]) -> Cause {
         401 | 403 => Cause::Key,
         404 | 405 | 410 => Cause::NotFound,
         413 => Cause::TooLarge,
+        400 if has_key_error(body) => Cause::Key,
         400..=499 if has_code(body, TOO_LARGE_CODES) => Cause::TooLarge,
         400..=499 => Cause::Rejected,
         _ => Cause::ServerError,
@@ -229,21 +247,34 @@ pub fn classify(status: u16, body: &[u8]) -> Cause {
 }
 
 /// Whether `error.code` or `error.type` of the body is one of `codes`, byte for byte. Anything
-/// that is not JSON, nests deeper than serde_json reads, or is not a short string is no code.
+/// that is not a short string is no code.
 fn has_code(body: &[u8], codes: &[&str]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return false;
-    };
-    let first = match &value {
-        Value::Array(items) => match items.first() {
-            Some(item) => item,
-            None => return false,
-        },
+    error_of(body).is_some_and(|error| {
+        ["code", "type"]
+            .iter()
+            .any(|key| short_str(&error[*key]).is_some_and(|code| codes.contains(&code)))
+    })
+}
+
+/// Whether `error.status` and `error.message` of the body are a pair of [`KEY_ERRORS`], byte for
+/// byte, each a short string.
+fn has_key_error(body: &[u8]) -> bool {
+    error_of(body).is_some_and(|error| {
+        let pair = (short_str(&error["status"]), short_str(&error["message"]));
+        KEY_ERRORS
+            .iter()
+            .any(|&(status, message)| pair == (Some(status), Some(message)))
+    })
+}
+
+/// The `error` of the body, of its first element when the body is an array. Anything that is not
+/// JSON, nests deeper than serde_json reads, or has no `error` key in an object has none.
+fn error_of(body: &[u8]) -> Option<Value> {
+    let mut first = match serde_json::from_slice::<Value>(body).ok()? {
+        Value::Array(items) => items.into_iter().next()?,
         other => other,
     };
-    ["code", "type"]
-        .iter()
-        .any(|key| short_str(&first["error"][*key]).is_some_and(|code| codes.contains(&code)))
+    first.as_object_mut()?.remove("error")
 }
 
 /// A string of at most `MAX_CODE_BYTES` bytes.
@@ -495,6 +526,117 @@ mod tests {
             assert_eq!(classified(404, &body), Cause::NotFound, "{field}");
             assert_eq!(classified(500, &body), Cause::ServerError, "{field}");
         }
+    }
+
+    /// A `400` body of Gemini's OpenAI-compatible endpoint, as captured on 2026-11-03.
+    fn gemini_400(message: &str) -> String {
+        format!(
+            "[{{\n  \"error\": {{\n    \"code\": 400,\n    \"message\": \"{message}\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }}\n}}\n]"
+        )
+    }
+
+    #[test]
+    fn the_key_errors_gemini_answers_with_a_400_are_key() {
+        // A wrong key not of the new format (`AIza...`), one of the new format (`AQ.`...), and no
+        // Authorization header.
+        for message in [
+            "Please pass a valid API key",
+            "Invalid Auth key.",
+            "Missing or invalid Authorization header.",
+        ] {
+            let body = gemini_400(message);
+            assert_eq!(classified(400, &body), Cause::Key, "{message}");
+            assert_eq!(Cause::Key.class(), Class::Configuration);
+            // Not an array, as an OpenAI-shaped provider would send it.
+            let object =
+                serde_json::json!({"error": {"message": message, "status": "INVALID_ARGUMENT"}});
+            assert_eq!(
+                classified(400, &object.to_string()),
+                Cause::Key,
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_400_the_request_can_shape_stays_rejected() {
+        // Captured on 2026-11-03: Gemini quotes the request in its own words.
+        let quoted = r#"[{
+  "error": {
+    "code": 400,
+    "message": "Invalid value at 'messages' (type.googleapis.com/google.protobuf.Struct), \"x\"",
+    "status": "INVALID_ARGUMENT",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.BadRequest",
+        "fieldViolations": [
+          {
+            "field": "messages",
+            "description": "Invalid value at 'messages' (type.googleapis.com/google.protobuf.Struct), \"x\""
+          }
+        ]
+      }
+    ]
+  }
+}
+]"#;
+        let key = "Please pass a valid API key";
+        let body = |status: &str, message: &str| {
+            serde_json::json!({"error": {"message": message, "status": status}}).to_string()
+        };
+        for body in [
+            quoted.to_owned(),
+            // The status alone, or the message alone.
+            body("INVALID_ARGUMENT", "an invented message"),
+            serde_json::json!({"error": {"message": key}}).to_string(),
+            body("FAILED_PRECONDITION", key),
+            // The message quoted, or not byte for byte.
+            body("INVALID_ARGUMENT", &format!("Invalid value at 'messages', \"{key}\"")),
+            body("INVALID_ARGUMENT", &format!("{key} ")),
+            body("INVALID_ARGUMENT", "please pass a valid API key"),
+            body("invalid_argument", key),
+            // Not where kausa reads it, or not a string.
+            serde_json::json!({"data": {"error": {"message": key, "status": "INVALID_ARGUMENT"}}})
+                .to_string(),
+            serde_json::json!([{"error": {}}, {"error": {"message": key, "status": "INVALID_ARGUMENT"}}])
+                .to_string(),
+            serde_json::json!({"error": {"message": [key], "status": "INVALID_ARGUMENT"}}).to_string(),
+            serde_json::json!({"error": {"message": key, "status": {"code": "INVALID_ARGUMENT"}}})
+                .to_string(),
+            "[]".to_owned(),
+            "[\"error\"]".to_owned(),
+        ] {
+            assert_eq!(classified(400, &body), Cause::Rejected, "{body}");
+        }
+    }
+
+    #[test]
+    fn a_key_error_counts_only_on_a_400() {
+        let body = gemini_400("Please pass a valid API key");
+        for (status, cause) in [
+            (409, Cause::Rejected),
+            (422, Cause::Rejected),
+            (499, Cause::Rejected),
+            (401, Cause::Key),
+            (404, Cause::NotFound),
+            (413, Cause::TooLarge),
+            (429, Cause::RateLimited),
+            (500, Cause::ServerError),
+            (200, Cause::NotAnAnswer),
+        ] {
+            assert_eq!(classified(status, &body), cause, "{status}");
+        }
+    }
+
+    #[test]
+    fn key_messages_of_64_and_65_bytes_are_read_or_ignored_without_harm() {
+        // Every message of KEY_ERRORS fits the cap, and a longer one is never compared.
+        for &(status, message) in KEY_ERRORS {
+            assert!(status.len() <= MAX_CODE_BYTES && message.len() <= MAX_CODE_BYTES);
+        }
+        let long = "x".repeat(MAX_CODE_BYTES + 1);
+        let body = serde_json::json!({"error": {"message": long, "status": "INVALID_ARGUMENT"}});
+        assert_eq!(classified(400, &body.to_string()), Cause::Rejected);
     }
 
     #[test]
