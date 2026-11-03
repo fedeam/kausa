@@ -44,7 +44,7 @@ v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa 
    image's signature and provenance and the chart's checksum with cosign and the GitHub CLI.
 
    ```sh
-   CHART=https://github.com/fedeam/kausa/releases/download/v0.5.0/kausa-0.5.0.tgz
+   CHART=https://github.com/fedeam/kausa/releases/download/v0.5.1/kausa-0.5.1.tgz
    ```
 
 2. **Create the namespace and, for a hosted endpoint, the API key's Secret.** kausa never reads it

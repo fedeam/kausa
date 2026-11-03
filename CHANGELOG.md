@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-03
+
+A fix for the endpoint check and the breaker with Google's Gemini API, which answers a wrong key
+with a `400`. Nothing to change in values or permissions.
+
 ### Fixed
 
 - A wrong or missing API key for Google's Gemini API is `key`, a configuration error that opens
@@ -393,7 +398,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/fedeam/kausa/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fedeam/kausa/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/fedeam/kausa/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/fedeam/kausa/compare/v0.3.0...v0.4.0

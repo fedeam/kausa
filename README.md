@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.5.0](https://github.com/fedeam/kausa/releases/tag/v0.5.0),
+> Event on the failing workload. The latest release, [v0.5.1](https://github.com/fedeam/kausa/releases/tag/v0.5.1),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,9 +62,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa https://github.com/fedeam/kausa/releases/download/v0.5.0/kausa-0.5.0.tgz \
+helm install kausa https://github.com/fedeam/kausa/releases/download/v0.5.1/kausa-0.5.1.tgz \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.5.0 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.5.1 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -154,7 +154,7 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.5.0 is released (2026-11-03): `kausa run` watches Pods, Warning events and
+Pre-alpha. v0.5.1 is released (2026-11-03): `kausa run` watches Pods, Warning events and
 Deployments, in the whole cluster or in a list of namespaces, groups failures by workload, builds a
 redacted context with the failed container's log, asks the model within a call budget (or logs the
 request with `--dry-run`), reuses explanations of repeated incidents, writes each explanation as an
@@ -265,6 +265,9 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   quality of local models against known
   causes](docs/research/2026-11-02-explanation-quality.md)). Upgrade the image and the chart
   together.
+- **v0.5.1** (2026-11-03): a wrong or missing key for Google's Gemini API, which its
+  OpenAI-compatible endpoint answers with a `400`, is a key error that opens the breaker, and the
+  endpoint check names the key instead of `--no-json-schema`.
 
 ## Documentation
 
