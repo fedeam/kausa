@@ -37,6 +37,12 @@ pub(crate) trait OwnerLookup {
         namespace: &str,
         name: &str,
     ) -> impl Future<Output = Result<Option<OwnerRef>, String>>;
+
+    /// The lookups held in a cache, expired ones included (the `kausa_owner_cache_entries`
+    /// gauge); 0 for a lookup without one.
+    fn cached(&self) -> usize {
+        0
+    }
 }
 
 /// The top-level owner of an object whose controller owner is `first`, or `fallback` (the object

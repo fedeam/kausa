@@ -60,6 +60,7 @@ use crate::log;
 use crate::metrics::{self, Metrics};
 use crate::notify::{self, Notifier};
 use crate::owner::{Hop, OwnerLookup, top_owner};
+use crate::prompt;
 use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
 
 /// The reporting controller of the Events kausa writes, excluded from its own watch.
@@ -823,9 +824,10 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
     /// dropped with its records, queue, retries and owner cache), the notifications waiting for
     /// the webhook are dropped and counted, and the budget and the deduplication cache are kept
     /// for the next term: the budget's windows are kept, and its credit is cut to the start burst
-    /// when the next term starts (docs/adr/0021-refill-the-call-budget.md). The queue went with
-    /// the controller, so its gauge reads 0. The breaker is kept too, and the endpoint is shown
-    /// closed while a standby (docs/adr/0020-check-the-endpoint.md).
+    /// when the next term starts (docs/adr/0021-refill-the-call-budget.md). The queue, the records
+    /// and the owner cache went with the controller, so their gauges read 0; the deduplication
+    /// cache's gauge is left as it is. The breaker is kept too, and the endpoint is shown closed
+    /// while a standby (docs/adr/0020-check-the-endpoint.md).
     fn step_down(&self, election: &Election<'_, L>, lost: Lost) -> io::Result<()> {
         self.term.close();
         let reason = match lost {
@@ -840,6 +842,7 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
             .inc("kausa_leadership_changes_total", &[("to", "standby")]);
         self.metrics.set_leading(false);
         show_endpoint(self.metrics, BreakerState::Closed);
+        show_held(self.metrics, self.options.rollouts, [0; 3], 0);
         if let Some(shared) = self.shared {
             self.metrics.set_gauge(QUEUE_GAUGE, &[], 0);
             let cleared = shared.notifications.borrow_mut().drain(..).count();
@@ -1083,6 +1086,13 @@ async fn lead<C: Cluster>(
                         enqueue(&mut queue, state.job(incident), metrics, waiting)?;
                     }
                 }
+                let records = [state.pods.len(), state.events.len(), state.deployments.len()];
+                show_held(metrics, options.rollouts, records, lookup.cached());
+                if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared)
+                    && settings.model.is_some()
+                {
+                    metrics.set_gauge(DEDUP_GAUGE, &[], shared.dedup.borrow().count() as u64);
+                }
             }
         }
     }
@@ -1091,19 +1101,51 @@ async fn lead<C: Cluster>(
 /// The gauge of the incidents waiting for an explanation (docs/adr/0021-refill-the-call-budget.md).
 const QUEUE_GAUGE: &str = "kausa_explanation_queue_length";
 
+/// The gauge of the explanations in the deduplication cache.
+const DEDUP_GAUGE: &str = "kausa_dedup_cache_entries";
+
 /// Sets the gauges a process shows from its start. Those of
 /// docs/adr/0021-refill-the-call-budget.md: the queue whenever kausa explains, the budget only with
 /// a model (a dry run has none to show). Those of docs/adr/0020-check-the-endpoint.md: the
-/// endpoint's state always (closed without one), and its last success only with a model.
+/// endpoint's state always (closed without one), and its last success only with a model. The build
+/// info always, the records and the owner cache at 0 until a term holds some, and the
+/// deduplication cache at 0 only with a model.
 fn show_start(metrics: &Metrics, options: &Options, shared: Option<&Shared<'_>>, now: Instant) {
+    metrics.set_gauge(
+        "kausa_build_info",
+        &[
+            ("version", env!("CARGO_PKG_VERSION")),
+            ("prompt_version", prompt::PROMPT_VERSION),
+        ],
+        1,
+    );
     show_endpoint(metrics, BreakerState::Closed);
+    show_held(metrics, options.rollouts, [0; 3], 0);
     if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
         metrics.set_gauge(QUEUE_GAUGE, &[], 0);
         if settings.model.is_some() {
             show_budget(metrics, &shared.budget.borrow(), now);
             metrics.set_gauge(explain::LAST_SUCCESS_GAUGE, &[], 0);
+            metrics.set_gauge(DEDUP_GAUGE, &[], 0);
         }
     }
+}
+
+/// Sets `kausa_records` from `records` (pods, events and deployments; deployments only with the
+/// Deployment watch, `rollouts`) and `kausa_owner_cache_entries` from `owners`: what a term holds,
+/// or 0 outside one.
+fn show_held(metrics: &Metrics, rollouts: bool, records: [usize; 3], owners: usize) {
+    let [pods, events, deployments] = records;
+    metrics.set_gauge("kausa_records", &[("kind", "pods")], pods as u64);
+    metrics.set_gauge("kausa_records", &[("kind", "events")], events as u64);
+    if rollouts {
+        metrics.set_gauge(
+            "kausa_records",
+            &[("kind", "deployments")],
+            deployments as u64,
+        );
+    }
+    metrics.set_gauge("kausa_owner_cache_entries", &[], owners as u64);
 }
 
 /// Sets `kausa_endpoint_state`: `state` at 1, the other two at 0
@@ -1713,6 +1755,10 @@ impl OwnerLookup for KubeLookup {
         cache.retain(|_, (answer, at)| fresh(answer, at));
         cache.insert(key, (answer.clone(), Instant::now()));
         answer
+    }
+
+    fn cached(&self) -> usize {
+        self.cache.borrow().len()
     }
 }
 

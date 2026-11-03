@@ -308,6 +308,12 @@ impl Dedup {
         );
     }
 
+    /// The entries held, expired ones included until a `get` reads them or a `put` evicts them
+    /// (the `kausa_dedup_cache_entries` gauge).
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// The entry stored for `fingerprint`, expired or not; removes nothing.
     pub fn peek(&self, fingerprint: &str) -> Option<&Cached> {
         self.entries.get(fingerprint)

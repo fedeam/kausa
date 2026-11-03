@@ -108,8 +108,9 @@ pub const COUNTERS: [(&str, &str); 22] = [
 /// (docs/adr/0019-high-availability.md). `kausa_leader` is always rendered; the budget and queue
 /// gauges (docs/adr/0021-refill-the-call-budget.md) and the endpoint gauges
 /// (docs/adr/0020-check-the-endpoint.md) only once a series was set, so that a process that has
-/// no budget, no queue or no endpoint shows no 0 an alert could fire on.
-pub const GAUGES: [(&str, &str); 5] = [
+/// no budget, no queue or no endpoint shows no 0 an alert could fire on. So are the build, record
+/// and cache gauges, which `kausa run` sets at start (the deduplication cache only with a model).
+pub const GAUGES: [(&str, &str); 9] = [
     (
         "kausa_leader",
         "1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a \
@@ -132,6 +133,24 @@ pub const GAUGES: [(&str, &str); 5] = [
     (
         "kausa_model_last_success_timestamp_seconds",
         "Unix time of the last call answered with a chat completion, 0 before the first.",
+    ),
+    (
+        "kausa_build_info",
+        "Always 1; the labels name this build of kausa (version, prompt_version).",
+    ),
+    (
+        "kausa_records",
+        "Records kausa holds, by kind (pods, events, deployments); 0 on a standby.",
+    ),
+    (
+        "kausa_owner_cache_entries",
+        "Owner lookups in the cache, expired ones included until the next lookup that reads the \
+         API server; 0 on a standby.",
+    ),
+    (
+        "kausa_dedup_cache_entries",
+        "Explanations in the deduplication cache (at most 1024), expired ones included until \
+         read again or evicted.",
     ),
 ];
 
