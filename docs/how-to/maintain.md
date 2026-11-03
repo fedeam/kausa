@@ -447,7 +447,20 @@ v0.1.0 was the first release; v0.6.0 will be the first with the chart on GHCR an
      the `image:` line of its `artifacthub.io/images` annotation (the `ci` target and the release
      refuse a mismatch);
    - in `CHANGELOG.md`, move the entries under `Unreleased` to a `## [X.Y.Z] - YYYY-MM-DD` section
-     and update the links at the bottom.
+     and update the links at the bottom;
+   - name the new release where the docs name the latest one: in `README.md`, the status note under
+     the badges, the first line of "Status" and both versions in "Try it" (the chart and the
+     `crasher` image); `VERSION=` in step 1 of [Install kausa with Helm](install-with-helm.md); the
+     latest release and the status line in `SECURITY.md`; and the status lines of `docs/index.md`
+     and [Command line and log format](../reference/command-line.md). From v0.6.0, "Try it"
+     installs with `helm install kausa oci://ghcr.io/fedeam/charts/kausa --version X.Y.Z`, not the
+     release URL;
+   - for v0.6.0 only, rewrite the lines that say it is not released: in [Install kausa with
+     Helm](install-with-helm.md), the status paragraph at the top, the end of step 1 ("Until v0.6.0
+     is released"), "Upgrade from a chart URL to the OCI chart" and the end of "Verify a release";
+     the status line of [Helm chart](../reference/helm-chart.md); and the status line of this
+     section. The lines that say no install from GHCR and no command of the notes has run stay
+     until step 5 has run them.
 2. Merge it, sync Gitea, and tag the merged commit on `main`:
 
    ```sh
