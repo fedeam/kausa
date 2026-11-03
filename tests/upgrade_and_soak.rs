@@ -615,9 +615,14 @@ fn upgrade_sh_prints_its_first_and_last_lines_and_the_contract_messages() {
         "the standby logged no standby line",
         "a started line has version $v after the upgrade",
         "the Lease's leaseTransitions did not increase in the upgrade",
+        // What the new chart rendered from the reused values, which helm get values cannot show.
+        "the new leader started with other settings than the old one: ",
+        "the new leader's --max-calls-per-hour is not followed by 3600",
+        "the new leader does not run with exactly one --history",
         "the new leader logged no incident about Job upgrade-after",
         "another Pod than the leader wrote about Job upgrade-after",
         "the standby logged an incident",
+        "notifications about Job upgrade-after, not 1",
     ] {
         assert!(script.contains(words), "{UPGRADE}: no message `{words}`");
     }

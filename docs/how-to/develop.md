@@ -133,8 +133,11 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    `helm upgrade --reuse-values`, to this checkout's chart and image, and checks that the rollout
    completed, both new Pods are Ready on the new image with no restart, the release is deployed
    at revision 2, the user values are the old ones plus the four image values the upgrade sets,
-   one Pod holds the Lease and the other is a standby, the new leader logs and explains a failure
-   seeded after the upgrade, and `helm test` passes. It ends with
+   one Pod holds the Lease and the other is a standby, the new leader's `started` line has the
+   settings of the old leader's and its arguments the user values' budget and history (what the
+   new chart renders from the values, which `helm get values` cannot show), the new leader logs,
+   explains and notifies the webhook of a failure seeded after the upgrade, and `helm test`
+   passes. It ends with
    `e2e upgrade: vX.Y.Z to <this checkout's version>, rbac.scope=<scope>: ok`:
 
    ```sh

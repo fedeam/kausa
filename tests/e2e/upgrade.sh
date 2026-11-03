@@ -5,9 +5,10 @@
 # in the rbac.scope of KAUSA_E2E_SCOPE (cluster when unset, or namespaced). Before the upgrade, the
 # released build explains a seeded failure; after it, the rollout is complete, both new Pods are
 # Ready and run kausa:e2e, one holds the Lease and the other is a standby, the user values are the
-# old ones plus the image, the new leader logs and explains a failure seeded after the upgrade, and
-# helm test passes. Needs docker, kind, kubectl, helm, curl and python3, and network access to
-# github.com and ghcr.io. Creates the kind cluster kausa-upgrade and deletes it at the end.
+# old ones plus the image, the new leader starts with the old leader's settings, logs and explains a
+# failure seeded after the upgrade and notifies the webhook of it, and helm test passes. Needs
+# docker, kind, kubectl, helm, curl and python3, and network access to github.com and ghcr.io.
+# Creates the kind cluster kausa-upgrade and deletes it at the end.
 # See docs/how-to/develop.md.
 #
 # The released chart is downloaded and checked before the cluster exists, so that a wrong pin fails
@@ -68,6 +69,27 @@ pod_images() {
   done | sort -u
 }
 
+# The settings of the one started line in kausa's log in WORK that the user values decide, as one
+# JSON object: what the new chart makes of the values, which helm get values cannot show.
+started_settings() {
+  python3 -I -c '
+import json, sys
+FIELDS = ("settle_seconds", "namespaces", "rollouts", "notifications", "leader_lease",
+          "model_timeout_seconds")
+started = []
+for line in open(sys.argv[1]):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "started":
+        started.append(entry)
+if len(started) != 1:
+    sys.exit("FAIL: %d started lines in the log" % len(started))
+print(json.dumps({field: started[0].get(field, "<missing>") for field in FIELDS}, sort_keys=True))
+' "$WORK/kausa.log"
+}
+
 # 1. The namespaces and the Secret, as run.sh makes them. TARGET holds the seeded failures in both
 # scopes.
 k create namespace "$NAMESPACE"
@@ -102,6 +124,9 @@ for p in "$leader" "$standby"; do
   v=$(started_field version)
   [ "$v" = "\"$FROM_VERSION\"" ] || fail "a started line has version $v before the upgrade"
 done
+# The leader's settings, which the new leader must start with.
+kausa_log "pod/$leader"
+started_settings > "$WORK/started-before.json"
 seed_failure upgrade-before
 wait_explained Job upgrade-before
 old_pods=$(kausa_pods)
@@ -170,7 +195,10 @@ print(" ".join(sorted(changed)))
 echo "values: the old user values plus the four image values"
 
 # 7. After the upgrade: the Lease split, checked as run.sh checks it after its install, plus this
-# checkout's version in each started line and one more Lease transition.
+# checkout's version in each started line and one more Lease transition. The new leader starts with
+# the settings the old leader started with, and its arguments carry the budget and the history of
+# the user values: helm get values (step 6) shows what Helm stored, not what the new chart renders
+# from it. Only the names of differing fields are printed: notifications.host is an address.
 wait_pair 60 "no two Ready kausa Pods with one holding the Lease after the upgrade"
 [ "$(pod_metric "$leader" kausa_leader)" = 1 ] || fail "kausa_leader is not 1 on the Lease holder"
 [ "$(pod_metric "$standby" kausa_leader)" = 0 ] || fail "kausa_leader is not 0 on the standby"
@@ -196,11 +224,28 @@ done
 [ "$(log_count standby < "$WORK/kausa.log")" -ge 1 ] || fail "the standby logged no standby line"
 [ "$(lease_transitions)" -gt "$transitions_before" ] ||
   fail "the Lease's leaseTransitions did not increase in the upgrade"
+kausa_log "pod/$leader"
+started_settings > "$WORK/started-after.json"
+changed=$(python3 -I -c '
+import json, sys
+before = json.load(open(sys.argv[1]))
+after = json.load(open(sys.argv[2]))
+changed = (key for key in set(before) | set(after) if before.get(key) != after.get(key))
+print(" ".join(sorted(changed)))
+' "$WORK/started-before.json" "$WORK/started-after.json")
+[ -z "$changed" ] || fail "the new leader started with other settings than the old one: $changed"
+args=$(kausa_args "pod/$leader")
+printf '%s\n' "$args" | awk '
+  prev == "--max-calls-per-hour" && $0 == "3600" { ok = 1 } { prev = $0 } END { exit !ok }' ||
+  fail "the new leader's --max-calls-per-hour is not followed by 3600"
+[ "$(printf '%s\n' "$args" | grep -cxF -- --history)" = 1 ] ||
+  fail "the new leader does not run with exactly one --history"
 echo "after the upgrade: one holds the Lease; kausa_leader 1 and 0, /readyz ready and standby," \
-  "one leading line, version $TO_VERSION, leaseTransitions up"
+  "one leading line, version $TO_VERSION, leaseTransitions up, the old leader's settings"
 
-# 8. An incident after the upgrade: the new leader logs and explains it, and nobody else writes
-# about it.
+# 8. An incident after the upgrade: the new leader logs and explains it, nobody else writes about
+# it, and the webhook receives it. The receiver answered its first POST 503, before the upgrade, so
+# this one is answered 200. Only a count is read from the hook log, never a body.
 seed_failure upgrade-after
 found=""
 for _ in $(seq 1 40); do
@@ -217,7 +262,33 @@ wait_explained Job upgrade-after
   fail "another Pod than the leader wrote about Job upgrade-after"
 kausa_log "pod/$standby"
 [ "$(log_count incident < "$WORK/kausa.log")" = 0 ] || fail "the standby logged an incident"
-echo "Job upgrade-after: logged and explained by the new leader only"
+# The notifications the receiver answered 200 about Job upgrade-after in TARGET.
+hooks_about() {
+  python3 -I -c '
+import json, sys
+count = 0
+for line in open(sys.argv[1]):
+    try:
+        hook = json.loads(line)
+        about = json.loads(hook["body"])["object"]
+    except (ValueError, KeyError, TypeError):
+        continue
+    if hook.get("status") == 200 and isinstance(about, dict) and (
+            about.get("kind"), about.get("namespace"), about.get("name")) == (
+            "Job", sys.argv[2], "upgrade-after"):
+        count += 1
+print(count)
+' "$WORK/hooks.jsonl" "$TARGET"
+}
+notified=0
+for _ in $(seq 1 30); do
+  notified=$(hooks_about)
+  [ "$notified" -ge 1 ] && break
+  sleep 2
+done
+[ "$notified" = 1 ] ||
+  fail "the webhook received $notified notifications about Job upgrade-after, not 1"
+echo "Job upgrade-after: logged and explained by the new leader only, and notified once"
 
 # 9. The endpoint check, rendered by this chart from the reused values.
 endpoint_check ok fake
