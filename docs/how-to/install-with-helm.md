@@ -48,9 +48,10 @@ v0.5.1 chart URL was upgraded to it.
 
 1. **Pick the release and, optionally, verify it.** From v0.6.0 the chart of each release is
    published at `oci://ghcr.io/fedeam/charts/kausa` and uses the image `ghcr.io/fedeam/kausa` of
-   the same version; every `helm install` and `helm upgrade` below passes `--version`. The release
-   notes have the commands to verify the image, the chart and their SBOMs and provenance ([Verify
-   a release](#verify-a-release)).
+   the same version. The commands below name the chart as `"$CHART" --version "$VERSION"`: without
+   `--version`, Helm takes the newest chart on GHCR, and with it a newer image. The release notes
+   have the commands to verify the image, the chart and their SBOMs and provenance ([Verify a
+   release](#verify-a-release)).
 
    ```sh
    CHART=oci://ghcr.io/fedeam/charts/kausa
@@ -155,7 +156,7 @@ release, which have no `rbac` map, and the chart refuses to render without it (c
 and the release stays as it was; the v0.2.0 chart's values have no `rbac` map either).
 
 ```sh
-helm upgrade kausa <chart> -n kausa --reuse-values --set rbac.scope=cluster
+helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set rbac.scope=cluster
 ```
 
 `rbac.scope=cluster` keeps the ClusterRole, its rules and the whole-cluster watch. After that,
@@ -224,7 +225,7 @@ Status as of 2026-10-29: v0.3.0 is the first release with this scope. The v0.2.0
    ```
 
    ```sh
-   helm install kausa <chart> -n kausa -f kausa-values.yaml --set dryRun=true
+   helm install kausa "$CHART" --version "$VERSION" -n kausa -f kausa-values.yaml --set dryRun=true
    ```
 
    Later upgrades pass `-f kausa-values.yaml` again, or use `--reuse-values`. An upgrade that
@@ -267,7 +268,7 @@ v0.3.0 is the first release with it.
    incidents only:
 
    ```sh
-   helm upgrade kausa <chart> -n kausa --reuse-values --set history.enabled=true
+   helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set history.enabled=true
    ```
 
    The chart installs the CustomResourceDefinition `explanations.kausa.fedeam.com` and a reader
@@ -298,7 +299,7 @@ v0.3.0 is the first release with it.
   CustomResourceDefinition and the reader role from the same values:
 
   ```sh
-  helm template kausa <chart> --kube-version 1.36.0 -f kausa-values.yaml \
+  helm template kausa "$CHART" --version "$VERSION" --kube-version 1.36.0 -f kausa-values.yaml \
     --set history.enabled=true --set history.installCRD=true \
     --show-only templates/explanation-crd.yaml --show-only templates/explanation-reader.yaml |
     kubectl apply -f -
@@ -335,7 +336,7 @@ code](../adr/0019-high-availability.md)).
 1. **Turn it on**, in either scope:
 
    ```sh
-   helm upgrade kausa <chart> -n kausa --reuse-values --set replicaCount=2 --wait
+   helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set replicaCount=2 --wait
    ```
 
    The chart runs two Pods with `--leader-lease kausa/kausa-leader` and adds, in the release
@@ -419,9 +420,9 @@ What to expect:
 
 Each release's notes, from v0.6.0, give these commands with the release's digests filled in: run
 them from there. Below, `<version>` is the release without its `v`, and `<index>`, `<amd64>`,
-`<arm64>` and `<chart>` are the `sha256:…` digests the notes list for the image, the image of each
-architecture and the chart. Verify by digest: a tag on GHCR can be moved. With cosign v3 or later,
-and no login:
+`<arm64>` and `<chart-digest>` are the `sha256:…` digests the notes list for the image, the image
+of each architecture and the chart. Verify by digest: a tag on GHCR can be moved. With cosign v3 or
+later, and no login:
 
 ```sh
 ID=https://github.com/fedeam/kausa/.github/workflows/release.yml@refs/tags/v<version>
@@ -430,8 +431,8 @@ cosign verify ghcr.io/fedeam/kausa@<index> --certificate-identity "$ID" --certif
 cosign verify-attestation --type https://slsa.dev/provenance/v1 ghcr.io/fedeam/kausa@<index> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
 cosign verify-attestation --type https://cyclonedx.org/bom ghcr.io/fedeam/kausa@<amd64> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
 cosign verify-attestation --type https://cyclonedx.org/bom ghcr.io/fedeam/kausa@<arm64> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
-cosign verify ghcr.io/fedeam/charts/kausa@<chart> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
-cosign verify-attestation --type https://slsa.dev/provenance/v1 ghcr.io/fedeam/charts/kausa@<chart> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+cosign verify ghcr.io/fedeam/charts/kausa@<chart-digest> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+cosign verify-attestation --type https://slsa.dev/provenance/v1 ghcr.io/fedeam/charts/kausa@<chart-digest> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
 ```
 
 To install exactly the chart you checked, compare it with the release's signed checksums (on
