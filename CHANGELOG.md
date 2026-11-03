@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The name of a Secret or ConfigMap that a Pod cannot mount reached the request and kausa's log in
+  clear when the volume was named like a secret key (`credentials`, `api-token`, `password`…):
+  `R010` took the kind in the kubelet's `volume "credentials" : secret "<name>" not found` for the
+  key's value, so `R003` no longer saw `secret "<name>"`. A kind followed by a quoted name is no
+  longer a value for `R010`, and `R003` redacts the name. Found by the known-cause corpus's
+  `no-volume` entry; a value was never exposed, only the object's name.
+
 ## [0.5.1] - 2026-11-03
 
 A fix for the endpoint check and the breaker with Google's Gemini API, which answers a wrong key
