@@ -2,7 +2,8 @@
 //! `Retry-After` an endpoint could send: classifying an error, reading a chat completion and
 //! reading the delay must never panic. A delay is always within 30 to 600 seconds and comes only
 //! from a `429` or a `503` with 1 to 10 ASCII digits; every cause has the class its name has in
-//! the causes table; a body changes the cause only on a `4xx`; and a `2xx` is a completion, a
+//! the causes table; a body changes the cause only on a `4xx`, and makes a key error only on a
+//! `400` whose error is a pair of `KEY_ERRORS`; and a `2xx` is a completion, a
 //! `not_an_answer` or a `no_content`, nothing else (docs/adr/0020-check-the-endpoint.md).
 #![no_main]
 
@@ -47,7 +48,7 @@ fn check_cause(cause: Cause) {
 }
 
 /// The cause of a non-`2xx` answer: fixed by the status, except that a body can choose between
-/// two causes on a `429` and on a `4xx` without a cause of its own.
+/// two causes on a `429` and on a `4xx` without a cause of its own, and three on a `400`.
 fn check_classify(status: u16, body: &[u8]) {
     let cause = pure::classify(status, body);
     check_cause(cause);
@@ -65,6 +66,7 @@ fn check_classify(status: u16, body: &[u8]) {
         401 | 403 => &[Cause::Key],
         404 | 405 | 410 => &[Cause::NotFound],
         413 => &[Cause::TooLarge],
+        400 => &[Cause::Key, Cause::TooLarge, Cause::Rejected],
         400..=499 => &[Cause::TooLarge, Cause::Rejected],
         _ => &[Cause::ServerError],
     };
@@ -79,6 +81,31 @@ fn check_classify(status: u16, body: &[u8]) {
             "a body changed a cause fixed by the status"
         );
     }
+}
+
+/// A `400` is a key error only when its `error.status` and `error.message`, read the way the code
+/// reads them, are one of the pairs, byte for byte: never from a quote of the request.
+fn check_key_error(body: &[u8]) {
+    let pair = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .map(|value| match value {
+            serde_json::Value::Array(items) => items.into_iter().next().unwrap_or_default(),
+            other => other,
+        })
+        .map(|first| {
+            let field = |key: &str| first["error"][key].as_str().map(str::to_owned);
+            (field("status"), field("message"))
+        });
+    let listed = pair.is_some_and(|(status, message)| {
+        pure::KEY_ERRORS
+            .iter()
+            .any(|&(s, m)| status.as_deref() == Some(s) && message.as_deref() == Some(m))
+    });
+    assert_eq!(
+        pure::classify(400, body) == Cause::Key,
+        listed,
+        "a key error that is not a listed pair, or a listed pair that is not a key error"
+    );
 }
 
 /// A `2xx` within the cap: a completion only from JSON, else `not_an_answer` or `no_content`.
@@ -119,6 +146,7 @@ fuzz_target!(|input: Input| {
     for status in [status, 400, 422, 429] {
         check_classify(status, body);
     }
+    check_key_error(body);
     check_completion(body);
     for status in [status, 429, 503] {
         check_retry_after(status, header);
