@@ -7,7 +7,8 @@
 # Nothing from this image is pushed or shipped.
 #
 # The runtime target is the controller image: a static binary on distroless, for the architecture
-# of the build (docs/adr/0010-packaging.md):
+# of the build, built with cargo auditable so that the binary carries its crate list
+# (docs/adr/0010-packaging.md, docs/adr/0023-oci-chart-and-sbom.md):
 #
 #     docker build --target runtime -t kausa .
 #
@@ -163,6 +164,14 @@ RUN cargo audit
 # (docs/reference/helm-chart.md). Rendering runs no code from the chart's values. rbac.scope has no
 # default (docs/adr/0013-namespaced-install-mode.md), so every lint and render sets it.
 RUN helm lint --strict charts/kausa --set rbac.scope=cluster
+# Artifact Hub scans the image that artifacthub.io/images names, and the release checks it against
+# the tag; this check catches a mismatch in the pull request (docs/adr/0023-oci-chart-and-sbom.md).
+# The images list must be exactly one line, ghcr.io/fedeam/kausa at appVersion: another image, a
+# second line or another version fails.
+RUN set -eu; \
+    app=$(sed -n 's/^appVersion: //p' charts/kausa/Chart.yaml); \
+    images=$(sed -n 's/^[ -]*image: *//p' charts/kausa/Chart.yaml); \
+    [ "$images" = "ghcr.io/fedeam/kausa:$app" ] || { echo "artifacthub.io/images in charts/kausa/Chart.yaml names '$images', not ghcr.io/fedeam/kausa:$app (appVersion)" >&2; exit 1; }
 # Cluster scope: v0.1's value sets. The default render keeps the ClusterRole and its binding and
 # passes no --namespace.
 RUN set -eu; \
@@ -532,10 +541,12 @@ FROM rust:1.99.1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c84
 
 ARG TARGETARCH
 
-# musl-gcc compiles ring's C and assembly for the musl target.
+# musl-gcc compiles ring's C and assembly for the musl target. curl and xz-utils download and
+# unpack cargo-auditable below (ca-certificates is already in the image); apt checks the
+# signatures of the Debian packages.
 RUN set -eu; \
     apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends musl-tools; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends musl-tools curl xz-utils; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eu; \
@@ -548,15 +559,44 @@ RUN set -eu; \
     rustup target add "$triple"; \
     echo "$triple" > /etc/kausa-triple
 
+# cargo-auditable: embeds the crate list in the binary (a linker section named .dep-v0, under
+# 4 kB), so that cargo audit bin, syft, grype and Trivy can read it from the image
+# (docs/adr/0023-oci-chart-and-sbom.md). Pinned here, not in the ci target: the Gitea job builds
+# only from this stage's FROM line on. Checksums: the .sha256 file next to each archive,
+# https://github.com/rust-secure-code/cargo-auditable/releases (also GitHub's asset digests).
+# The install ends with test -x, not a version: `cargo auditable --version` passes the flag to
+# cargo and prints cargo's version.
+ARG CARGO_AUDITABLE_VERSION=0.7.7
+ARG CARGO_AUDITABLE_SHA256_AMD64=7676443367c5e33d9fb22acef63cccb5e9202de12dae1b0579995eb3e2bc7a18
+ARG CARGO_AUDITABLE_SHA256_ARM64=c324af56990601354bbf40080f582ba46f8ec8b807a1388e25bb7e429d285c18
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) triple=x86_64-unknown-linux-musl; sum="$CARGO_AUDITABLE_SHA256_AMD64" ;; \
+      arm64) triple=aarch64-unknown-linux-musl; sum="$CARGO_AUDITABLE_SHA256_ARM64" ;; \
+      *) echo "no pinned cargo-auditable for architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    name="cargo-auditable-$triple"; \
+    curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 20 --retry 5 --retry-all-errors -o /tmp/cargo-auditable.tar.xz \
+      "https://github.com/rust-secure-code/cargo-auditable/releases/download/v$CARGO_AUDITABLE_VERSION/$name.tar.xz"; \
+    echo "$sum  /tmp/cargo-auditable.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/cargo-auditable.tar.xz -C /tmp "$name/cargo-auditable"; \
+    install -m 0755 "/tmp/$name/cargo-auditable" /usr/local/bin/cargo-auditable; \
+    rm -rf /tmp/cargo-auditable.tar.xz "/tmp/$name"; \
+    test -x /usr/local/bin/cargo-auditable
+
 ENV RUSTUP_AUTO_INSTALL=0 \
     CC_x86_64_unknown_linux_musl=musl-gcc \
     CC_aarch64_unknown_linux_musl=musl-gcc
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
+# The build fails if the crate list did not survive LTO, strip and static linking.
 RUN set -eu; \
     triple=$(cat /etc/kausa-triple); \
-    cargo build --locked --release --target "$triple"; \
+    cargo auditable build --locked --release --target "$triple"; \
+    readelf -S --wide "target/$triple/release/kausa" | grep -q '\.dep-v0' \
+      || { echo "target/$triple/release/kausa has no .dep-v0 section: cargo auditable embedded no crate list" >&2; exit 1; }; \
     install -m 0755 "target/$triple/release/kausa" /kausa
 
 # The controller image. distroless static: CA certificates, /etc/passwd with the nonroot user,
