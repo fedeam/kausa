@@ -1,0 +1,167 @@
+# HELP kausa_incidents_total Incidents that settled, by detection.
+# TYPE kausa_incidents_total counter
+kausa_incidents_total{detection="D001"} 4
+kausa_incidents_total{detection="D014"} 1
+# HELP kausa_model_calls_total Calls to the model endpoint, by outcome (ok, error, invalid).
+# TYPE kausa_model_calls_total counter
+kausa_model_calls_total{outcome="error"} 2
+kausa_model_calls_total{outcome="invalid"} 1
+kausa_model_calls_total{outcome="ok"} 5
+# HELP kausa_model_tokens_total Tokens the endpoint reported, by direction (in, out).
+# TYPE kausa_model_tokens_total counter
+kausa_model_tokens_total{direction="in"} 1200
+kausa_model_tokens_total{direction="out"} 300
+# HELP kausa_explanations_cached_total Incidents explained again from the deduplication cache.
+# TYPE kausa_explanations_cached_total counter
+kausa_explanations_cached_total 3
+# HELP kausa_explanations_skipped_total Incidents not explained, by reason.
+# TYPE kausa_explanations_skipped_total counter
+kausa_explanations_skipped_total{reason="budget"} 1
+kausa_explanations_skipped_total{reason="context_too_large"} 0
+kausa_explanations_skipped_total{reason="endpoint"} 2
+kausa_explanations_skipped_total{reason="endpoint_unavailable"} 0
+kausa_explanations_skipped_total{reason="invalid_answer"} 1
+# HELP kausa_explanations_retried_total Calls tried again after a transient error.
+# TYPE kausa_explanations_retried_total counter
+kausa_explanations_retried_total 1
+# HELP kausa_explanations_dropped_total Incidents dropped because the explanation queue was full.
+# TYPE kausa_explanations_dropped_total counter
+kausa_explanations_dropped_total 0
+# HELP kausa_requests_logged_total Requests logged instead of sent (--dry-run).
+# TYPE kausa_requests_logged_total counter
+kausa_requests_logged_total 0
+# HELP kausa_redactions_total Values replaced by redaction in the requests, by rule.
+# TYPE kausa_redactions_total counter
+kausa_redactions_total{rule="R004"} 7
+kausa_redactions_total{rule="R010"} 2
+# HELP kausa_events_written_total Events created or updated, by reason.
+# TYPE kausa_events_written_total counter
+kausa_events_written_total{reason="Explained"} 5
+kausa_events_written_total{reason="ExplanationSkipped"} 4
+# HELP kausa_event_write_errors_total Events that could not be written.
+# TYPE kausa_event_write_errors_total counter
+kausa_event_write_errors_total 1
+# HELP kausa_watch_errors_total Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch.
+# TYPE kausa_watch_errors_total counter
+kausa_watch_errors_total{watch="deployments"} 0
+kausa_watch_errors_total{watch="events"} 3
+kausa_watch_errors_total{watch="pods"} 2
+# HELP kausa_history_writes_total Explanation objects written, by outcome (created, updated, refused, conflict, error).
+# TYPE kausa_history_writes_total counter
+kausa_history_writes_total{outcome="conflict"} 1
+kausa_history_writes_total{outcome="created"} 4
+kausa_history_writes_total{outcome="error"} 0
+kausa_history_writes_total{outcome="refused"} 0
+kausa_history_writes_total{outcome="updated"} 2
+# HELP kausa_history_deleted_total Explanation objects deleted by the sweep, by reason (age, cap).
+# TYPE kausa_history_deleted_total counter
+kausa_history_deleted_total{reason="age"} 2
+kausa_history_deleted_total{reason="cap"} 1
+# HELP kausa_history_sweep_errors_total Failed list or delete calls of the history sweep.
+# TYPE kausa_history_sweep_errors_total counter
+kausa_history_sweep_errors_total 0
+# HELP kausa_notifications_total Notifications by final outcome (sent, failed, dropped).
+# TYPE kausa_notifications_total counter
+kausa_notifications_total{outcome="dropped"} 0
+kausa_notifications_total{outcome="failed"} 1
+kausa_notifications_total{outcome="sent"} 4
+# HELP kausa_notifications_retried_total Notifications tried again after a transient error.
+# TYPE kausa_notifications_retried_total counter
+kausa_notifications_retried_total 1
+# HELP kausa_leadership_changes_total Times this process became leader or stepped down to standby, by `to` (leader, standby).
+# TYPE kausa_leadership_changes_total counter
+kausa_leadership_changes_total{to="leader"} 2
+kausa_leadership_changes_total{to="standby"} 1
+# HELP kausa_lease_errors_total Failed calls on the Lease, by `call` (get, patch); conflicts are not errors.
+# TYPE kausa_lease_errors_total counter
+kausa_lease_errors_total{call="get"} 0
+kausa_lease_errors_total{call="patch"} 1
+# HELP kausa_answer_redactions_total Values replaced by redaction in the model's answers, by rule.
+# TYPE kausa_answer_redactions_total counter
+kausa_answer_redactions_total{rule="R004"} 1
+# HELP kausa_watch_relists_total Lists of the Pod, Event and Deployment watches after the first of each watch, by watch.
+# TYPE kausa_watch_relists_total counter
+kausa_watch_relists_total{watch="deployments"} 0
+kausa_watch_relists_total{watch="events"} 1
+kausa_watch_relists_total{watch="pods"} 2
+# HELP kausa_watch_restarts_total New watchers started after the API server refused a watch (403), by watch.
+# TYPE kausa_watch_restarts_total counter
+kausa_watch_restarts_total{watch="deployments"} 0
+kausa_watch_restarts_total{watch="events"} 0
+kausa_watch_restarts_total{watch="pods"} 1
+# HELP kausa_leader 1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a standby.
+# TYPE kausa_leader gauge
+kausa_leader 1
+# HELP kausa_budget_calls_remaining Model calls this process may start now, by window (hour: the refill bucket within the 60-minute cap; day: the 24-hour cap).
+# TYPE kausa_budget_calls_remaining gauge
+kausa_budget_calls_remaining{window="day"} 195
+kausa_budget_calls_remaining{window="hour"} 3
+# HELP kausa_explanation_queue_length Incidents waiting for an explanation (at most 16).
+# TYPE kausa_explanation_queue_length gauge
+kausa_explanation_queue_length 2
+# HELP kausa_endpoint_state State of the model endpoint's breaker: 1 for the current state (closed, open, half_open), 0 for the others; closed on a standby.
+# TYPE kausa_endpoint_state gauge
+kausa_endpoint_state{state="closed"} 1
+kausa_endpoint_state{state="half_open"} 0
+kausa_endpoint_state{state="open"} 0
+# HELP kausa_model_last_success_timestamp_seconds Unix time of the last call answered with a chat completion, 0 before the first.
+# TYPE kausa_model_last_success_timestamp_seconds gauge
+kausa_model_last_success_timestamp_seconds 1793620800
+# HELP kausa_build_info Always 1; the labels name this build of kausa (version, prompt_version).
+# TYPE kausa_build_info gauge
+kausa_build_info{version="0.0.0-golden",prompt_version="2"} 1
+# HELP kausa_records Records kausa holds, by kind (pods, events, deployments); 0 on a standby.
+# TYPE kausa_records gauge
+kausa_records{kind="deployments"} 1
+kausa_records{kind="events"} 12
+kausa_records{kind="pods"} 9
+# HELP kausa_owner_cache_entries Owner lookups in the cache, expired ones included until the next lookup that reads the API server; 0 on a standby.
+# TYPE kausa_owner_cache_entries gauge
+kausa_owner_cache_entries 4
+# HELP kausa_dedup_cache_entries Explanations in the deduplication cache (at most 1024), expired ones included until read again or evicted.
+# TYPE kausa_dedup_cache_entries gauge
+kausa_dedup_cache_entries 5
+# HELP kausa_model_call_duration_seconds Duration of the calls to the model endpoint, by outcome (ok, error, invalid).
+# TYPE kausa_model_call_duration_seconds histogram
+kausa_model_call_duration_seconds_bucket{outcome="error",le="0.5"} 1
+kausa_model_call_duration_seconds_bucket{outcome="error",le="1"} 1
+kausa_model_call_duration_seconds_bucket{outcome="error",le="2.5"} 1
+kausa_model_call_duration_seconds_bucket{outcome="error",le="5"} 1
+kausa_model_call_duration_seconds_bucket{outcome="error",le="10"} 2
+kausa_model_call_duration_seconds_bucket{outcome="error",le="20"} 2
+kausa_model_call_duration_seconds_bucket{outcome="error",le="30"} 2
+kausa_model_call_duration_seconds_bucket{outcome="error",le="60"} 2
+kausa_model_call_duration_seconds_bucket{outcome="error",le="120"} 2
+kausa_model_call_duration_seconds_bucket{outcome="error",le="300"} 2
+kausa_model_call_duration_seconds_bucket{outcome="error",le="600"} 2
+kausa_model_call_duration_seconds_bucket{outcome="error",le="+Inf"} 2
+kausa_model_call_duration_seconds_sum{outcome="error"} 10.25
+kausa_model_call_duration_seconds_count{outcome="error"} 2
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="0.5"} 0
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="1"} 0
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="2.5"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="5"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="10"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="20"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="30"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="60"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="120"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="300"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="600"} 1
+kausa_model_call_duration_seconds_bucket{outcome="invalid",le="+Inf"} 1
+kausa_model_call_duration_seconds_sum{outcome="invalid"} 1.5
+kausa_model_call_duration_seconds_count{outcome="invalid"} 1
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="0.5"} 1
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="1"} 2
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="2.5"} 3
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="5"} 4
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="10"} 4
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="20"} 4
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="30"} 4
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="60"} 4
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="120"} 4
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="300"} 5
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="600"} 5
+kausa_model_call_duration_seconds_bucket{outcome="ok",le="+Inf"} 5
+kausa_model_call_duration_seconds_sum{outcome="ok"} 137.75
+kausa_model_call_duration_seconds_count{outcome="ok"} 5
