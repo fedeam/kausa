@@ -190,7 +190,9 @@ class Window:
         ]
 
 
-def s1(w):
+def s1(w, dry_run=False):
+    """S1. With dry_run (a soak installed with dryRun=true), kausa calls no model, so the breaker,
+    ok-call and queue terms cannot be met and are left out; S2 and S3 do not change."""
     reasons = []
     if w.hours < SOAK_HOURS:
         reasons.append("the window is %g hours, shorter than 168 hours" % w.hours)
@@ -207,6 +209,11 @@ def s1(w):
             "restartCount rose in the window (%s): the 168-hour clock starts again, with --from"
             " after the restart" % ", ".join(restarted)
         )
+    summary = "%g hours, two Pods, coverage at least 90%%, no restart" % w.hours
+    if dry_run:
+        if reasons:
+            return "INVALID", "; ".join(reasons)
+        return "VALID", "%s (dry run: no model calls, breaker or queue to check)" % summary
     episodes = w.breaker_episodes()
     if episodes < BREAKER_DAYS:
         reasons.append(
@@ -222,7 +229,6 @@ def s1(w):
         reasons.append("the explanation queue was never above 0")
     if reasons:
         return "INVALID", "; ".join(reasons)
-    summary = "%g hours, two Pods, coverage at least 90%%, no restart" % w.hours
     return "VALID", "%s, breaker open in %d episodes, ok calls on %d days" % (
         summary,
         episodes,
@@ -330,8 +336,8 @@ def s3(w):
     return verdict, reason
 
 
-def verdicts(w):
-    return [("S1",) + s1(w), ("S2",) + s2(w), ("S3",) + s3(w)]
+def verdicts(w, dry_run=False):
+    return [("S1",) + s1(w, dry_run), ("S2",) + s2(w), ("S3",) + s3(w)]
 
 
 def report(w):
@@ -491,7 +497,8 @@ def synthetic(case, hours=SOAK_HOURS, use_from=True):
             if n == 1 and (case == "restarted-before" or (case == "from-6" and h >= 5)):
                 restarts, reason = 1, "Error"
             kausa = {"kausa_leader": 1 - n}
-            if n == 0:
+            # "dry": a soak with dryRun=true, no model calls, no budget, breaker or queue gauge.
+            if n == 0 and case != "dry":
                 kausa.update(
                     {
                         OK_CALLS: int(h // 6),
@@ -551,6 +558,12 @@ def self_test():
             failures.append("short: the S1 reason does not say 'shorter than 168 hours'")
         if case == "flap" and "in 3 episodes" not in got["S1"][1]:
             failures.append("flap: the S1 reason does not say 'in 3 episodes'")
+    # "dry": invalid as an endpoint soak, valid as a dry-run one, with S2 and S3 unchanged.
+    dry = synthetic("dry")
+    if s1(dry)[0] != "INVALID":
+        failures.append("dry: S1 without --dry-run is not INVALID")
+    if [v for _, v, _ in verdicts(dry, dry_run=True)] != ["VALID", "PASS", "PASS"]:
+        failures.append("dry: the verdicts with --dry-run are not VALID, PASS, PASS")
     # "from-6" without --from: the restart at hour 5 is inside the window.
     if s1(synthetic("from-6", use_from=False))[0] != "INVALID":
         failures.append("from-6 without --from: S1 is not INVALID")
@@ -587,6 +600,11 @@ def main():
         " (YYYY-MM-DDTHH:MM:SSZ), for example after a restart caused outside kausa",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="the soak ran with dryRun=true: S1 leaves out the breaker, ok-call and queue terms",
+    )
+    parser.add_argument(
         "--self-test", action="store_true", help="run the verdicts on synthetic samples"
     )
     args = parser.parse_args()
@@ -608,7 +626,7 @@ def main():
         print(line)
     if bad:
         print("unreadable lines skipped: %d" % bad)
-    for name, verdict, reason in verdicts(w):
+    for name, verdict, reason in verdicts(w, args.dry_run):
         print("%s %s: %s" % (name, verdict, reason))
     return 0
 

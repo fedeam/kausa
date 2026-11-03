@@ -41,6 +41,19 @@ kausa writes nothing outside `kausa-soak` but its ClusterRole and ClusterRoleBin
 `kausa-soak`: no Event and no Explanation on the cluster's workloads, and no
 CustomResourceDefinition.
 
+### A dry-run soak
+
+The first soak, started on 2026-11-03, runs in dry-run instead: the release `kausa-soak` in
+`kausa-soak` with `rbac.scope=cluster`, two replicas, the pinned image digest and `dryRun=true`,
+installed by the cluster's own deploy tool rather than `install.sh`, with no fake endpoint and no
+notifications. kausa then calls no model and writes nothing, so it answers the memory question
+(the watches of the whole cluster, S2 and S3) but not how the budget, queue and breaker behave.
+`tests/soak/sample.py` reads it unchanged (same release, namespace and Lease), and
+`summarize.py --dry-run` leaves the breaker, ok-call and queue terms out of S1; every other term
+of the rule below holds as written. A deploy tool that excludes Leases (Argo CD does by default,
+[#79](https://github.com/fedeam/kausa/issues/79)) does not create the release's Lease: create it
+once, with `spec: {}`, or neither replica leads.
+
 ## Before you start
 
 - A test cluster whose owner agreed to the soak and to the seeded failures. The seeded failures
