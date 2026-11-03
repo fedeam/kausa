@@ -171,6 +171,12 @@ impl Readiness {
         self.listed.insert((kind, watch.clone()));
         self.listed.len() >= self.total
     }
+
+    /// Whether `watch` of `kind` has sent `InitDone` in this term; changes nothing. An `Init` of
+    /// such a watch begins a relist.
+    fn has_listed(&self, kind: Kind, watch: &WatchKey) -> bool {
+        self.listed.contains(&(kind, watch.clone()))
+    }
 }
 
 /// How long a watch error that repeats with the same text is folded. Once its backoff has grown,
@@ -984,6 +990,12 @@ async fn lead<C: Cluster>(
             item = pods.next() => match item {
                 Some((watch, Some(Ok(event)))) => {
                     let listed = matches!(event, watcher::Event::InitDone);
+                    // A watch that listed in this term starts its list again.
+                    if matches!(event, watcher::Event::Init)
+                        && readiness.has_listed(Kind::Pods, &watch)
+                    {
+                        metrics.inc("kausa_watch_relists_total", &[("watch", "pods")]);
+                    }
                     state.on_pod(&watch, event, &lookup).await?;
                     if listed && readiness.listed(Kind::Pods, &watch) {
                         metrics.set_ready();
@@ -991,6 +1003,10 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "pods")]);
+                    if forbidden(&e) {
+                        // `Restarting` starts a new watcher after a refusal.
+                        metrics.inc("kausa_watch_restarts_total", &[("watch", "pods")]);
+                    }
                     watch_errors.log("pod watch error", Kind::Pods, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Pods, &watch, &e);
                 }
@@ -1000,6 +1016,12 @@ async fn lead<C: Cluster>(
             item = events.next() => match item {
                 Some((watch, Some(Ok(event)))) => {
                     let listed = matches!(event, watcher::Event::InitDone);
+                    // A watch that listed in this term starts its list again.
+                    if matches!(event, watcher::Event::Init)
+                        && readiness.has_listed(Kind::Events, &watch)
+                    {
+                        metrics.inc("kausa_watch_relists_total", &[("watch", "events")]);
+                    }
                     state.on_event(&watch, event, &lookup).await?;
                     if listed && readiness.listed(Kind::Events, &watch) {
                         metrics.set_ready();
@@ -1007,6 +1029,10 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "events")]);
+                    if forbidden(&e) {
+                        // `Restarting` starts a new watcher after a refusal.
+                        metrics.inc("kausa_watch_restarts_total", &[("watch", "events")]);
+                    }
                     watch_errors.log("event watch error", Kind::Events, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Events, &watch, &e);
                 }
@@ -1017,6 +1043,12 @@ async fn lead<C: Cluster>(
                 if deployments.is_some() => match item {
                 Some((watch, Some(Ok(event)))) => {
                     let listed = matches!(event, watcher::Event::InitDone);
+                    // A watch that listed in this term starts its list again.
+                    if matches!(event, watcher::Event::Init)
+                        && readiness.has_listed(Kind::Deployments, &watch)
+                    {
+                        metrics.inc("kausa_watch_relists_total", &[("watch", "deployments")]);
+                    }
                     state.on_deployment(&watch, event);
                     if listed && readiness.listed(Kind::Deployments, &watch) {
                         metrics.set_ready();
@@ -1024,6 +1056,10 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "deployments")]);
+                    if forbidden(&e) {
+                        // `Restarting` starts a new watcher after a refusal.
+                        metrics.inc("kausa_watch_restarts_total", &[("watch", "deployments")]);
+                    }
                     watch_errors.log("deployment watch error", Kind::Deployments, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Deployments, &watch, &e);
                 }

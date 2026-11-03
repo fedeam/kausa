@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 20] = [
+pub const COUNTERS: [(&str, &str); 22] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -92,6 +92,14 @@ pub const COUNTERS: [(&str, &str); 20] = [
     (
         "kausa_answer_redactions_total",
         "Values replaced by redaction in the model's answers, by rule.",
+    ),
+    (
+        "kausa_watch_relists_total",
+        "Lists of the Pod, Event and Deployment watches after the first of each watch, by watch.",
+    ),
+    (
+        "kausa_watch_restarts_total",
+        "New watchers started after the API server refused a watch (403), by watch.",
     ),
 ];
 
