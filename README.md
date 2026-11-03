@@ -70,7 +70,13 @@ kind delete cluster --name kausa-try
 ```
 
 To have it explain, point it at a model: [Install kausa with
-Helm](docs/how-to/install-with-helm.md).
+Helm](docs/how-to/install-with-helm.md). Then, with a chart that has the test (from v0.5), check
+the endpoint, the key and the model with one synthetic request, which prints the step that failed
+and a hint:
+
+```sh
+helm test kausa -n kausa --logs
+```
 
 ## What leaves the cluster
 

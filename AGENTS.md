@@ -24,7 +24,9 @@ reuses explanations of repeated incidents, writes them as Events (and, with `--h
 them in an Explanation object per incident, off by default), with `--notify-url-file` posts each new
 explanation to one webhook (JSON, Slack or Telegram, off by default) and serves metrics; with the
 chart's `replicaCount: 2` (off by default) a second replica waits as a standby and takes over
-through a Lease. The image and the Helm
+through a Lease. `kausa run` holds its calls behind a breaker while the endpoint fails, and `kausa
+check-endpoint` (and the chart's `helm test`) sends one synthetic request to the endpoint on
+demand and says which step failed. The image and the Helm
 chart are in the repository (not published); the kind test passes locally and waits for GitHub
 Actions.
 Maintainer: FedeAM (GitHub: `fedeam`).
@@ -93,11 +95,13 @@ read-only proxy that keeps it to its own reads. Tests never reach a cluster: `te
 the binary with a nonexistent kubeconfig, and a new test that starts `kausa run` must do the same.
 The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`,
 `src/record.rs`, `src/redact.rs`, `src/context.rs`, `src/prompt.rs`, `src/history/pure.rs`,
-`src/notification.rs`, `src/leader/pure.rs`) is pure and tested without a cluster, and so are `src/budget.rs`,
+`src/notification.rs`, `src/leader/pure.rs`, `src/model/pure.rs`, `src/breaker.rs`) is pure and
+tested without a cluster, and so are `src/budget.rs`,
 `src/metrics.rs` (except its listener) and the building of Events in `src/events.rs`;
 `src/run.rs`, `src/explain.rs`, `src/events.rs`, `src/history.rs` and `src/leader.rs` talk to the
 API server,
-`src/model.rs` to the model endpoint and `src/notify.rs` to the webhook.
+`src/model.rs` and `src/check.rs` to the model endpoint and `src/notify.rs` to the webhook.
+`kausa check-endpoint` needs no cluster: `tests/cli.rs` runs it against a local fake server.
 
 ## Verification (same as CI)
 

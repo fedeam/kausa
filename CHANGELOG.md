@@ -45,6 +45,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `score.py`, which replays dry-run requests against an endpoint and grades the answers with a
   fixed rubric; first results in
   [Explanation quality of local models against known causes](docs/research/2026-11-02-explanation-quality.md).
+- `kausa check-endpoint`: one synthetic request to the model endpoint, on demand, with no cluster
+  and outside the budget, and one `endpoint check` line that names the step that failed, its cause
+  and a hint; exit `0` passed, `1` failed, `2` usage error
+  ([0020](docs/adr/0020-check-the-endpoint.md)).
+- `--model-timeout` on `kausa run` and `kausa check-endpoint`: a call's total timeout, 10 to 600
+  seconds, 120 by default; the `started` line shows it as `model_timeout_seconds`.
+- The chart's `helm test`: a Pod `<fullname>-endpoint-check` that runs `kausa check-endpoint` with
+  no ServiceAccount token, created only by `helm test`, and, with `networkPolicy.enabled`, its own
+  NetworkPolicy with egress to DNS and the endpoint only. The values `model.timeoutSeconds` (120)
+  and `endpointCheck.enabled` (true).
+- Two gauges: `kausa_endpoint_state{state}` (`closed`, `half_open`, `open`) and
+  `kausa_model_last_success_timestamp_seconds`; the skip reason `endpoint_unavailable`; the log
+  lines `endpoint unavailable` and `endpoint available`; `cause` and `queued` on `explanation
+  retried`, and `cause` and `status` on `endpoint error`.
 
 ### Changed
 
@@ -58,6 +72,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExplanationSkipped` Event (reason `budget`). A spent daily cap and a cap of 0 still skip at once.
 - A budget skip no longer reads the container log, so it may come where `context_too_large` came
   before, and delayed retries no longer take the queue past 16.
+- A failed model call gets a cause and a class ([Causes](docs/reference/command-line.md#causes)):
+  a quota `429` (`insufficient_quota`) and a `402` are no longer retried, nor a redirect, a refused
+  key, a missing model or an answer that is not a chat completion; `Retry-After` is honoured on
+  `429` and `503`, in seconds, clamped to 30-600 ([0020](docs/adr/0020-check-the-endpoint.md)).
+- After 3 transient failures in a row or 1 configuration error, kausa stops calling the endpoint
+  and incidents wait, one probing per hold (60 seconds, doubling up to 30 minutes); with 16
+  waiting, the oldest is skipped as `endpoint_unavailable`. A transient first failure that opens
+  the breaker sends its incident to the back of the queue.
+- A `413` is skipped as `context_too_large`, with the note `the endpoint refused the request as too
+  large for the model: lower --max-input-tokens`.
+- A chat completion with no content (a refusal, a filter, out of output tokens) is still skipped
+  at once with reason `endpoint`, now with a fixed note that names the kind.
 - A watch error that repeats with the same text is logged at most once every 5 minutes, with a
   `folded` field counting the repeats in between; `kausa_watch_errors_total` still counts every
   one ([#7](https://github.com/fedeam/kausa/issues/7)).

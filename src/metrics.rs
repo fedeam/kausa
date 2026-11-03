@@ -97,9 +97,10 @@ pub const COUNTERS: [(&str, &str); 20] = [
 
 /// The gauges kausa exports, with their help text, rendered after the counters
 /// (docs/adr/0019-high-availability.md). `kausa_leader` is always rendered; the budget and queue
-/// gauges (docs/adr/0021-refill-the-call-budget.md) only once a series was set, so that a process
-/// that has no budget or no queue shows no 0 an alert could fire on.
-pub const GAUGES: [(&str, &str); 3] = [
+/// gauges (docs/adr/0021-refill-the-call-budget.md) and the endpoint gauges
+/// (docs/adr/0020-check-the-endpoint.md) only once a series was set, so that a process that has
+/// no budget, no queue or no endpoint shows no 0 an alert could fire on.
+pub const GAUGES: [(&str, &str); 5] = [
     (
         "kausa_leader",
         "1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a \
@@ -113,6 +114,15 @@ pub const GAUGES: [(&str, &str); 3] = [
     (
         "kausa_explanation_queue_length",
         "Incidents waiting for an explanation (at most 16).",
+    ),
+    (
+        "kausa_endpoint_state",
+        "State of the model endpoint's breaker: 1 for the current state (closed, open, \
+         half_open), 0 for the others; closed on a standby.",
+    ),
+    (
+        "kausa_model_last_success_timestamp_seconds",
+        "Unix time of the last call answered with a chat completion, 0 before the first.",
     ),
 ];
 
@@ -538,9 +548,10 @@ mod tests {
 
     #[test]
     fn the_leader_gauge_comes_after_the_counters_and_is_1_by_default() {
-        // 3: the budget and queue gauges (docs/adr/0021-refill-the-call-budget.md) came later,
-        // and are not rendered until set.
-        assert_eq!(GAUGES.len(), 3);
+        // 5: the budget and queue gauges (docs/adr/0021-refill-the-call-budget.md) and the
+        // endpoint gauges (docs/adr/0020-check-the-endpoint.md) came later, and are not rendered
+        // until set.
+        assert_eq!(GAUGES.len(), 5);
         assert_eq!(GAUGES[0], ("kausa_leader", LEADER_HELP));
         let gauge = |value: u8| {
             format!(
@@ -615,7 +626,7 @@ mod tests {
     #[test]
     fn gauges_render_after_kausa_leader_in_order_and_only_once_set() {
         assert_eq!(
-            GAUGES,
+            GAUGES[..3],
             [
                 ("kausa_leader", LEADER_HELP),
                 ("kausa_budget_calls_remaining", BUDGET_HELP),
@@ -757,5 +768,119 @@ mod tests {
             !text.contains("kausa_answer_redactions_total 0\n"),
             "{text}"
         );
+    }
+
+    // Acceptance tests for the endpoint gauges (docs/adr/0020-check-the-endpoint.md), written
+    // before the code. They use `GAUGES: [(&str, &str); 5]`, the two new gauges appended after
+    // the queue gauge, and `set_gauge` as the 0021 gauges do: `kausa_endpoint_state` has three
+    // series, by `state`, exactly one of them 1; `kausa_model_last_success_timestamp_seconds` has
+    // one, 0 before the first chat completion. No counter is added.
+
+    const ENDPOINT_HELP: &str = "State of the model endpoint's breaker: 1 for the current state \
+                                 (closed, open, half_open), 0 for the others; closed on a standby.";
+    const LAST_SUCCESS_HELP: &str =
+        "Unix time of the last call answered with a chat completion, 0 before the first.";
+
+    /// Sets the endpoint gauge as kausa does: `state` at 1, the other two at 0.
+    fn show_state(m: &Metrics, state: &str) {
+        for s in ["closed", "open", "half_open"] {
+            m.set_gauge(
+                "kausa_endpoint_state",
+                &[("state", s)],
+                u64::from(s == state),
+            );
+        }
+    }
+
+    #[test]
+    fn the_endpoint_gauges_come_last_with_their_help() {
+        assert_eq!(COUNTERS.len(), 20, "a counter was added");
+        assert_eq!(
+            GAUGES,
+            [
+                ("kausa_leader", LEADER_HELP),
+                ("kausa_budget_calls_remaining", BUDGET_HELP),
+                ("kausa_explanation_queue_length", QUEUE_HELP),
+                ("kausa_endpoint_state", ENDPOINT_HELP),
+                (
+                    "kausa_model_last_success_timestamp_seconds",
+                    LAST_SUCCESS_HELP
+                ),
+            ]
+        );
+        let names: std::collections::BTreeSet<&str> = GAUGES.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), GAUGES.len(), "a gauge is listed twice");
+    }
+
+    #[test]
+    fn the_endpoint_state_renders_three_series_under_one_help_with_one_at_1() {
+        let state = |closed: u8, half_open: u8, open: u8| {
+            format!(
+                "# HELP kausa_endpoint_state {ENDPOINT_HELP}\n\
+                 # TYPE kausa_endpoint_state gauge\n\
+                 kausa_endpoint_state{{state=\"closed\"}} {closed}\n\
+                 kausa_endpoint_state{{state=\"half_open\"}} {half_open}\n\
+                 kausa_endpoint_state{{state=\"open\"}} {open}\n"
+            )
+        };
+        let last = |seconds: u64| {
+            format!(
+                "# HELP kausa_model_last_success_timestamp_seconds {LAST_SUCCESS_HELP}\n\
+                 # TYPE kausa_model_last_success_timestamp_seconds gauge\n\
+                 kausa_model_last_success_timestamp_seconds {seconds}\n"
+            )
+        };
+        let m = Metrics::default();
+        // Never set, never rendered.
+        let text = m.render();
+        assert!(!text.contains("kausa_endpoint_state"), "{text}");
+        assert!(
+            !text.contains("kausa_model_last_success_timestamp_seconds"),
+            "{text}"
+        );
+        // Without --endpoint, the state alone, closed; after the queue gauge.
+        m.set_gauge("kausa_explanation_queue_length", &[], 0);
+        show_state(&m, "closed");
+        let text = m.render();
+        assert!(text.ends_with(&state(1, 0, 0)), "{text}");
+        assert!(
+            text.find("# TYPE kausa_explanation_queue_length")
+                < text.find("# TYPE kausa_endpoint_state"),
+            "{text}"
+        );
+        // With --endpoint, the last success too: 0 before the first chat completion.
+        m.set_gauge("kausa_model_last_success_timestamp_seconds", &[], 0);
+        let text = m.render();
+        assert!(
+            text.ends_with(&format!("{}{}", state(1, 0, 0), last(0))),
+            "{text}"
+        );
+        for (current, expected) in [
+            ("open", state(0, 0, 1)),
+            ("half_open", state(0, 1, 0)),
+            ("closed", state(1, 0, 0)),
+        ] {
+            show_state(&m, current);
+            m.set_gauge(
+                "kausa_model_last_success_timestamp_seconds",
+                &[],
+                1_793_620_800,
+            );
+            let text = m.render();
+            assert!(
+                text.ends_with(&format!("{expected}{}", last(1_793_620_800))),
+                "{current}: {text}"
+            );
+            assert_eq!(
+                text.matches("# HELP kausa_endpoint_state ").count(),
+                1,
+                "{text}"
+            );
+            let ones = text
+                .lines()
+                .filter(|l| l.starts_with("kausa_endpoint_state{") && l.ends_with(" 1"))
+                .count();
+            assert_eq!(ones, 1, "{current}: {text}");
+        }
     }
 }

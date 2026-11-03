@@ -242,6 +242,111 @@ explanations.
 - A hints ADR only if more runs confirm that small models miss known signatures and invent objects
   for incidents with no Pod.
 
+## Later the same day: check the endpoint and hold calls behind a breaker
+
+**Request.** Implement [0020. Check the model endpoint on demand with `kausa check-endpoint` and
+`helm test`, and hold calls behind a breaker while it fails](../adr/0020-check-the-endpoint.md) on
+top of the integrated 0021 and 0022 work, in two tracks (code, chart) merged into one branch.
+
+**What was done.**
+
+- `src/model/pure.rs`: the causes (`connection`, `timeout`, `redirect`, `not_an_answer`,
+  `no_content` of four kinds, `rate_limited`, `quota`, `key`, `not_found`, `too_large`,
+  `rejected`, `server_error`), their classes and hints, `classify` by status and by `error.code` /
+  `error.type` (strings of at most 64 bytes, an array by its first element), `completion` and
+  `retry_after` (delta-seconds only, clamped to 30-600 s). Pure, no `crate::` import, fuzzed by
+  the new target `endpoint_error`, and run by ClusterFuzzLite on pull requests that change it.
+- `src/model.rs`: `CallError` carries a cause, a status and a delay instead of `transient`;
+  `--model-timeout` sets the total timeout; `Retry-After` is read before the body.
+- `src/breaker.rs`: the pure breaker (3 transient failures or 1 configuration error; holds of 60 s
+  doubling to 1800 s; `Retry-After` raises a hold and never compounds into it).
+- `src/explain.rs` and `src/run.rs`: `Shared.breaker`, kept across terms; the call is recorded
+  before the term check; `explain::run` returns `Next` (done, retry, requeue at the back);
+  `allowance` maps an open breaker to 0021's gate-holds branch and `refusal` puts
+  `endpoint_unavailable` in front of the budget's rows; `endpoint unavailable` and `endpoint
+  available` once per transition; `explanation retried` gains `cause` and `queued`, `endpoint
+  error` `cause` and `status`.
+- `src/metrics.rs`: `GAUGES` grows from 3 to 5 (`kausa_endpoint_state`,
+  `kausa_model_last_success_timestamp_seconds`, last); `COUNTERS` stays at 20.
+- `src/check.rs` and `src/main.rs`: `kausa check-endpoint`, the six model flags parsed by one
+  helper for both commands, `--model-timeout`, `model_timeout_seconds` in `started`, and
+  `prompt::MAX_TOKENS` (800) shared by both.
+- The chart: `model.timeoutSeconds`, `endpointCheck.enabled`, the `helm test` Pod
+  `<fullname>-endpoint-check` and its own NetworkPolicy, `NOTES.txt`; `kausa.rules`, `rbac.yaml`
+  and `leader-election.yaml` unchanged.
+- The kind test: `helm test --logs` passes in every run and fails with `cause` `not_found` on a
+  missing model; the cluster-scope, one-replica run adds the breaker phase against a fake
+  endpoint answering `401`.
+- The documentation listed in the ADR's Consequences, and `Update` paragraphs on 0008 and 0010
+  recording the implementation.
+- The merge of the chart track had one conflict, the comment at the top of
+  `.github/workflows/cflite.yml`; the chart track's wording was kept.
+
+**Decisions** (0020 holds the design; these are the choices made while building it):
+
+- The request bodies are pinned by golden files under `tests/golden/`
+  (`check-endpoint-request-json-schema.json`, `check-endpoint-request-instructions.json`),
+  compared as parsed JSON by a unit test and by `tests/cli.rs` against what a local fake server
+  received, rather than by fixtures inside `src/check.rs`.
+- `waiting_for_budget` on `explanation dropped` stays about the budget only: it is `false` while
+  the breaker holds the slot. `explanations waiting` carries the reason of the gate that holds,
+  `the hourly call budget is spent` or `the model endpoint is unavailable`, with the end of the
+  hold as `next_call_in_seconds`.
+- `kausa_model_last_success_timestamp_seconds` is rendered only with a model client
+  (`--endpoint`, not `--dry-run`), like `kausa_budget_calls_remaining`; `kausa_endpoint_state` is
+  set to `closed` at start in every mode.
+- The breaker's e2e phase runs once, in the `KAUSA_E2E_SCOPE=cluster` `KAUSA_E2E_REPLICAS=1` job,
+  to keep the other two jobs within their timeouts.
+- The fabricated incident's `EXAMPLE_URL` reaches the model as `namespace-1_URL`: `R002` replaces
+  the namespace `example` in any ASCII case. Kept: it shows the redaction at work, and the golden
+  files pin it.
+
+**How it was checked.**
+
+- `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D
+  warnings` and `cargo test --locked --all-features` (579 unit tests, 75 command-line tests) pass
+  on the merged branch; `helm lint --strict charts/kausa --set rbac.scope=cluster` and `bash
+  tests/chart/render.sh` pass; the eight `RUN` blocks of the `Dockerfile` that call `helm` were
+  run by hand with the local Helm and macOS tools (their `/tmp` files moved to a scratch
+  directory) and pass; `bash -n tests/e2e/run.sh` and `python3 -I -m py_compile
+  tests/e2e/fake_endpoint.py` pass. `docker build --target ci` and the kind tests were not run
+  locally; CI runs them on the pull request.
+- `kausa check-endpoint` against Ollama 0.9.2 on the same machine (started for the check and
+  stopped after it; no hosted provider): `qwen3:0.6b` and `qwen3:4b` passed (1.6 s and 4.0 s,
+  about 510 tokens in); a model that is not pulled failed with `not_found` (`model_found`
+  `false`); the base URL without `/v1` gave `not_found` too; a closed port gave `connection`
+  (`connected` `false`); `qwen3:0.6b` with `--no-json-schema` gave `invalid_answer`, its answer
+  not being JSON. The lines are quoted in [Command line and log
+  format](../reference/command-line.md#the-endpoint-check-line).
+- The ADR's shipping check (`helm test` against Ollama in kind) and a `promtool check rules` of
+  the example alert in a pinned container were **not run**: the shared Docker disk had 3.8 GB
+  free, under the 4 GB this session allows itself. No cluster was created and `~/.kube/config`
+  was not touched.
+
+**Hypotheses still open** (none confirmed or refuted here, beyond what the Ollama runs show):
+
+- Where providers put quota codes (`code` or `type`), other providers' codes, Gemini's array
+  shape, `context_length_exceeded`, `402` for credit, and `Retry-After` in seconds.
+- The null-content shapes of a structured-output refusal, a `content_filter` finish and a
+  reasoning model that spends `max_tokens` (no body captured).
+- That reqwest reports DNS, TLS and connect timeouts as connect errors (a refused connection
+  does, in the unit tests and against the closed port above).
+- That content does not make a provider time out, answer `5xx`, or a `2xx` with no `choices`
+  array, nor a firewall `403`; that failed calls are not billed.
+- That `activeDeadlineSeconds` covers the image pull; how Argo CD and Flux treat `helm.sh/hook:
+  test` objects, to settle before `endpointCheck.enabled` keeps its default `true`.
+- The example alert's PromQL, until `promtool` runs on it.
+
+**Follow-ups.**
+
+- The ADR's shipping checks: `helm test` against Ollama in kind (a pass, and `not_found` on a
+  wrong model), when the Docker disk has room; the kind jobs of the pull request cover the same
+  path against the fake endpoint.
+- One dated `kausa check-endpoint` run against a hosted provider with a key the maintainer gives
+  and revokes, first an OpenAI reasoning model if a funded key exists (`max_completion_tokens`);
+  never run by an agent here.
+- `promtool check rules` on the example alert `KausaModelEndpointFailing`.
+- Argo CD's (and Flux's) treatment of the test hook, before the release.
 ## Later the same day: the budget case counted a call in the wrong life
 
 The kind job of the cluster scope failed in the budget case: `life 2: request 5 came 11.836 s
@@ -271,3 +376,21 @@ after its start; at most 4 may`.
   The kind test of the cluster scope passed locally on Docker Desktop with the fix: 88 requests in
   610 s over 10 starts, at most 90, and every process logged `stopped` 0.41 to 0.53 s before the
   next one logged `started`.
+
+## Later the same day: `kausa check-endpoint` against a hosted provider
+
+- The release build of the change of 0020 ran `kausa check-endpoint` three times against the
+  OpenAI-compatible endpoint of Google's Gemini API, with a key the maintainer gave (passed in
+  `KAUSA_API_KEY`, never printed or written):
+  - `gemini-3.5-flash-lite`: `result` `ok`, status `200`, a valid answer, 514 tokens in and 102
+    out, about 3.7 s; exit `0`.
+  - `gemini-2.5-flash`, no longer offered to new users: `cause` `not_found`, class
+    `configuration`, the provider's message in `detail`, and the hint to check the model name;
+    exit `1`.
+  - A wrong key: Gemini answers `400` with `INVALID_ARGUMENT` ("Please pass a valid API key"), not
+    `401`, so the cause is `rejected` and the hint points at `--no-json-schema`. Under 0020 a `400`
+    never opens the breaker, so a wrong Gemini key skips each incident instead of holding calls.
+    Follow-up: recognize a provider's key error inside a `400` body with the fixed-key lookup
+    (Gemini's `error.status` and, if present, its `details[].reason`), without letting a
+    tenant-shaped `400` count.
+

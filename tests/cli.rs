@@ -1807,3 +1807,927 @@ fn help_explains_the_refilling_budget() {
     }
     assert!(help.lines().all(|l| l.len() <= 84), "{help}");
 }
+
+// `kausa check-endpoint` and `--model-timeout` (docs/adr/0020-check-the-endpoint.md), written
+// before the code. Usage errors exit 2 before anything connects; against a fake endpoint on
+// localhost, the check sends one request, prints one `endpoint check` line and exits 0 or 1.
+// Every run has a nonexistent kubeconfig: the check reads nothing from a cluster. Whether
+// `started` shows `model_timeout_seconds` is checked by the kind test: with no cluster, `kausa run`
+// stops before it logs `started`.
+
+const PLAIN_HTTP: &str = "the endpoint uses plain HTTP: pass --allow-http for an endpoint inside \
+                          the cluster or the same private network";
+const NEEDS_ENDPOINT_OR_DRY_RUN: &str = "--model, --api-key-file, --allow-http, --no-json-schema \
+                                         and --model-timeout need --endpoint or --dry-run";
+const RUN_ONLY: [&str; 19] = [
+    "--settle-seconds",
+    "--namespace",
+    "--no-rollouts",
+    "--dry-run",
+    "--no-logs",
+    "--no-events",
+    "--history",
+    "--history-days",
+    "--notify-url-file",
+    "--notify-format",
+    "--notify-telegram-chat-id",
+    "--notify-token-file",
+    "--notify-allow-http",
+    "--max-calls-per-hour",
+    "--max-calls-per-day",
+    "--max-input-tokens",
+    "--dedup-hours",
+    "--metrics-address",
+    "--leader-lease",
+];
+
+fn bad_timeout(value: &str) -> String {
+    format!("--model-timeout takes a whole number of seconds from 10 to 600, not '{value}'")
+}
+
+fn run_only(flag: &str) -> String {
+    format!("{flag} is a flag of kausa run, not of kausa check-endpoint")
+}
+
+/// `check-endpoint --endpoint ENDPOINT --model m` followed by `rest`.
+fn check_with(rest: &[&str]) -> Vec<String> {
+    ["check-endpoint", "--endpoint", ENDPOINT, "--model", "m"]
+        .iter()
+        .chain(rest)
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
+#[test]
+fn check_endpoint_needs_an_endpoint_and_a_model() {
+    for args in [
+        &["check-endpoint"][..],
+        &["check-endpoint", "--model", "m"][..],
+        &["check-endpoint", "--model", "m", "--allow-http"][..],
+        // No endpoint comes before the key file is read.
+        &[
+            "check-endpoint",
+            "--model",
+            "m",
+            "--api-key-file",
+            "/nonexistent/kausa-tests/key",
+        ][..],
+    ] {
+        assert_usage_error(
+            &kausa(args),
+            "kausa check-endpoint needs --endpoint",
+            &format!("{args:?}"),
+        );
+    }
+    assert_usage_error(
+        &kausa(&["check-endpoint", "--endpoint", ENDPOINT]),
+        "--endpoint needs --model",
+        "no model",
+    );
+}
+
+#[test]
+fn check_endpoint_flags_need_their_values() {
+    for flag in ["--endpoint", "--model", "--model-timeout", "--api-key-file"] {
+        assert_usage_error(
+            &kausa(&["check-endpoint", flag]),
+            &format!("{flag} needs a value"),
+            flag,
+        );
+    }
+    for flag in ["--endpoint", "--model", "--model-timeout"] {
+        assert_usage_error(
+            &kausa(&["check-endpoint", flag, ""]),
+            &format!("{flag} needs a value"),
+            &format!("{flag} ''"),
+        );
+    }
+}
+
+#[test]
+fn check_endpoint_checks_the_endpoint_as_run_does() {
+    assert_usage_error(
+        &kausa(&[
+            "check-endpoint",
+            "--endpoint",
+            "http://127.0.0.1:11434/v1",
+            "--model",
+            "m",
+        ]),
+        PLAIN_HTTP,
+        "plain http",
+    );
+    assert_usage_error(
+        &kausa(&[
+            "check-endpoint",
+            "--endpoint",
+            "ftp://example.com",
+            "--model",
+            "m",
+            "--allow-http",
+        ]),
+        "the endpoint 'ftp://example.com' is not an http(s) URL",
+        "ftp",
+    );
+    // The scheme is checked before the model: plain http without a model names the scheme.
+    assert_usage_error(
+        &kausa(&["check-endpoint", "--endpoint", "http://127.0.0.1:11434/v1"]),
+        PLAIN_HTTP,
+        "plain http, no model",
+    );
+}
+
+#[test]
+fn check_endpoint_names_an_unreadable_key_file() {
+    let prefix = "cannot read the API key file '/nonexistent/kausa-tests/key': ";
+    assert_usage_error_starting(
+        &kausa_owned(&check_with(&[
+            "--api-key-file",
+            "/nonexistent/kausa-tests/key",
+        ])),
+        prefix,
+        "unreadable",
+    );
+    // The key file is read before the scheme and the model are checked.
+    assert_usage_error_starting(
+        &kausa(&[
+            "check-endpoint",
+            "--endpoint",
+            "ftp://example.com",
+            "--api-key-file",
+            "/nonexistent/kausa-tests/key",
+        ]),
+        prefix,
+        "unreadable before the scheme",
+    );
+}
+
+#[test]
+fn check_endpoint_refuses_the_flags_of_run() {
+    for flag in RUN_ONLY {
+        // Refused at the flag itself, with or without a value after it.
+        assert_usage_error(&kausa_owned(&check_with(&[flag])), &run_only(flag), flag);
+        assert_usage_error(
+            &kausa(&["check-endpoint", flag, "1"]),
+            &run_only(flag),
+            &format!("{flag} first"),
+        );
+    }
+}
+
+#[test]
+fn check_endpoint_refuses_a_flag_given_twice() {
+    let dir = notify_dir("check-twice");
+    let key = file(&dir, "key", "a-key\n");
+    for (flag, value) in [
+        ("--endpoint", Some(ENDPOINT)),
+        ("--model", Some("m")),
+        ("--api-key-file", Some(key.as_str())),
+        ("--model-timeout", Some("30")),
+        ("--allow-http", None),
+        ("--no-json-schema", None),
+    ] {
+        let mut args = vec!["check-endpoint"];
+        for _ in 0..2 {
+            args.push(flag);
+            args.extend(value);
+        }
+        assert_usage_error(&kausa(&args), &format!("{flag} is given twice"), flag);
+    }
+}
+
+#[test]
+fn check_endpoint_refuses_anything_else() {
+    for arg in ["--bogus", "extra", "-h", "--version", "run"] {
+        assert_usage_error(
+            &kausa_owned(&check_with(&[arg])),
+            &format!("unexpected argument '{arg}'"),
+            arg,
+        );
+    }
+}
+
+#[test]
+fn check_endpoint_reports_the_first_bad_argument_in_order() {
+    let cases: [(&[&str], String); 5] = [
+        (
+            &["check-endpoint", "--bogus", "--dry-run"],
+            "unexpected argument '--bogus'".to_owned(),
+        ),
+        (
+            &["check-endpoint", "--dry-run", "--bogus"],
+            run_only("--dry-run"),
+        ),
+        (
+            &["check-endpoint", "--model-timeout", "9", "--namespace", "a"],
+            bad_timeout("9"),
+        ),
+        (
+            &[
+                "check-endpoint",
+                "--allow-http",
+                "--allow-http",
+                "--dry-run",
+            ],
+            "--allow-http is given twice".to_owned(),
+        ),
+        // Every argument is read before the endpoint is missed.
+        (
+            &["check-endpoint", "--model", "m", "--history"],
+            run_only("--history"),
+        ),
+    ];
+    for (args, message) in cases {
+        assert_usage_error(&kausa(args), &message, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn the_model_timeout_takes_10_to_600_seconds_on_both_commands() {
+    for value in [
+        "9",
+        "601",
+        "abc",
+        "0",
+        "-1",
+        "10.5",
+        "1e2",
+        " 30",
+        "99999999999",
+    ] {
+        assert_usage_error(
+            &kausa_owned(&check_with(&["--model-timeout", value])),
+            &bad_timeout(value),
+            &format!("check {value}"),
+        );
+        assert_usage_error(
+            &kausa_owned(&with_endpoint(&["--model-timeout", value])),
+            &bad_timeout(value),
+            &format!("run {value}"),
+        );
+    }
+    // Accepted on run: it gets past the flags and fails only on the missing cluster.
+    for value in ["10", "120", "600"] {
+        assert_gets_past_the_flags(
+            &kausa_owned(&with_endpoint(&["--model-timeout", value])),
+            value,
+        );
+        assert_gets_past_the_flags(
+            &kausa(&["run", "--dry-run", "--model-timeout", value]),
+            &format!("dry-run {value}"),
+        );
+    }
+}
+
+#[test]
+fn run_takes_the_model_flags_only_with_an_endpoint_or_dry_run() {
+    for args in [
+        &["run", "--model-timeout", "30"][..],
+        &["run", "--model", "m"][..],
+        &["run", "--allow-http"][..],
+        &["run", "--no-json-schema"][..],
+        &["run", "--api-key-file", "/nonexistent/kausa-tests/key"][..],
+    ] {
+        assert_usage_error(
+            &kausa(args),
+            NEEDS_ENDPOINT_OR_DRY_RUN,
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn help_lists_check_endpoint_and_the_model_timeout() {
+    let output = kausa(&["--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = stdout(&output);
+    let usage: Vec<&str> = help
+        .lines()
+        .skip_while(|l| *l != "Usage:")
+        .take_while(|l| !l.is_empty())
+        .collect();
+    assert!(
+        usage
+            .iter()
+            .any(|l| l.starts_with("  kausa check-endpoint [OPTIONS]")
+                && l.contains("Send one synthetic request to the model endpoint")),
+        "no check-endpoint line under 'Usage:': {help}"
+    );
+    let run_options: Vec<&str> = help
+        .lines()
+        .skip_while(|l| *l != "Options of kausa run:")
+        .take_while(|l| !l.is_empty())
+        .collect();
+    assert!(
+        run_options
+            .iter()
+            .any(|l| l.starts_with("  --model-timeout <N>")
+                && l.contains("A call's total timeout in seconds (10-600, default 120)")),
+        "no --model-timeout line under 'Options of kausa run:': {help}"
+    );
+    let check_options: Vec<&str> = help
+        .lines()
+        .skip_while(|l| *l != "Options of kausa check-endpoint:")
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .collect();
+    for flag in [
+        "--endpoint <URL>",
+        "--model <NAME>",
+        "--api-key-file <PATH>",
+        "--allow-http",
+        "--no-json-schema",
+        "--model-timeout <N>",
+    ] {
+        assert!(
+            check_options.iter().any(|l| l.contains(flag)),
+            "{flag} is not under 'Options of kausa check-endpoint:': {help}"
+        );
+    }
+    for flag in RUN_ONLY {
+        assert!(
+            !check_options.iter().any(|l| l.contains(flag)),
+            "{flag} is under 'Options of kausa check-endpoint:': {help}"
+        );
+    }
+    assert!(help.lines().all(|l| l.len() <= 84), "{help}");
+}
+
+/// A fake model endpoint on localhost: answers every request with `response` and keeps each
+/// whole request.
+struct FakeEndpoint {
+    port: u16,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl FakeEndpoint {
+    fn start(response: String) -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let port = listener.local_addr().expect("an address").port();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = std::sync::Arc::clone(&requests);
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut request = Vec::new();
+                let mut buffer = vec![0; 65536];
+                loop {
+                    let n = stream.read(&mut buffer).unwrap_or(0);
+                    request.extend_from_slice(&buffer[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(str::to_owned)
+                            })
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                kept.lock()
+                    .expect("the requests")
+                    .push(String::from_utf8_lossy(&request).into_owned());
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Self { port, requests }
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/v1", self.port)
+    }
+
+    fn origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("the requests").clone()
+    }
+}
+
+fn http_reply(status: &str, headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\n\
+         connection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// A chat completion whose content is a valid explanation, with its token counts.
+fn valid_completion() -> String {
+    let content = serde_json::json!({
+        "summary": "deployment-1 in namespace-1 crashes: namespace-1_URL is not set.",
+        "cause": "container-1 exits with code 1.",
+        "steps": ["Set the variable."],
+        "confidence": "high",
+    })
+    .to_string();
+    let body = serde_json::json!({
+        "choices": [{"message": {"content": content}}],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 30},
+    });
+    http_reply("200 OK", "", &body.to_string())
+}
+
+/// Runs `kausa check-endpoint --endpoint <url> --model example-model` and `rest`, with `key` in
+/// `KAUSA_API_KEY` when given.
+fn check_against(url: &str, rest: &[&str], key: Option<&str>) -> Output {
+    let mut command = command();
+    command.args([
+        "check-endpoint",
+        "--endpoint",
+        url,
+        "--model",
+        "example-model",
+        "--allow-http",
+    ]);
+    command.args(rest);
+    if let Some(key) = key {
+        command.env("KAUSA_API_KEY", key);
+    }
+    command.output().expect("the kausa binary should start")
+}
+
+/// The one line the check printed, parsed.
+fn check_line(output: &Output) -> serde_json::Value {
+    let text = stdout(output);
+    assert_eq!(text.lines().count(), 1, "not one line: {text}");
+    assert!(text.ends_with('\n'), "{text}");
+    let line: serde_json::Value = serde_json::from_str(text).expect("a JSON line");
+    assert_eq!(line["msg"], "endpoint check", "{text}");
+    line
+}
+
+/// The fields every `endpoint check` line has, beside `ts`, `level` and `msg`.
+const CHECK_FIELDS: [&str; 22] = [
+    "answer_valid",
+    "api_key",
+    "authenticated",
+    "cause",
+    "class",
+    "connected",
+    "detail",
+    "endpoint",
+    "hint",
+    "json_schema",
+    "latency_ms",
+    "model",
+    "model_found",
+    "prompt_version",
+    "reason",
+    "request_accepted",
+    "result",
+    "retry_after_seconds",
+    "status",
+    "timeout_seconds",
+    "tokens_in",
+    "tokens_out",
+];
+
+fn assert_fields(line: &serde_json::Value, case: &str) {
+    let object = line.as_object().expect("an object");
+    let mut names: Vec<&str> = object.keys().map(String::as_str).collect();
+    names.retain(|n| !["ts", "level", "msg"].contains(n));
+    names.sort_unstable();
+    assert_eq!(names, CHECK_FIELDS, "{case}: the fields of the line");
+    assert!(line["latency_ms"].is_u64(), "{case}: {line}");
+    assert_eq!(line["prompt_version"], "2", "{case}: {line}");
+}
+
+/// The steps of a line: connected, authenticated, model_found, request_accepted, answer_valid.
+fn steps(line: &serde_json::Value) -> [serde_json::Value; 5] {
+    [
+        line["connected"].clone(),
+        line["authenticated"].clone(),
+        line["model_found"].clone(),
+        line["request_accepted"].clone(),
+        line["answer_valid"].clone(),
+    ]
+}
+
+fn golden(name: &str) -> serde_json::Value {
+    let path = format!(
+        "{}/tests/golden/check-endpoint-request-{name}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(path).expect("a golden file");
+    serde_json::from_str(&text).expect("JSON")
+}
+
+/// The body of a request the fake endpoint kept.
+fn body_of(request: &str) -> serde_json::Value {
+    let body = request.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+    serde_json::from_str(body).expect("a JSON body")
+}
+
+#[test]
+fn a_passing_check_exits_0_with_every_step_proven() {
+    use serde_json::{Value, json};
+    let endpoint = FakeEndpoint::start(valid_completion());
+    let output = check_against(&endpoint.url(), &[], None);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+    let line = check_line(&output);
+    assert_fields(&line, "pass");
+    assert_eq!(line["level"], "info");
+    assert_eq!(line["result"], "ok");
+    let t = Value::Bool(true);
+    assert_eq!(
+        steps(&line),
+        [t.clone(), t.clone(), t.clone(), t.clone(), t]
+    );
+    for field in [
+        "cause",
+        "class",
+        "reason",
+        "hint",
+        "detail",
+        "retry_after_seconds",
+    ] {
+        assert_eq!(line[field], Value::Null, "{field}: {line}");
+    }
+    assert_eq!(line["status"], 200);
+    assert_eq!(line["endpoint"], json!(endpoint.origin()));
+    assert_eq!(line["model"], "example-model");
+    assert_eq!(line["json_schema"], true);
+    assert_eq!(line["timeout_seconds"], 120);
+    assert_eq!(line["api_key"], false);
+    assert_eq!(
+        (line["tokens_in"].clone(), line["tokens_out"].clone()),
+        (json!(120), json!(30))
+    );
+    // Never the answer's text.
+    assert!(!stdout(&output).contains("Set the variable"), "{line}");
+    // One request, to the chat completions path, no key, the golden body.
+    let requests = endpoint.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].starts_with("POST /v1/chat/completions "),
+        "{}",
+        requests[0].lines().next().unwrap_or_default()
+    );
+    assert!(!requests[0].to_ascii_lowercase().contains("authorization:"));
+    assert_eq!(body_of(&requests[0]), golden("json-schema"));
+}
+
+#[test]
+fn the_check_sends_the_golden_body_in_both_output_modes() {
+    for (flags, name, json_schema) in [
+        (&[][..], "json-schema", true),
+        (&["--no-json-schema"][..], "instructions", false),
+    ] {
+        let endpoint = FakeEndpoint::start(valid_completion());
+        let output = check_against(&endpoint.url(), flags, None);
+        assert_eq!(output.status.code(), Some(0), "{name}");
+        assert_eq!(check_line(&output)["json_schema"], json_schema, "{name}");
+        let requests = endpoint.requests();
+        assert_eq!(requests.len(), 1, "{name}");
+        assert_eq!(body_of(&requests[0]), golden(name), "{name}");
+    }
+}
+
+#[test]
+fn a_failed_check_exits_1_and_names_the_step_that_failed() {
+    use serde_json::{Value, json};
+    let n = Value::Null;
+    let (t, f) = (Value::Bool(true), Value::Bool(false));
+    let refusal = json!({"choices": [{"message": {"content": null, "refusal": "REFUSAL-CANARY"},
+                                      "finish_reason": "stop"}]})
+    .to_string();
+    let not_kausa = json!({"choices": [{"message": {"content": "hello"}}]}).to_string();
+    // (case, response, cause, class, status, steps)
+    type Case = (&'static str, String, &'static str, Value, Value, [Value; 5]);
+    let cases: Vec<Case> = vec![
+        (
+            "404",
+            http_reply(
+                "404 Not Found",
+                "",
+                r#"{"error":{"message":"The model does not exist","code":"model_not_found"}}"#,
+            ),
+            "not_found",
+            json!("configuration"),
+            json!(404),
+            [t.clone(), n.clone(), f.clone(), n.clone(), n.clone()],
+        ),
+        (
+            "401",
+            http_reply("401 Unauthorized", "", "{}"),
+            "key",
+            json!("configuration"),
+            json!(401),
+            [t.clone(), f.clone(), n.clone(), n.clone(), n.clone()],
+        ),
+        (
+            "429 quota",
+            http_reply(
+                "429 Too Many Requests",
+                "",
+                r#"{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}"#,
+            ),
+            "quota",
+            json!("configuration"),
+            json!(429),
+            [t.clone(), n.clone(), n.clone(), n.clone(), n.clone()],
+        ),
+        (
+            "400",
+            http_reply("400 Bad Request", "", "{}"),
+            "rejected",
+            json!("rejected"),
+            json!(400),
+            [t.clone(), n.clone(), n.clone(), f.clone(), n.clone()],
+        ),
+        (
+            "413",
+            http_reply("413 Payload Too Large", "", ""),
+            "too_large",
+            json!("rejected"),
+            json!(413),
+            [t.clone(), n.clone(), n.clone(), f.clone(), n.clone()],
+        ),
+        (
+            "503",
+            http_reply("503 Service Unavailable", "", ""),
+            "server_error",
+            json!("transient"),
+            json!(503),
+            [t.clone(), n.clone(), n.clone(), n.clone(), n.clone()],
+        ),
+        (
+            "200 OK",
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\
+             connection: close\r\n\r\nOK"
+                .to_owned(),
+            "not_an_answer",
+            json!("configuration"),
+            json!(200),
+            [t.clone(), t.clone(), t.clone(), t.clone(), f.clone()],
+        ),
+        (
+            "refusal",
+            http_reply("200 OK", "", &refusal),
+            "no_content",
+            json!("rejected"),
+            json!(200),
+            [t.clone(), t.clone(), t.clone(), t.clone(), f.clone()],
+        ),
+        (
+            "invalid",
+            http_reply("200 OK", "", &not_kausa),
+            "invalid_answer",
+            Value::Null,
+            json!(200),
+            [t.clone(), t.clone(), t.clone(), t.clone(), f.clone()],
+        ),
+    ];
+    for (case, response, cause, class, status, expected) in cases {
+        let endpoint = FakeEndpoint::start(response);
+        let output = check_against(&endpoint.url(), &[], None);
+        assert_eq!(output.status.code(), Some(1), "{case}: {}", stderr(&output));
+        assert_eq!(stderr(&output), "", "{case}");
+        let line = check_line(&output);
+        assert_fields(&line, case);
+        assert_eq!(line["level"], "error", "{case}");
+        assert_eq!(line["result"], "failed", "{case}");
+        assert_eq!(line["cause"], cause, "{case}");
+        assert_eq!(line["class"], class, "{case}");
+        assert_eq!(line["status"], status, "{case}");
+        assert_eq!(steps(&line), expected, "{case}: {line}");
+        assert!(line["reason"].is_string(), "{case}: {line}");
+        assert!(line["hint"].is_string(), "{case}: {line}");
+        assert_eq!(line["retry_after_seconds"], Value::Null, "{case}");
+        assert_eq!(line["endpoint"], json!(endpoint.origin()), "{case}");
+        assert!(
+            !stdout(&output).contains("REFUSAL-CANARY"),
+            "{case}: the model's text"
+        );
+        // One request: the check never retries.
+        assert_eq!(endpoint.requests().len(), 1, "{case}");
+    }
+}
+
+#[test]
+fn a_failed_check_carries_the_reason_hint_and_detail_run_logs() {
+    use serde_json::{Value, json};
+    let body = r#"{"error":{"message":"The model does not exist","code":"model_not_found"}}"#;
+    let endpoint = FakeEndpoint::start(http_reply("404 Not Found", "", body));
+    let line = check_line(&check_against(&endpoint.url(), &[], None));
+    assert_eq!(line["reason"], "the endpoint answered 404 Not Found");
+    assert_eq!(
+        line["hint"],
+        "the model or the URL is wrong, or the model is no longer offered: check model.name \
+         (--model) and that model.endpoint is the base URL"
+    );
+    assert_eq!(line["detail"], body);
+    assert_eq!(
+        (line["tokens_in"].clone(), line["tokens_out"].clone()),
+        (Value::Null, Value::Null)
+    );
+
+    let not_kausa = json!({"choices": [{"message": {"content": "hello"}}]}).to_string();
+    let endpoint = FakeEndpoint::start(http_reply("200 OK", "", &not_kausa));
+    let line = check_line(&check_against(&endpoint.url(), &[], None));
+    assert!(
+        line["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("invalid answer: ")),
+        "{line}"
+    );
+    assert_eq!(
+        line["hint"],
+        "the model answered, but not with kausa's JSON: try another model, or \
+         model.jsonSchema=false (--no-json-schema) if the server ignores response_format"
+    );
+    assert_eq!(line["detail"], Value::Null);
+    assert!(!line.to_string().contains("hello"), "the answer's text");
+
+    let refusal = json!({"choices": [{"message": {"content": null},
+                                      "finish_reason": "length"}]})
+    .to_string();
+    let endpoint = FakeEndpoint::start(http_reply("200 OK", "", &refusal));
+    let line = check_line(&check_against(&endpoint.url(), &[], None));
+    assert_eq!(
+        line["reason"],
+        "the model answered with no content: it ran out of output tokens"
+    );
+    assert_eq!(line["detail"], Value::Null);
+
+    // Without the JSON schema, the hint of a refused request blames no response_format.
+    let endpoint = FakeEndpoint::start(http_reply("400 Bad Request", "", "{}"));
+    let line = check_line(&check_against(&endpoint.url(), &["--no-json-schema"], None));
+    assert_eq!(line["hint"], "the endpoint refused the request: see detail");
+}
+
+#[test]
+fn a_check_shows_the_clamped_retry_after_and_never_waits_for_it() {
+    let endpoint = FakeEndpoint::start(http_reply(
+        "429 Too Many Requests",
+        "retry-after: 99999\r\n",
+        "{}",
+    ));
+    let start = std::time::Instant::now();
+    let output = check_against(&endpoint.url(), &[], None);
+    assert!(start.elapsed() < std::time::Duration::from_secs(20));
+    assert_eq!(output.status.code(), Some(1));
+    let line = check_line(&output);
+    assert_eq!(line["cause"], "rate_limited");
+    assert_eq!(line["class"], "transient");
+    assert_eq!(line["retry_after_seconds"], 600);
+    assert_eq!(endpoint.requests().len(), 1, "a retry was sent");
+}
+
+#[test]
+fn a_closed_port_fails_to_connect() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("a free port")
+        .port();
+    let output = check_against(&format!("http://127.0.0.1:{port}/v1"), &[], None);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let line = check_line(&output);
+    assert_fields(&line, "closed port");
+    assert_eq!(line["cause"], "connection");
+    assert_eq!(line["class"], "transient");
+    assert_eq!(line["status"], serde_json::Value::Null);
+    let n = serde_json::Value::Null;
+    assert_eq!(
+        steps(&line),
+        [
+            serde_json::Value::Bool(false),
+            n.clone(),
+            n.clone(),
+            n.clone(),
+            n
+        ]
+    );
+    assert_eq!(line["endpoint"], format!("http://127.0.0.1:{port}"));
+}
+
+#[test]
+fn the_model_timeout_is_the_checks_timeout() {
+    let endpoint = FakeEndpoint::start(valid_completion());
+    for value in ["10", "600"] {
+        let output = check_against(&endpoint.url(), &["--model-timeout", value], None);
+        assert_eq!(output.status.code(), Some(0), "{value}");
+        assert_eq!(
+            check_line(&output)["timeout_seconds"],
+            value.parse::<u64>().expect("a number"),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn the_key_and_the_urls_user_information_never_reach_the_output() {
+    // Built with concat! so that a secret scanner does not take the fake key for a real one.
+    let key = concat!("kausa-sentinel-", "key-4Rt8Wq");
+    let password = "kausa-sentinel-password-9Kd2";
+    let dir = notify_dir("check-key");
+    let key_file = file(&dir, "key", &format!("  {key}\n"));
+    let blank_file = file(&dir, "blank", " \n");
+    // A pass, a refusal and a failed connection, with the key from the file or the environment.
+    let endpoint = FakeEndpoint::start(valid_completion());
+    let refusing = FakeEndpoint::start(http_reply(
+        "401 Unauthorized",
+        "",
+        r#"{"error":{"message":"Incorrect API key provided"}}"#,
+    ));
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("a free port")
+        .port();
+    let with_user = |port: u16| format!("http://user:{password}@127.0.0.1:{port}/v1");
+    for (case, port, code) in [
+        ("pass", endpoint.port, 0),
+        ("refused", refusing.port, 1),
+        ("closed", closed, 1),
+    ] {
+        for from_file in [true, false] {
+            let output = if from_file {
+                check_against(&with_user(port), &["--api-key-file", &key_file], None)
+            } else {
+                check_against(&with_user(port), &[], Some(key))
+            };
+            assert_eq!(output.status.code(), Some(code), "{case}");
+            for (stream, text) in [("stdout", stdout(&output)), ("stderr", stderr(&output))] {
+                assert!(!text.contains(key), "{case}: the API key is in {stream}");
+                assert!(
+                    !text.contains(password),
+                    "{case}: the URL's password is in {stream}"
+                );
+                assert!(
+                    !text.contains("user:"),
+                    "{case}: the URL's user name is in {stream}"
+                );
+            }
+            let line = check_line(&output);
+            assert_eq!(line["api_key"], true, "{case}");
+            assert_eq!(
+                line["endpoint"],
+                format!("http://127.0.0.1:{port}"),
+                "{case}"
+            );
+        }
+    }
+    // The key went to the endpoint, as a bearer token, and nowhere else.
+    let requests = endpoint.requests();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert!(
+            request.to_ascii_lowercase().contains(&format!(
+                "authorization: bearer {}",
+                key.to_ascii_lowercase()
+            )),
+            "no bearer key"
+        );
+    }
+    // A key file of white space is no key.
+    let endpoint = FakeEndpoint::start(valid_completion());
+    let output = check_against(&endpoint.url(), &["--api-key-file", &blank_file], None);
+    assert_eq!(check_line(&output)["api_key"], false);
+    assert!(
+        !endpoint.requests()[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer")
+    );
+}
+
+// A failed write exits with 2, as for the help (Linux only: /dev/full).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_check_that_cannot_write_its_line_exits_with_2() {
+    let endpoint = FakeEndpoint::start(valid_completion());
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full should open for writing");
+    let output = command()
+        .args([
+            "check-endpoint",
+            "--endpoint",
+            &endpoint.url(),
+            "--model",
+            "example-model",
+            "--allow-http",
+        ])
+        .stdout(full)
+        .output()
+        .expect("the kausa binary should start");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).starts_with("error: cannot write to stdout: "),
+        "{}",
+        stderr(&output)
+    );
+}

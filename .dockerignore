@@ -13,8 +13,10 @@
 !LICENSE-MIT
 !LICENSE-APACHE
 !LICENSES/
-# The rules reference, which the tests of src/detect.rs and src/redact.rs compare with the code.
+# The rules reference, which the tests of src/detect.rs and src/redact.rs compare with the code,
+# and the command-line reference, whose table of endpoint causes src/model/pure.rs compares.
 !docs/reference/rules.md
+!docs/reference/command-line.md
 # The fuzz targets and the image ClusterFuzzLite builds them in (.clusterfuzzlite/Dockerfile
 # uses this same context).
 !fuzz/

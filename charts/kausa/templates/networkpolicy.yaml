@@ -57,3 +57,38 @@ spec:
         {{- toYaml $ports | nindent 8 }}
     {{- end }}
 {{- end }}
+{{- if and .Values.networkPolicy.enabled (include "kausa.endpointCheck" .) }}
+---
+{{- /*
+The helm test Pod's own policy (docs/adr/0020-check-the-endpoint.md): an ordinary object, not a
+hook, so that it exists before any test Pod starts and helm uninstall deletes it. No ingress, and
+egress to DNS and the model endpoint only, as kausa's policy renders them: no API-server or webhook
+rule. kausa.validate refuses an empty networkPolicy.endpoint.to under this condition.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kausa.endpointCheckName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kausa.endpointCheckLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kausa.endpointCheckSelectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  egress:
+    # DNS, to resolve the endpoint's name.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The model endpoint.
+    - to:
+        {{- toYaml .Values.networkPolicy.endpoint.to | nindent 8 }}
+      {{- with .Values.networkPolicy.endpoint.ports }}
+      ports:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

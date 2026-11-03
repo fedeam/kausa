@@ -116,6 +116,53 @@ file is a float64, which toString writes in scientific notation: it is written a
 {{- end }}
 
 {{/*
+The endpoint check (docs/adr/0020-check-the-endpoint.md). model.timeoutSeconds and endpointCheck
+are read nil-safe with hasKey, like the history map: a release made before them (helm upgrade
+--reuse-values from v0.4.1) or --set endpointCheck=null has neither, and renders the defaults.
+*/}}
+
+{{/* model.timeoutSeconds as a string, 120 when missing or null; kausa.validate allows 10-600. A
+number from a values file is a float64: toString of 120.0 is 120. */}}
+{{- define "kausa.modelTimeout" -}}
+{{- $m := .Values.model | default dict }}
+{{- if and (hasKey $m "timeoutSeconds") (not (kindIs "invalid" $m.timeoutSeconds)) }}{{ toString $m.timeoutSeconds }}{{ else }}120{{ end }}
+{{- end }}
+
+{{/* endpointCheck.enabled as a string, true when missing or null; kausa.validate allows only true
+and false, and refuses an endpointCheck that is set but neither a map nor null. */}}
+{{- define "kausa.endpointCheckEnabled" -}}
+{{- $e := .Values.endpointCheck | default dict }}
+{{- if and (kindIs "map" $e) (hasKey $e "enabled") (not (kindIs "invalid" $e.enabled)) }}{{ toString $e.enabled }}{{ else }}true{{ end }}
+{{- end }}
+
+{{/* The helm test Pod and its NetworkPolicy render with endpointCheck.enabled, an endpoint and
+outside dry-run. */}}
+{{- define "kausa.endpointCheck" -}}
+{{- if and (eq (include "kausa.endpointCheckEnabled" .) "true") .Values.model.endpoint (not .Values.dryRun) }}true{{ end }}
+{{- end }}
+
+{{/* The name of the helm test Pod and of its NetworkPolicy. */}}
+{{- define "kausa.endpointCheckName" -}}
+{{- printf "%s-endpoint-check" (include "kausa.fullname" .) }}
+{{- end }}
+
+{{/* The labels the test's NetworkPolicy selects the test Pod by. */}}
+{{- define "kausa.endpointCheckSelectorLabels" -}}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: endpoint-check
+{{- end }}
+
+{{/* The test Pod's labels. Never app.kubernetes.io/name: no selector built on
+kausa.selectorLabels (the Service, the PodDisruptionBudget, the anti-affinity, kausa's
+NetworkPolicy) may match the test Pod. */}}
+{{- define "kausa.endpointCheckLabels" -}}
+{{ include "kausa.endpointCheckSelectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 The rules of the ClusterRole (rbac.scope=cluster) and of every Role (rbac.scope=namespaced): the
 permissions in docs/reference/permissions.md, and nothing else. A later feature adds its rules
 only here, so that both scopes grant the same.
@@ -159,8 +206,9 @@ only here, so that both scopes grant the same.
 Refuses to render with a reason. The rbac checks come first, in this order: the scope, the list
 against the scope, every name, the first repeat, and the count. rbac is read nil-safe: a v0.1
 release's stored values and --set rbac=null have no rbac map, and must reach the "not set"
-message, not a nil-pointer error. history.days and replicaCount come next, with the history on
-or off, and the notification checks last, only with notifications.enabled.
+message, not a nil-pointer error. history.days, replicaCount, model.timeoutSeconds, endpointCheck
+(a map or null) and endpointCheck.enabled come next, with or without an endpoint, and the
+notification checks last, only with notifications.enabled.
 */}}
 {{- define "kausa.validate" -}}
 {{- $rbac := .Values.rbac | default dict }}
@@ -215,6 +263,18 @@ or off, and the notification checks last, only with notifications.enabled.
 {{- $replicas := include "kausa.replicas" . }}
 {{- if not (has $replicas (list "1" "2")) }}
 {{- fail (printf "replicaCount must be 1 or 2, not '%s': a second replica is a standby that takes over through a Lease (docs/adr/0019-high-availability.md)" $replicas) }}
+{{- end }}
+{{- $timeout := include "kausa.modelTimeout" . }}
+{{- if not (regexMatch "^([1-9][0-9]|[1-5][0-9][0-9]|600)$" $timeout) }}
+{{- fail (printf "model.timeoutSeconds must be a whole number of seconds from 10 to 600, not '%s'" $timeout) }}
+{{- end }}
+{{- $e := .Values.endpointCheck }}
+{{- if and (hasKey .Values "endpointCheck") (not (kindIs "invalid" $e)) (not (kindIs "map" $e)) }}
+{{- fail (printf "endpointCheck must be a map with enabled: true or false, not '%s'" (toString $e)) }}
+{{- end }}
+{{- $check := include "kausa.endpointCheckEnabled" . }}
+{{- if not (has $check (list "true" "false")) }}
+{{- fail (printf "endpointCheck.enabled must be true or false, not '%s'" $check) }}
 {{- end }}
 {{- if include "kausa.notifies" . }}
 {{- $n := .Values.notifications | default dict }}

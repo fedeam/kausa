@@ -95,7 +95,13 @@ chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availabilit
 provider over HTTPS (the distroless CA bundle with rustls) was tried on 2026-10-30. Starts were
 measured in kind with up to 10,000 Pods ([Thousands of
 Pods](docs/research/2026-10-28-thousands-of-pods.md), [List
-pages](docs/research/2026-11-02-list-pages.md)). Not tested yet: long runs
+pages](docs/research/2026-11-02-list-pages.md)). Since v0.5 (not released as of 2026-11-02),
+`kausa check-endpoint`, which the chart runs as its `helm test`, sends one synthetic request to
+the endpoint on demand, and `kausa run` holds its calls behind a breaker while the endpoint fails
+([0020. Check the model endpoint on demand with `kausa check-endpoint` and `helm test`, and hold
+calls behind a breaker while it fails](docs/adr/0020-check-the-endpoint.md)); the breaker and the
+test Pod are checked by unit tests and the renders, and the kind test that exercises them runs in
+CI. Not tested yet: long runs
 ([Architecture](docs/explanation/architecture.md)).
 
 **Who controls kausa's inputs.** Anyone who can create or change a workload in a watched namespace
@@ -103,7 +109,11 @@ controls event messages, log lines, container and volume names, image references
 probe paths and node selector, affinity and toleration keys, and through them the Pod status messages the kubelet writes (an eviction names the container or the
 `emptyDir` volume). In a shared
 cluster that includes tenants who are not cluster administrators. The language model endpoint
-controls the answers. kausa treats both as untrusted. With `replicaCount: 2`, whoever can write
+controls the answers, and also its error bodies and `Retry-After` headers: a forged `401`, quota
+code or `503` with `Retry-After: 600` pauses kausa's calls for up to 30 minutes at a time (it
+could already refuse every call), visible in the gauge `kausa_endpoint_state`, the example alert
+of [Install kausa with Helm](docs/how-to/install-with-helm.md#verify) and the `endpoint
+unavailable` log line. kausa treats both as untrusted. With `replicaCount: 2`, whoever can write
 Leases in the release namespace (the default `edit` and `admin` roles there, as the reviewer of
 [0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md) found in kind, Kubernetes v1.36.4; not re-run since)
 decides which replica acts, and can stop the watches in every replica: by holding kausa's Lease
@@ -166,6 +176,9 @@ kausa must:
   and writes it only as plain text in an Event, its own log and, when they are on, the history and
   the notification ([0022. Pass the model's answer through the pattern redaction rules before it
   is written anywhere, and redact the query of an HTTP request line](docs/adr/0022-redact-the-answer.md)).
+  The endpoint's error body and `Retry-After` go through a pure parser, fuzzed
+  (`fuzz/fuzz_targets/endpoint_error.rs`), that reads fixed keys only and lets out only a cause
+  kausa defines and a delay clamped to 30-600 seconds; the start of the body stays in kausa's log.
 - **Bound its cost and its resources.** A call budget per hour and per day, a cap on input tokens
   per request and on output tokens, deduplication of repeated incidents, one request at a time
   and a bounded queue, so that a tenant who makes Pods fail on purpose cannot run up the bill or
@@ -173,7 +186,17 @@ kausa must:
   ([0021](docs/adr/0021-refill-the-call-budget.md)): each start, and each takeover with two
   replicas, allows at most 3 calls at once, then one every `3600 / callsPerHour` seconds. The
   budget and the deduplication cache live in memory, with nothing stored or read back: a restart
-  empties the cache but does not refill the budget beyond those 3 calls. With two replicas each
+  empties the cache but does not refill the budget beyond those 3 calls. In front of the budget,
+  a breaker stops the calls while the endpoint fails: 3 transient failures or 1 configuration
+  error, then one probe per hold, from 1 minute up to 30, about 54 calls a day at most during an
+  outage instead of up to the daily cap. Tenants cannot open it through the causes kausa
+  classifies as the request's: `rejected`, `too_large` and `no_content` (a refusal, a filtered or
+  an out-of-tokens completion) never move it, and an answer that fails validation counts as an
+  answer. This rests on a hypothesis: within the input cap (6000 tokens by default) and
+  `max_tokens` 800, content does not make a provider time out, answer `5xx` or a `2xx` with no
+  `choices` array, and no firewall in front of the endpoint answers `403` to kausa's requests. If
+  it does, one tenant incident opens or reopens the breaker for at least 60 seconds; the next
+  probe is another incident, and each incident is still called at most twice. With two replicas each
   process keeps its own windows across its own terms as leader, so each process starts at most
   `budget.callsPerHour` calls in any hour and `budget.callsPerDay` in any day. Watches keep small
   records instead of whole objects; log
@@ -192,7 +215,15 @@ kausa must:
   webhook URL and token reach it only as files mounted from a Secret, never as a flag value or an
   environment variable; kausa posts only to that URL, sends the token only to it, and never logs
   either one (the `started` line shows the host alone) or puts it in an error, an Event or a
-  metric.
+  metric. A provider's error body may echo a masked key (hypothesis): its start is in kausa's log
+  as `detail`, and now in the `helm test` Pod's log too.
+- **Check the endpoint without new access.** The `helm test` Pod holds the API key, as kausa's
+  Pod does, with no ServiceAccount token (the namespace's `default` identity, never kausa's),
+  no Service variables, and, with the NetworkPolicy on, egress to DNS and the endpoint only.
+  Whoever can run `helm test` can already read the release (Helm 3 stores it in Secrets in the
+  release namespace) and create Pods there, so could already mount the API-key Secret: the test
+  grants nothing new. It reads nothing from the cluster, and its request carries no cluster data
+  ([Data sent to the provider](docs/reference/data-sent-to-the-provider.md#the-endpoint-check)).
 - **Run with the least privilege in the pod too.** A minimal image with no shell, a numeric
   non-root user, a read-only root filesystem, no capabilities, no privilege escalation, the
   `RuntimeDefault` seccomp profile and declared resource limits. The chart offers a NetworkPolicy
@@ -247,6 +278,12 @@ kausa must:
   `kausa_explanation_queue_length` tell any peer that `networkPolicy.metricsFrom` allows when the
   budget is spent and how many incidents wait, with no namespace, workload or other name.
 
+- **Explanations can come late after an outage.** While the breaker holds, incidents wait, and are
+  explained up to one hold (30 minutes) after the endpoint is back, their logs read only then; a
+  Pod deleted meanwhile is explained without its log. With 16 waiting, the oldest is skipped
+  (`endpoint_unavailable`). A restart resets the breaker, as it resets the cache.
+- **`helm test` is outside the budget.** Each run is one call to the provider, which may bill it,
+  and no cap of kausa's counts it. A passing test does not close the running kausa's breaker.
 - **Redaction has false negatives.** A secret in a format no rule knows, split across lines or
   encoded, can reach the provider. Every rule ships with a test corpus, and `--dry-run` shows the
   exact requests before a provider is enabled. Where any leak is unacceptable, use a model served

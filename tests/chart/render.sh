@@ -9,7 +9,8 @@
 # (docs/adr/0021-refill-the-call-budget.md), and every refusal of kausa.validate with its exact
 # message. It also checks, with helm alone, that the detections of v0.5's coverage gaps need no new
 # permission, and the seeded failure the kind test adds for them (tests/e2e/failures.yaml and
-# tests/e2e/run.sh).
+# tests/e2e/run.sh), and the endpoint check's helm test Pod, its NetworkPolicy and
+# model.timeoutSeconds (docs/adr/0020-check-the-endpoint.md).
 # Needs helm, git and coreutils only, and never contacts a cluster (KUBECONFIG points nowhere).
 # Run it from anywhere: tests/chart/render.sh. It prints one line per check and exits 1 if any
 # failed.
@@ -20,11 +21,13 @@
 # names a git ref with the chart before notifications (for example 13cfd4d, the history's merge;
 # unset by default, because the chart's version labels differ after a release); when it is set and
 # in the clone, renders with notifications off are compared with its renders byte for byte (with
-# rollouts=false, its --no-rollouts arg left out). KAUSA_CHART_V03 names a git ref with the v0.3
-# chart (default v0.3.0); when the ref is in the clone, NOTES.txt's scope paragraph with
-# rollouts=false is compared with that chart's. KAUSA_CHART_PRE_HA names a git ref with the chart
-# before replicaCount (unset by default, for the same reason as KAUSA_CHART_PREVIOUS); when it is
-# set and in the clone, the one-replica renders are compared with its renders byte for byte.
+# rollouts=false, its --no-rollouts arg left out, and without the endpoint check's documents and
+# --model-timeout arg). KAUSA_CHART_V03 names a git ref with the v0.3 chart (default v0.3.0);
+# when the ref is in the clone, NOTES.txt's scope paragraph with rollouts=false is compared with
+# that chart's. KAUSA_CHART_PRE_HA names a git ref with the chart before replicaCount (unset by
+# default, for the same reason as KAUSA_CHART_PREVIOUS); when it is set and in the clone, the
+# one-replica renders are compared with its renders byte for byte (without the endpoint check's
+# documents and --model-timeout arg).
 # HELM names the binary.
 # No pipefail: grep -q ends a pipe early, and its writer's SIGPIPE is not a failure.
 set -eu
@@ -37,6 +40,8 @@ PREVIOUS=${KAUSA_CHART_PREVIOUS:-}
 KUBE_VERSION=1.36.0
 RELEASE=kausa
 NAMESPACE=kausa-system
+# The helm test Pod of the endpoint check and its NetworkPolicy (docs/adr/0020-check-the-endpoint.md).
+CHECK_POD=kausa-endpoint-check
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 export KUBECONFIG=/nonexistent/kausa-chart-tests/kubeconfig
@@ -100,6 +105,22 @@ expected_cluster_scoped() {
 }
 
 count_docs() { docs "$@" | grep -c '^%%$' || true; }
+
+# without_endpoint_check: the render on stdin without what docs/adr/0020-check-the-endpoint.md
+# added: the documents named $CHECK_POD (the helm test Pod and its NetworkPolicy), each with its
+# '---' line, and the Deployment's --model-timeout arg with its value. For the byte-for-byte
+# comparisons with charts from before it, as --no-rollouts is left out for those before 0018.
+without_endpoint_check() {
+  awk -v nm="$CHECK_POD" '
+    function flush() { if (!drop) printf "%s", buf; buf = ""; drop = 0; meta = 0 }
+    /^---/ { flush() }
+    skip { skip = 0; next }
+    /^ *- --model-timeout$/ { skip = 1; next }
+    { buf = buf $0 "\n" }
+    /^[^ #]/ { meta = ($0 == "metadata:") }
+    meta && ($0 == "  name: " nm || $0 == "  name: \"" nm "\"") { drop = 1 }
+    END { flush() }'
+}
 
 # section KEY: the lines of a top-level key of the documents on stdin, spaces removed.
 section() {
@@ -1387,12 +1408,13 @@ if [ -n "$PREVIOUS" ] && git -C "$ROOT" rev-parse --verify --quiet "$PREVIOUS^{c
       if render "$out" "$RELEASE" "$WORK/previous/charts/kausa" "${scope_args[@]}" \
         ${values[@]+"${values[@]}"} && render "$now" "$RELEASE" "$CHART" "${scope_args[@]}" \
         ${values[@]+"${values[@]}"} "${ROLLOUTS_OFF[@]}"; then
-        # The chart before notifications had no Deployment watch: compare with it off.
-        grep -vx -- ' *- --no-rollouts' "$now" >"$now.v0.3" || true
+        # The chart before notifications had no Deployment watch: compare with it off; nor the
+        # endpoint check, whose documents and --model-timeout arg are left out.
+        { grep -vx -- ' *- --no-rollouts' "$now" || true; } | without_endpoint_check >"$now.v0.3"
         if cmp -s "$out" "$now.v0.3"; then
           ok "$scope/$name renders like $PREVIOUS"
         else
-          fail "$scope/$name renders unlike $PREVIOUS: $(diff "$out" "$now" | head -20)"
+          fail "$scope/$name renders unlike $PREVIOUS: $(diff "$out" "$now.v0.3" | head -20)"
         fi
       else
         fail "$scope/$name does not render here or in $PREVIOUS: $(cat "$out.err" "$now.err")"
@@ -1405,9 +1427,10 @@ fi
 
 # --- The webhook's egress rule ---
 
-# egress FILE: the egress section of the NetworkPolicy, as rendered.
+# egress FILE: the egress section of kausa's NetworkPolicy, as rendered (the endpoint check's
+# policy, docs/adr/0020-check-the-endpoint.md, is another document).
 egress() {
-  docs "$1" NetworkPolicy | awk '$0 == "  egress:" { on = 1; next } on && !/^    / { on = 0 } on'
+  docs "$1" NetworkPolicy "$NAMESPACE" kausa | awk '$0 == "  egress:" { on = 1; next } on && !/^    / { on = 0 } on'
 }
 # egress_rule FILE N: the Nth egress rule, spaces and quotes removed.
 egress_rule() {
@@ -2081,7 +2104,9 @@ if [ -n "$PRE_HA" ] &&
     out="$WORK/pre-ha-$set"
     if render "$out" "$RELEASE" "$WORK/pre-ha/charts/kausa" "${scope[@]}" \
       ${values[@]+"${values[@]}"}; then
-      check_same "$set-is-$PRE_HA" "$WORK/standby-$set-one" "$out"
+      # Without the endpoint check, which that chart did not have.
+      without_endpoint_check <"$WORK/standby-$set-one" >"$out.now"
+      check_same "$set-is-$PRE_HA" "$out.now" "$out"
     else
       fail "the $PRE_HA chart does not render $set: $(cat "$out.err")"
     fi
@@ -2407,6 +2432,591 @@ refuse budget-v0.1-checks-stay "model.name is required with model.endpoint" \
   --set budget.callsPerHour=360
 refuse budget-replicas-stay "$(not_replicas 3)" --set rbac.scope=cluster \
   --set budget.callsPerHour=360 --set replicaCount=3
+
+# --- Endpoint check (docs/adr/0020-check-the-endpoint.md) ---------------------------------------
+
+# Acceptance checks written before the chart change: model.timeoutSeconds (--model-timeout in the
+# Deployment), endpointCheck.enabled, the helm test Pod <fullname>-endpoint-check and, with the
+# NetworkPolicy on, its own ordinary policy of the same name; NOTES.txt; and the two refusals.
+# Blocks are compared row by row with indentation and quotes removed; lists are split into items
+# by the indentation of their first row.
+
+EP_NP=(--set networkPolicy.enabled=true --set 'networkPolicy.apiServer.cidrs[0]=192.0.2.1/32'
+  --set 'networkPolicy.endpoint.to[0].ipBlock.cidr=192.0.2.2/32'
+  --set 'networkPolicy.endpoint.ports[0].port=443'
+  --set 'networkPolicy.endpoint.ports[0].protocol=TCP')
+EP_NP_NOTIFY=(--set 'networkPolicy.notifications.to[0].ipBlock.cidr=198.51.100.0/24')
+bad_model_timeout() {
+  echo "model.timeoutSeconds must be a whole number of seconds from 10 to 600, not '$1'"
+}
+bad_endpoint_check() { echo "endpointCheck.enabled must be true or false, not '$1'"; }
+not_an_endpoint_check_map() {
+  echo "endpointCheck must be a map with enabled: true or false, not '$1'"
+}
+
+# ep_render NAME ARGS...: renders with rbac.scope=cluster into $WORK/ep-NAME (empty on failure).
+ep_render() {
+  local name=$1
+  shift
+  if ! render "$WORK/ep-$name" "$RELEASE" "${EP_CHART:-$CHART}" --set rbac.scope=cluster "$@"; then
+    fail "endpoint check, $name: does not render: $(cat "$WORK/ep-$name.err")"
+    : >"$WORK/ep-$name"
+  fi
+}
+
+# doc_of FILE KIND [NAME]: one document of the render, without the '%%' separator.
+doc_of() { docs "$1" "$2" "$NAMESPACE" "${3-}" | sed '/^%%$/d'; }
+
+# blocks KEY: every block on stdin that starts with a line 'KEY:' at any indentation, as rows
+# without the key's indentation, quotes and comments, each block followed by a line '%%'.
+blocks() {
+  awk -v key="$1" '
+    function done() { if (on) print "%%"; on = 0 }
+    {
+      if (on) {
+        if ($0 ~ /^ *$/) next
+        match($0, /^ */)
+        if (RLENGTH > ind) {
+          s = substr($0, ind + 1)
+          gsub(/"/, "", s)
+          if (s !~ /^ *#/) print s
+          next
+        }
+        done()
+      }
+      if ($0 ~ "^ *" key ":$") { on = 1; match($0, /^ */); ind = RLENGTH }
+    }
+    END { done() }'
+}
+
+# first_block KEY: the rows of the first such block, without the separator.
+first_block() { blocks "$1" | awk '$0 == "%%" { exit } { print }'; }
+
+# trimmed: the rows on stdin without their indentation.
+trimmed() { sed 's/^ *//'; }
+
+# joined: each block on stdin on one line, rows trimmed and joined by ' | ', sorted.
+joined() {
+  awk '$0 == "%%" { print row; row = ""; next }
+       { sub(/^ */, ""); row = row (row == "" ? "" : " | ") $0 }' | sort
+}
+
+# meta_map KEY: the rows of metadata.KEY (labels or annotations) of the document on stdin, quotes
+# removed, sorted.
+meta_map() {
+  awk -v key="$1" '
+    /^metadata:$/ { m = 1; next }
+    /^[^ ]/ { m = 0 }
+    m && $0 == "  " key ":" { on = 1; next }
+    m && on && /^    / { s = substr($0, 5); gsub(/"/, "", s); print s; next }
+    { on = 0 }' | sort
+}
+
+# items: the items of the list block on stdin (rows from first_block), one item per line, its rows
+# trimmed and joined by ' | '. An item starts at a row '- ' indented as the first row.
+items() {
+  awk 'NR == 1 { match($0, /^ */); ind = RLENGTH }
+       { match($0, /^ */); s = substr($0, RLENGTH + 1) }
+       RLENGTH == ind && s ~ /^- / { if (row != "") print row; row = s; next }
+       { row = row " | " s }
+       END { if (row != "") print row }'
+}
+
+# pod_args FILE: the Pod's container args, one per line, without '- ' and quotes.
+pod_args() { doc_of "$1" Pod "$CHECK_POD" | first_block args | trimmed | sed 's/^- //'; }
+
+# deployment_args FILE: the same for the Deployment.
+deployment_args() { args "$1" | sed 's/^- //' | tr -d '"'; }
+
+# Where the Pod and its policy render: with model.endpoint, without dryRun and with
+# endpointCheck.enabled (true, or missing); the policy also needs networkPolicy.enabled.
+since=$FAILURES
+for case in \
+  "defaults|0|0|1|" \
+  "endpoint|1|0|1|endpoint" \
+  "endpoint-no-key|1|0|1|endpoint-no-key" \
+  "dry|0|0|1|dry" \
+  "endpoint-dry|0|0|1|endpoint,dry" \
+  "endpoint-off|0|0|1|endpoint,off" \
+  "endpoint-off-string|0|0|1|endpoint,off-string" \
+  "endpoint-on-string|1|0|1|endpoint,on-string" \
+  "endpoint-no-map|1|0|1|endpoint,no-map" \
+  "endpoint-np|1|1|1|endpoint,np" \
+  "endpoint-np-off|0|0|1|endpoint,np,off" \
+  "dry-np|0|0|1|dry,np-api" \
+  "endpoint-np-notify|1|1|1|endpoint,np,notify"; do
+  IFS='|' read -r name pods policies deployments sets <<<"$case"
+  set_values=()
+  case ",$sets," in *,endpoint,*) set_values+=("${ENDPOINT[@]}") ;; esac
+  case ",$sets," in *,endpoint-no-key,*) set_values+=("${ENDPOINT_NO_KEY[@]}") ;; esac
+  case ",$sets," in *,dry,*) set_values+=(--set dryRun=true) ;; esac
+  case ",$sets," in *,off,*) set_values+=(--set endpointCheck.enabled=false) ;; esac
+  case ",$sets," in *,off-string,*) set_values+=(--set-string endpointCheck.enabled=false) ;; esac
+  case ",$sets," in *,on-string,*) set_values+=(--set-string endpointCheck.enabled=true) ;; esac
+  case ",$sets," in *,no-map,*) set_values+=(--set endpointCheck=null) ;; esac
+  case ",$sets," in *,np,*) set_values+=("${EP_NP[@]}") ;; esac
+  case ",$sets," in
+    *,np-api,*) set_values+=(--set networkPolicy.enabled=true
+      --set 'networkPolicy.apiServer.cidrs[0]=192.0.2.1/32') ;;
+  esac
+  case ",$sets," in *,notify,*) set_values+=("${NOTIFY_ON[@]}" "${EP_NP_NOTIFY[@]}") ;; esac
+  ep_render "$name" ${set_values[@]+"${set_values[@]}"}
+  file="$WORK/ep-$name"
+  got_pods=$(count_docs "$file" Pod "$NAMESPACE" "$CHECK_POD")
+  [ "$got_pods" = "$pods" ] || fail "endpoint check, $name: $got_pods test Pods, not $pods"
+  [ "$(count_docs "$file" Pod)" = "$pods" ] ||
+    fail "endpoint check, $name: another Pod renders: $(count_docs "$file" Pod)"
+  got_policies=$(count_docs "$file" NetworkPolicy "$NAMESPACE" "$CHECK_POD")
+  [ "$got_policies" = "$policies" ] ||
+    fail "endpoint check, $name: $got_policies test NetworkPolicies, not $policies"
+  [ "$(count_docs "$file" Deployment)" = "$deployments" ] ||
+    fail "endpoint check, $name: not one Deployment"
+  case ",$sets," in
+    *,np,* | *,np-api,*)
+      [ "$(count_docs "$file" NetworkPolicy "$NAMESPACE" kausa)" = 1 ] ||
+        fail "endpoint check, $name: kausa's own NetworkPolicy is gone"
+      ;;
+  esac
+done
+# In the namespaced scope too.
+render "$WORK/ep-namespaced" "$RELEASE" "$CHART" --set rbac.scope=namespaced \
+  --set 'rbac.namespaces={e2e-a}' "${ENDPOINT[@]}" ||
+  fail "endpoint check, namespaced: does not render: $(cat "$WORK/ep-namespaced.err")"
+[ "$(count_docs "$WORK/ep-namespaced" Pod "$NAMESPACE" "$CHECK_POD")" = 1 ] ||
+  fail "endpoint check, namespaced: no test Pod"
+passed "$since" "endpoint check: the Pod and its policy render only with an endpoint, outside dryRun, with endpointCheck.enabled"
+
+# The Pod: a test hook kept until the next helm test, with no token and no ServiceAccount of
+# kausa's, the namespace's default, and a deadline of the timeout plus 60 s.
+since=$FAILURES
+pod=$(doc_of "$WORK/ep-endpoint" Pod "$CHECK_POD")
+expected_annotations=$(printf '%s\n' 'helm.sh/hook-delete-policy: before-hook-creation' \
+  'helm.sh/hook: test' | sort)
+got_annotations=$(printf '%s\n' "$pod" | meta_map annotations)
+[ "$got_annotations" = "$expected_annotations" ] ||
+  fail "endpoint check: the Pod's annotations are not the two hook annotations: $got_annotations"
+printf '%s\n' "$pod" | grep -q 'hook-succeeded' &&
+  fail "endpoint check: the Pod is deleted when it succeeds (helm test --logs loses its line)"
+for row in 'restartPolicy: Never' 'activeDeadlineSeconds: 180' \
+  'automountServiceAccountToken: false' 'enableServiceLinks: false'; do
+  printf '%s\n' "$pod" | grep -qx "  $row" || fail "endpoint check: the Pod has no '$row'"
+done
+printf '%s\n' "$pod" | grep -qE '^ *(serviceAccountName|serviceAccount):' &&
+  fail "endpoint check: the Pod names a ServiceAccount"
+printf '%s\n' "$pod" | grep -qx "  namespace: $NAMESPACE" ||
+  fail "endpoint check: the Pod is not in the release namespace"
+passed "$since" "endpoint check: the Pod is a test hook with no token, no ServiceAccount and a deadline"
+
+# Its labels: instance, component, version, managed-by and chart, never app.kubernetes.io/name.
+since=$FAILURES
+deployment_labels=$(doc_of "$WORK/ep-endpoint" Deployment | meta_map labels)
+version_label=$(printf '%s\n' "$deployment_labels" | grep '^app.kubernetes.io/version: ' || true)
+chart_label=$(printf '%s\n' "$deployment_labels" | grep '^helm.sh/chart: ' || true)
+expected_labels=$(printf '%s\n' 'app.kubernetes.io/component: endpoint-check' \
+  'app.kubernetes.io/instance: kausa' 'app.kubernetes.io/managed-by: Helm' "$version_label" \
+  "$chart_label" | sort)
+pod_labels=$(printf '%s\n' "$pod" | meta_map labels)
+[ "$pod_labels" = "$expected_labels" ] ||
+  fail "endpoint check: the Pod's labels are not the five expected: $pod_labels"
+passed "$since" "endpoint check: the Pod's labels carry no app.kubernetes.io/name"
+
+# One container, kausa's image, pull policy, resources and security contexts, and nothing else of
+# kausa's Pod: no env, ports, probes, pod labels or annotations.
+since=$FAILURES
+deployment=$(doc_of "$WORK/ep-endpoint" Deployment)
+containers=$(printf '%s\n' "$pod" | first_block containers)
+[ "$(printf '%s\n' "$containers" | items | grep -c .)" = 1 ] ||
+  fail "endpoint check: the Pod has not exactly one container: $(printf '%s\n' "$containers" | items)"
+containers=$(printf '%s\n' "$containers" | trimmed)
+printf '%s\n' "$containers" | grep -qx -- '- name: endpoint-check' ||
+  fail "endpoint check: the container is not named endpoint-check"
+for key in image imagePullPolicy; do
+  want=$(printf '%s\n' "$deployment" | grep -m1 -E "^ *$key: " | sed 's/^ *//' | tr -d '"')
+  got=$(printf '%s\n' "$containers" | grep -m1 -E "^$key: " || true)
+  [ -n "$want" ] && [ "$got" = "$want" ] || fail "endpoint check: $key is '$got', not '$want'"
+done
+[ "$(printf '%s\n' "$pod" | first_block resources | trimmed)" = \
+  "$(printf '%s\n' "$deployment" | first_block resources | trimmed)" ] ||
+  fail "endpoint check: the Pod's resources differ from the Deployment's"
+[ "$(printf '%s\n' "$pod" | blocks securityContext | joined)" = \
+  "$(printf '%s\n' "$deployment" | blocks securityContext | joined)" ] ||
+  fail "endpoint check: the Pod's security contexts differ from the Deployment's:" \
+    "$(printf '%s\n' "$pod" | blocks securityContext | joined)"
+for key in env envFrom ports livenessProbe readinessProbe startupProbe command; do
+  printf '%s\n' "$pod" | grep -qE "^ *$key:" && fail "endpoint check: the Pod has $key"
+done
+ep_render pod-extras "${ENDPOINT[@]}" --set podLabels.team=blue \
+  --set podAnnotations.example\\.com/note=kept --set 'imagePullSecrets[0].name=regcred'
+extras=$(doc_of "$WORK/ep-pod-extras" Pod "$CHECK_POD")
+printf '%s\n' "$extras" | grep -qE 'team: blue|example.com/note' &&
+  fail "endpoint check: the Pod takes podLabels or podAnnotations"
+[ "$(printf '%s\n' "$extras" | first_block imagePullSecrets | trimmed)" = '- name: regcred' ] ||
+  fail "endpoint check: the Pod does not take imagePullSecrets"
+passed "$since" "endpoint check: one container with kausa's image, resources and security contexts, nothing else"
+
+# Scheduling from the values: nodeSelector, tolerations and affinity as the Deployment has them,
+# never the standby's own anti-affinity.
+since=$FAILURES
+ep_render scheduling "${ENDPOINT[@]}" --set nodeSelector.disktype=ssd \
+  --set 'tolerations[0].key=dedicated' --set 'tolerations[0].operator=Exists' \
+  --set-json 'affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/arch","operator":"In","values":["arm64"]}]}]}}}'
+for key in nodeSelector tolerations affinity; do
+  got=$(doc_of "$WORK/ep-scheduling" Pod "$CHECK_POD" | first_block "$key" | trimmed)
+  want=$(doc_of "$WORK/ep-scheduling" Deployment | first_block "$key" | trimmed)
+  [ -n "$got" ] && [ "$got" = "$want" ] || fail "endpoint check: the Pod's $key: '$got'"
+done
+ep_render standby "${ENDPOINT[@]}" --set replicaCount=2
+doc_of "$WORK/ep-standby" Pod "$CHECK_POD" | grep -qE '^ *(affinity|podAntiAffinity):' &&
+  fail "endpoint check: the Pod takes the standby's anti-affinity"
+passed "$since" "endpoint check: the Pod schedules by the values only"
+
+# The args, for each combination of allowHttp, jsonSchema and the key's Secret.
+since=$FAILURES
+expect_pod_args() {
+  local name=$1
+  shift
+  local got
+  got=$(pod_args "$WORK/ep-$name")
+  [ "$got" = "$(printf '%s\n' "$@")" ] ||
+    fail "endpoint check, $name: the Pod's args are: $(printf '%s' "$got" | tr '\n' ' ')"
+}
+CHECK_ARGS=(check-endpoint --endpoint https://api.example.com/v1 --model m --model-timeout 120)
+KEY_ARGS=(--api-key-file /var/run/secrets/kausa/api-key)
+expect_pod_args endpoint "${CHECK_ARGS[@]}" "${KEY_ARGS[@]}"
+expect_pod_args endpoint-no-key "${CHECK_ARGS[@]}"
+ep_render no-schema "${ENDPOINT[@]}" --set model.jsonSchema=false
+expect_pod_args no-schema "${CHECK_ARGS[@]}" --no-json-schema "${KEY_ARGS[@]}"
+ep_render http --set model.endpoint=http://ollama.example.svc:11434/v1 --set model.name=m \
+  --set model.allowHttp=true
+expect_pod_args http check-endpoint --endpoint http://ollama.example.svc:11434/v1 --model m \
+  --model-timeout 120 --allow-http
+ep_render http-no-schema-key --set model.endpoint=http://ollama.example.svc:11434/v1 \
+  --set model.name=m --set model.allowHttp=true --set model.jsonSchema=false \
+  --set model.apiKey.existingSecret=k --set model.timeoutSeconds=300
+expect_pod_args http-no-schema-key check-endpoint --endpoint http://ollama.example.svc:11434/v1 \
+  --model m --model-timeout 300 --allow-http --no-json-schema "${KEY_ARGS[@]}"
+doc_of "$WORK/ep-http-no-schema-key" Pod "$CHECK_POD" | grep -qx '  activeDeadlineSeconds: 360' ||
+  fail "endpoint check: activeDeadlineSeconds is not the timeout plus 60 with 300"
+# Every combination of the three, in the order kausa run takes them: --allow-http, then
+# --no-json-schema, then --api-key-file.
+for http in no yes; do
+  for schema in yes no; do
+    for key in yes no; do
+      name="combo-http-$http-schema-$schema-key-$key"
+      if [ "$http" = yes ]; then
+        url=http://ollama.example.svc:11434/v1
+        set_values=(--set "model.endpoint=$url" --set model.allowHttp=true)
+      else
+        url=https://api.example.com/v1
+        set_values=(--set "model.endpoint=$url")
+      fi
+      set_values+=(--set model.name=m)
+      want_args=(check-endpoint --endpoint "$url" --model m --model-timeout 120)
+      [ "$http" = yes ] && want_args+=(--allow-http)
+      if [ "$schema" = no ]; then
+        set_values+=(--set model.jsonSchema=false)
+        want_args+=(--no-json-schema)
+      fi
+      if [ "$key" = yes ]; then
+        set_values+=(--set model.apiKey.existingSecret=k)
+        want_args+=("${KEY_ARGS[@]}")
+      fi
+      ep_render "$name" "${set_values[@]}"
+      expect_pod_args "$name" "${want_args[@]}"
+    done
+  done
+done
+for seconds in 10 600; do
+  ep_render "timeout-$seconds" "${ENDPOINT[@]}" --set "model.timeoutSeconds=$seconds"
+  doc_of "$WORK/ep-timeout-$seconds" Pod "$CHECK_POD" |
+    grep -qx "  activeDeadlineSeconds: $((seconds + 60))" ||
+    fail "endpoint check: activeDeadlineSeconds is not $((seconds + 60)) with $seconds"
+done
+passed "$since" "endpoint check: the Pod's args and deadline follow the model values"
+
+# One volume, the API key's, as the Deployment mounts it; none without the Secret; never the
+# notification Secret, even with notifications on.
+since=$FAILURES
+for name in endpoint endpoint-np-notify; do
+  file="$WORK/ep-$name"
+  got=$(doc_of "$file" Pod "$CHECK_POD" | first_block volumes | items)
+  want=$(doc_of "$WORK/ep-endpoint" Deployment | first_block volumes | items)
+  [ -n "$got" ] && [ "$got" = "$want" ] ||
+    fail "endpoint check, $name: the Pod's volumes are not the API key's alone: $got"
+  [ "$(printf '%s\n' "$got" | grep -c .)" = 1 ] ||
+    fail "endpoint check, $name: not exactly one volume"
+  got=$(doc_of "$file" Pod "$CHECK_POD" | first_block volumeMounts | items)
+  want=$(doc_of "$WORK/ep-endpoint" Deployment | first_block volumeMounts | items)
+  [ -n "$got" ] && [ "$got" = "$want" ] ||
+    fail "endpoint check, $name: the Pod's volume mounts are not the API key's alone: $got"
+  doc_of "$file" Pod "$CHECK_POD" | grep -qE "kausa-notify|$NOTIFY_SECRET" &&
+    fail "endpoint check, $name: the Pod mounts the notification Secret"
+done
+doc_of "$WORK/ep-endpoint-np-notify" Deployment | grep -q "$NOTIFY_SECRET" ||
+  fail "endpoint check: the notification render has no notification Secret to leave out"
+doc_of "$WORK/ep-endpoint-no-key" Pod "$CHECK_POD" | grep -qE '^ *(volumes|volumeMounts):' &&
+  fail "endpoint check: the Pod has a volume without model.apiKey.existingSecret"
+passed "$since" "endpoint check: the Pod mounts the API key's Secret only, and only with it"
+
+# No selector built on kausa.selectorLabels matches the Pod: the metrics Service, the
+# PodDisruptionBudget and the anti-affinity of two replicas, and kausa's NetworkPolicy.
+since=$FAILURES
+# matches: whether every row of the selector block on stdin is one of the rows in POD_LABELS.
+matches() {
+  local row
+  while IFS= read -r row; do
+    [ -z "$row" ] && continue
+    printf '%s\n' "$POD_LABELS" | grep -qxF -- "$row" || return 1
+  done
+  return 0
+}
+ep_render selectors "${ENDPOINT[@]}" "${EP_NP[@]}" --set replicaCount=2
+file="$WORK/ep-selectors"
+POD_LABELS=$(doc_of "$file" Pod "$CHECK_POD" | meta_map labels)
+[ -n "$POD_LABELS" ] || fail "endpoint check: the selector render has no test Pod"
+selectors=0
+for source in "Service|kausa-metrics|selector" "PodDisruptionBudget|kausa|matchLabels" \
+  "Deployment||matchLabels" "NetworkPolicy|kausa|matchLabels"; do
+  IFS='|' read -r kind name key <<<"$source"
+  while IFS= read -r selector; do
+    [ -z "$selector" ] && continue
+    selectors=$((selectors + 1))
+    if printf '%s\n' "$selector" | tr '|' '\n' | sed 's/^ *//; s/ *$//' | matches; then
+      fail "endpoint check: the $kind's $key selects the test Pod: $selector"
+    fi
+  done <<<"$(doc_of "$file" "$kind" "$name" | blocks "$key" | joined)"
+done
+# The Service, the PodDisruptionBudget, the Deployment's selector and its anti-affinity, and
+# kausa's NetworkPolicy.
+[ "$selectors" -ge 5 ] || fail "endpoint check: only $selectors selectors were found"
+# The test policy selects the test Pod, and not kausa's own Pods.
+test_selector=$(doc_of "$file" NetworkPolicy "$CHECK_POD" | first_block matchLabels | trimmed)
+if [ -z "$test_selector" ] || ! printf '%s\n' "$test_selector" | matches; then
+  fail "endpoint check: the test NetworkPolicy does not select the test Pod: $test_selector"
+fi
+POD_LABELS=$(doc_of "$file" Deployment | blocks labels | trimmed |
+  awk '$0 == "%%" { n++; next } n == 1')
+[ -n "$test_selector" ] && printf '%s\n' "$test_selector" | matches &&
+  fail "endpoint check: the test NetworkPolicy selects kausa's Pods"
+passed "$since" "endpoint check: no selector of kausa's matches the test Pod, and its policy selects it alone"
+
+# The test NetworkPolicy: an ordinary object (not a hook), no ingress, egress to DNS and the
+# endpoint only, each rule as kausa's own policy renders it.
+since=$FAILURES
+for name in endpoint-np endpoint-np-notify; do
+  file="$WORK/ep-$name"
+  policy=$(doc_of "$file" NetworkPolicy "$CHECK_POD")
+  main=$(doc_of "$file" NetworkPolicy kausa)
+  printf '%s\n' "$policy" | grep -q 'helm.sh/hook' && fail "endpoint check, $name: the policy is a hook"
+  types=$(printf '%s\n' "$policy" |
+    awk '/^  policyTypes:/ { on = 1; print; next } on && /^  [^ ]/ { on = 0 } on' | tr -d ' []-')
+  case "$types" in *Ingress*Egress* | *Egress*Ingress*) ;;
+    *) fail "endpoint check, $name: policyTypes is not Ingress and Egress: $types" ;; esac
+  [ -z "$(printf '%s\n' "$policy" | first_block ingress)" ] ||
+    fail "endpoint check, $name: the test policy allows ingress"
+  printf '%s\n' "$policy" | grep -qE '^ *(- )?from:' && fail "endpoint check, $name: a from: peer"
+  rules=$(printf '%s\n' "$policy" | first_block egress | items)
+  main_rules=$(printf '%s\n' "$main" | first_block egress | items)
+  [ "$(printf '%s\n' "$rules" | grep -c .)" = 2 ] ||
+    fail "endpoint check, $name: not exactly two egress rules: $rules"
+  dns=$(printf '%s\n' "$main_rules" | grep -F 'port: 53' || true)
+  endpoint_rule=$(printf '%s\n' "$main_rules" | grep -F '192.0.2.2/32' || true)
+  if [ -z "$dns" ] || ! printf '%s\n' "$rules" | grep -qxF -- "$dns"; then
+    fail "endpoint check, $name: the DNS rule differs from kausa's: $rules"
+  fi
+  if [ -z "$endpoint_rule" ] || ! printf '%s\n' "$rules" | grep -qxF -- "$endpoint_rule"; then
+    fail "endpoint check, $name: the endpoint rule differs from kausa's: $rules"
+  fi
+  printf '%s\n' "$policy" | grep -qE '192\.0\.2\.1/32|port: 6443|198\.51\.100\.0/24' &&
+    fail "endpoint check, $name: the test policy reaches the API server or the webhook"
+done
+passed "$since" "endpoint check: the test NetworkPolicy allows DNS and the endpoint only, as kausa's"
+
+# The endpoint rule of the test policy is kausa's byte for byte, as rendered (comment, indentation
+# and quotes included), for every shape of networkPolicy.endpoint: an ipBlock with one port, an
+# ipBlock with an exception and a port range, and an in-cluster peer with no ports (every port).
+since=$FAILURES
+# endpoint_rule: the raw lines of the egress rule after '# The model endpoint.' in the policy on
+# stdin, the comment included.
+endpoint_rule() {
+  awk '$0 == "    # The model endpoint." { on = 1; print; next }
+       on == 1 && /^    - / { on = 2; print; next }
+       on == 2 && /^      / { print; next }
+       on { exit }'
+}
+ep_render np-range "${ENDPOINT[@]}" --set networkPolicy.enabled=true \
+  --set 'networkPolicy.apiServer.cidrs[0]=192.0.2.1/32' \
+  --set-json 'networkPolicy.endpoint={"to":[{"ipBlock":{"cidr":"203.0.113.0/24","except":["203.0.113.8/29"]}}],"ports":[{"port":443,"protocol":"TCP"},{"port":8000,"endPort":8100,"protocol":"TCP"}]}'
+ep_render np-in-cluster --set model.endpoint=http://ollama.example.svc:11434/v1 --set model.name=m \
+  --set model.allowHttp=true --set networkPolicy.enabled=true \
+  --set 'networkPolicy.apiServer.cidrs[0]=192.0.2.1/32' \
+  --set-json 'networkPolicy.endpoint={"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"ollama"}},"podSelector":{"matchLabels":{"app":"ollama"}}}],"ports":[]}'
+render "$WORK/ep-np-namespaced" "$RELEASE" "$CHART" --set rbac.scope=namespaced \
+  --set 'rbac.namespaces={e2e-a}' "${ENDPOINT[@]}" "${EP_NP[@]}" ||
+  fail "endpoint check, np-namespaced: does not render: $(cat "$WORK/ep-np-namespaced.err")"
+for case in "endpoint-np|192.0.2.2/32" "endpoint-np-notify|192.0.2.2/32" \
+  "np-range|endPort: 8100" "np-in-cluster|app: ollama" "np-namespaced|192.0.2.2/32"; do
+  IFS='|' read -r name marker <<<"$case"
+  file="$WORK/ep-$name"
+  doc_of "$file" NetworkPolicy kausa | endpoint_rule >"$file.main-rule"
+  doc_of "$file" NetworkPolicy "$CHECK_POD" | endpoint_rule >"$file.check-rule"
+  grep -qF -- "$marker" "$file.main-rule" ||
+    fail "endpoint check, $name: kausa's policy has no endpoint rule with '$marker'"
+  cmp -s "$file.main-rule" "$file.check-rule" ||
+    fail "endpoint check, $name: the endpoint rules differ: $(diff "$file.main-rule" "$file.check-rule")"
+done
+grep -qE '^ *ports:' "$WORK/ep-np-in-cluster.check-rule" &&
+  fail "endpoint check, np-in-cluster: the endpoint rule has ports with networkPolicy.endpoint.ports empty"
+passed "$since" "endpoint check: the test policy's endpoint rule is kausa's byte for byte"
+
+# The Deployment passes --model-timeout with the model flags, after --no-json-schema and before
+# --api-key-file; not without an endpoint or dryRun.
+since=$FAILURES
+# after_arg FILE ARG: the arg right after ARG in the Deployment's args.
+after_arg() { deployment_args "$1" | awk -v a="$2" 'found { print; exit } $0 == a { found = 1 }'; }
+before_arg() { deployment_args "$1" | awk -v a="$2" '$0 == a { print prev; exit } { prev = $0 }'; }
+for case in "endpoint|120|--api-key-file" "endpoint-no-key|120|--max-calls-per-hour" \
+  "no-schema|120|--api-key-file" "http-no-schema-key|300|--api-key-file" \
+  "timeout-10|10|--api-key-file" "timeout-600|600|--api-key-file" "dry|120|--max-calls-per-hour"; do
+  IFS='|' read -r name seconds next <<<"$case"
+  file="$WORK/ep-$name"
+  [ "$(deployment_args "$file" | grep -cx -- --model-timeout)" = 1 ] ||
+    fail "endpoint check, $name: not one --model-timeout in the Deployment"
+  [ "$(after_arg "$file" --model-timeout)" = "$seconds" ] ||
+    fail "endpoint check, $name: --model-timeout is '$(after_arg "$file" --model-timeout)', not $seconds"
+  [ "$(after_arg "$file" "$seconds")" = "$next" ] ||
+    fail "endpoint check, $name: --model-timeout comes before '$(after_arg "$file" "$seconds")', not $next"
+done
+for name in no-schema http-no-schema-key; do
+  [ "$(before_arg "$WORK/ep-$name" --model-timeout)" = --no-json-schema ] ||
+    fail "endpoint check, $name: --model-timeout does not follow --no-json-schema"
+done
+deployment_args "$WORK/ep-defaults" | grep -qx -- --model-timeout &&
+  fail "endpoint check: --model-timeout without an endpoint or dryRun"
+ep_render timeout-no-endpoint --set model.timeoutSeconds=300
+deployment_args "$WORK/ep-timeout-no-endpoint" | grep -qx -- --model-timeout &&
+  fail "endpoint check: --model-timeout without an endpoint or dryRun, with the value set"
+passed "$since" "endpoint check: the Deployment passes --model-timeout with the model flags"
+
+# Accepted forms of the two values: a number from a values file (a float), a string, null (the
+# default), and true or false as strings.
+since=$FAILURES
+ep_render timeout-json "${ENDPOINT[@]}" --set-json model.timeoutSeconds=120.0
+ep_render timeout-string "${ENDPOINT[@]}" --set-string model.timeoutSeconds=45
+ep_render timeout-null "${ENDPOINT[@]}" --set model.timeoutSeconds=null
+for case in timeout-json:120 timeout-string:45 timeout-null:120; do
+  name=${case%%:*} seconds=${case#*:}
+  [ "$(after_arg "$WORK/ep-$name" --model-timeout)" = "$seconds" ] ||
+    fail "endpoint check, $name: --model-timeout is not $seconds"
+done
+passed "$since" "endpoint check: model.timeoutSeconds is read as a whole number, 120 when missing"
+
+# A release made before 0020 (helm upgrade --reuse-values from v0.4.1) has neither value: it
+# renders --model-timeout 120 and the test Pod.
+OLD_VALUES_REF=v0.4.1
+if git -C "$ROOT" cat-file -e "$OLD_VALUES_REF:charts/kausa/values.yaml" 2>/dev/null; then
+  since=$FAILURES
+  EP_OLD_CHART="$WORK/ep-old/kausa"
+  mkdir -p "$WORK/ep-old"
+  cp -R "$CHART" "$EP_OLD_CHART"
+  git -C "$ROOT" show "$OLD_VALUES_REF:charts/kausa/values.yaml" >"$EP_OLD_CHART/values.yaml"
+  grep -qE '^endpointCheck:|timeoutSeconds:' "$EP_OLD_CHART/values.yaml" &&
+    fail "the values of $OLD_VALUES_REF already have the new keys"
+  EP_CHART="$EP_OLD_CHART" ep_render old-values "${ENDPOINT[@]}"
+  [ "$(after_arg "$WORK/ep-old-values" --model-timeout)" = 120 ] ||
+    fail "endpoint check: the values of $OLD_VALUES_REF do not render --model-timeout 120"
+  [ "$(count_docs "$WORK/ep-old-values" Pod "$NAMESPACE" "$CHECK_POD")" = 1 ] ||
+    fail "endpoint check: the values of $OLD_VALUES_REF do not render the test Pod"
+  expect_pod_args old-values "${CHECK_ARGS[@]}" "${KEY_ARGS[@]}"
+  doc_of "$WORK/ep-old-values" Pod "$CHECK_POD" | grep -qx '  activeDeadlineSeconds: 180' ||
+    fail "endpoint check: the values of $OLD_VALUES_REF do not give activeDeadlineSeconds 180"
+  grep -qi 'nil pointer' "$WORK/ep-old-values.err" &&
+    fail "endpoint check: the values of $OLD_VALUES_REF give a nil-pointer error"
+  passed "$since" "endpoint check: the values of $OLD_VALUES_REF render the defaults"
+else
+  echo "skipped: $OLD_VALUES_REF is not in this clone; its values are not rendered"
+fi
+
+# The new values in values.yaml, with their defaults.
+since=$FAILURES
+grep -qx '  timeoutSeconds: 120' "$VALUES" || fail "values.yaml: model.timeoutSeconds is not 120"
+awk '/^endpointCheck:/ { on = 1; next } on && /^[^ ]/ { exit } on && /^  enabled: true$/ { found = 1 }
+     END { exit !found }' "$VALUES" || fail "values.yaml: endpointCheck.enabled is not true"
+passed "$since" "values.yaml: model.timeoutSeconds 120 and endpointCheck.enabled true"
+
+# NOTES.txt names helm test, the call outside the budget and the cleanup, only when the test
+# renders.
+since=$FAILURES
+notes "$WORK/ep-notes-on" --set rbac.scope=cluster "${ENDPOINT[@]}"
+on_text=$(collapsed "$WORK/ep-notes-on")
+for words in "helm test $RELEASE -n $NAMESPACE --logs" 'billed by the provider' \
+  "outside kausa's budget" "kubectl -n $NAMESPACE delete pod $CHECK_POD" \
+  'stays until the next helm test'; do
+  printf '%s' "$on_text" | grep -qF -- "$words" ||
+    fail "NOTES.txt with the test does not say '$words'"
+done
+for case in "defaults|" "dry|dry" "endpoint-dry|endpoint,dry" "endpoint-off|endpoint,off"; do
+  IFS='|' read -r name sets <<<"$case"
+  set_values=()
+  case ",$sets," in *,endpoint,*) set_values+=("${ENDPOINT[@]}") ;; esac
+  case ",$sets," in *,dry,*) set_values+=(--set dryRun=true) ;; esac
+  case ",$sets," in *,off,*) set_values+=(--set endpointCheck.enabled=false) ;; esac
+  notes "$WORK/ep-notes-$name" --set rbac.scope=cluster ${set_values[@]+"${set_values[@]}"}
+  grep -qF 'helm test' "$WORK/ep-notes-$name" &&
+    fail "NOTES.txt names helm test without the test ($name)"
+  grep -qF "$CHECK_POD" "$WORK/ep-notes-$name" &&
+    fail "NOTES.txt names the test Pod without the test ($name)"
+done
+passed "$since" "NOTES.txt names helm test only when the test renders"
+
+# helm lint --strict with the test Pod and its policy.
+if "$HELM" lint --strict "$CHART" --set rbac.scope=cluster "${ENDPOINT[@]}" "${EP_NP[@]}" \
+  >"$WORK/lint-endpoint-check" 2>&1; then
+  ok "helm lint --strict with the endpoint check and its NetworkPolicy"
+else
+  fail "helm lint --strict with the endpoint check: $(cat "$WORK/lint-endpoint-check")"
+fi
+
+# Refusals, with helm template (helm lint does not fail on fail): the timeout outside 10-600,
+# endpointCheck.enabled other than true or false and an endpointCheck set but neither a map nor
+# null (endpointCheck=false, meant as off, would otherwise render the test Pod), with or without an
+# endpoint; the scope first.
+for value in 9 601 0 -1 abc 1.5 1000; do
+  refuse "timeout-$value" "$(bad_model_timeout "$value")" --set rbac.scope=cluster \
+    --set "model.timeoutSeconds=$value"
+done
+refuse timeout-9-endpoint "$(bad_model_timeout 9)" --set rbac.scope=cluster "${ENDPOINT[@]}" \
+  --set model.timeoutSeconds=9
+refuse timeout-601-dry "$(bad_model_timeout 601)" --set rbac.scope=cluster --set dryRun=true \
+  --set model.timeoutSeconds=601
+refuse timeout-json-float "$(bad_model_timeout 1.5)" --set rbac.scope=cluster "${ENDPOINT[@]}" \
+  --set-json model.timeoutSeconds=1.5
+refuse timeout-empty "$(bad_model_timeout '')" --set rbac.scope=cluster \
+  --set-string model.timeoutSeconds=
+refuse endpoint-check-yes "$(bad_endpoint_check yes)" --set rbac.scope=cluster \
+  --set endpointCheck.enabled=yes
+refuse endpoint-check-yes-endpoint "$(bad_endpoint_check yes)" --set rbac.scope=cluster \
+  "${ENDPOINT[@]}" --set endpointCheck.enabled=yes
+refuse endpoint-check-1 "$(bad_endpoint_check 1)" --set rbac.scope=cluster \
+  --set endpointCheck.enabled=1
+refuse endpoint-check-capital "$(bad_endpoint_check True)" --set rbac.scope=cluster \
+  --set-string endpointCheck.enabled=True
+refuse endpoint-check-scalar "$(not_an_endpoint_check_map false)" --set rbac.scope=cluster \
+  "${ENDPOINT[@]}" --set endpointCheck=false
+refuse endpoint-check-scalar-true "$(not_an_endpoint_check_map true)" --set rbac.scope=cluster \
+  --set endpointCheck=true
+refuse endpoint-check-scalar-empty "$(not_an_endpoint_check_map '')" --set rbac.scope=cluster \
+  --set endpointCheck=
+refuse endpoint-check-list "$(not_an_endpoint_check_map '[]')" --set rbac.scope=cluster \
+  --set-json 'endpointCheck=[]'
+cat >"$WORK/endpoint-check-scalar.yaml" <<'VALUES'
+endpointCheck: false
+VALUES
+refuse endpoint-check-scalar-file "$(not_an_endpoint_check_map false)" --set rbac.scope=cluster \
+  "${ENDPOINT[@]}" -f "$WORK/endpoint-check-scalar.yaml"
+refuse timeout-scope-first "$NOT_SET" --set model.timeoutSeconds=9
+refuse endpoint-check-scope-first "$NOT_SET" --set endpointCheck.enabled=yes
+refuse endpoint-check-scalar-scope-first "$NOT_SET" --set endpointCheck=false
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "FAIL: $FAILURES chart checks failed" >&2

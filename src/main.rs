@@ -7,7 +7,9 @@
 //! also an Event on the failing object unless `--no-events`, and, with `--history`, kept in an
 //! Explanation object in its namespace, and, with `--notify-url-file`, posted to a webhook.
 
+mod breaker;
 mod budget;
+mod check;
 mod context;
 mod detect;
 mod events;
@@ -30,6 +32,7 @@ mod run;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use k8s_openapi::jiff::SignedDuration;
 use serde_json::json;
@@ -47,6 +50,35 @@ const DEFAULT_HISTORY_DAYS: u32 = 7;
 /// The help line spells the number out, so the two must change together.
 const MAX_NAMESPACES: usize = 32;
 
+/// A model call's total timeout without `--model-timeout`, in seconds, and the values the flag
+/// takes (docs/adr/0020-check-the-endpoint.md). The help line spells them out.
+const DEFAULT_MODEL_TIMEOUT: u64 = 120;
+const MODEL_TIMEOUTS: std::ops::RangeInclusive<u64> = 10..=600;
+
+/// The flags of `kausa run` that `kausa check-endpoint` refuses by name: every flag of `run` but
+/// the six model flags they share ([`ModelFlags`]).
+const RUN_ONLY_FLAGS: [&str; 19] = [
+    "--settle-seconds",
+    "--namespace",
+    "--no-rollouts",
+    "--dry-run",
+    "--no-logs",
+    "--no-events",
+    "--history",
+    "--history-days",
+    "--notify-url-file",
+    "--notify-format",
+    "--notify-telegram-chat-id",
+    "--notify-token-file",
+    "--notify-allow-http",
+    "--max-calls-per-hour",
+    "--max-calls-per-day",
+    "--max-input-tokens",
+    "--dedup-hours",
+    "--metrics-address",
+    "--leader-lease",
+];
+
 const HELP: &str = concat!(
     env!("CARGO_PKG_NAME"),
     " ",
@@ -61,6 +93,7 @@ const HELP: &str = concat!(
     "\n",
     "Usage:\n",
     "  kausa run [OPTIONS]    Run the controller\n",
+    "  kausa check-endpoint [OPTIONS]  Send one synthetic request to the model endpoint\n",
     "  kausa -h, --help       Print this help\n",
     "  kausa -V, --version    Print the version\n",
     "\n",
@@ -76,6 +109,7 @@ const HELP: &str = concat!(
     "  --dry-run              Log the redacted request instead of sending it\n",
     "  --no-logs              Do not read container logs\n",
     "  --no-json-schema       Do not ask for structured output (response_format)\n",
+    "  --model-timeout <N>    A call's total timeout in seconds (10-600, default 120)\n",
     "  --no-events            Do not write Events (log the explanations only)\n",
     "  --history              Keep each incident's explanations in an Explanation\n",
     "                         object in its namespace (needs the CRD)\n",
@@ -103,6 +137,20 @@ const HELP: &str = concat!(
     "  they persist for the settle window, and writes one JSON object per line to\n",
     "  stdout. It stops on SIGTERM or Ctrl-C.\n",
     "\n",
+    "Options of kausa check-endpoint:\n",
+    "  --endpoint <URL>       OpenAI-compatible base URL to check (required)\n",
+    "  --model <NAME>         The model to ask (required)\n",
+    "  --api-key-file <PATH>  A file with the API key (or KAUSA_API_KEY)\n",
+    "  --allow-http           Allow a plain http:// endpoint (local or in-cluster)\n",
+    "  --no-json-schema       Do not ask for structured output (response_format)\n",
+    "  --model-timeout <N>    The call's total timeout in seconds (10-600, default 120)\n",
+    "\n",
+    "  kausa check-endpoint reads nothing from the cluster. It sends one fixed request\n",
+    "  with synthetic data, outside the call budget (the provider may bill it), and\n",
+    "  writes one JSON line that names the step that failed. It exits with 0 when the\n",
+    "  check passed, 1 when it failed, and 2 on a usage error or when stdout cannot\n",
+    "  be written.\n",
+    "\n",
     "By design, kausa never reads Secrets or ConfigMaps, writes nothing but Events\n",
     "and, with --history, its own Explanation objects, and, with --leader-lease, the\n",
     "spec of its one Lease, and sends nothing unredacted to the model. With\n",
@@ -127,6 +175,7 @@ fn run_cli(args: &[OsString]) -> ExitCode {
         Some("-h" | "--help") => HELP,
         Some("-V" | "--version") => VERSION_LINE,
         Some("run") => return run_command(rest),
+        Some("check-endpoint") => return check_command(rest),
         _ => {
             return usage_error(&format!(
                 "unknown command or option '{}'",
@@ -145,11 +194,8 @@ fn run_cli(args: &[OsString]) -> ExitCode {
 
 fn run_command(args: &[OsString]) -> ExitCode {
     let mut settle_seconds = DEFAULT_SETTLE_SECONDS;
-    let mut endpoint: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut api_key_file: Option<OsString> = None;
-    let (mut allow_http, mut dry_run, mut no_logs, mut no_json_schema) =
-        (false, false, false, false);
+    let mut model_flags = ModelFlags::default();
+    let (mut dry_run, mut no_logs) = (false, false);
     let mut no_events = false;
     let mut no_rollouts = false;
     let mut history = false;
@@ -162,6 +208,12 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let flag = arg.to_string_lossy();
+        // A repeated model flag keeps its last value, as before kausa check-endpoint.
+        match model_flags.take(&flag, &mut args, false) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(message) => return usage_error(&message),
+        }
         let mut value = || -> Result<String, ExitCode> {
             match args.next().map(|v| v.to_str()) {
                 Some(Some(v)) if !v.is_empty() => Ok(v.to_owned()),
@@ -179,18 +231,6 @@ fn run_command(args: &[OsString]) -> ExitCode {
                     }
                 },
                 Err(code) => return code,
-            },
-            "--endpoint" => match value() {
-                Ok(v) => endpoint = Some(v),
-                Err(code) => return code,
-            },
-            "--model" => match value() {
-                Ok(v) => model = Some(v),
-                Err(code) => return code,
-            },
-            "--api-key-file" => match args.next() {
-                Some(path) => api_key_file = Some(path.clone()),
-                None => return usage_error("--api-key-file needs a value"),
             },
             "--max-calls-per-hour"
             | "--max-calls-per-day"
@@ -275,10 +315,8 @@ fn run_command(args: &[OsString]) -> ExitCode {
             "--history" => history = true,
             "--no-events" => no_events = true,
             "--no-rollouts" => no_rollouts = true,
-            "--allow-http" => allow_http = true,
             "--dry-run" => dry_run = true,
             "--no-logs" => no_logs = true,
-            "--no-json-schema" => no_json_schema = true,
             _ => return usage_error(&format!("unexpected argument '{flag}'")),
         }
     }
@@ -297,21 +335,18 @@ fn run_command(args: &[OsString]) -> ExitCode {
     if let Err(message) = check_namespaces(&namespaces) {
         return usage_error(&message);
     }
-    if let Err(message) = check_history(history, history_days, dry_run, endpoint.is_some()) {
+    let endpoint = model_flags.endpoint.is_some();
+    if let Err(message) = check_history(history, history_days, dry_run, endpoint) {
         return usage_error(message);
     }
-    let notifier = match check_notify(notify_flags, dry_run, endpoint.is_some()) {
+    let notifier = match check_notify(notify_flags, dry_run, endpoint) {
         Ok(notifier) => notifier,
         Err(message) => return usage_error(&message),
     };
     let explain = match explain_settings(
-        endpoint,
-        model,
-        api_key_file,
-        allow_http,
+        model_flags,
         dry_run,
         no_logs,
-        no_json_schema,
         no_events,
         history.then(|| history_days.unwrap_or(DEFAULT_HISTORY_DAYS)),
         &limits,
@@ -598,50 +633,34 @@ impl Default for Limits {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // one argument per flag, called once
 fn explain_settings(
-    endpoint: Option<String>,
-    model: Option<String>,
-    api_key_file: Option<OsString>,
-    allow_http: bool,
+    model_flags: ModelFlags,
     dry_run: bool,
     no_logs: bool,
-    no_json_schema: bool,
     no_events: bool,
     history_days: Option<u32>,
     limits: &Limits,
     notify: Option<notify::Notifier>,
 ) -> Result<Option<explain::Settings>, String> {
-    if endpoint.is_none() && !dry_run {
-        if model.is_some() || api_key_file.is_some() || allow_http || no_json_schema {
+    if model_flags.endpoint.is_none() && !dry_run {
+        if model_flags.any_but_endpoint() {
             return Err(
-                "--model, --api-key-file, --allow-http and --no-json-schema need \
-                        --endpoint or --dry-run"
+                "--model, --api-key-file, --allow-http, --no-json-schema and \
+                        --model-timeout need --endpoint or --dry-run"
                     .into(),
             );
         }
         return Ok(None);
     }
-    let api_key = match api_key_file {
-        Some(path) => {
-            let key = std::fs::read_to_string(&path).map_err(|e| {
-                format!(
-                    "cannot read the API key file '{}': {e}",
-                    path.to_string_lossy()
-                )
-            })?;
-            Some(key.trim().to_owned()).filter(|k| !k.is_empty())
-        }
-        None => std::env::var("KAUSA_API_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty())
-            .map(|k| k.trim().to_owned()),
-    };
-    let model_client = match (&endpoint, dry_run) {
-        (Some(url), false) => Some(model::ModelClient::new(url, api_key, allow_http)?),
+    let api_key = model_flags.api_key()?;
+    // With --dry-run, the endpoint is not used: no client, so neither its scheme nor
+    // --model-timeout matters.
+    let model_client = match (&model_flags.endpoint, dry_run) {
+        (Some(url), false) => Some(model_flags.client(url, api_key)?),
         _ => None,
     };
-    let model_name = match (model, &model_client) {
+    let mode = model_flags.mode();
+    let model_name = match (model_flags.model, &model_client) {
         (Some(name), _) => name,
         (None, None) => "unset".to_owned(),
         (None, Some(_)) => return Err("--endpoint needs --model".into()),
@@ -650,12 +669,8 @@ fn explain_settings(
         model: model_client,
         model_name,
         logs: !no_logs,
-        mode: if no_json_schema {
-            prompt::OutputMode::Instructions
-        } else {
-            prompt::OutputMode::JsonSchema
-        },
-        max_tokens: 800,
+        mode,
+        max_tokens: prompt::MAX_TOKENS,
         max_input_tokens: limits.input_tokens,
         events: !no_events && !dry_run,
         history_days,
@@ -668,6 +683,187 @@ fn explain_settings(
             .unwrap_or_else(|| "kausa".to_owned()),
         notify,
     }))
+}
+
+/// The six flags `kausa run` and `kausa check-endpoint` share (docs/adr/0020-check-the-endpoint.md),
+/// read by one function so that their messages cannot drift.
+#[derive(Default)]
+struct ModelFlags {
+    endpoint: Option<String>,
+    model: Option<String>,
+    api_key_file: Option<OsString>,
+    allow_http: bool,
+    no_json_schema: bool,
+    timeout: Option<u64>,
+}
+
+impl ModelFlags {
+    /// Reads `flag`, and its value from `args`, when it is one of the six: `Ok(true)` when it is,
+    /// `Ok(false)` for any other argument, which is left to the caller. With `once`, a flag given
+    /// twice is refused (`kausa check-endpoint`); without it the last one wins (`kausa run`).
+    fn take(
+        &mut self,
+        flag: &str,
+        args: &mut std::slice::Iter<'_, OsString>,
+        once: bool,
+    ) -> Result<bool, String> {
+        let given = match flag {
+            "--endpoint" => self.endpoint.is_some(),
+            "--model" => self.model.is_some(),
+            "--api-key-file" => self.api_key_file.is_some(),
+            "--allow-http" => self.allow_http,
+            "--no-json-schema" => self.no_json_schema,
+            "--model-timeout" => self.timeout.is_some(),
+            _ => return Ok(false),
+        };
+        if once && given {
+            return Err(format!("{flag} is given twice"));
+        }
+        match flag {
+            "--endpoint" => self.endpoint = Some(flag_value(flag, args)?),
+            "--model" => self.model = Some(flag_value(flag, args)?),
+            // A path, which may be any bytes; what the file holds is checked when it is read.
+            "--api-key-file" => match args.next() {
+                Some(path) => self.api_key_file = Some(path.clone()),
+                None => return Err("--api-key-file needs a value".into()),
+            },
+            "--allow-http" => self.allow_http = true,
+            "--no-json-schema" => self.no_json_schema = true,
+            _ => {
+                let value = flag_value(flag, args)?;
+                self.timeout = Some(parse_model_timeout(&value)?);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether a model flag other than `--endpoint` is given.
+    fn any_but_endpoint(&self) -> bool {
+        self.model.is_some()
+            || self.api_key_file.is_some()
+            || self.allow_http
+            || self.no_json_schema
+            || self.timeout.is_some()
+    }
+
+    /// The API key: the trimmed content of `--api-key-file`, or else of the environment variable
+    /// `KAUSA_API_KEY`; empty is no key. Never an argument, and never in a message.
+    fn api_key(&self) -> Result<Option<String>, String> {
+        let key = match &self.api_key_file {
+            Some(path) => std::fs::read_to_string(path).map_err(|e| {
+                format!(
+                    "cannot read the API key file '{}': {e}",
+                    path.to_string_lossy()
+                )
+            })?,
+            None => std::env::var("KAUSA_API_KEY").unwrap_or_default(),
+        };
+        Ok(Some(key.trim().to_owned()).filter(|k| !k.is_empty()))
+    }
+
+    /// The client of `url`, with the scheme checks of [`model::ModelClient::new`].
+    fn client(&self, url: &str, api_key: Option<String>) -> Result<model::ModelClient, String> {
+        let seconds = self.timeout.unwrap_or(DEFAULT_MODEL_TIMEOUT);
+        model::ModelClient::new(url, api_key, self.allow_http, Duration::from_secs(seconds))
+    }
+
+    fn mode(&self) -> prompt::OutputMode {
+        if self.no_json_schema {
+            prompt::OutputMode::Instructions
+        } else {
+            prompt::OutputMode::JsonSchema
+        }
+    }
+}
+
+/// The value after `flag`: present, UTF-8 and not empty.
+fn flag_value(flag: &str, args: &mut std::slice::Iter<'_, OsString>) -> Result<String, String> {
+    match args.next().map(|v| v.to_str()) {
+        Some(Some(v)) if !v.is_empty() => Ok(v.to_owned()),
+        _ => Err(format!("{flag} needs a value")),
+    }
+}
+
+/// The value of `--model-timeout`: ASCII digits only (no sign, space or fraction), within
+/// [`MODEL_TIMEOUTS`].
+fn parse_model_timeout(value: &str) -> Result<u64, String> {
+    value
+        .bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| value.parse::<u64>().ok())
+        .flatten()
+        .filter(|seconds| MODEL_TIMEOUTS.contains(seconds))
+        .ok_or_else(|| {
+            format!("--model-timeout takes a whole number of seconds from 10 to 600, not '{value}'")
+        })
+}
+
+/// `kausa check-endpoint` (docs/adr/0020-check-the-endpoint.md): the usage errors, in this order,
+/// before anything connects: each argument in turn (a flag of `run` only, a model flag given
+/// twice, a missing value, a bad `--model-timeout`, anything else), then a missing `--endpoint`,
+/// the key file, the endpoint's scheme and a missing `--model`. Then one request, no Kubernetes
+/// client: exit 0 when the check passed, 1 when it failed.
+fn check_command(args: &[OsString]) -> ExitCode {
+    let mut flags = ModelFlags::default();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let flag = arg.to_string_lossy();
+        if RUN_ONLY_FLAGS.contains(&flag.as_ref()) {
+            return usage_error(&format!(
+                "{flag} is a flag of kausa run, not of kausa check-endpoint"
+            ));
+        }
+        match flags.take(&flag, &mut args, true) {
+            Ok(true) => {}
+            Ok(false) => return usage_error(&format!("unexpected argument '{flag}'")),
+            Err(message) => return usage_error(&message),
+        }
+    }
+    let Some(endpoint) = flags.endpoint.as_deref() else {
+        return usage_error("kausa check-endpoint needs --endpoint");
+    };
+    let api_key = match flags.api_key() {
+        Ok(key) => key,
+        Err(message) => return usage_error(&message),
+    };
+    let target_api_key = api_key.is_some();
+    let client = match flags.client(endpoint, api_key) {
+        Ok(client) => client,
+        Err(message) => return usage_error(&message),
+    };
+    let Some(model) = flags.model.as_deref() else {
+        return usage_error("--endpoint needs --model");
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = log::error(
+                "cannot start the runtime",
+                json!({"error": error.to_string()}),
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let target = check::Target {
+        endpoint,
+        model,
+        mode: flags.mode(),
+        api_key: target_api_key,
+    };
+    match runtime.block_on(check::run(&client, &target)) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "error: cannot write to stdout: {error}"
+            );
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn usage_error(message: &str) -> ExitCode {
@@ -731,6 +927,99 @@ mod tests {
         assert!(
             HELP.contains(&format!("repeat for more (up to {MAX_NAMESPACES})\n")),
             "{HELP}"
+        );
+    }
+
+    #[test]
+    fn check_endpoint_refuses_by_name_every_flag_of_run_it_does_not_share() {
+        // The flags under "Options of kausa run:" are the model flags and RUN_ONLY_FLAGS.
+        let run_flags: Vec<&str> = HELP
+            .lines()
+            .skip_while(|l| *l != "Options of kausa run:")
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .filter_map(|l| l.strip_prefix("  --"))
+            .filter_map(|l| l.split_whitespace().next())
+            .collect();
+        let model_flags = [
+            "endpoint",
+            "model",
+            "api-key-file",
+            "allow-http",
+            "no-json-schema",
+            "model-timeout",
+        ];
+        let mut expected: Vec<String> = RUN_ONLY_FLAGS.iter().map(|f| f.to_string()).collect();
+        expected.extend(model_flags.iter().map(|f| format!("--{f}")));
+        expected.sort();
+        let mut listed: Vec<String> = run_flags.iter().map(|f| format!("--{f}")).collect();
+        listed.sort();
+        assert_eq!(listed, expected);
+        for flag in model_flags {
+            let mut flags = ModelFlags::default();
+            let args = [OsString::from("30")];
+            assert_eq!(
+                flags.take(&format!("--{flag}"), &mut args.iter(), true),
+                Ok(true),
+                "{flag}"
+            );
+        }
+        for flag in RUN_ONLY_FLAGS {
+            let mut flags = ModelFlags::default();
+            assert_eq!(flags.take(flag, &mut [].iter(), true), Ok(false), "{flag}");
+        }
+    }
+
+    #[test]
+    fn the_model_timeout_is_whole_seconds_from_10_to_600() {
+        for (value, seconds) in [("10", 10), ("120", 120), ("600", 600), ("0060", 60)] {
+            assert_eq!(parse_model_timeout(value), Ok(seconds), "{value}");
+        }
+        for value in [
+            "",
+            "9",
+            "601",
+            "+30",
+            "-30",
+            " 30",
+            "30 ",
+            "30s",
+            "1e2",
+            "10.0",
+            "abc",
+            "99999999999999999999999",
+        ] {
+            assert_eq!(
+                parse_model_timeout(value),
+                Err(format!(
+                    "--model-timeout takes a whole number of seconds from 10 to 600, not '{value}'"
+                )),
+                "{value:?}"
+            );
+        }
+        assert!(MODEL_TIMEOUTS.contains(&DEFAULT_MODEL_TIMEOUT));
+        let range = format!(
+            "({}-{}, default {DEFAULT_MODEL_TIMEOUT})",
+            MODEL_TIMEOUTS.start(),
+            MODEL_TIMEOUTS.end()
+        );
+        assert_eq!(HELP.matches(range.as_str()).count(), 2, "{HELP}");
+    }
+
+    #[test]
+    fn run_keeps_the_last_model_flag_and_check_endpoint_refuses_a_repeat() {
+        let args: Vec<OsString> = ["a", "b"].map(OsString::from).to_vec();
+        let mut flags = ModelFlags::default();
+        let mut iter = args.iter();
+        assert_eq!(flags.take("--model", &mut iter, false), Ok(true));
+        assert_eq!(flags.take("--model", &mut iter, false), Ok(true));
+        assert_eq!(flags.model.as_deref(), Some("b"));
+        let mut flags = ModelFlags::default();
+        let mut iter = args.iter();
+        assert_eq!(flags.take("--model", &mut iter, true), Ok(true));
+        assert_eq!(
+            flags.take("--model", &mut iter, true),
+            Err("--model is given twice".to_owned())
         );
     }
 }
