@@ -14,7 +14,7 @@
 # in seconds. The upgrade runs once and is never retried: after a failed upgrade, the next
 # --reuse-values upgrade reuses the values of the last deployed revision, not of the failed one.
 # The released image is pulled by the node from GHCR, never side-loaded; kind loads only kausa:e2e.
-# KAUSA_E2E_REPLICAS is ignored: the test always runs two replicas.
+# The replica count is not read from the environment: the test always runs two replicas.
 set -euo pipefail
 
 . tests/e2e/lib.sh
