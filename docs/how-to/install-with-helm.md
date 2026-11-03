@@ -19,7 +19,7 @@ for stalled rollouts (`rollouts`, on by default), which the kind test installed 
 2026-10-29 ([Upgrade to the Deployment watch](#upgrade-to-the-deployment-watch)), and an optional
 standby replica (`replicaCount: 2`, off by default), whose renders are checked in both scopes and
 whose kind test runs on GitHub Actions ([Run a standby replica](#run-a-standby-replica)). The
-chart of v0.5 (not released as of 2026-11-02) adds `helm test`, which checks the endpoint, the key
+chart of v0.5.0 adds `helm test`, which checks the endpoint, the key
 and the model with one synthetic request (step 6); its kind test runs on GitHub Actions, and the
 v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa check-endpoint` and
 `helm test`, and hold calls behind a breaker while it fails](../adr/0020-check-the-endpoint.md)).
@@ -44,7 +44,7 @@ v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa 
    image's signature and provenance and the chart's checksum with cosign and the GitHub CLI.
 
    ```sh
-   CHART=https://github.com/fedeam/kausa/releases/download/v0.4.1/kausa-0.4.1.tgz
+   CHART=https://github.com/fedeam/kausa/releases/download/v0.5.0/kausa-0.5.0.tgz
    ```
 
 2. **Create the namespace and, for a hosted endpoint, the API key's Secret.** kausa never reads it
@@ -86,7 +86,7 @@ v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa 
    `kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes`) and the
    endpoint's peers in `networkPolicy.endpoint.to`.
 
-6. **Check the endpoint, the key and the model** (with a chart that has the test, from v0.5):
+6. **Check the endpoint, the key and the model** (with a chart that has the test, from v0.5.0):
 
    ```sh
    helm test kausa -n kausa --logs

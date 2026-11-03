@@ -409,7 +409,7 @@ format, never ones that were issued.
 
 ## On the model's answer
 
-Since v0.5 ([0022. Pass the model's answer through the pattern redaction rules before it is
+Since v0.5.0 ([0022. Pass the model's answer through the pattern redaction rules before it is
 written anywhere, and redact the query of an HTTP request line](../adr/0022-redact-the-answer.md)),
 the model's answer passes the same pattern rules before it is logged, stored or written: after
 `prompt::validate` has checked it against the schema and cleaned it, and before the names are

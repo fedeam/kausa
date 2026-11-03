@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.4.1](https://github.com/fedeam/kausa/releases/tag/v0.4.1),
+> Event on the failing workload. The latest release, [v0.5.0](https://github.com/fedeam/kausa/releases/tag/v0.5.0),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,15 +62,15 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa https://github.com/fedeam/kausa/releases/download/v0.4.1/kausa-0.4.1.tgz \
+helm install kausa https://github.com/fedeam/kausa/releases/download/v0.5.0/kausa-0.5.0.tgz \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.4.1 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.5.0 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
 
 To have it explain, point it at a model: [Install kausa with
-Helm](docs/how-to/install-with-helm.md). Then, with a chart that has the test (from v0.5), check
+Helm](docs/how-to/install-with-helm.md). Then, with a chart that has the test (from v0.5.0), check
 the endpoint, the key and the model with one synthetic request, which prints the step that failed
 and a hint:
 
@@ -154,15 +154,17 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.4.1 is released (2026-10-30): `kausa run` watches Pods, Warning events and
+Pre-alpha. v0.5.0 is released (2026-11-03): `kausa run` watches Pods, Warning events and
 Deployments, in the whole cluster or in a list of namespaces, groups failures by workload, builds a
 redacted context with the failed container's log, asks the model within a call budget (or logs the
 request with `--dry-run`), reuses explanations of repeated incidents, writes each explanation as an
 Event on the failing workload, and serves Prometheus metrics with `--metrics-address`; with
 `--history` it keeps each incident's explanations in an Explanation object, and with
 `--notify-url-file` it posts each new explanation to one webhook, both off by default; with the
-chart's `replicaCount: 2`, off by default, a standby replica takes over through a Lease; its log
-lines are JSON ([Command line and log format](docs/reference/command-line.md)). The image is
+chart's `replicaCount: 2`, off by default, a standby replica takes over through a Lease; it
+redacts the model's answer as it redacts the request, holds its calls behind a breaker while the
+endpoint fails, and `kausa check-endpoint` (the chart's `helm test`) checks the endpoint on
+demand; its log lines are JSON ([Command line and log format](docs/reference/command-line.md)). The image is
 published at `ghcr.io/fedeam/kausa`, signed with cosign and with SLSA build provenance, and the
 chart is attached to each [GitHub release](https://github.com/fedeam/kausa/releases), next to its
 signed checksums; how to verify them is in the release notes.
@@ -249,6 +251,20 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
 - **v0.4.1** (2026-10-30): the Slack fix, a word joiner after every `@` of the text, since a
   real post showed a plain `@here` or `@channel` in v0.4.0's Slack text notifying the channel; and
   the redaction rule `R014`, which drops the query and fragment of URLs in event text and logs.
+- **v0.5.0** (2026-11-03): the model's answer passes the pattern redaction rules `R003`–`R014`
+  before it is logged, written or posted ([0022. Pass the model's answer through the pattern
+  redaction rules before it is written anywhere, and redact the query of an HTTP request
+  line](docs/adr/0022-redact-the-answer.md)); the hourly call budget refills at a steady rate from
+  a start burst of three, and incidents wait for it in the queue ([0021. Refill the hourly call
+  budget at a steady rate from a start burst of three, and let incidents wait for it in the queue,
+  so that a restart does not refill it](docs/adr/0021-refill-the-call-budget.md)); `kausa
+  check-endpoint`, the chart's `helm test`, and a breaker that holds calls while the endpoint
+  fails ([0020. Check the model endpoint on demand with `kausa check-endpoint` and `helm test`, and
+  hold calls behind a breaker while it fails](docs/adr/0020-check-the-endpoint.md)); and `D002`,
+  `D004`, `D008` and `D011` explain more failures, scored against known causes ([Explanation
+  quality of local models against known
+  causes](docs/research/2026-11-02-explanation-quality.md)). Upgrade the image and the chart
+  together.
 
 ## Documentation
 

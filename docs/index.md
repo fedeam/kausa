@@ -9,7 +9,7 @@ ConfigMaps, never changes a workload, and writes nothing but its own Events (non
 `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease. With
 `--notify-url-file` (off by default) it also posts each new explanation to one webhook.
 
-Status as of 2026-10-30: **in development** (pre-alpha). The four implementation weekends of v0.1
+Status as of 2026-11-03: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
@@ -21,7 +21,9 @@ release, [v0.1.0](https://github.com/fedeam/kausa/releases/tag/v0.1.0), came out
 Notifications](journal/2026-10-29-notifications.md), "v0.3.0"), and on 2026-10-30 by
 [v0.4.0](https://github.com/fedeam/kausa/releases/tag/v0.4.0) ([2026-10-30 — Release
 v0.4.0](journal/2026-10-30-release-v0-4-0.md)), and the same day by
-[v0.4.1](https://github.com/fedeam/kausa/releases/tag/v0.4.1), with the Slack fix and `R014`. The
+[v0.4.1](https://github.com/fedeam/kausa/releases/tag/v0.4.1), with the Slack fix and `R014`, and on
+2026-11-03 by [v0.5.0](https://github.com/fedeam/kausa/releases/tag/v0.5.0) ([2026-11-03 — Release
+v0.5.0](journal/2026-11-03-release-v0-5-0.md)). The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -147,7 +149,7 @@ checks](how-to/develop.md).
   progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
   StatefulSets or DaemonSets](adr/0018-stuck-rollouts.md) and [0019. Offer an optional standby
   replica that takes over through a chart-created Lease, elected by kausa's own
-  code](adr/0019-high-availability.md). Accepted for v0.5: [0020. Check the model endpoint on
+  code](adr/0019-high-availability.md). Shipped in v0.5.0: [0020. Check the model endpoint on
   demand with `kausa check-endpoint` and `helm test`, and hold calls behind a breaker while it
   fails](adr/0020-check-the-endpoint.md), [0021. Refill the hourly call budget at a steady rate
   from a start burst of three, and let incidents wait for it in the queue, so that a restart does
@@ -164,4 +166,5 @@ checks](how-to/develop.md).
   [2026-10-28 — First release](journal/2026-10-28-first-release.md);
   [2026-10-29 — Notifications](journal/2026-10-29-notifications.md);
   [2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md);
-  [2026-11-02 — The good first issues](journal/2026-11-02-good-first-issues.md).
+  [2026-11-02 — The good first issues](journal/2026-11-02-good-first-issues.md);
+  [2026-11-03 — Release v0.5.0](journal/2026-11-03-release-v0-5-0.md).

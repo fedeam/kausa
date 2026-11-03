@@ -176,7 +176,7 @@ node finds them in the Event or in kausa's log.
 "Never logs" means that no field holds a log line. The explanation is the model's text, which can
 repeat the redacted context the model was given (log and event text, probe paths, label keys), up
 to the explanation's caps (2,400 characters in all), whether the model is verbose or injected text
-asks it to. kausa cannot tell a quote from a summary. Since v0.5 the answer passes the pattern
+asks it to. kausa cannot tell a quote from a summary. Since v0.5.0 the answer passes the pattern
 redaction rules before any of it is written, so a value they recognize (an address, a token, a
 URL's query, a host outside the allowlist) is redacted even when the model writes it out of the
 context or invents it; text they do not recognize, such as a command, is posted as written. The kind test checks that no body carries a log line of the requests, but

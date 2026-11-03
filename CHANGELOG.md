@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-03
+
+The model's answer passes the pattern redaction rules before it is written anywhere (0022), the
+hourly call budget refills at a steady rate, so that a restart no longer refills it (0021),
+`kausa check-endpoint` and the chart's `helm test` check the endpoint, and a breaker holds calls
+while it fails (0020), and `D002`, `D004`, `D008` and `D011` explain more failures. Upgrade the
+image and the chart together, since the new chart passes `--model-timeout`, which older images
+refuse; after the upgrade an Explanation may start a new entry once.
+
 ### Added
 
 - `R011` redacts npm (`npm_`), PyPI (`pypi-`) and Docker (`dckr_pat_`, `dckr_oat_`) tokens and
@@ -376,7 +385,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.4.1...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/fedeam/kausa/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/fedeam/kausa/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/fedeam/kausa/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fedeam/kausa/compare/v0.2.0...v0.3.0
