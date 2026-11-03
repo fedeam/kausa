@@ -58,7 +58,8 @@ measured in kind on 2026-10-29 ([Standby and failover](research/2026-10-29-stand
 
 - **What it is:** a Rust controller on kube-rs, one static binary for linux/amd64 and
   linux/arm64, in a distroless non-root image published at `ghcr.io/fedeam/kausa` with a Helm
-  chart in `charts/kausa`, attached to each GitHub release.
+  chart in `charts/kausa`, attached to each GitHub release and, from v0.6.0, published at
+  `oci://ghcr.io/fedeam/charts/kausa`.
 - **URL:** none: kausa runs in its users' clusters.
 - **Repository:** [`fedeam/kausa`](https://github.com/fedeam/kausa) on GitHub, public since
   2026-10-27. A private copy on the maintainer's Gitea instance, synced by

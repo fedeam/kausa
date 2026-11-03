@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The chart is published at `oci://ghcr.io/fedeam/charts/kausa` (install with `--version`),
+  signed with cosign and with SLSA build provenance; the `.tgz` stays on each GitHub release.
+- Each release attests a CycloneDX SBOM to the image of each architecture and attaches both; the
+  binary is built with `cargo auditable`, so scanners read its crates from the image.
+- The chart has a README and Artifact Hub annotations.
+
 ## [0.5.1] - 2026-11-03
 
 A fix for the endpoint check and the breaker with Google's Gemini API, which answers a wrong key
