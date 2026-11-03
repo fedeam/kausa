@@ -157,7 +157,9 @@ checks](how-to/develop.md).
   from a start burst of three, and let incidents wait for it in the queue, so that a restart does
   not refill it](adr/0021-refill-the-call-budget.md) and [0022. Pass the model's answer through
   the pattern redaction rules before it is written anywhere, and redact the query of an HTTP
-  request line](adr/0022-redact-the-answer.md).
+  request line](adr/0022-redact-the-answer.md). Accepted for v0.6: [0023. Publish the chart as a
+  signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
+  CycloneDX SBOM of an auditable binary to each image](adr/0023-oci-chart-and-sbom.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

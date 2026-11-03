@@ -103,3 +103,9 @@ FedeAM decided this on 2026-10-23, reusing kaution's setup.
 - The end-to-end tests in a kind cluster (third weekend) need a Docker daemon that can run kind;
   whether they run on both forges or only on GitHub is decided then.
 - Pinning makes every update an explicit, reviewed pull request.
+
+Update 2026-11-03: [0023. Publish the chart as a signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it
+on Artifact Hub, and attest a CycloneDX SBOM of an auditable binary to each
+image](0023-oci-chart-and-sbom.md) adds one pinned tool (`cargo-auditable`, by version and checksum) and
+two Debian packages to the build stage, and the `ci` target gains a check that the chart's image
+annotation matches its `appVersion`; the release workflow pins `syft` and `oras` the same way.
