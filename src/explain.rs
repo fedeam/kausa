@@ -636,6 +636,12 @@ async fn skip(
     reason: &str,
     why: &str,
 ) -> io::Result<()> {
+    // A reason outside the list would have no zero series and no documented value: any test
+    // that drives it fails here.
+    debug_assert!(
+        SKIP_REASONS.contains(&reason),
+        "{reason} is not in SKIP_REASONS"
+    );
     if !shared.term.holds() {
         return Ok(());
     }
