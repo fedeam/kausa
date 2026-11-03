@@ -1,0 +1,17 @@
+# The soak's values (docs/how-to/run-the-soak.md): v0.5.1's chart defaults, with an in-cluster
+# fake endpoint and nothing written outside kausa-soak.
+rbac:
+  scope: cluster
+replicaCount: 2
+model:
+  endpoint: http://kausa-soak-endpoint.kausa-soak.svc:8080/v1
+  name: fake
+  allowHttp: true
+events: false
+history:
+  enabled: false
+notifications:
+  enabled: true
+  format: json
+  existingSecret: kausa-soak-notify
+  allowHttp: true
