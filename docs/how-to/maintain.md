@@ -427,6 +427,17 @@ GitHub release](../adr/0012-releases.md). Status as of 2026-10-28: v0.1.0 is the
 5. Verify what was published with the commands in the release notes (`cosign verify`, both
    `gh attestation verify`, `cosign verify-blob`), and that the image can be pulled without
    logging in: `docker pull ghcr.io/fedeam/kausa:X.Y.Z` from a machine logged out of GHCR.
+6. **Point the upgrade test at the new release** in a pull request of your own
+   (`test(e2e): upgrade from vX.Y.Z`): set the three values of `tests/e2e/upgrade-from.txt`
+   (the version, the chart's SHA-256 and the image index digest) from what step 5 verified:
+
+   ```sh
+   gh release download vX.Y.Z --repo fedeam/kausa --pattern SHA256SUMS --output - | grep ' kausa-X.Y.Z.tgz$'
+   docker buildx imagetools inspect ghcr.io/fedeam/kausa:X.Y.Z --format '{{json .Manifest.Digest}}'
+   ```
+
+   Until it merges, the `upgrade` jobs of the `e2e` workflow warn that a newer release exists;
+   they never fail for it.
 
 ## If something fails
 

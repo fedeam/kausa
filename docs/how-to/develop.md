@@ -104,8 +104,8 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    `kausa-leader` RoleBinding (nobody acts until `helm upgrade`), a foreign label change on the
    Lease, a rollout and an uninstall ([0019. Offer an optional standby replica that takes over
    through a chart-created Lease, elected by kausa's own code](../adr/0019-high-availability.md)).
-   CI runs the three, as the checks `kind (cluster)`, `kind (namespaced)` and `kind (namespaced,
-   standby)`:
+   Its three runs, which CI reports as the checks `kind (cluster)`, `kind (namespaced)` and
+   `kind (namespaced, standby)`:
 
    ```sh
    KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the node image pinned in .github/workflows/e2e.yml> \
@@ -122,6 +122,34 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    path passed on 2026-10-27; the Linux one waits for GitHub's runners. kind writes its context to
    the kubeconfig and makes it the current one: to leave yours as it is, run the test with
    `KUBECONFIG` pointing at a file of its own.
+
+   The upgrade test, `tests/e2e/upgrade.sh`, checks what a user's `helm upgrade` does to a running
+   release. It creates its own kind cluster, `kausa-upgrade` (and deletes it at the end), and
+   installs the latest release, pinned in `tests/e2e/upgrade-from.txt`, from its GitHub release:
+   the chart, checked against the pinned SHA-256 before the cluster is created, and the image,
+   pulled by digest from GHCR. It therefore needs network access to github.com and ghcr.io. It
+   always runs two replicas, in the `rbac.scope` of `KAUSA_E2E_SCOPE` (`cluster` when unset, or
+   `namespaced`), and has the release explain a seeded failure. Then it upgrades once, with
+   `helm upgrade --reuse-values`, to this checkout's chart and image, and checks that the rollout
+   completed, both new Pods are Ready on the new image with no restart, the release is deployed
+   at revision 2, the user values are the old ones plus the four image values the upgrade sets,
+   one Pod holds the Lease and the other is a standby, the new leader logs and explains a failure
+   seeded after the upgrade, and `helm test` passes. It ends with
+   `e2e upgrade: vX.Y.Z to <this checkout's version>, rbac.scope=<scope>: ok`:
+
+   ```sh
+   KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the same image> tests/e2e/upgrade.sh
+   KUBECONFIG=$(mktemp) KIND_NODE_IMAGE=<the same image> KAUSA_E2E_SCOPE=namespaced \
+     tests/e2e/upgrade.sh
+   ```
+
+   CI runs the five, as the checks `kind (cluster)`, `kind (namespaced)`,
+   `kind (namespaced, standby)`, `upgrade (cluster)` and `upgrade (namespaced)`. Both scripts
+   take their helpers (the constants, the `kubectl` and `helm` wrappers, the fake endpoint, the
+   cleanup and the checks) from `tests/e2e/lib.sh`, which they source and which never runs on its
+   own. After each release, a pull request points `tests/e2e/upgrade-from.txt` at it ([Maintain
+   the repository](maintain.md), "Cut a release"); until it merges, the `upgrade` jobs warn that
+   a newer release exists.
 
 ## Fuzz
 

@@ -438,7 +438,10 @@ and not published yet](../adr/0010-packaging.md).
   and checks the Events, that no real name reached the endpoint, the chart's role against the
   reference, and the metrics, once per `rbac.scope` (`KAUSA_E2E_SCOPE`), and once more in the
   namespaced scope with a standby (`KAUSA_E2E_REPLICAS=2`): graceful, frozen and fail-closed
-  handovers.
+  handovers; and an upgrade test in kind (`tests/e2e/upgrade.sh`) that installs the latest
+  release with two replicas, upgrades it with `helm upgrade --reuse-values` to the checkout's
+  chart and image, and checks the rollout, the values, the Lease split and an explanation after
+  the upgrade, once per `rbac.scope`.
 
 ## Exit codes
 
