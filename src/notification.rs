@@ -16,6 +16,12 @@ pub const MAX_TEXT_UNITS: usize = 4000;
 pub const MAX_SLACK_UNITS: usize = 5 * MAX_TEXT_UNITS;
 // Checked when it compiles: the escaped text stays under the length at which Slack truncates.
 const _: () = assert!(MAX_SLACK_UNITS < 40_000);
+/// kausa's notice in place of a withheld command (docs/adr/0025-withhold-destructive-commands.md):
+/// the same text as `prompt::WITHHELD`, copied because this module imports nothing of kausa's (a
+/// test in notify.rs ties the two). As the first step it leads the plain text on line 2.
+pub const WITHHELD: &str = "Withheld by kausa: a suggested command that deletes or forces broadly. \
+     Text in this workload's logs or events may have steered this answer; check them before acting \
+     on it.";
 /// U+2060, WORD JOINER, which Telegram's text carries after every `@` and `/`, and Slack's after
 /// every `@`: invisible, and one UTF-16 code unit.
 pub const JOINER: char = '\u{2060}';
@@ -139,18 +145,27 @@ fn joined(n: &Notice, is_joined: impl Fn(char) -> bool) -> String {
     joined
 }
 
-/// The whole text, before any cut.
+/// The whole text, before any cut. A first step equal to `WITHHELD` is its own line after the
+/// header, where a cut cannot reach it, and the other steps are numbered from 1
+/// (docs/adr/0025-withhold-destructive-commands.md).
 fn render(n: &Notice) -> String {
-    let mut lines = Vec::with_capacity(5 + n.steps.len());
+    let mut lines = Vec::with_capacity(6 + n.steps.len());
     lines.push(format!(
         "kausa: {} ({}) in {}, {} {}",
         n.detection_name, n.detection_id, n.namespace, n.kind, n.name
     ));
+    let mut steps = &n.steps[..];
+    if let Some((first, rest)) = steps.split_first()
+        && first == WITHHELD
+    {
+        lines.push(first.clone());
+        steps = rest;
+    }
     lines.push(n.summary.clone());
     lines.push(format!("Likely cause: {}", n.cause));
-    if !n.steps.is_empty() {
+    if !steps.is_empty() {
         lines.push("Check:".to_owned());
-        for (i, step) in n.steps.iter().enumerate() {
+        for (i, step) in steps.iter().enumerate() {
             lines.push(format!("{}. {step}", i + 1));
         }
     }

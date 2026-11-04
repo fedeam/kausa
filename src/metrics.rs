@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 22] = [
+pub const COUNTERS: [(&str, &str); 23] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -101,6 +101,12 @@ pub const COUNTERS: [(&str, &str); 22] = [
     (
         "kausa_watch_restarts_total",
         "New watchers started after the API server refused a watch (403), by watch.",
+    ),
+    // docs/adr/0025-withhold-destructive-commands.md: once per fresh answer whose restored
+    // version carries the notice; a cached repeat counts nothing.
+    (
+        "kausa_answers_withheld_total",
+        "Model answers in which kausa replaced text with its withheld-command notice.",
     ),
 ];
 

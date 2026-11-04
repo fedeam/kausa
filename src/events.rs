@@ -21,7 +21,7 @@ use crate::fingerprint::fingerprint;
 use crate::incident::Incident;
 use crate::leader::Term;
 use crate::leader::pure::WRITE_BOUND;
-use crate::prompt::Explanation;
+use crate::prompt::{Explanation, WITHHELD};
 use crate::run::REPORTING_CONTROLLER;
 
 /// The longest note an Event may carry, in bytes (`NoteLengthLimit` in Kubernetes'
@@ -35,15 +35,22 @@ pub enum Outcome<'a> {
 }
 
 /// The note of an explanation: the summary, the cause and the steps, cut at a character boundary
-/// to fit the limit.
+/// to fit the limit. A withheld answer's note starts with kausa's notice, ahead of anything a cut
+/// could take, and numbers the other steps from 1
+/// (docs/adr/0025-withhold-destructive-commands.md); it stays Normal and Explained.
 pub fn note(explanation: &Explanation) -> String {
-    let mut text = format!(
+    let (mut text, steps) = if explanation.withheld() {
+        (format!("{WITHHELD} "), &explanation.steps[1..])
+    } else {
+        (String::new(), &explanation.steps[..])
+    };
+    text.push_str(&format!(
         "{} Likely cause: {}",
         explanation.summary, explanation.cause
-    );
-    if !explanation.steps.is_empty() {
+    ));
+    if !steps.is_empty() {
         text.push_str(" Check:");
-        for (i, step) in explanation.steps.iter().enumerate() {
+        for (i, step) in steps.iter().enumerate() {
             text.push_str(&format!(" {}. {}", i + 1, step));
         }
     }
