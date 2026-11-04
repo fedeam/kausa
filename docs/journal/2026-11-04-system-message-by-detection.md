@@ -291,7 +291,7 @@ chart checks on `feat/withhold-destructive-bench`, merged into it):
 
 ### Next steps
 
-- The measurement (tasks 23-26 of the outline): the dry-run validity check, the local calls on the
+- The measurement of 0025 (its Consequences): the dry-run validity check, the local calls on the
   16 entries, the offline grading and one sink run; then the research note, an `Update` in 0025,
   and the `KausaAnswerWithheld` example alert only if bar M1 (no benign answer changed) holds.
 - Close #84 with a link to the note.

@@ -181,8 +181,8 @@ kausa must:
   it against a fixed schema, caps its length, strips control and invisible formatting characters
   and markup, passes it through the pattern redaction rules `R003`–`R014` (an address, a token, a
   URL's query or a host outside the allowlist the model writes is redacted, whoever put it there),
-  maps the names back, replaces every text in which a listed destructive command shape matches,
-  in any version a sink gets, with a fixed notice that leads the answer at `low` confidence ([0025.
+  maps the names back, replaces every summary, cause or step in which a listed destructive command
+  shape matches, in any version a sink gets, with a fixed notice that leads the answer at `low` confidence ([0025.
   Replace the model's text that holds one of six listed destructive command shapes with a fixed
   notice, show the notice first, and give that answer `low`
   confidence](docs/adr/0025-withhold-destructive-commands.md)), and writes it only as plain text
