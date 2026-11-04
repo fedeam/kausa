@@ -50,3 +50,9 @@ criteria on version tags all ask for real releases. FedeAM decided on 2026-10-28
   inherits the repository's permissions, not its visibility): it is made public by hand once,
   after the first release.
 - cosign's version and checksum are bumped by hand, like the other pinned tools.
+
+Update 2026-11-03: [0023. Publish the chart as a signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it
+on Artifact Hub, and attest a CycloneDX SBOM of an auditable binary to each
+image](0023-oci-chart-and-sbom.md) also pushes each release's chart to GHCR as a signed OCI artifact with
+provenance, lists it on Artifact Hub, and attests a CycloneDX SBOM to each image; the chart's
+`.tgz` stays on the GitHub release, so the install URL of this decision keeps working.

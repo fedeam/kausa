@@ -8,7 +8,13 @@ server-side dry run against Kubernetes v1.36 (k3s), by one install in dry-run on
 with an endpoint in each `rbac.scope` (both passed on 2026-10-28 on the maintainer's machine).
 Since v0.1.0 (2026-10-28) each release attaches the packaged chart to its GitHub release and
 publishes the image it uses by default, and the v0.1.0 chart was installed in dry-run in kind with
-that image ([Install kausa with Helm](../how-to/install-with-helm.md)). `rbac.scope` and
+that image ([Install kausa with Helm](../how-to/install-with-helm.md)). Since v0.6.0 the chart is
+also published at `oci://ghcr.io/fedeam/charts/kausa` (not released as of 2026-11-03), and it
+carries a `README.md` (Artifact Hub's package page and `helm show readme`), its maintainer and
+Artifact Hub's annotations in `Chart.yaml`, none of which changes a render ([0023. Publish the
+chart as a signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub,
+and attest a CycloneDX SBOM of an auditable binary to each
+image](../adr/0023-oci-chart-and-sbom.md)). `rbac.scope` and
 `rbac.namespaces` are in the chart since v0.3.0 (2026-10-29): the v0.2.0 and v0.1.0
 charts have neither and always create the ClusterRole. The `history` values, the Explanation
 CustomResourceDefinition and its reader role came with v0.3.0 too, and the kind test installs

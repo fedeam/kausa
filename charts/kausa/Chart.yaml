@@ -3,11 +3,37 @@ name: kausa
 description: A tiny Kubernetes controller that explains failing workloads with an LLM
 type: application
 # The same version as the binary (Cargo.toml); the release checks that they match.
-version: 0.5.1
-appVersion: 0.5.1
+version: 0.5.2
+appVersion: 0.5.2
 # k8s-openapi is built for the API of Kubernetes 1.32 (Cargo.toml); kausa uses only stable APIs.
 kubeVersion: ">=1.32.0-0"
 home: https://github.com/fedeam/kausa
 sources:
   - https://github.com/fedeam/kausa
 keywords: [kubernetes, controller, llm, troubleshooting]
+# No email: the repository publishes none (AGENTS.md).
+maintainers:
+  - name: FedeAM
+    url: https://github.com/fedeam
+# Read by Artifact Hub (docs/adr/0023-oci-chart-and-sbom.md). Helm also copies them into the OCI
+# manifest of the chart.
+annotations:
+  artifacthub.io/category: monitoring-logging
+  artifacthub.io/license: MIT OR Apache-2.0
+  # The image at appVersion: the ci target and the release check it. Artifact Hub scans it; without
+  # this list it would render the chart with its default values, which fail without rbac.scope.
+  artifacthub.io/images: |
+    - name: kausa
+      image: ghcr.io/fedeam/kausa:0.5.2
+      platforms:
+        - linux/amd64
+        - linux/arm64
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/fedeam/kausa/blob/main/docs/index.md
+    - name: Changelog
+      url: https://github.com/fedeam/kausa/blob/main/CHANGELOG.md
+    - name: Security policy
+      url: https://github.com/fedeam/kausa/blob/main/SECURITY.md
+    - name: Issues
+      url: https://github.com/fedeam/kausa/issues

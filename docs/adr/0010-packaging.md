@@ -92,3 +92,9 @@ Update 2026-11-02: as implemented with [0020](0020-check-the-endpoint.md), the c
 `model.timeoutSeconds`, `endpointCheck.enabled` and two objects: a `helm test` Pod with no
 ServiceAccount token and, with the NetworkPolicy on, a policy limited to DNS and the endpoint
 ([Helm chart](../reference/helm-chart.md#the-endpoint-check)).
+
+Update 2026-11-03: with [0023. Publish the chart as a signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it
+on Artifact Hub, and attest a CycloneDX SBOM of an auditable binary to each
+image](0023-oci-chart-and-sbom.md), the image's build stage compiles kausa with `cargo auditable`,
+which embeds the dependency list in the binary; the runtime image and its contents are otherwise
+unchanged.

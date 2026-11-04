@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kausa_owner_cache_entries` and `kausa_dedup_cache_entries`
   ([Command line and log format](docs/reference/command-line.md#metrics)). No label names a
   namespace, a Pod, a model or a host.
+- The chart is published at `oci://ghcr.io/fedeam/charts/kausa` (install with `--version`),
+  signed with cosign and with SLSA build provenance; the `.tgz` stays on each GitHub release.
+- Each release attests a CycloneDX SBOM to the image of each architecture and attaches both; the
+  binary is built with `cargo auditable`, so scanners read its crates from the image.
+- The chart has a README and Artifact Hub annotations.
 
 ### Changed
 
@@ -35,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The example alert on a flapping Lease, now `KausaLeaderFlapping`, fires at 7 takeovers in an
   hour (`>= 7`) instead of `> 6`, which six takeovers could cross once `increase` extrapolates.
   It and `KausaNoLeader` add up a release's Pods `by (namespace, job)`.
+
+## [0.5.2] - 2026-11-03
+
+A security fix of redaction: the name of a Secret or ConfigMap that a Pod cannot mount could
+reach the request in clear. Nothing to change in values or permissions.
 
 ### Security
 
@@ -436,7 +446,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.5.1...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/fedeam/kausa/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/fedeam/kausa/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fedeam/kausa/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/fedeam/kausa/compare/v0.4.0...v0.4.1
