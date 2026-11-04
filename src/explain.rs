@@ -3671,4 +3671,57 @@ mod tests {
             "an ordinary answer counted"
         );
     }
+
+    #[test]
+    fn a_destructive_answer_is_withheld_without_notifications() {
+        // Without a webhook there is no narrow version: restored alone is withheld and counted.
+        let settings = settings(Some(model("200 OK", Some(destructive_answer()))), false, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        assert!(!explain(job_work("inject-log", "task"), &settings, &shared));
+        {
+            let dedup = shared.dedup.borrow();
+            let entry = dedup.peek(FINGERPRINT).expect("an entry");
+            assert_withheld(&entry.explanation, "notifications off: the dedup entry");
+            assert!(entry.notice.is_none(), "a stored notification text");
+            let note = crate::events::note(&entry.explanation);
+            assert!(
+                note.starts_with(&format!("{WITHHELD} ")),
+                "notifications off: the Event note does not lead with the notice"
+            );
+            assert!(
+                shapes(&note).is_empty(),
+                "notifications off: a shape in the Event note"
+            );
+        }
+        assert!(
+            shared.notifications.borrow().is_empty(),
+            "a queued notification"
+        );
+        assert!(metrics.render().contains(WITHHELD_ONCE), "the counter");
+    }
+
+    #[test]
+    fn a_model_written_notice_counts() {
+        // The model wrote kausa's notice itself and no shape: the answer still reaches the sinks
+        // as a withheld one (one notice, low) and counts, since restored carries the notice.
+        let answer = json!({
+            "summary": "job-1 in namespace-1 failed.",
+            "cause": "the container exits with an error.",
+            "steps": ["Check the logs of job-1.", WITHHELD],
+            "confidence": "high",
+        })
+        .to_string();
+        let settings = settings(Some(model("200 OK", Some(answer))), true, 30);
+        let metrics = Metrics::default();
+        let shared = shared(&settings, &metrics);
+        assert!(!explain(job_work("migrate", "task"), &settings, &shared));
+        assert_every_sink_withheld(&shared, "a model-written notice");
+        {
+            let dedup = shared.dedup.borrow();
+            let entry = dedup.peek(FINGERPRINT).expect("an entry");
+            assert_eq!(entry.explanation.steps[1..], ["Check the logs of migrate."]);
+        }
+        assert!(metrics.render().contains(WITHHELD_ONCE), "the counter");
+    }
 }
