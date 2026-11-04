@@ -495,9 +495,10 @@ mod tests {
     #[test]
     fn the_notification_counters_come_last_with_their_help() {
         // The two counters of docs/adr/0019-high-availability.md, the one of
-        // docs/adr/0022-redact-the-answer.md and the two watch counters of v0.6's
-        // self-observability come after these.
-        assert_eq!(COUNTERS.len(), 22);
+        // docs/adr/0022-redact-the-answer.md, the two watch counters of v0.6's
+        // self-observability and the withheld answers of
+        // docs/adr/0025-withhold-destructive-commands.md come after these.
+        assert_eq!(COUNTERS.len(), 23);
         assert_eq!(
             COUNTERS[15],
             (
@@ -577,10 +578,11 @@ mod tests {
     // `watch="deployments"`, and `D014` incidents under `kausa_incidents_total`.
     #[test]
     fn the_deployment_watch_adds_no_counter() {
-        // 22: the standby's two counters (docs/adr/0019-high-availability.md), the answer's
-        // redactions (docs/adr/0022-redact-the-answer.md) and the watch relists and restarts of
-        // v0.6's self-observability came later.
-        assert_eq!(COUNTERS.len(), 22, "a counter was added");
+        // 23: the standby's two counters (docs/adr/0019-high-availability.md), the answer's
+        // redactions (docs/adr/0022-redact-the-answer.md), the watch relists and restarts of
+        // v0.6's self-observability and the withheld answers of
+        // docs/adr/0025-withhold-destructive-commands.md came later.
+        assert_eq!(COUNTERS.len(), 23, "a counter was added");
         assert!(COUNTERS.contains(&(
             "kausa_watch_errors_total",
             "Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch."
@@ -608,9 +610,10 @@ mod tests {
 
     #[test]
     fn the_standby_counters_come_last_with_their_help() {
-        // The counter of docs/adr/0022-redact-the-answer.md and the two watch counters of v0.6's
-        // self-observability come after these.
-        assert_eq!(COUNTERS.len(), 22);
+        // The counter of docs/adr/0022-redact-the-answer.md, the two watch counters of v0.6's
+        // self-observability and the withheld answers of
+        // docs/adr/0025-withhold-destructive-commands.md come after these.
+        assert_eq!(COUNTERS.len(), 23);
         assert_eq!(
             COUNTERS[17],
             (
@@ -904,8 +907,9 @@ mod tests {
     #[test]
     fn the_endpoint_gauges_follow_the_queue_gauge_with_their_help() {
         // By position: the build, record and cache gauges of v0.6's self-observability follow
-        // these, and the watch counters came with them (22 counters).
-        assert_eq!(COUNTERS.len(), 22, "a counter was added");
+        // these, and the watch counters came with them; the withheld answers of
+        // docs/adr/0025-withhold-destructive-commands.md came later (23 counters).
+        assert_eq!(COUNTERS.len(), 23, "a counter was added");
         assert_eq!(
             GAUGES[..5],
             [
@@ -1028,9 +1032,11 @@ mod tests {
 
     #[test]
     fn the_watch_relist_and_restart_counters_come_last_with_their_help() {
-        assert_eq!(COUNTERS.len(), 22);
+        // The withheld answers of docs/adr/0025-withhold-destructive-commands.md come after
+        // these.
+        assert_eq!(COUNTERS.len(), 23);
         assert_eq!(
-            COUNTERS[COUNTERS.len() - 2..],
+            COUNTERS[COUNTERS.len() - 3..COUNTERS.len() - 1],
             [
                 ("kausa_watch_relists_total", RELISTS_HELP),
                 ("kausa_watch_restarts_total", RESTARTS_HELP),
@@ -1643,5 +1649,46 @@ mod tests {
                 "### {heading} in docs/reference/alerts.md is no alert of the rules file"
             );
         }
+    }
+
+    // Acceptance tests for docs/adr/0025-withhold-destructive-commands.md, written before the
+    // code: one counter with no labels, appended last to `COUNTERS`, so it renders 0 from the
+    // start and needs no zero series in run.rs. No alert reads it yet.
+
+    const WITHHELD_HELP: &str =
+        "Model answers in which kausa replaced text with its withheld-command notice.";
+
+    #[test]
+    fn the_withheld_counter_comes_last_with_its_help() {
+        assert_eq!(COUNTERS.len(), 23);
+        assert_eq!(
+            COUNTERS.last(),
+            Some(&("kausa_answers_withheld_total", WITHHELD_HELP))
+        );
+        assert_eq!(
+            counter_at("kausa_answers_withheld_total"),
+            counter_at("kausa_watch_restarts_total") + 1
+        );
+        let names: std::collections::BTreeSet<&str> = COUNTERS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), COUNTERS.len(), "a counter is listed twice");
+    }
+
+    #[test]
+    fn the_withheld_counter_renders_as_zero_when_unused() {
+        let m = Metrics::default();
+        let name = "kausa_answers_withheld_total";
+        assert!(
+            m.render().contains(&format!(
+                "# HELP {name} {WITHHELD_HELP}\n# TYPE {name} counter\n{name} 0\n"
+            )),
+            "no zero series"
+        );
+        m.inc(name, &[]);
+        let text = respond("GET /metrics HTTP/1.1", &m).2;
+        assert!(text.contains(&format!("\n{name} 1\n")), "the count");
+        assert!(
+            !text.contains(&format!("\n{name} 0\n")),
+            "a zero series is left"
+        );
     }
 }

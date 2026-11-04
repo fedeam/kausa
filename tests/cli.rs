@@ -70,6 +70,21 @@ fn unknown_command_is_a_usage_error() {
     );
 }
 
+// The kind test's failing-job runs kausa's image with this one unknown option, so that its log
+// tail, which the D008 request carries, holds the marker the fake endpoint answers with a
+// destructive step (docs/adr/0025-withhold-destructive-commands.md, tests/e2e/fake_endpoint.py).
+#[test]
+fn the_e2e_withhold_marker_is_echoed_in_the_usage_error() {
+    let output = kausa(&["--e2e-withhold-marker"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert!(
+        stderr(&output).contains("error: unknown command or option '--e2e-withhold-marker'"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn no_arguments_is_a_usage_error() {
     let output = kausa(&[]);
