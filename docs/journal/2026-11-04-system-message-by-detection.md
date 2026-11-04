@@ -94,3 +94,23 @@ All within [0024](../adr/0024-system-message-by-detection.md):
 - kausa cites the Job reasons as `pkg/apis/batch/types.go:622-633` (`src/detect.rs`,
   [Detection and redaction rules](../reference/rules.md)); at v1.36.4 they are at those lines of
   `staging/src/k8s.io/api/batch/v1/types.go`. A later fix, outside 0024.
+
+## Review fixes
+
+A review of the branch found six problems, each confirmed by two of three skeptics; all are fixed
+before the run.
+
+- **The fuzz targets did not build** (`fix(prompt): keep the fuzz targets building with the
+  detection`). `fuzz/fuzz_targets/validate.rs` and `history.rs` compile `src/prompt.rs` on its
+  own, and its new `use crate::detect::Detection` has no module there, so `cargo fuzz build` and
+  ClusterFuzzLite would have failed. The import, `system` and `request` are now under
+  `#[cfg(not(fuzzing))]`; `fuzz/build.rs` sets `cfg(fuzzing)` as `cargo fuzz build` does, so that
+  `cargo check --manifest-path fuzz/Cargo.toml` passes too, and kausa's `Cargo.toml` declares the
+  cfg for `check-cfg`. `fn system` stays in `src/prompt.rs`, as the ADR says. None of the checks
+  of AGENTS.md builds the fuzz crate; that gap stays open.
+- **`before_after.py`** (`test(bench): make before_after.py follow ADR 0024 before the freeze`):
+  `swap` fails when a detection's message is not the one the ADR gives it; `compare` computes `n`
+  before the reader's marks, takes the majority of three when every pair has three answers (one
+  file per repeat), and a mark fails the answer's `cause` whatever its other criteria, so bar B1
+  counts it; the sheet no longer names the ADR. `selftest` has 15 checks, and a mutation of each
+  fix fails its check.
