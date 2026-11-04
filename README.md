@@ -167,7 +167,10 @@ endpoint fails, and `kausa check-endpoint` (the chart's `helm test`) checks the 
 demand; its log lines are JSON ([Command line and log format](docs/reference/command-line.md)). The image is
 published at `ghcr.io/fedeam/kausa`, signed with cosign and with SLSA build provenance, and the
 chart is attached to each [GitHub release](https://github.com/fedeam/kausa/releases), next to its
-signed checksums; how to verify them is in the release notes.
+signed checksums; how to verify them is in the release notes. From v0.6.0 the chart is also
+published at `oci://ghcr.io/fedeam/charts/kausa`, signed and with provenance, and each image gets
+an attested CycloneDX SBOM of a binary built with `cargo auditable`, whose crate list scanners can
+read from the image.
 
 What was measured, once each and on small setups: on five seeded failures with the same small
 local model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 calls and 5,128
