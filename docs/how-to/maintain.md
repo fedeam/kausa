@@ -469,8 +469,7 @@ SBOMs.
      Helm](install-with-helm.md), the status paragraph at the top, the end of step 1 ("Until v0.6.0
      is released"), "Upgrade from a chart URL to the OCI chart" and the end of "Verify a release";
      the status line of [Helm chart](../reference/helm-chart.md); and the status line of this
-     section. The lines that say no install from GHCR and no command of the notes has run stay
-     until step 5 has run them.
+     section. (Done for v0.6.0; step 5 ran its notes on 2026-11-04.)
 2. Merge it, sync Gitea, and tag the merged commit on `main`:
 
    ```sh
@@ -493,9 +492,9 @@ SBOMs.
    with the repository's visibility (an anonymous pull worked on 2026-10-28). If a pull without
    logging in ever fails, set it in the package's page
    (`https://github.com/users/fedeam/packages/container/package/kausa`) → Package settings →
-   Change visibility → Public. Once, after v0.6.0, do the same for the chart: from a machine logged
-   out of GHCR, `helm show chart oci://ghcr.io/fedeam/charts/kausa --version X.Y.Z`; if it is
-   refused, make
+   Change visibility → Public. The chart's package `charts/kausa` was created public too: an
+   anonymous `helm pull` of v0.6.0 worked on 2026-11-04. If a pull of it without logging in ever
+   fails (`helm show chart oci://ghcr.io/fedeam/charts/kausa --version X.Y.Z`), make
    `https://github.com/users/fedeam/packages/container/package/charts%2Fkausa` public the same
    way, and check that it is linked to `fedeam/kausa` (the `%2F` encoding of the nested name is a
    hypothesis: if the link fails, open the package from the repository's Packages list).

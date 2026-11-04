@@ -28,9 +28,9 @@ and with provenance, with a CycloneDX SBOM for each image ([0023. Publish the ch
 OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
 CycloneDX SBOM of an auditable binary to each image](../adr/0023-oci-chart-and-sbom.md)). v0.6.0,
 released on 2026-11-04, is the first; the v0.5.2 chart and earlier are only on their GitHub
-releases. As of 2026-11-04 no install from GHCR has been tested. On 2026-11-03 the publishing was rehearsed
-locally: the chart was pushed to a throwaway registry, and a release installed in kind from the
-v0.5.1 chart URL was upgraded to it.
+releases. On 2026-11-04 the v0.6.0 chart was pulled from GHCR without a login, matched the signed
+checksums, and installed in kind in both scopes and with two replicas; a release installed from the
+v0.5.2 chart URL was upgraded to it with `--reuse-values`.
 
 ## Before you start
 
@@ -449,8 +449,8 @@ login`. The v0.5.2 release and earlier have no chart on GHCR and no SBOM: their 
 image's signature and provenance and the chart's checksum. Why: [0023. Publish the chart as a signed OCI artifact at
 `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX SBOM of an
 auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). v0.6.0, released on
-2026-11-04, is the first release whose notes give them; as of 2026-11-04 they have not run against
-it.
+2026-11-04, is the first release whose notes give them; every command of its notes passed on
+2026-11-04 (the `cosign` block and the checksum block with no login, the `gh` block logged in).
 
 ## Verify
 
