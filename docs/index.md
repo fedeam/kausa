@@ -136,6 +136,8 @@ checks](how-to/develop.md).
 - [Try kausa against a cluster with a local model](how-to/try-with-a-local-model.md): a
   read-only run with Ollama.
 - [Add a detection or redaction rule](how-to/add-a-rule.md): the files, tests and docs to change.
+- [Alerts](reference/alerts.md): the Prometheus alerting rules for kausa's own metrics
+  (`deploy/prometheus/kausa-alerts.yaml`), what each alert means and what to do when it fires.
 - [Run the soak](how-to/run-the-soak.md): seven days of the pinned release on a test cluster,
   sampled every 30 seconds, and the rule, fixed before any measurement, that decides the chart's
   memory limit.

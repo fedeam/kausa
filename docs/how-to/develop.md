@@ -20,6 +20,8 @@ Linux runners on 2026-10-27.
 - **cargo-deny** and **cargo-audit**, for the dependency policy and the RustSec advisories.
 - **gitleaks**, for the secret scan.
 - **Docker** (BuildKit or the classic builder), for the CI target and the image.
+- **promtool**, for the alerting rules and the metrics exposition. It ships in the Prometheus
+  release archive (<https://github.com/prometheus/prometheus/releases>); the CI image pins 3.15.1.
 - **helm**, for the chart's lint (the CI image pins 4.3.1). For the end-to-end test only:
   **kind** (the version and node image CI pins are in `.github/workflows/e2e.yml`), and
   **kubectl** and **python3** (CI uses the ones preinstalled on GitHub's `ubuntu-24.04` runner).
@@ -59,6 +61,9 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    cargo deny --locked check
    cargo audit
    helm lint --strict charts/kausa --set rbac.scope=cluster
+   promtool check rules --lint=all --lint-fatal deploy/prometheus/kausa-alerts.yaml
+   promtool test rules tests/prometheus/kausa-alerts.test.yaml
+   promtool check metrics < tests/golden/metrics.prom
    cargo clippy --locked --all-targets --all-features -- -D warnings
    cargo test --locked --all-features
    ```

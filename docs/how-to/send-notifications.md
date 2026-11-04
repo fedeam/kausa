@@ -165,11 +165,10 @@ acknowledged it.
 ## Alert on failures
 
 A failed notification is not tried again until its incident comes back, never stops kausa and
-never shows in an Event. Alert on the counter, for example in a Prometheus rule:
-
-```text
-increase(kausa_notifications_total{outcome="failed"}[1h]) > 0
-```
+never shows in an Event. Alert on it with
+[`KausaNotificationsFailing`](../reference/alerts.md#kausanotificationsfailing), one of the
+alerting rules of [Alerts](../reference/alerts.md), which fires for about an hour after a failed
+notification.
 
 `kausa_notifications_total{outcome="dropped"}` counts notifications pushed out of the queue of 16
 by a burst; `kausa_notifications_retried_total` counts second attempts.

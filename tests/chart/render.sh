@@ -13,7 +13,13 @@
 # model.timeoutSeconds (docs/adr/0020-check-the-endpoint.md). It checks the chart's Artifact Hub
 # metadata and README, what helm package ships, and the two checks of the artifacthub.io/images
 # annotation, taken from the Dockerfile's ci target and the release workflow and run on copies of
-# Chart.yaml (docs/adr/0023-oci-chart-and-sbom.md). For the upgrade test and the soak (v0.6,
+# Chart.yaml (docs/adr/0023-oci-chart-and-sbom.md). For v0.6's self-observability (no ADR), it
+# checks with helm and grep alone that the chart renders no PrometheusRule, ServiceMonitor
+# or PodMonitor, the alerting rules beside it (deploy/prometheus/kausa-alerts.yaml) and their
+# promtool unit tests (tests/prometheus/), the promtool step and checks of the Dockerfile and
+# AGENTS.md, the build context, and the new series tests/e2e/run.sh asserts; promtool itself runs
+# in the Dockerfile's ci target.
+# For the upgrade test and the soak (v0.6,
 # measured reliability), it renders the pinned release's values upgraded to this chart as
 # helm upgrade --reuse-values does and the soak's values, and checks the soak endpoint's manifest,
 # the e2e workflow's jobs, and the e2e and soak scripts, the soak's against stub kubectl, helm, curl
@@ -3028,6 +3034,269 @@ refuse endpoint-check-scalar-file "$(not_an_endpoint_check_map false)" --set rba
 refuse timeout-scope-first "$NOT_SET" --set model.timeoutSeconds=9
 refuse endpoint-check-scope-first "$NOT_SET" --set endpointCheck.enabled=yes
 refuse endpoint-check-scalar-scope-first "$NOT_SET" --set endpointCheck=false
+
+# --- Self-observability (v0.6, no ADR) ----------------------------------------------------------
+
+# The chart installs no monitoring object: the alerting rules ship beside it, in deploy/prometheus/,
+# for users to load (a PrometheusRule template would need the CRD and its own ADR).
+since=$FAILURES
+for set in cluster namespaced standby endpoint-history-notifications dry-run; do
+  case "$set" in
+    cluster) set_args=("${HA_CL[@]}") ;;
+    namespaced) set_args=("${HA_NS[@]}") ;;
+    standby) set_args=("${HA_CL[@]}" "${HA[@]}") ;;
+    endpoint-history-notifications)
+      set_args=("${HA_CL[@]}" "${ENDPOINT[@]}" "${HISTORY_ON[@]}" "${NOTIFY_ON[@]}") ;;
+    dry-run) set_args=("${HA_NS[@]}" "${DRY[@]}") ;;
+  esac
+  out="$WORK/obs-render-$set"
+  if ! render "$out" "$RELEASE" "$CHART" "${set_args[@]}"; then
+    fail "observability/$set does not render: $(cat "$out.err")"
+    continue
+  fi
+  if grep -Eq '^kind: (PrometheusRule|ServiceMonitor|PodMonitor)$' "$out"; then
+    fail "observability/$set renders a monitoring object: $(grep -E '^kind: ' "$out" | sort -u)"
+  fi
+done
+passed "$since" "observability: the chart renders no PrometheusRule, ServiceMonitor or PodMonitor"
+
+# The rules file and its unit tests, read with helm (fromYaml in a throwaway chart, as the seeded
+# failures above): 11 alerts in 5 groups, labels severity: warning alone, annotations summary,
+# description and runbook_url, the runbook_url naming the alert's section of
+# docs/reference/alerts.md, and only kausa's own metrics, each one src/metrics.rs exports.
+RULES="$ROOT/deploy/prometheus/kausa-alerts.yaml"
+RULE_TESTS="$ROOT/tests/prometheus/kausa-alerts.test.yaml"
+RUNBOOK=https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md
+OBS="$WORK/obs-chart"
+mkdir -p "$OBS/templates"
+printf '%s\n' 'apiVersion: v2' 'name: obs-read' 'version: 0.0.0' >"$OBS/Chart.yaml"
+cat >"$OBS/templates/read.yaml" <<'TEMPLATE'
+{{- $rules := .Files.Get "rules.yaml" | fromYaml }}
+{{- if hasKey $rules "Error" }}
+# error {{ $rules.Error }}
+{{- end }}
+# top {{ keys $rules | sortAlpha | join "," }}
+{{- range $g := $rules.groups }}
+# group {{ $g.name }}
+{{- range $r := $g.rules }}
+# alert {{ $g.name }} {{ $r.alert | default "-" }} {{ $r.labels | toJson }} {{ keys $r.annotations | sortAlpha | join "," }} {{ $r.annotations.runbook_url }}
+# expr {{ $r.alert | default "-" }} {{ $r.expr | replace "\n" " " }}
+{{- end }}
+{{- end }}
+{{- $tests := .Files.Get "tests.yaml" | fromYaml }}
+{{- if hasKey $tests "Error" }}
+# error {{ $tests.Error }}
+{{- end }}
+# rule_files {{ $tests.rule_files | toJson }}
+{{- range $t := $tests.tests }}
+{{- range $a := $t.alert_rule_test }}
+# case {{ $a.alertname }} {{ len ($a.exp_alerts | default list) }}
+{{- range $e := ($a.exp_alerts | default list) }}
+# firing {{ $a.alertname }} {{ $e.exp_labels.severity }} {{ $e.exp_annotations.runbook_url }}
+{{- end }}
+{{- end }}
+{{- end }}
+TEMPLATE
+since=$FAILURES
+if [ ! -f "$RULES" ] || [ ! -f "$RULE_TESTS" ]; then
+  fail "observability: deploy/prometheus/kausa-alerts.yaml or tests/prometheus/kausa-alerts.test.yaml is missing"
+else
+  cp "$RULES" "$OBS/rules.yaml"
+  cp "$RULE_TESTS" "$OBS/tests.yaml"
+  if ! render "$OBS/out" obs-read "$OBS"; then
+    fail "observability: the rules file or its tests cannot be read: $(cat "$OBS/out.err")"
+  elif grep -q '^# error ' "$OBS/out"; then
+    fail "observability: the rules file or its tests is not YAML: $(grep '^# error ' "$OBS/out")"
+  else
+    [ "$(sed -n 's/^# top //p' "$OBS/out")" = groups ] ||
+      fail "observability: the rules file holds more than groups: $(sed -n 's/^# top //p' "$OBS/out")"
+    sed -n 's/^# group //p' "$OBS/out" >"$OBS/groups"
+    printf '%s\n' kausa-model kausa-explanations kausa-watches kausa-replicas kausa-notifications \
+      >"$OBS/groups-expected"
+    diff -u "$OBS/groups-expected" "$OBS/groups" >"$OBS/groups-diff" ||
+      fail "observability: the rule groups are not the five of the spec: $(cat "$OBS/groups-diff")"
+    awk '/^# alert / { print $3, $4 }' "$OBS/out" >"$OBS/alerts"
+    cat >"$OBS/alerts-expected" <<'ALERTS'
+kausa-model KausaModelEndpointFailing
+kausa-model KausaNoSuccessfulModelCall
+kausa-model KausaDailyCallBudgetSpent
+kausa-explanations KausaExplanationQueueNearlyFull
+kausa-explanations KausaExplanationsBehind
+kausa-explanations KausaExplanationsSkipped
+kausa-watches KausaWatchErrors
+kausa-watches KausaWatchRefused
+kausa-replicas KausaNoLeader
+kausa-replicas KausaLeaderFlapping
+kausa-notifications KausaNotificationsFailing
+ALERTS
+    diff -u "$OBS/alerts-expected" "$OBS/alerts" >"$OBS/alerts-diff" ||
+      fail "observability: the alerts are not the eleven of the spec, in order: $(cat "$OBS/alerts-diff")"
+    while read -r _ _ _ alert labels annotations runbook; do
+      lower=$(printf '%s' "$alert" | tr '[:upper:]' '[:lower:]')
+      [ "$labels" = '{"severity":"warning"}' ] ||
+        fail "observability: $alert has the labels $labels, not severity: warning alone"
+      [ "$annotations" = description,runbook_url,summary ] ||
+        fail "observability: $alert has the annotations $annotations"
+      [ "$runbook" = "$RUNBOOK#$lower" ] ||
+        fail "observability: $alert's runbook_url is $runbook, not $RUNBOOK#$lower"
+    done < <(grep '^# alert ' "$OBS/out")
+    # The decisions D7 and D9: the leader alerts add up a release's Pods by (namespace, job), and
+    # the flapping threshold is >= 7.
+    grep -qxF '# expr KausaNoLeader sum by (namespace, job) (kausa_leader) != 1' "$OBS/out" ||
+      fail "observability: KausaNoLeader is not sum by (namespace, job) (kausa_leader) != 1"
+    grep -Eq '^# expr KausaLeaderFlapping sum by \(namespace, job\) \(.*\) >= 7$' "$OBS/out" ||
+      fail "observability: KausaLeaderFlapping is not summed by (namespace, job) with >= 7"
+    # The metrics the rules read: exactly these, and each one a name src/metrics.rs exports (its
+    # code, before the tests).
+    grep '^# expr ' "$OBS/out" | grep -oE 'kausa_[a-z_]+' | sort -u >"$OBS/metrics"
+    printf '%s\n' kausa_budget_calls_remaining kausa_endpoint_state \
+      kausa_explanation_queue_length kausa_explanations_skipped_total kausa_leader \
+      kausa_leadership_changes_total kausa_model_calls_total \
+      kausa_model_last_success_timestamp_seconds kausa_notifications_total \
+      kausa_watch_errors_total kausa_watch_restarts_total | sort >"$OBS/metrics-expected"
+    diff -u "$OBS/metrics-expected" "$OBS/metrics" >"$OBS/metrics-diff" ||
+      fail "observability: the rules read other metrics than the spec's: $(cat "$OBS/metrics-diff")"
+    sed '/^#\[cfg(test)\]/q' "$ROOT/src/metrics.rs" >"$OBS/metrics.rs"
+    while read -r metric; do
+      grep -qF "\"$metric\"," "$OBS/metrics.rs" ||
+        fail "observability: the rules read $metric, which src/metrics.rs does not export"
+    done <"$OBS/metrics"
+    # The unit tests: they load the rules file, and every alert has a case that fires, with
+    # severity warning and its runbook_url, and a case that stays silent.
+    [ "$(sed -n 's/^# rule_files //p' "$OBS/out")" = '["../../deploy/prometheus/kausa-alerts.yaml"]' ] ||
+      fail "observability: the unit tests' rule_files is not ../../deploy/prometheus/kausa-alerts.yaml"
+    while read -r _ _ _ alert _ _ _; do
+      lower=$(printf '%s' "$alert" | tr '[:upper:]' '[:lower:]')
+      awk -v a="$alert" '$1 == "#" && $2 == "case" && $3 == a && $4 > 0 { n++ } END { exit !n }' \
+        "$OBS/out" || fail "observability: no unit test where $alert fires"
+      awk -v a="$alert" '$1 == "#" && $2 == "case" && $3 == a && $4 == 0 { n++ } END { exit !n }' \
+        "$OBS/out" || fail "observability: no unit test where $alert stays silent"
+      awk -v a="$alert" -v url="$RUNBOOK#$lower" \
+        '$1 == "#" && $2 == "firing" && $3 == a && ($4 != "warning" || $5 != url) { n++ }
+         END { exit n > 0 }' "$OBS/out" ||
+        fail "observability: a firing case of $alert expects another severity or runbook_url"
+    done < <(grep '^# alert ' "$OBS/out")
+    awk '$1 == "#" && $2 == "case" { print $3 }' "$OBS/out" | sort -u >"$OBS/tested"
+    sort "$OBS/alerts" | awk '{ print $2 }' | sort -u >"$OBS/alert-names"
+    comm -13 "$OBS/alert-names" "$OBS/tested" >"$OBS/unknown"
+    [ ! -s "$OBS/unknown" ] ||
+      fail "observability: the unit tests name alerts the rules do not have: $(cat "$OBS/unknown")"
+  fi
+fi
+passed "$since" "observability: 11 alerts in 5 groups, severity warning, runbooks, tests for each"
+
+# The Dockerfile's ci target installs promtool pinned by version and SHA-256 per architecture, as
+# root after helm's step and before the unprivileged user, with no BuildKit-only feature, and runs
+# exactly three checks after the chart refusals and before clippy; AGENTS.md lists the same three,
+# in the same order, between helm lint and clippy.
+since=$FAILURES
+DOCKERFILE="$ROOT/Dockerfile"
+line_of() { grep -nxF -- "$1" "$2" | head -n 1 | cut -d: -f1; }
+grep -Eqx 'ARG PROMETHEUS_VERSION=[0-9]+\.[0-9]+\.[0-9]+' "$DOCKERFILE" ||
+  fail "Dockerfile: no ARG PROMETHEUS_VERSION=<x.y.z>"
+for arch in AMD64 ARM64; do
+  grep -Eqx "ARG PROMETHEUS_SHA256_$arch=[0-9a-f]{64}" "$DOCKERFILE" ||
+    fail "Dockerfile: no ARG PROMETHEUS_SHA256_$arch with a SHA-256"
+done
+version_at=$(grep -n '^ARG PROMETHEUS_VERSION=' "$DOCKERFILE" | head -n 1 | cut -d: -f1)
+helm_at=$(line_of '    helm version --short' "$DOCKERFILE")
+user_at=$(line_of '# The checks run as an unprivileged user.' "$DOCKERFILE")
+installed_at=$(line_of '    promtool --version' "$DOCKERFILE")
+if [ -z "$version_at" ] || [ -z "$helm_at" ] || [ -z "$user_at" ] || [ -z "$installed_at" ]; then
+  fail "Dockerfile: the promtool step, helm's step or the unprivileged user is missing"
+else
+  if [ "$helm_at" -gt "$version_at" ] || [ "$version_at" -gt "$installed_at" ] ||
+    [ "$installed_at" -gt "$user_at" ]; then
+    fail "Dockerfile: the promtool step is not between helm's step and the unprivileged user"
+  fi
+  sed -n "${version_at},${installed_at}p" "$DOCKERFILE" >"$WORK/promtool-step"
+  # shellcheck disable=SC2016 # the Dockerfile's own text, not to be expanded
+  for words in 'amd64) sum="$PROMETHEUS_SHA256_AMD64" ;;' 'arm64) sum="$PROMETHEUS_SHA256_ARM64" ;;' \
+    "curl --proto '=https' --tlsv1.2 -fsSL" \
+    'https://github.com/prometheus/prometheus/releases/download/v$PROMETHEUS_VERSION/' \
+    '| sha256sum -c -;' '"$name/promtool"' '/usr/local/bin/promtool;'; do
+    grep -qF -- "$words" "$WORK/promtool-step" || fail "Dockerfile: the promtool step has no '$words'"
+  done
+  if grep -Eq -- '--mount|<<|ADD ' "$WORK/promtool-step"; then
+    fail "Dockerfile: the promtool step uses a BuildKit-only feature"
+  fi
+fi
+cat >"$WORK/promtool-checks" <<'CHECKS'
+promtool check rules --lint=all --lint-fatal deploy/prometheus/kausa-alerts.yaml
+promtool test rules tests/prometheus/kausa-alerts.test.yaml
+promtool check metrics < tests/golden/metrics.prom
+CHECKS
+sed -n 's/^RUN \(promtool .*\)$/\1/p' "$DOCKERFILE" >"$WORK/promtool-dockerfile"
+diff -u "$WORK/promtool-checks" "$WORK/promtool-dockerfile" >"$WORK/promtool-dockerfile-diff" ||
+  fail "Dockerfile: the promtool checks are not the three of the spec: $(cat "$WORK/promtool-dockerfile-diff")"
+first_check=$(line_of "RUN $(head -n 1 "$WORK/promtool-checks")" "$DOCKERFILE")
+refusals_end=$(line_of '    rm -f /tmp/refusal' "$DOCKERFILE")
+clippy_at=$(line_of 'RUN cargo clippy --locked --all-targets --all-features -- -D warnings' "$DOCKERFILE")
+if [ -z "$first_check" ] || [ -z "$refusals_end" ] || [ -z "$clippy_at" ]; then
+  fail "Dockerfile: the promtool checks, the end of the refusals or clippy is missing"
+else
+  sed -n "${first_check},$((first_check + 2))p" "$DOCKERFILE" | sed 's/^RUN //' |
+    diff -q "$WORK/promtool-checks" - >/dev/null ||
+    fail "Dockerfile: the three promtool checks are not consecutive"
+  if [ "$refusals_end" -gt "$first_check" ] || [ "$((first_check + 2))" -gt "$clippy_at" ]; then
+    fail "Dockerfile: the promtool checks are not between the chart refusals and clippy"
+  fi
+fi
+awk '/^## Verification \(same as CI\)/ { v = 1 } v && /^```sh$/ { b = 1; next } b && /^```$/ { exit }
+     b { print }' "$ROOT/AGENTS.md" >"$WORK/agents-verification"
+grep -E '^promtool ' "$WORK/agents-verification" >"$WORK/promtool-agents" || true
+diff -u "$WORK/promtool-dockerfile" "$WORK/promtool-agents" >"$WORK/promtool-agents-diff" ||
+  fail "AGENTS.md: the promtool checks differ from the Dockerfile's: $(cat "$WORK/promtool-agents-diff")"
+{
+  echo 'helm lint --strict charts/kausa --set rbac.scope=cluster'
+  cat "$WORK/promtool-checks"
+  echo 'cargo clippy --locked --all-targets --all-features -- -D warnings'
+} >"$WORK/agents-expected-run"
+grep -A4 -xF 'helm lint --strict charts/kausa --set rbac.scope=cluster' "$WORK/agents-verification" |
+  diff -q "$WORK/agents-expected-run" - >/dev/null ||
+  fail "AGENTS.md: the promtool checks do not come right after helm lint and before cargo clippy"
+passed "$since" "Dockerfile and AGENTS.md: pinned promtool and its three checks, in the same order"
+
+# The build context admits the rules (tests/ already covers tests/prometheus/ and tests/golden/)
+# and the alerts reference.
+since=$FAILURES
+for entry in '!deploy/' '!docs/reference/alerts.md' '!tests/'; do
+  grep -qxF -- "$entry" "$ROOT/.dockerignore" || fail ".dockerignore: no '$entry'"
+done
+passed "$since" ".dockerignore: deploy/ and docs/reference/alerts.md reach the build context"
+
+# tests/e2e/run.sh asserts the new series (the kind runs of .github/workflows/e2e.yml check their
+# values): the build info of the chart's appVersion and prompt version 2, the records, the relists,
+# the call-duration count beside the calls, the dedup cache, the budget's skip series at 0; the
+# restarts of each watch from the not-Ready Pod of the refused namespace; and, with two replicas,
+# the standby's records and build info.
+since=$FAILURES
+bash -n "$RUN_SH" || fail "e2e/run.sh: bash -n fails"
+for series in 'kausa_build_info' 'prompt_version=\\?"2' 'kausa_records\\?\{kind=\\?"pods' \
+  'kausa_watch_relists_total\\?\{watch=\\?"pods' \
+  'kausa_model_call_duration_seconds_count\\?\{outcome=\\?"ok' \
+  'kausa_model_calls_total\\?\{outcome=\\?"ok' 'kausa_dedup_cache_entries' \
+  'kausa_explanations_skipped_total\\?\{reason=\\?"budget' 'kausa_watch_restarts_total'; do
+  grep -Eq -- "$series" "$RUN_SH" || fail "e2e/run.sh: no '$series'"
+done
+if ! grep -q 'appVersion' "$RUN_SH" || ! grep -qF 'charts/kausa/Chart.yaml' "$RUN_SH"; then
+  fail "e2e/run.sh: the build info is not compared with charts/kausa/Chart.yaml's appVersion"
+fi
+# shellcheck disable=SC2016 # run.sh's own text, not to be expanded
+grep -qF 'pod_get "${pod#pod/}" metrics' "$RUN_SH" ||
+  fail "e2e/run.sh: the refused namespace's Pod is not read with pod_get \"\${pod#pod/}\" metrics"
+for series in kausa_records kausa_build_info; do
+  grep -Eq "first_standby.*$series|$series.*first_standby" "$RUN_SH" ||
+    fail "e2e/run.sh: the standby's $series is not read"
+done
+header=$(awk 'NR > 1 && !/^#/ { exit } { print }' "$RUN_SH")
+for name in kausa_build_info kausa_watch_restarts_total; do
+  case "$header" in
+    *"$name"*) ;;
+    *) fail "e2e/run.sh: the header comment does not name $name" ;;
+  esac
+done
+passed "$since" "e2e/run.sh: the new series are asserted, the refused Pod's restarts and the standby's"
 
 # --- The upgrade test and the soak (v0.6, measured reliability) --------------------------------
 

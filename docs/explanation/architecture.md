@@ -411,8 +411,8 @@ record across a failover, in the same object, and is never read back into `Dedup
 held under another identity, or whose version changes faster than every 30 s, by whoever can
 write Leases in the release namespace; a deleted Lease or `<full name>-leader` RoleBinding; or
 Lease calls failing for 20 s, as in an API server outage, which also drops the records and settle
-progress a single replica keeps. Each shows as `sum(kausa_leader) != 1` over the Pods ([Install
-kausa with Helm](../how-to/install-with-helm.md#run-a-standby-replica)).
+progress a single replica keeps. Each shows as no acting replica in `kausa_leader` over the Pods,
+which the alert `KausaNoLeader` reports ([Alerts](../reference/alerts.md#kausanoleader)).
 
 **Cost:** about 0.4 API requests per second (a read and a renewal every 5 s), and a second Pod
 (10m CPU and 32 MiB requested).

@@ -17,6 +17,10 @@
 # and the command-line reference, whose table of endpoint causes src/model/pure.rs compares.
 !docs/reference/rules.md
 !docs/reference/command-line.md
+# The alerting rules, which promtool checks in the ci target and src/metrics.rs compares with the
+# metrics, and the alerts reference, whose sections the same test compares with the rules.
+!deploy/
+!docs/reference/alerts.md
 # The fuzz targets and the image ClusterFuzzLite builds them in (.clusterfuzzlite/Dockerfile
 # uses this same context).
 !fuzz/

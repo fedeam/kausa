@@ -308,6 +308,12 @@ impl Dedup {
         );
     }
 
+    /// The entries held, expired ones included until a `get` reads them or a `put` evicts them
+    /// (the `kausa_dedup_cache_entries` gauge).
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// The entry stored for `fingerprint`, expired or not; removes nothing.
     pub fn peek(&self, fingerprint: &str) -> Option<&Cached> {
         self.entries.get(fingerprint)
@@ -518,6 +524,38 @@ mod tests {
         assert!(!dedup.already_sent("a", &explanation("na")));
         assert!(!dedup.mark_notified("a", &explanation("na")));
         assert!(!dedup.peek("b").expect("an entry").notified);
+    }
+
+    // Acceptance test for v0.6's self-observability (no ADR), written before the code. It uses
+    // `Dedup::count(&self) -> usize`: the entries held, expired ones included until a `get` reads
+    // them or a `put` evicts them; `kausa_dedup_cache_entries` shows it.
+    #[test]
+    fn count_follows_puts_evictions_and_expired_reads() {
+        let mut dedup = Dedup::new(Duration::from_secs(60), 2);
+        assert_eq!(dedup.count(), 0);
+        dedup.put("a", explanation("a"), None, t(0));
+        assert_eq!(dedup.count(), 1);
+        // A put that replaces an entry adds none.
+        dedup.put("a", explanation("a again"), None, t(1));
+        assert_eq!(dedup.count(), 1);
+        dedup.put("b", explanation("b"), None, t(2));
+        assert_eq!(dedup.count(), 2);
+        // At capacity, a new entry evicts the oldest.
+        dedup.put("c", explanation("c"), None, t(3));
+        assert_eq!(dedup.count(), 2);
+        assert!(dedup.peek("a").is_none(), "the oldest was evicted");
+        // An expired entry is counted until a get reads it: is_fresh and peek remove nothing.
+        assert!(!dedup.is_fresh("b", t(100)));
+        assert!(dedup.peek("b").is_some());
+        assert_eq!(dedup.count(), 2);
+        assert!(dedup.get("b", t(100)).is_none());
+        assert_eq!(dedup.count(), 1);
+        assert!(dedup.get("c", t(10)).is_some());
+        assert_eq!(dedup.count(), 1);
+        // A cache of capacity 0 holds nothing.
+        let mut none = Dedup::new(Duration::from_secs(60), 0);
+        none.put("a", explanation("a"), None, t(0));
+        assert_eq!(none.count(), 0);
     }
 
     #[test]

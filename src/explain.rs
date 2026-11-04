@@ -120,6 +120,16 @@ pub const ENDPOINT_UNAVAILABLE_NOTE: &str =
 pub const TOO_LARGE_NOTE: &str =
     "the endpoint refused the request as too large for the model: lower --max-input-tokens";
 
+/// Every reason `kausa_explanations_skipped_total` counts a skip with, as
+/// docs/reference/command-line.md lists them; `kausa run` shows each at 0 from its start.
+pub const SKIP_REASONS: [&str; 5] = [
+    "budget",
+    "context_too_large",
+    "endpoint",
+    "invalid_answer",
+    "endpoint_unavailable",
+];
+
 /// The gauge of the last call answered with a chat completion (docs/adr/0020-check-the-endpoint.md).
 pub const LAST_SUCCESS_GAUGE: &str = "kausa_model_last_success_timestamp_seconds";
 
@@ -289,17 +299,17 @@ pub async fn run(
             .await
             .map(|()| Next::Done);
     }
+    let started = std::time::Instant::now();
     let result = model.complete(&body).await;
     // The breaker counts the call before the term check: the answer is true of the endpoint even
     // when the term ended during the call.
     let now = std::time::Instant::now();
+    let took = now.saturating_duration_since(started);
     record(shared, settings, result.as_ref().err(), now)?;
     let answer = match result {
         Ok(answer) => answer,
         Err(error) => {
-            shared
-                .metrics
-                .inc("kausa_model_calls_total", &[("outcome", "error")]);
+            called(shared, "error", took);
             if !error.reached {
                 shared.budget.borrow_mut().refund();
             }
@@ -348,18 +358,14 @@ pub async fn run(
     let explanation = match prompt::validate(&answer.content) {
         Ok(explanation) => explanation,
         Err(error) => {
-            shared
-                .metrics
-                .inc("kausa_model_calls_total", &[("outcome", "invalid")]);
+            called(shared, "invalid", took);
             let why = format!("invalid answer: {error}");
             return skip(settings, shared, &gathered, about, "invalid_answer", &why)
                 .await
                 .map(|()| Next::Done);
         }
     };
-    shared
-        .metrics
-        .inc("kausa_model_calls_total", &[("outcome", "ok")]);
+    called(shared, "ok", took);
     // The term ended while the model answered: the answer is dropped, not cached.
     if !shared.term.holds() {
         return Ok(Next::Done);
@@ -411,6 +417,18 @@ pub async fn run(
         notify::enqueue(shared, notify::queued(&gathered.incident, narrow))?;
     }
     Ok(Next::Done)
+}
+
+/// Counts a call to the model under its outcome (ok, error, invalid) and observes how long it
+/// took, so that the histogram's `_count` always equals `kausa_model_calls_total` per outcome.
+fn called(shared: &Shared<'_>, outcome: &str, took: Duration) {
+    let labels = [("outcome", outcome)];
+    shared.metrics.inc("kausa_model_calls_total", &labels);
+    shared.metrics.observe(
+        "kausa_model_call_duration_seconds",
+        &labels,
+        took.as_secs_f64(),
+    );
 }
 
 /// Records a call that ended at `now` in the breaker (`None`: a chat completion, valid or not)
@@ -618,6 +636,12 @@ async fn skip(
     reason: &str,
     why: &str,
 ) -> io::Result<()> {
+    // A reason outside the list would have no zero series and no documented value: any test
+    // that drives it fails here.
+    debug_assert!(
+        SKIP_REASONS.contains(&reason),
+        "{reason} is not in SKIP_REASONS"
+    );
     if !shared.term.holds() {
         return Ok(());
     }
@@ -3032,5 +3056,220 @@ mod tests {
                 assert!(fields.get(key).is_none(), "{key}");
             }
         }
+    }
+
+    // Acceptance tests for v0.6's self-observability (no ADR), written before the code. They use
+    // `Metrics::observe` with `kausa_model_call_duration_seconds` (src/metrics.rs), observed
+    // beside every count of `kausa_model_calls_total` with the same outcome, from just before
+    // `model.complete` to the instant the answer is in; and `pub const SKIP_REASONS: [&str; 5]`,
+    // the reasons `skip` counts, which `run.rs` starts at 0 when kausa explains.
+
+    const CALL_DURATION: &str = "kausa_model_call_duration_seconds";
+
+    fn calls(metrics: &Metrics, outcome: &str) -> Option<u64> {
+        series(
+            metrics,
+            &format!("kausa_model_calls_total{{outcome=\"{outcome}\"}}"),
+        )
+    }
+
+    fn duration_count(metrics: &Metrics, outcome: &str) -> Option<u64> {
+        series(
+            metrics,
+            &format!("{CALL_DURATION}_count{{outcome=\"{outcome}\"}}"),
+        )
+    }
+
+    fn duration_sum(metrics: &Metrics, outcome: &str) -> Option<f64> {
+        let name = format!("{CALL_DURATION}_sum{{outcome=\"{outcome}\"}}");
+        metrics
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(name.as_str())?.strip_prefix(' '))
+            .map(|value| value.parse().expect("seconds"))
+    }
+
+    #[test]
+    fn every_counted_call_is_timed_under_its_outcome() {
+        // The fake model waits before it answers: the time covers the call.
+        let wait = Duration::from_millis(50);
+        let invalid = json!({"choices": [{"message": {"content": "not an explanation"}}]});
+        for (outcome, response, attempts) in [
+            ("ok", valid_reply(), 1),
+            // A 500 is retried once, then skipped: two calls.
+            ("error", reply("500 Internal Server Error", "", "{}"), 2),
+            ("invalid", reply("200 OK", "", &invalid.to_string()), 1),
+        ] {
+            let (url, served) = answering(response, wait);
+            let settings = settings(Some(url), false, 30);
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            for attempt in 0..attempts {
+                let mut job = work();
+                job.attempt = attempt;
+                run_job(job, &settings, &shared, "http://127.0.0.1:9");
+            }
+            assert_eq!(
+                served.load(Ordering::SeqCst),
+                usize::from(attempts),
+                "{outcome}"
+            );
+            let least = wait.as_secs_f64() * f64::from(attempts);
+            let attempts = u64::from(attempts);
+            assert_eq!(calls(&metrics, outcome), Some(attempts), "{outcome}");
+            assert_eq!(
+                duration_count(&metrics, outcome),
+                calls(&metrics, outcome),
+                "{outcome}"
+            );
+            assert_eq!(
+                series(
+                    &metrics,
+                    &format!("{CALL_DURATION}_bucket{{outcome=\"{outcome}\",le=\"+Inf\"}}")
+                ),
+                Some(attempts),
+                "{outcome}"
+            );
+            let sum = duration_sum(&metrics, outcome).expect("a sum");
+            assert!(
+                sum >= least,
+                "{outcome}: {sum} s, less than the fake's wait"
+            );
+            for other in ["ok", "error", "invalid"] {
+                if other != outcome {
+                    assert_eq!(duration_count(&metrics, other), None, "{outcome}: {other}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_dry_run_a_cached_repeat_and_a_skip_before_the_call_time_nothing() {
+        // A dry run logs the request.
+        let settings_dry = settings(None, false, 30);
+        let metrics = Metrics::default();
+        let shared_dry = shared(&settings_dry, &metrics);
+        assert!(!explain(work(), &settings_dry, &shared_dry));
+        let text = metrics.render();
+        assert!(text.contains("kausa_requests_logged_total 1\n"), "{text}");
+        assert!(!text.contains(CALL_DURATION), "dry run: {text}");
+        // A cached repeat calls nothing.
+        let (url, served) = answering(valid_reply(), Duration::ZERO);
+        let settings_cached = settings(Some(url), false, 30);
+        let metrics = Metrics::default();
+        let shared_cached = shared(&settings_cached, &metrics);
+        shared_cached.dedup.borrow_mut().put(
+            FINGERPRINT,
+            stored("cached"),
+            None,
+            std::time::Instant::now(),
+        );
+        let next = run_job(
+            work(),
+            &settings_cached,
+            &shared_cached,
+            "http://127.0.0.1:9",
+        );
+        assert!(matches!(next, Next::Done), "{}", outcome(&next));
+        assert_eq!(served.load(Ordering::SeqCst), 0, "the model was called");
+        let text = metrics.render();
+        assert!(
+            text.contains("kausa_explanations_cached_total 1\n"),
+            "{text}"
+        );
+        assert!(!text.contains(CALL_DURATION), "cached: {text}");
+        // A job the budget refuses is skipped before any call.
+        let settings_spent = settings(Some(nowhere()), false, 0);
+        let metrics = Metrics::default();
+        let shared_spent = shared(&settings_spent, &metrics);
+        run_job(work(), &settings_spent, &shared_spent, "http://127.0.0.1:9");
+        assert_eq!(skipped(&metrics, "budget"), 1);
+        assert!(!metrics.render().contains(CALL_DURATION), "budget");
+    }
+
+    /// The reasons of the `kausa_explanations_skipped_total` series in the metrics.
+    fn skip_reasons(metrics: &Metrics) -> Vec<String> {
+        metrics
+            .render()
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("kausa_explanations_skipped_total{reason=\"")?;
+                rest.split_once('"').map(|(reason, _)| reason.to_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_skip_reasons_are_the_list_and_the_documented_row() {
+        let large = json!({"error": {"code": "context_length_exceeded"}}).to_string();
+        let invalid = json!({"choices": [{"message": {"content": "not an explanation"}}]});
+        // Each reason `skip` is called with, driven once: the reason, the fake model's answer
+        // (none: nothing listens), the calls per hour and whether the breaker is open.
+        let mut seen = BTreeSet::new();
+        for (reason, response, calls_per_hour, open) in [
+            ("budget", None, 0, false),
+            ("endpoint_unavailable", Some(valid_reply()), 30, true),
+            (
+                "context_too_large",
+                Some(reply("400 Bad Request", "", &large)),
+                30,
+                false,
+            ),
+            (
+                "endpoint",
+                Some(reply("401 Unauthorized", "", "{}")),
+                30,
+                false,
+            ),
+            (
+                "invalid_answer",
+                Some(reply("200 OK", "", &invalid.to_string())),
+                30,
+                false,
+            ),
+        ] {
+            let url = response.map_or_else(nowhere, |r| answering(r, Duration::ZERO).0);
+            let settings = settings(Some(url), false, calls_per_hour);
+            let metrics = Metrics::default();
+            let shared = shared(&settings, &metrics);
+            if open {
+                hold(&shared);
+            }
+            run_job(work(), &settings, &shared, "http://127.0.0.1:9");
+            assert_eq!(skip_reasons(&metrics), [reason], "{reason}");
+            assert_eq!(skipped(&metrics, reason), 1, "{reason}");
+            seen.insert(reason);
+        }
+        let listed: BTreeSet<&str> = SKIP_REASONS.iter().copied().collect();
+        assert_eq!(listed.len(), SKIP_REASONS.len(), "a reason is listed twice");
+        assert_eq!(
+            seen, listed,
+            "a reason skip is called with is not in SKIP_REASONS"
+        );
+        // Every reason a test of this module reads with `skipped` is in the list.
+        let source = include_str!("explain.rs");
+        let call = "skipped(&metrics, \"";
+        for (at, _) in source.match_indices(call) {
+            let rest = &source[at + call.len()..];
+            let reason = &rest[..rest.find('"').expect("the closing quote")];
+            assert!(SKIP_REASONS.contains(&reason), "{reason}");
+        }
+        // The reference documents exactly the list, in the counter's row.
+        let doc = include_str!("../docs/reference/command-line.md");
+        let row = doc
+            .lines()
+            .find(|line| line.starts_with("| `kausa_explanations_skipped_total` |"))
+            .expect("the row of kausa_explanations_skipped_total");
+        let labels = row.split('|').nth(2).expect("the labels cell");
+        let values = labels
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(values, _)| values)
+            .expect("the values in parentheses");
+        let documented: BTreeSet<&str> = values
+            .split(',')
+            .map(|value| value.trim().trim_matches('`'))
+            .collect();
+        assert_eq!(documented, listed, "{labels}");
     }
 }

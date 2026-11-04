@@ -9,11 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Prometheus alerting rules for kausa's own metrics, `deploy/prometheus/kausa-alerts.yaml`: eleven
+  alerts in five groups, on a failing model endpoint, failed calls, the spent daily budget, the
+  explanation queue, skipped incidents, failing or refused watches, the Lease of two replicas and
+  failed notifications. CI checks them with `promtool check rules` and unit-tests each threshold,
+  window and `for` with `promtool test rules`. [Alerts](docs/reference/alerts.md) explains each
+  alert and what to do when it fires; each alert's `runbook_url` links its section.
+- Seven metrics: `kausa_build_info{version, prompt_version}` (always `1`),
+  `kausa_model_call_duration_seconds{outcome}` (a histogram of the model calls, whose `_count`
+  equals `kausa_model_calls_total`), `kausa_watch_relists_total{watch}` and
+  `kausa_watch_restarts_total{watch}` (new watchers after a `403`), `kausa_records{kind}`,
+  `kausa_owner_cache_entries` and `kausa_dedup_cache_entries`
+  ([Command line and log format](docs/reference/command-line.md#metrics)). No label names a
+  namespace, a Pod, a model or a host.
 - The chart is published at `oci://ghcr.io/fedeam/charts/kausa` (install with `--version`),
   signed with cosign and with SLSA build provenance; the `.tgz` stays on each GitHub release.
 - Each release attests a CycloneDX SBOM to the image of each architecture and attaches both; the
   binary is built with `cargo auditable`, so scanners read its crates from the image.
 - The chart has a README and Artifact Hub annotations.
+
+### Changed
+
+- The counters with a fixed set of label values (`kausa_watch_errors_total`,
+  `kausa_model_calls_total`, `kausa_explanations_skipped_total`, `kausa_notifications_total` and
+  `kausa_leadership_changes_total`) show a `0` series for each value from the start, in the modes
+  that can count them, so that the first increase after a start is seen; their unlabelled `0`
+  line is gone, and a dashboard that matched it changes.
+- The example alert on a spent daily budget, now `KausaDailyCallBudgetSpent`, matches the leader
+  gauge with `ignoring(window)` instead of `on (pod)`, so it needs no `pod` label from the scrape.
+- The example alert on a flapping Lease, now `KausaLeaderFlapping`, fires at 7 takeovers in an
+  hour (`>= 7`) instead of `> 6`, which six takeovers could cross once `increase` extrapolates.
+  It and `KausaNoLeader` add up a release's Pods `by (namespace, job)`.
 
 ## [0.5.2] - 2026-11-03
 
