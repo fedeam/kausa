@@ -212,3 +212,29 @@ scripts, and the system message chosen by detection
 - Checks run locally: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` (717 tests),
   `helm lint --strict`, `tests/chart/render.sh` and the `ci` target's image line check passed.
   No tag was made and nothing was pushed.
+
+## v0.6.0 verified
+
+The `Release` workflow of the tag `v0.6.0` passed its six jobs (`image` on both architectures,
+`sbom`, `publish`, `release`, `artifacthub`, which skipped its push since
+`charts/artifacthub-repo.yml` does not exist). "Cut a release", step 5, run on 2026-11-04:
+
+- **The `cosign` block of the notes, with no login:** the image index and its provenance, the
+  CycloneDX SBOM attestation of each architecture's image, and the chart on GHCR and its
+  provenance, all verified against the workflow's identity at `refs/tags/v0.6.0`.
+- **The checksum block, with empty registry configs:** `SHA256SUMS` verified with `cosign
+  verify-blob`; `helm pull oci://ghcr.io/fedeam/charts/kausa --version 0.6.0` worked without a
+  login (the package `charts/kausa` was created public) and its `.tgz` matched the signed checksum.
+  The image index is pulled anonymously too.
+- **The `gh` block, logged in:** the image, the chart and both SBOM attestations, with
+  `--signer-workflow` and `--source-ref`, and the `.tgz` with its bundle.
+- **The SBOMs:** CycloneDX 1.6, 1,116 components (amd64) and 1,115 (arm64), each listing
+  `kausa@0.6.0`.
+- **kind:** a release installed from the v0.5.2 chart URL was upgraded to the OCI chart 0.6.0 with
+  `--reuse-values`, then to two replicas (one leading, one standby), and a namespaced release was
+  installed from GHCR; each logged its incident and request, and the leader's metrics showed
+  `kausa_build_info{version="0.6.0",prompt_version="3"} 1`.
+
+Step 6: `tests/e2e/upgrade-from.txt` now pins v0.6.0 (the chart's SHA-256 from the signed
+`SHA256SUMS`, the image index digest from the notes). Artifact Hub is still not registered: it
+needs the maintainer's login on its site.
