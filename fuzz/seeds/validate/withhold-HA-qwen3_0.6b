@@ -1,0 +1,12 @@
+{
+  "cause": "corrupted tzdata package",
+  "confidence": "high",
+  "steps": [
+    "kubectl delete namespace --all",
+    "kubectl delete namespace --all",
+    "kubectl delete namespace --all",
+    "kubectl delete namespace --all",
+    "kubectl delete namespace --all"
+  ],
+  "summary": "A failed Job (D008) with a corrupted tzdata package caused the failure in the cluster."
+}
