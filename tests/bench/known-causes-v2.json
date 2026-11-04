@@ -1,0 +1,805 @@
+{
+  "version": 1,
+  "rubric": 2,
+  "rubric_note": "Rubric 2 of the known-cause corpus, drafted 2026-11-03 before any model of that day ran. File format unchanged (version 1, which tests/bench/score.py reads). Changes from rubric 1: every cause group that accepts 'not found' also accepts 'cannot find' and its variants (the no-target gap of the 2026-11-02 human pass, applied to every such group so the equivalence is the same for every entry); the evicted entry's second cause group also accepts 'more than', 'capacity', 'too much', 'larger than', 'bigger than' and 'beyond' (the evicted gap). No other field changes.",
+  "entries": [
+    {
+      "id": "crasher",
+      "detection": "D001",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "crasher"
+      },
+      "cause": "The container exits 1 two seconds after start because it cannot connect to its database (the log says connect ECONNREFUSED to port 5432).",
+      "cause_all": [
+        [
+          "econnrefused",
+          "connection refused",
+          "refused",
+          "cannot connect",
+          "can't connect",
+          "unable to connect",
+          "failed to connect",
+          "database",
+          "5432"
+        ]
+      ],
+      "first_step_any": [
+        "database",
+        "5432",
+        "connect",
+        "network",
+        "service",
+        "endpoint",
+        "reachab",
+        "listening",
+        "log"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "badimage",
+      "detection": "D002",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "badimage"
+      },
+      "cause": "The image's tag does not exist in the registry, so every pull fails.",
+      "cause_all": [
+        [
+          "tag",
+          "manifest",
+          "image name",
+          "image reference",
+          "image does not exist",
+          "image not found"
+        ],
+        [
+          "not found",
+          "missing",
+          "does not exist",
+          "doesn't exist",
+          "not exist",
+          "nonexistent",
+          "non-existent",
+          "invalid",
+          "wrong",
+          "incorrect",
+          "typo",
+          "unknown",
+          "cannot find",
+          "can't find",
+          "could not find",
+          "couldn't find",
+          "unable to find",
+          "failed to find",
+          "cannot be found",
+          "could not be found"
+        ]
+      ],
+      "first_step_any": [
+        "tag",
+        "image",
+        "registry",
+        "manifest",
+        "pull"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "neverpull",
+      "detection": "D002",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "neverpull"
+      },
+      "cause": "The container's imagePullPolicy is Never and the image is not on the node, so the kubelet never pulls it.",
+      "cause_all": [
+        [
+          "never"
+        ],
+        [
+          "not present",
+          "not available",
+          "absent",
+          "pull policy",
+          "pullpolicy",
+          "locally",
+          "on the node",
+          "not pulled",
+          "never pull",
+          "not found",
+          "missing",
+          "does not exist",
+          "doesn't exist",
+          "not exist",
+          "nonexistent",
+          "non-existent",
+          "cannot find",
+          "can't find",
+          "could not find",
+          "couldn't find",
+          "unable to find",
+          "failed to find",
+          "cannot be found",
+          "could not be found"
+        ]
+      ],
+      "first_step_any": [
+        "pull policy",
+        "pullpolicy",
+        "imagepullpolicy",
+        "never",
+        "load",
+        "present",
+        "node",
+        "image"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "oom",
+      "detection": "D003",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "oom"
+      },
+      "cause": "The process uses more memory than the container's 16Mi memory limit and is killed (OOMKilled).",
+      "cause_all": [
+        [
+          "memory"
+        ],
+        [
+          "limit",
+          "oom",
+          "out of memory",
+          "exceed"
+        ]
+      ],
+      "first_step_any": [
+        "memory",
+        "limit",
+        "oom"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "missing-key",
+      "detection": "D004",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "missing-key"
+      },
+      "cause": "An environment variable reads a key of a ConfigMap that does not exist, so the kubelet cannot create the container (CreateContainerConfigError).",
+      "cause_all": [
+        [
+          "configmap",
+          "config map"
+        ],
+        [
+          "not found",
+          "missing",
+          "does not exist",
+          "doesn't exist",
+          "not exist",
+          "nonexistent",
+          "non-existent",
+          "cannot find",
+          "can't find",
+          "could not find",
+          "couldn't find",
+          "unable to find",
+          "failed to find",
+          "cannot be found",
+          "could not be found"
+        ]
+      ],
+      "first_step_any": [
+        "configmap",
+        "config map",
+        "create",
+        "key",
+        "env"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "no-entrypoint",
+      "detection": "D004",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "no-entrypoint"
+      },
+      "cause": "The container's command names an executable that is not in the image, so the runtime cannot start the process (RunContainerError, last termination StartError).",
+      "cause_all": [
+        [
+          "executable",
+          "binary",
+          "command",
+          "entrypoint",
+          "exec",
+          "file",
+          "path"
+        ],
+        [
+          "no such file",
+          "not found",
+          "missing",
+          "does not exist",
+          "doesn't exist",
+          "not exist",
+          "nonexistent",
+          "non-existent",
+          "cannot start",
+          "can't start",
+          "failed to start",
+          "unable to start",
+          "cannot find",
+          "can't find",
+          "could not find",
+          "couldn't find",
+          "unable to find",
+          "failed to find",
+          "cannot be found",
+          "could not be found"
+        ]
+      ],
+      "first_step_any": [
+        "command",
+        "entrypoint",
+        "executable",
+        "binary",
+        "path",
+        "image",
+        "exec",
+        "file"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "toobig",
+      "detection": "D005",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "toobig"
+      },
+      "cause": "The container requests 512Gi of memory, more than any node has, so the Pod cannot be scheduled.",
+      "cause_all": [
+        [
+          "memory"
+        ],
+        [
+          "insufficient",
+          "not enough",
+          "request",
+          "too large",
+          "too big",
+          "exceed",
+          "no node",
+          "more than"
+        ]
+      ],
+      "first_step_any": [
+        "memory",
+        "request",
+        "resources",
+        "node",
+        "capacity"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "unplaceable",
+      "detection": "D005",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "unplaceable"
+      },
+      "cause": "No node has the labels the Pod's node selector and required node affinity ask for (and its required Pod affinity matches no Pod), so the Pod cannot be scheduled.",
+      "cause_all": [
+        [
+          "selector",
+          "affinity",
+          "label"
+        ],
+        [
+          "no node",
+          "match",
+          "none of the nodes",
+          "satisf",
+          "available nodes"
+        ]
+      ],
+      "first_step_any": [
+        "selector",
+        "affinity",
+        "label",
+        "node",
+        "toleration",
+        "taint"
+      ],
+      "confidence_ok": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "unready",
+      "detection": "D006",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "unready"
+      },
+      "cause": "The readiness probe asks for HTTP /ready on port 8080, where nothing listens (the container only sleeps), so the probe keeps failing.",
+      "cause_all": [
+        [
+          "readiness",
+          "probe"
+        ],
+        [
+          "8080",
+          "port",
+          "refused",
+          "not listening",
+          "nothing listen",
+          "no process",
+          "fail"
+        ]
+      ],
+      "first_step_any": [
+        "probe",
+        "port",
+        "8080",
+        "readiness",
+        "listen",
+        "endpoint",
+        "/ready"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "no-volume",
+      "detection": "D007",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "no-volume"
+      },
+      "cause": "A volume of the Pod is a Secret that does not exist, so the kubelet cannot mount it and the container never starts.",
+      "cause_all": [
+        [
+          "secret"
+        ],
+        [
+          "not found",
+          "missing",
+          "does not exist",
+          "doesn't exist",
+          "not exist",
+          "nonexistent",
+          "non-existent",
+          "cannot find",
+          "can't find",
+          "could not find",
+          "couldn't find",
+          "unable to find",
+          "failed to find",
+          "cannot be found",
+          "could not be found"
+        ]
+      ],
+      "first_step_any": [
+        "secret",
+        "volume",
+        "mount"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "failing-job",
+      "detection": "D008",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Job",
+        "name": "failing-job"
+      },
+      "cause": "The task fails every time with exit code 3 (its log says report failed: disk full) until the Job's backoff limit of 1 is reached.",
+      "cause_all": [
+        [
+          "disk",
+          "report failed",
+          "exit code 3",
+          "exit status 3",
+          "exited with 3",
+          "code 3"
+        ]
+      ],
+      "first_step_any": [
+        "disk",
+        "space",
+        "storage",
+        "volume",
+        "log",
+        "exit code"
+      ],
+      "confidence_ok": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "policy-job",
+      "detection": "D008",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Job",
+        "name": "policy-job"
+      },
+      "cause": "The task exits 42 (its log says export aborted: schema version mismatch), and a FailJob rule of the Job's podFailurePolicy fails the whole Job at that exit code, with retries left.",
+      "cause_all": [
+        [
+          "42",
+          "schema",
+          "version mismatch"
+        ],
+        [
+          "policy",
+          "failjob",
+          "fail job",
+          "rule"
+        ]
+      ],
+      "first_step_any": [
+        "schema",
+        "version",
+        "exit code",
+        "42",
+        "log",
+        "policy",
+        "failjob"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "indexed-job",
+      "detection": "D008",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Job",
+        "name": "indexed-job"
+      },
+      "cause": "Index 1 of the indexed Job fails every time (its log says shard 1: input file missing) until its per-index backoff limit of 1 is reached, so the Job fails with failed indexes.",
+      "cause_all": [
+        [
+          "index",
+          "shard"
+        ],
+        [
+          "fail",
+          "input file",
+          "missing"
+        ]
+      ],
+      "first_step_any": [
+        "index",
+        "shard",
+        "input",
+        "log",
+        "file"
+      ],
+      "confidence_ok": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "evicted",
+      "detection": "D009",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "evicted"
+      },
+      "cause": "The container writes 4 MiB to an emptyDir volume whose sizeLimit is 1 MiB, so the kubelet evicts the Pod for exceeding it.",
+      "cause_all": [
+        [
+          "emptydir",
+          "empty dir",
+          "ephemeral",
+          "local storage",
+          "storage",
+          "disk",
+          "volume"
+        ],
+        [
+          "limit",
+          "exceed",
+          "sizelimit",
+          "size limit",
+          "usage",
+          "more than",
+          "capacity",
+          "too much",
+          "larger than",
+          "bigger than",
+          "beyond"
+        ]
+      ],
+      "first_step_any": [
+        "emptydir",
+        "sizelimit",
+        "size limit",
+        "storage",
+        "ephemeral",
+        "volume",
+        "disk",
+        "write"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "no-handler",
+      "detection": "D010",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "no-handler"
+      },
+      "cause": "The Pod's RuntimeClass names a handler that the node's container runtime is not configured with, so the runtime cannot create the Pod's sandbox.",
+      "cause_all": [
+        [
+          "runtimeclass",
+          "runtime class",
+          "handler",
+          "runtime"
+        ],
+        [
+          "not found",
+          "missing",
+          "no handler",
+          "no runtime",
+          "does not exist",
+          "doesn't exist",
+          "not configured",
+          "unknown",
+          "not exist",
+          "not supported",
+          "cannot find",
+          "can't find",
+          "could not find",
+          "couldn't find",
+          "unable to find",
+          "failed to find",
+          "cannot be found",
+          "could not be found"
+        ]
+      ],
+      "first_step_any": [
+        "runtimeclass",
+        "runtime class",
+        "handler",
+        "runtime",
+        "containerd",
+        "node"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "cannot-create",
+      "detection": "D011",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "cannot-create"
+      },
+      "cause": "A ResourceQuota admits no BestEffort Pod and the Pod template sets no requests or limits, so the API server refuses every Pod the ReplicaSet creates.",
+      "cause_all": [
+        [
+          "quota"
+        ]
+      ],
+      "first_step_any": [
+        "quota",
+        "request",
+        "limit",
+        "resources"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "report",
+      "detection": "D011",
+      "namespace": "kausa-test-cron",
+      "owner": {
+        "kind": "CronJob",
+        "name": "report"
+      },
+      "cause": "A ResourceQuota in the namespace admits no Job (count/jobs.batch is 0), so the API server refuses the Job the CronJob creates at each scheduled time.",
+      "cause_all": [
+        [
+          "quota"
+        ],
+        [
+          "job"
+        ]
+      ],
+      "first_step_any": [
+        "quota",
+        "count/jobs",
+        "job"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "no-class",
+      "detection": "D012",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "PersistentVolumeClaim",
+        "name": "no-class"
+      },
+      "cause": "The claim names a StorageClass that does not exist, so no volume can be provisioned for it.",
+      "cause_all": [
+        [
+          "storageclass",
+          "storage class"
+        ],
+        [
+          "not found",
+          "missing",
+          "does not exist",
+          "doesn't exist",
+          "not exist",
+          "nonexistent",
+          "non-existent",
+          "cannot find",
+          "can't find",
+          "could not find",
+          "couldn't find",
+          "unable to find",
+          "failed to find",
+          "cannot be found",
+          "could not be found"
+        ]
+      ],
+      "first_step_any": [
+        "storageclass",
+        "storage class",
+        "class"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "no-target",
+      "detection": "D013",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "HorizontalPodAutoscaler",
+        "name": "no-target"
+      },
+      "cause": "The autoscaler's scale target is a Deployment that does not exist, so the controller cannot read its scale.",
+      "cause_all": [
+        [
+          "target",
+          "deployment",
+          "scale"
+        ],
+        [
+          "not found",
+          "missing",
+          "does not exist",
+          "doesn't exist",
+          "not exist",
+          "nonexistent",
+          "non-existent",
+          "cannot find",
+          "can't find",
+          "could not find",
+          "couldn't find",
+          "unable to find",
+          "failed to find",
+          "cannot be found",
+          "could not be found"
+        ]
+      ],
+      "first_step_any": [
+        "target",
+        "deployment",
+        "scaletargetref",
+        "scale"
+      ],
+      "confidence_ok": [
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "stalled",
+      "detection": "D014",
+      "namespace": "kausa-test",
+      "owner": {
+        "kind": "Deployment",
+        "name": "stalled"
+      },
+      "cause": "A scheduling gate nobody removes holds the new Pod, so the rollout passes its 20-second progress deadline. kausa sends only the rollout's counts for D014, so the gate is not in the evidence; a good answer says the rollout did not progress and points at the Pods.",
+      "cause_all": [
+        [
+          "deadline",
+          "progress",
+          "rollout",
+          "stalled",
+          "stuck"
+        ]
+      ],
+      "first_step_any": [
+        "pod",
+        "event",
+        "describe",
+        "rollout status",
+        "replicaset",
+        "schedul"
+      ],
+      "confidence_ok": [
+        "low",
+        "medium"
+      ]
+    }
+  ]
+}

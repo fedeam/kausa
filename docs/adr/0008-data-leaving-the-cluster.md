@@ -141,3 +141,11 @@ with no cluster data is sent only when an operator runs `kausa check-endpoint` o
 [Data sent to the provider](../reference/data-sent-to-the-provider.md#the-endpoint-check) prints
 it in full, and golden files pin it. The destination, the path and the redaction steps do not
 change, and the breaker only removes calls.
+
+Update 2026-11-04: [0024. Send one of four fixed system messages, chosen by detection, that say when a request
+carries no Pod and how a failed Job's event and log combine, as `PROMPT_VERSION` 3, only if a
+before-and-after run passes bars fixed now](0024-system-message-by-detection.md) replaces the one fixed system message with four, fixed in the binary and
+versioned together (`PROMPT_VERSION` 3), chosen only by the request's detection: the Pod
+detections keep v2's, and `D008`, `D011` to `D013` and `D014` get messages that say the request
+has no Pod and what their fields mean. It ships only if its before-and-after measurement passes.
+No field, destination or redaction rule changes.
