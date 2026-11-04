@@ -172,7 +172,10 @@ checks](how-to/develop.md).
   Send one of four fixed system messages, chosen by detection, as `PROMPT_VERSION`
   3](adr/0024-system-message-by-detection.md), measured on 2026-11-04 with a partial verdict: it
   ships with three messages, `D008` keeping the v2 one ([The system message by detection,
-  measured](research/2026-11-04-system-message-by-detection-measured.md)).
+  measured](research/2026-11-04-system-message-by-detection-measured.md)). Accepted for v0.6.x:
+  [0025. Replace the model's text that holds one of six listed destructive command shapes with a
+  fixed notice, show the notice first, and give that answer `low`
+  confidence](adr/0025-withhold-destructive-commands.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

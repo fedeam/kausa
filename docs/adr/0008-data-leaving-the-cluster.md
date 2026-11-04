@@ -153,3 +153,8 @@ No field, destination or redaction rule changes.
 Update 2026-11-04: after its measurement, [0024](0024-system-message-by-detection.md) ships three
 messages, not four: `D008` keeps the Pod message, v2's, and only `D011` to `D013` and `D014` get
 messages that say the request has no Pod.
+
+Update 2026-11-04: with [0025. Replace the model's text that holds one of six listed destructive command shapes with a
+fixed notice, show the notice first, and give that answer `low` confidence](0025-withhold-destructive-commands.md), "untrusted data stays data" also covers what comes back: a
+field of the model's answer that holds a listed destructive command shape is not written to any
+sink. Nothing in the request changes.
