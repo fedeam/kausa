@@ -179,3 +179,36 @@ alone on `D008` was never measured whole.
 
 - `D008` is the measured case of a later ADR on hints (ADR 0025 in 0024's "What ships"), with this
   run's `B` as its reference.
+
+## Release v0.6.0
+
+The release change for v0.6.0, step 1 of "Cut a release" in [Maintain the
+repository](../how-to/maintain.md), with the four themes of v0.6: the chart on GHCR as a signed OCI
+artifact with SBOMs and `cargo auditable` ([0023](../adr/0023-oci-chart-and-sbom.md)), kausa's own
+observability (alert rules checked by `promtool`, seven new metrics), the upgrade test and the soak
+scripts, and the system message chosen by detection
+([0024](../adr/0024-system-message-by-detection.md), `PROMPT_VERSION` 3, `D008` keeping v2's).
+
+- `version` 0.6.0 in `Cargo.toml`, `Cargo.lock` (only kausa's entry changed) and the chart's
+  `version`, `appVersion` and `artifacthub.io/images` line.
+- The changelog's `Unreleased` entries moved to `[0.6.0] - 2026-11-04`, with a summary and the
+  upgrade notes the `Changed` entries imply: the counters with a fixed set of labels start at `0`
+  for each label and lose their unlabelled `0` line, a copy of the install guide's example alert
+  `KausaDailyCallBudgetSpent` is replaced by the file's, and new Explanation entries store
+  `promptVersion` `"3"`. Nothing changes in values or permissions.
+- The README (status note, Status, a v0.6.0 roadmap entry, and "Try it" installing
+  `oci://ghcr.io/fedeam/charts/kausa --version 0.6.0` with the crasher image 0.6.0), the [Security
+  policy](../../SECURITY.md), the front page, [Command line and log
+  format](../reference/command-line.md), [Helm chart](../reference/helm-chart.md),
+  [Alerts](../reference/alerts.md), the status comment of `src/run.rs` and the release section of
+  [Maintain the repository](../how-to/maintain.md) name v0.6.0.
+- [Install kausa with Helm](../how-to/install-with-helm.md): the lines that said v0.6.0 is not
+  released are rewritten (the status paragraph, the end of step 1, "Upgrade from a chart URL to
+  the OCI chart" and the end of "Verify a release"). The lines that say no install from GHCR and
+  no command of the release notes has run stay until step 5 runs them.
+- Not changed: `charts/artifacthub-repo.yml` is not created (the chart is not registered on
+  Artifact Hub yet), and `tests/e2e/upgrade-from.txt` still pins v0.5.1 (step 6 bumps it), as does
+  the status line of [Run the soak](../how-to/run-the-soak.md), which names the pinned release.
+- Checks run locally: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` (717 tests),
+  `helm lint --strict`, `tests/chart/render.sh` and the `ci` target's image line check passed.
+  No tag was made and nothing was pushed.
