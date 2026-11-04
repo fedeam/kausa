@@ -4,9 +4,10 @@ Run the pinned latest release for seven days on a small cluster, sample its memo
 metrics every 30 seconds, and decide with a rule fixed in advance whether the chart's memory limit
 may go back from `192Mi` to `128Mi`.
 
-Status as of 2026-11-03: the scripts in `tests/soak/` are written and were run once, for nine
-minutes, in a throwaway kind cluster; no soak has been run yet, so there is no result. The release
-is v0.5.1, the one pinned in `tests/e2e/upgrade-from.txt`.
+Status as of 2026-11-04: the scripts in `tests/soak/` were run once, for nine minutes, in a
+throwaway kind cluster; a dry-run soak of v0.5.1 started on 2026-11-03 ([A dry-run
+soak](#a-dry-run-soak)) and has no result yet. `install.sh` installs the release pinned in
+`tests/e2e/upgrade-from.txt`, v0.5.2 since the v0.6.0 release change.
 
 ## What the soak answers, and what it cannot
 

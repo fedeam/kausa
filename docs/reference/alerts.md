@@ -4,7 +4,7 @@ The Prometheus alerting rules in
 [`deploy/prometheus/kausa-alerts.yaml`](../../deploy/prometheus/kausa-alerts.yaml): what each
 alert means, its expression and what to do when it fires.
 
-Status as of 2026-11-03 (unreleased, for v0.6.0): eleven alerts in five groups, all on kausa's own
+Status as of 2026-11-04 (released in v0.6.0): eleven alerts in five groups, all on kausa's own
 metrics ([Command line and log format](command-line.md#metrics)). The `ci` target of the
 `Dockerfile` checks the file with `promtool check rules --lint=all --lint-fatal` and runs its unit
 tests, [`tests/prometheus/kausa-alerts.test.yaml`](../../tests/prometheus/kausa-alerts.test.yaml),

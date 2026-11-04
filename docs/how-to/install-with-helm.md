@@ -3,7 +3,7 @@
 Install the released chart, which runs the published image, first in dry-run and then pointed at
 a model.
 
-Status as of 2026-10-30: the v0.1.0 chart from the GitHub release was installed in dry-run in kind
+Status as of 2026-11-04: the v0.1.0 chart from the GitHub release was installed in dry-run in kind
 (Kubernetes v1.37) with the published image, on 2026-10-28. The chart in the repository was
 checked with a server-side dry run against Kubernetes v1.36, installed in dry-run on a Raspberry
 Pi 4 node, and installed with an endpoint by the kind test (`tests/e2e/run.sh`, passed on
@@ -26,9 +26,9 @@ v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa 
 From v0.6.0 each release also publishes the chart at `oci://ghcr.io/fedeam/charts/kausa`, signed
 and with provenance, with a CycloneDX SBOM for each image ([0023. Publish the chart as a signed
 OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
-CycloneDX SBOM of an auditable binary to each image](../adr/0023-oci-chart-and-sbom.md)). As of
-2026-11-03 v0.6.0 is not released: the v0.5.2 chart and earlier are only on their GitHub
-releases, and no install from GHCR has been tested. On 2026-11-03 the publishing was rehearsed
+CycloneDX SBOM of an auditable binary to each image](../adr/0023-oci-chart-and-sbom.md)). v0.6.0,
+released on 2026-11-04, is the first; the v0.5.2 chart and earlier are only on their GitHub
+releases. As of 2026-11-04 no install from GHCR has been tested. On 2026-11-03 the publishing was rehearsed
 locally: the chart was pushed to a throwaway registry, and a release installed in kind from the
 v0.5.1 chart URL was upgraded to it.
 
@@ -62,8 +62,8 @@ v0.5.1 chart URL was upgraded to it.
    release](https://github.com/fedeam/kausa/releases). To use it, set
    `CHART=https://github.com/fedeam/kausa/releases/download/v$VERSION/kausa-$VERSION.tgz`; Helm
    3.16.1 and 4.3.1 accept and ignore `--version` with a chart URL (checked on 2026-11-03), so the
-   commands below work unchanged, but the URL alone picks the version. Until v0.6.0 is released,
-   this is the way to install: `VERSION=0.5.2` and the URL.
+   commands below work unchanged, but the URL alone picks the version. The v0.5.2 chart and
+   earlier are only there: for them, this is the way to install.
 
 2. **Create the namespace and, for a hosted endpoint, the API key's Secret.** kausa never reads it
    through the API; the kubelet mounts it as a file:
@@ -136,8 +136,8 @@ helm install kausa charts/kausa -n kausa --set rbac.scope=cluster \
 ## Upgrade from a chart URL to the OCI chart
 
 A release installed from a chart URL of a GitHub release (v0.5.2 and earlier, or any later one)
-moves to the chart on GHCR with an upgrade, from v0.6.0 on; `--reuse-values` keeps its values,
-`rbac.scope` included:
+moves to the chart on GHCR with an upgrade to v0.6.0 or a later version; `--reuse-values` keeps
+its values, `rbac.scope` included:
 
 ```sh
 helm upgrade kausa oci://ghcr.io/fedeam/charts/kausa --version <version> -n kausa --reuse-values
@@ -145,7 +145,8 @@ helm upgrade kausa oci://ghcr.io/fedeam/charts/kausa --version <version> -n kaus
 
 Rehearsed on 2026-11-03 in kind with Helm 4.3.1, from the v0.5.1 chart URL to the same chart
 pushed to a throwaway local registry: `helm get values` kept `rbac.scope` and `dryRun`, and `helm
-history` showed revision 2. Not yet done against GHCR, where the first OCI chart is v0.6.0.
+history` showed revision 2. As of 2026-11-04 not yet done against GHCR, where the first OCI chart
+is v0.6.0, released on 2026-11-04.
 
 ## Upgrade from a chart without rbac.scope
 
@@ -447,8 +448,9 @@ The notes also verify the same attestations with `gh attestation verify`, which 
 login`. The v0.5.2 release and earlier have no chart on GHCR and no SBOM: their notes verify the
 image's signature and provenance and the chart's checksum. Why: [0023. Publish the chart as a signed OCI artifact at
 `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX SBOM of an
-auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). As of 2026-11-03 these
-commands have not run against a release: v0.6.0, the first that publishes them, is not out yet.
+auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). v0.6.0, released on
+2026-11-04, is the first release whose notes give them; as of 2026-11-04 they have not run against
+it.
 
 ## Verify
 
