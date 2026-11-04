@@ -1,0 +1,866 @@
+{
+  "0019dbc088": {
+    "arm": "HB",
+    "fingerprint": "867d8395d3d88562",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "05800ac11d": {
+    "arm": "A",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "06d7399b50": {
+    "arm": "B",
+    "fingerprint": "d6a315090de685c5",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "0916ecee6d": {
+    "arm": "B",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "09209eb042": {
+    "arm": "HA",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "0a8bda23df": {
+    "arm": "A",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "0a9444ca44": {
+    "arm": "HA",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "0aa39f84ec": {
+    "arm": "A",
+    "fingerprint": "d6a315090de685c5",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "0b203a6d78": {
+    "arm": "B",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "0b4e223ad8": {
+    "arm": "B",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "0ce7a6ceef": {
+    "arm": "B",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "0d347c875b": {
+    "arm": "B",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "101efc2acd": {
+    "arm": "HA",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "13acaebaa9": {
+    "arm": "HA",
+    "fingerprint": "867d8395d3d88562",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "154d2cbe5d": {
+    "arm": "B",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "1554046127": {
+    "arm": "A",
+    "fingerprint": "d6a315090de685c5",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "196d336217": {
+    "arm": "HB",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "1b7c9d6ea3": {
+    "arm": "B",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "1b8ee2fff8": {
+    "arm": "HB",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "1ec510b920": {
+    "arm": "B",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "2171bdde37": {
+    "arm": "A",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "23e28e112e": {
+    "arm": "B",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "24f0c1c8bb": {
+    "arm": "HA",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "27dcaa87a2": {
+    "arm": "B",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "28098f723c": {
+    "arm": "HA",
+    "fingerprint": "867d8395d3d88562",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "2acbac5895": {
+    "arm": "A",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "2b82388d26": {
+    "arm": "B",
+    "fingerprint": "26ad692b467e8729",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "2c9ff50be0": {
+    "arm": "HB",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "2dc2a1beb1": {
+    "arm": "HB",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "2ec1c753e4": {
+    "arm": "B",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "2fdbf759a6": {
+    "arm": "A",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "2fea863b7b": {
+    "arm": "A",
+    "fingerprint": "26ad692b467e8729",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "31a2099cd1": {
+    "arm": "A",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "31f7688c9c": {
+    "arm": "A",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "328fedfbb1": {
+    "arm": "B",
+    "fingerprint": "26ad692b467e8729",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "364219efc1": {
+    "arm": "A",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "3afe924f0f": {
+    "arm": "A",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "3b4253b811": {
+    "arm": "HA",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "42df75ed65": {
+    "arm": "HB",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "45e279214e": {
+    "arm": "HA",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "474bbb269c": {
+    "arm": "HA",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "4917baeadc": {
+    "arm": "A",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "4940e5c6ca": {
+    "arm": "HA",
+    "fingerprint": "867d8395d3d88562",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "4ca02a6a6f": {
+    "arm": "B",
+    "fingerprint": "d6a315090de685c5",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "5408d0b47c": {
+    "arm": "B",
+    "fingerprint": "d6a315090de685c5",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "55738c3726": {
+    "arm": "B",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "588f0a9613": {
+    "arm": "HA",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "59c3bcbd30": {
+    "arm": "B",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "5a03415eb1": {
+    "arm": "HB",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "5bafd99eeb": {
+    "arm": "A",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "5c8255b5d9": {
+    "arm": "B",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "5cdce8ed76": {
+    "arm": "B",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "5ce2343c51": {
+    "arm": "B",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "61d1c3a8ea": {
+    "arm": "HA",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "6646e32c25": {
+    "arm": "A",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "667fe4c6b7": {
+    "arm": "B",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "66c69872ed": {
+    "arm": "HB",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "67e6330b60": {
+    "arm": "A",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "6b09d61d29": {
+    "arm": "A",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "6bd66cdb9c": {
+    "arm": "HB",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "6cb725ffb2": {
+    "arm": "HB",
+    "fingerprint": "867d8395d3d88562",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "6d142ee1e1": {
+    "arm": "A",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "6d455f0244": {
+    "arm": "B",
+    "fingerprint": "26ad692b467e8729",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "6f9bb0d0fa": {
+    "arm": "A",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "7422ace6a3": {
+    "arm": "B",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "74532dcda7": {
+    "arm": "A",
+    "fingerprint": "26ad692b467e8729",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "767b25defd": {
+    "arm": "B",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "76a19371dc": {
+    "arm": "A",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "781071a33b": {
+    "arm": "B",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "786a85145e": {
+    "arm": "HB",
+    "fingerprint": "867d8395d3d88562",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "79613ce232": {
+    "arm": "B",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "7b731eacad": {
+    "arm": "B",
+    "fingerprint": "d6a315090de685c5",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "7b9a03a277": {
+    "arm": "A",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "7c6d0a748b": {
+    "arm": "A",
+    "fingerprint": "26ad692b467e8729",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "7c86e564bb": {
+    "arm": "HB",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "7d07e11a12": {
+    "arm": "HB",
+    "fingerprint": "867d8395d3d88562",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "7e9c1ffc33": {
+    "arm": "HB",
+    "fingerprint": "867d8395d3d88562",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "80c6256b4d": {
+    "arm": "A",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "8121290a95": {
+    "arm": "A",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "824612b5e4": {
+    "arm": "B",
+    "fingerprint": "26ad692b467e8729",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "8483c7f34a": {
+    "arm": "HA",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "85963c76e6": {
+    "arm": "HB",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "8838e06c79": {
+    "arm": "B",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "88fea89fc6": {
+    "arm": "HA",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "8de69a3fb5": {
+    "arm": "HB",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "8f3321c99f": {
+    "arm": "A",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "8fa8dafc1a": {
+    "arm": "B",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "9440437755": {
+    "arm": "B",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "95f7af54e4": {
+    "arm": "HB",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "98f4236e92": {
+    "arm": "A",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "9956f14ffc": {
+    "arm": "HB",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "997f98d59e": {
+    "arm": "HB",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "9b9f420fcb": {
+    "arm": "A",
+    "fingerprint": "d6a315090de685c5",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "9d372762bb": {
+    "arm": "HA",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "9dc865d6c1": {
+    "arm": "HB",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "a111af9c47": {
+    "arm": "A",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "a29c159ddc": {
+    "arm": "HB",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "a366d68cad": {
+    "arm": "A",
+    "fingerprint": "d6a315090de685c5",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "a8b4885401": {
+    "arm": "B",
+    "fingerprint": "26ad692b467e8729",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "a961df8603": {
+    "arm": "B",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "a9755a54ac": {
+    "arm": "A",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "a9f9371dcb": {
+    "arm": "A",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "aaf5e6bdc8": {
+    "arm": "A",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "b06841523b": {
+    "arm": "HA",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "b15c8561bd": {
+    "arm": "B",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "b1b3561876": {
+    "arm": "A",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "b4648143da": {
+    "arm": "B",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "b93cca8ceb": {
+    "arm": "A",
+    "fingerprint": "26ad692b467e8729",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "bcdddc80e9": {
+    "arm": "A",
+    "fingerprint": "26ad692b467e8729",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "bd6b950fea": {
+    "arm": "HA",
+    "fingerprint": "867d8395d3d88562",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "c18f6775c5": {
+    "arm": "B",
+    "fingerprint": "d6a315090de685c5",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "c471f9878d": {
+    "arm": "HB",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "c5cb5afcf8": {
+    "arm": "HA",
+    "fingerprint": "867d8395d3d88562",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "c9869722f4": {
+    "arm": "HA",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "cbc8ea7018": {
+    "arm": "B",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "cbdf2d2802": {
+    "arm": "HA",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "ce01446f45": {
+    "arm": "B",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "cf70d20e87": {
+    "arm": "A",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "d041180186": {
+    "arm": "A",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "d48c714092": {
+    "arm": "B",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "d5ab82e63b": {
+    "arm": "HB",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "d9b55b5aae": {
+    "arm": "A",
+    "fingerprint": "d6a315090de685c5",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "dab95778bb": {
+    "arm": "B",
+    "fingerprint": "26ad692b467e8729",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "dd33fa1643": {
+    "arm": "B",
+    "fingerprint": "d6a315090de685c5",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "de8733fcdb": {
+    "arm": "A",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "e0adab5d6d": {
+    "arm": "HA",
+    "fingerprint": "763e1e3837db8de6",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "e6a6c1f79e": {
+    "arm": "A",
+    "fingerprint": "2612fa8fd2b4b9a9",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "e780c050b0": {
+    "arm": "B",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "e9ab575882": {
+    "arm": "A",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "eba51be59d": {
+    "arm": "A",
+    "fingerprint": "b9c37560e7bf2dc6",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "ebd3671583": {
+    "arm": "A",
+    "fingerprint": "c1702b46c71d34ba",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "eedd0675da": {
+    "arm": "B",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "ef8e9ee54a": {
+    "arm": "HA",
+    "fingerprint": "867d8395d3d88562",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "efc60ae055": {
+    "arm": "B",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "f0ceb8a53e": {
+    "arm": "A",
+    "fingerprint": "84dbfdc27df31dab",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "f1b538a12d": {
+    "arm": "A",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "granite3.3:8b",
+    "repeat": 0
+  },
+  "f28de89687": {
+    "arm": "A",
+    "fingerprint": "d6a315090de685c5",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "f3e0c3cf7a": {
+    "arm": "HB",
+    "fingerprint": "867d8395d3d88562",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "f534435008": {
+    "arm": "B",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "qwen3:4b",
+    "repeat": 0
+  },
+  "f93ad6712d": {
+    "arm": "B",
+    "fingerprint": "8b03cee2bd60e592",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  },
+  "f946db0b5b": {
+    "arm": "HA",
+    "fingerprint": "cf02199d6789a42e",
+    "model": "llama3.2:3b",
+    "repeat": 0
+  },
+  "fb2b88cc68": {
+    "arm": "HA",
+    "fingerprint": "4b1bef9c7033cb34",
+    "model": "qwen3:0.6b",
+    "repeat": 0
+  },
+  "fb9a76385b": {
+    "arm": "A",
+    "fingerprint": "26ad692b467e8729",
+    "model": "qwen2.5:7b",
+    "repeat": 0
+  },
+  "feb8c961e0": {
+    "arm": "B",
+    "fingerprint": "cda76689c5bec44b",
+    "model": "phi4-mini:3.8b",
+    "repeat": 0
+  }
+}

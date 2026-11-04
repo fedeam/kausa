@@ -13,8 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `D013`) and a stalled rollout (`D014`) carry one of three new fixed system messages, which say
   that the request has no Pod and, for `D008` and `D014`, what their events and fields mean. The
   prompt version is `3`, so new Explanation entries store `promptVersion` `"3"`. Requests for the
-  other rules do not change. These messages ship only if the before-and-after measurement fixed by
-  [0024](docs/adr/0024-system-message-by-detection.md) passes.
+  other rules do not change. These messages ship only as far as the before-and-after measurement
+  fixed by [0024](docs/adr/0024-system-message-by-detection.md) passes. Its verdict is partial
+  ([The system message by detection,
+  measured](docs/research/2026-11-04-system-message-by-detection-measured.md)): the paragraph for
+  requests with no Pod (`D011` to `D013`) and the one for `D014` pass their bars; the `D008`
+  paragraph fails bars B1 and B2 and does not ship as measured.
 
 ## [0.5.2] - 2026-11-03
 

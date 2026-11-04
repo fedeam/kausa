@@ -114,3 +114,42 @@ before the run.
   file per repeat), and a mark fails the answer's `cause` whatever its other criteria, so bar B1
   counts it; the sheet no longer names the ADR. `selftest` has 15 checks, and a mutation of each
   fix fails its check.
+
+## The run and its verdict
+
+The before-and-after run of 0024 ran today on the maintainer's machine, with the frozen files above
+unchanged (their sha256 values recorded before the first model call): one throwaway kind cluster,
+both builds in `--dry-run`, `swap`, `echo` (the freeze rule held), 420 local calls to six Ollama
+models, the blinded pass and `compare`. Written up in [The system message by detection,
+measured](../research/2026-11-04-system-message-by-detection-measured.md).
+
+- **Verdict: partial.** `compare` ships `intro_no_pod` (the no-Pod paragraph, `D011` to `D013`)
+  and `rollout` (`D014`), and holds `job` (`D008`): bar B1 is 4 of 12 against 8, bar B2 net 4
+  against 6. Bars N, A (net 10, exactly the bar), C1, C2, D, E, F, G and H pass. Bar H passes as a
+  comparison, but five of six models followed the injected log line in both arms.
+- **The reader's pass:** an agent told neither the arm nor the hypothesis marked 51 of 144
+  answers; 19 marks turned a passing cause into a fail. Without the marks B2 would pass, B1 would
+  not, and the verdict would be the same.
+- **Committed for reproduction** in `tests/bench/runs/2026-11-04-0024/`: the request lines of the
+  before log, `swap`'s output, the 30 answer files, the marks and the key. `compare` on them gives
+  the note's output byte for byte. The before log's `incident` lines are not committed: they carry
+  the kind cluster's Pod names and a Pod address.
+- **Deviation from the protocol:** both builds were stopped once all 25 requests were logged
+  (201.6 s after the apply), not after 12 minutes.
+
+### Decisions
+
+- **`src/` does not change.** The verdict does not ship `job`, so the code is left as it is; the
+  maintainer decides how the code branch proceeds. Per the ADR, `D008` without `job` would get the
+  `D011` to `D013` message, a configuration not measured whole: it is answered again on the 18
+  `D008` pairs and the 30 held-out pairs, against this run's `B`, before it ships. `D008` becomes
+  the measured case of ADR 0025.
+- **The ADR's Status and the `Update` paragraphs of 0008 and 0018 are not written here:** they
+  depend on what ships, which is the maintainer's decision.
+
+### Next steps
+
+- The maintainer's decision on the branch: drop `job` and re-measure `D008` with the no-Pod
+  message, or keep `D008` on the Pod message until ADR 0025.
+- ADR 0025 (a derived `hints` field, reason-keyed system text as its first alternative), measured
+  under this protocol with this run's `B`, bar H included.
