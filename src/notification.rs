@@ -882,6 +882,31 @@ mod tests {
     }
 
     #[test]
+    fn a_withheld_notice_over_the_cap_keeps_the_notice_whole() {
+        // Fields far over the cap, one or two units a character: the cut falls after the notice,
+        // which stays whole on line 2, and every body keeps its invariants.
+        for (i, c) in ["x", "\u{e9}", "\u{1f600}", "&"].into_iter().enumerate() {
+            let long = c.repeat(MAX_TEXT_UNITS);
+            let mut n = withheld_notice(&[&long, &long, &long, &long]);
+            n.summary.clone_from(&long);
+            n.cause = long;
+            let t = text(&n);
+            assert!(
+                t.starts_with(&format!(
+                    "kausa: crash loop (D001) in shop, Deployment web\n{WITHHELD}\n"
+                )),
+                "case {i}: the notice is not whole on line 2"
+            );
+            assert!(units(&t) <= MAX_TEXT_UNITS, "case {i}");
+            check_bodies(&n, &format!("withheld over the cap, case {i}"));
+        }
+        // Every text field over the cap: the header alone fills the text, and the cut still holds.
+        let mut n = filled(&"@/".repeat(MAX_TEXT_UNITS), 3);
+        n.steps[0] = WITHHELD.into();
+        check_bodies(&n, "every field over the cap, withheld");
+    }
+
+    #[test]
     fn the_notice_is_the_text_of_the_adr() {
         assert_eq!(WITHHELD.len(), 171);
         assert!(WITHHELD.starts_with("Withheld by kausa: "));
