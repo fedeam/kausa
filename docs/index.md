@@ -9,7 +9,7 @@ ConfigMaps, never changes a workload, and writes nothing but its own Events (non
 `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease. With
 `--notify-url-file` (off by default) it also posts each new explanation to one webhook.
 
-Status as of 2026-11-03: **in development** (pre-alpha). The four implementation weekends of v0.1
+Status as of 2026-11-04: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
@@ -25,8 +25,10 @@ v0.4.0](journal/2026-10-30-release-v0-4-0.md)), and the same day by
 2026-11-03 by [v0.5.0](https://github.com/fedeam/kausa/releases/tag/v0.5.0) ([2026-11-03 — Release
 v0.5.0](journal/2026-11-03-release-v0-5-0.md)), and the same day by
 [v0.5.1](https://github.com/fedeam/kausa/releases/tag/v0.5.1), which recognizes a wrong Gemini key,
-and [v0.5.2](https://github.com/fedeam/kausa/releases/tag/v0.5.2), a security fix of redaction.
-The
+and [v0.5.2](https://github.com/fedeam/kausa/releases/tag/v0.5.2), a security fix of redaction,
+and on 2026-11-04 by [v0.6.0](https://github.com/fedeam/kausa/releases/tag/v0.6.0), the first with
+the chart on GHCR ([2026-11-04 — A system message chosen by
+detection](journal/2026-11-04-system-message-by-detection.md), "Release v0.6.0"). The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -166,7 +168,7 @@ checks](how-to/develop.md).
   from a start burst of three, and let incidents wait for it in the queue, so that a restart does
   not refill it](adr/0021-refill-the-call-budget.md) and [0022. Pass the model's answer through
   the pattern redaction rules before it is written anywhere, and redact the query of an HTTP
-  request line](adr/0022-redact-the-answer.md). Accepted for v0.6: [0023. Publish the chart as a
+  request line](adr/0022-redact-the-answer.md). Shipped in v0.6.0: [0023. Publish the chart as a
   signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
   CycloneDX SBOM of an auditable binary to each image](adr/0023-oci-chart-and-sbom.md) and [0024.
   Send one of four fixed system messages, chosen by detection, as `PROMPT_VERSION`
@@ -187,4 +189,6 @@ checks](how-to/develop.md).
   [2026-10-29 — Notifications](journal/2026-10-29-notifications.md);
   [2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md);
   [2026-11-02 — The good first issues](journal/2026-11-02-good-first-issues.md);
-  [2026-11-03 — Releases v0.5.0 to v0.5.2](journal/2026-11-03-release-v0-5-0.md).
+  [2026-11-03 — Releases v0.5.0 to v0.5.2](journal/2026-11-03-release-v0-5-0.md);
+  [2026-11-04 — A system message chosen by
+  detection](journal/2026-11-04-system-message-by-detection.md), with the release of v0.6.0.

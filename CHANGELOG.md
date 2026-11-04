@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-04
+
+The chart is published at `oci://ghcr.io/fedeam/charts/kausa` as a signed OCI artifact, and each
+image gets an attested CycloneDX SBOM of a binary built with `cargo auditable` (0023); kausa
+watches itself, with alert rules that `promtool` checks and unit-tests and seven new metrics; an
+upgrade test from the latest release and the scripts of a seven-day soak measure its reliability;
+and the system message is chosen by detection, as prompt version `3`, with `D008` keeping version
+2's (0024). Nothing to change in values or permissions. After the upgrade, the counters with a
+fixed set of labels show a `0` series for each label from the start, and their unlabelled `0` line
+is gone: a dashboard or query that matched it changes. A copy of the install guide's example
+alert `KausaDailyCallBudgetSpent`, which needed a `pod` label, is replaced by the one in
+`deploy/prometheus/kausa-alerts.yaml`. New Explanation entries store `promptVersion` `"3"`.
+
 ### Added
 
 - Prometheus alerting rules for kausa's own metrics, `deploy/prometheus/kausa-alerts.yaml`: eleven
@@ -455,7 +468,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.5.2...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/fedeam/kausa/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/fedeam/kausa/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/fedeam/kausa/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fedeam/kausa/compare/v0.4.1...v0.5.0

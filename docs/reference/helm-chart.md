@@ -2,14 +2,14 @@
 
 The values of the chart in `charts/kausa`, what each one turns into, and the objects it creates.
 
-Status as of 2026-10-30: the chart exists and is checked by `helm lint` and renders in CI, by a
+Status as of 2026-11-04: the chart exists and is checked by `helm lint` and renders in CI, by a
 server-side dry run against Kubernetes v1.36 (k3s), by one install in dry-run on that cluster
 (admitted under the restricted Pod Security Standard), and by the kind test, which installs it
 with an endpoint in each `rbac.scope` (both passed on 2026-10-28 on the maintainer's machine).
 Since v0.1.0 (2026-10-28) each release attaches the packaged chart to its GitHub release and
 publishes the image it uses by default, and the v0.1.0 chart was installed in dry-run in kind with
-that image ([Install kausa with Helm](../how-to/install-with-helm.md)). Since v0.6.0 the chart is
-also published at `oci://ghcr.io/fedeam/charts/kausa` (not released as of 2026-11-03), and it
+that image ([Install kausa with Helm](../how-to/install-with-helm.md)). Since v0.6.0 (2026-11-04)
+the chart is also published at `oci://ghcr.io/fedeam/charts/kausa`, and it
 carries a `README.md` (Artifact Hub's package page and `helm show readme`), its maintainer and
 Artifact Hub's annotations in `Chart.yaml`, none of which changes a render ([0023. Publish the
 chart as a signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub,

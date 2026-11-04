@@ -446,8 +446,9 @@ kind publish a security fix:
 Why releases work this way: [0012. Release from a tag: a signed image on GHCR and the chart on the
 GitHub release](../adr/0012-releases.md) and [0023. Publish the chart as a signed OCI artifact at
 `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX SBOM of an
-auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). Status as of 2026-11-03:
-v0.1.0 was the first release; v0.6.0 will be the first with the chart on GHCR and the SBOMs.
+auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). Status as of 2026-11-04:
+v0.1.0 was the first release; v0.6.0 (2026-11-04) is the first with the chart on GHCR and the
+SBOMs.
 
 1. In a pull request of your own (for example `chore(release): v0.1.1`):
    - set the new `version` in `Cargo.toml`, and run `cargo build` once without `--locked` so that

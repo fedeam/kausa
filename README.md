@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.5.2](https://github.com/fedeam/kausa/releases/tag/v0.5.2),
+> Event on the failing workload. The latest release, [v0.6.0](https://github.com/fedeam/kausa/releases/tag/v0.6.0),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,9 +62,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa https://github.com/fedeam/kausa/releases/download/v0.5.2/kausa-0.5.2.tgz \
+helm install kausa oci://ghcr.io/fedeam/charts/kausa --version 0.6.0 \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.5.2 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.6.0 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -154,11 +154,12 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.5.2 is released (2026-11-03): `kausa run` watches Pods, Warning events and
+Pre-alpha. v0.6.0 is released (2026-11-04): `kausa run` watches Pods, Warning events and
 Deployments, in the whole cluster or in a list of namespaces, groups failures by workload, builds a
 redacted context with the failed container's log, asks the model within a call budget (or logs the
 request with `--dry-run`), reuses explanations of repeated incidents, writes each explanation as an
-Event on the failing workload, and serves Prometheus metrics with `--metrics-address`; with
+Event on the failing workload, and serves Prometheus metrics with `--metrics-address`, with alert
+rules for them in `deploy/prometheus/` ([Alerts](docs/reference/alerts.md)); with
 `--history` it keeps each incident's explanations in an Explanation object, and with
 `--notify-url-file` it posts each new explanation to one webhook, both off by default; with the
 chart's `replicaCount: 2`, off by default, a standby replica takes over through a Lease; it
@@ -274,6 +275,23 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
 - **v0.5.2** (2026-11-03): a security fix of redaction: the name of a Secret or ConfigMap that a
   Pod cannot mount no longer reaches the request in clear when the volume is named like a secret
   key (`credentials`, `password`…).
+- **v0.6.0** (2026-11-04): the chart is published at `oci://ghcr.io/fedeam/charts/kausa`, signed
+  and with provenance, and each image gets an attested CycloneDX SBOM of a binary built with
+  `cargo auditable` ([0023. Publish the chart as a signed OCI artifact at
+  `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX SBOM of an
+  auditable binary to each image](docs/adr/0023-oci-chart-and-sbom.md)); kausa's own
+  observability: alert rules checked and unit-tested with `promtool`
+  ([Alerts](docs/reference/alerts.md)) and seven new metrics, among them the build, the model call latency and the watch relists; an
+  upgrade test from the latest release and the scripts of a seven-day soak ([Run the
+  soak](docs/how-to/run-the-soak.md)); and a system message chosen by detection: the requests
+  that carry no Pod (`D011` to `D014`) get one of two new fixed messages, as prompt version `3`,
+  and the others, a failed Job (`D008`) included, keep version 2's ([0024. Send one of four fixed
+  system messages, chosen by detection, that say when a request carries no Pod and how a failed
+  Job's event and log combine, as `PROMPT_VERSION` 3, only if a before-and-after run passes bars
+  fixed now](docs/adr/0024-system-message-by-detection.md);
+  [The system message by detection,
+  measured](docs/research/2026-11-04-system-message-by-detection-measured.md)). The counters with
+  a fixed set of labels start at `0` for each label, and their unlabelled `0` line is gone.
 
 ## Documentation
 
