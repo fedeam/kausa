@@ -1968,3 +1968,102 @@ low confidence.";
         );
     }
 }
+
+/// Offline grading of a measurement's answers (docs/adr/0025-withhold-destructive-commands.md,
+/// Consequences, "Measurement"). Both tests are ignored: they read a directory or a file named in
+/// the environment and print one JSON line per row, with ids, counts and booleans only, never a
+/// text. Run them with
+/// `KAUSA_ANSWERS_DIR=<dir> cargo test --locked -- --ignored withhold_answers_dir --nocapture` and
+/// `KAUSA_SINK_TEXTS=<file> cargo test --locked -- --ignored withhold_sink_texts --nocapture`.
+#[cfg(test)]
+mod measurement {
+    use super::*;
+
+    /// The path named by the environment variable `name`; the test fails, naming the variable,
+    /// when it is unset.
+    fn input(name: &str) -> std::path::PathBuf {
+        std::env::var_os(name)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| panic!("set {name}"))
+    }
+
+    /// One graded row: what `withhold` did to an answer, in ids and counts.
+    fn grade(file: &str, row: &Value) -> Value {
+        let mut graded = json!({
+            "file": file,
+            "id": row["id"].as_str(),
+            "model": row["model"].as_str(),
+            "valid": false,
+            "withheld": null,
+            "confidence_before": null,
+            "confidence_after": null,
+            "steps_removed": null,
+            "summary_replaced": null,
+            "cause_replaced": null,
+        });
+        let Some(Ok(e)) = row["answer"].as_str().map(validate) else {
+            return graded;
+        };
+        let removed = e.steps.iter().filter(|s| !shapes(s).is_empty()).count();
+        let (w, ids) = withhold(e.clone());
+        graded["valid"] = json!(true);
+        graded["withheld"] = json!(ids);
+        graded["confidence_before"] = json!(e.confidence);
+        graded["confidence_after"] = json!(w.confidence);
+        graded["steps_removed"] = json!(removed);
+        graded["summary_replaced"] = json!(w.summary != e.summary);
+        graded["cause_replaced"] = json!(w.cause != e.cause);
+        graded
+    }
+
+    /// Every row of every `*.jsonl` file of `KAUSA_ANSWERS_DIR` (the `--out` files of
+    /// tests/bench/score.py), validated and withheld as `kausa run` would. An invalid or missing
+    /// answer is reported with `valid` false and nulls.
+    #[test]
+    #[ignore = "reads KAUSA_ANSWERS_DIR; run by hand after a measurement"]
+    fn withhold_answers_dir() {
+        let dir = input("KAUSA_ANSWERS_DIR");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("KAUSA_ANSWERS_DIR is a readable directory")
+            .map(|entry| entry.expect("a directory entry").path())
+            .filter(|path| path.extension().is_some_and(|e| e == "jsonl"))
+            .collect();
+        files.sort();
+        for path in &files {
+            let file = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .expect("a UTF-8 file name")
+                .to_owned();
+            let text = std::fs::read_to_string(path).expect("a readable answers file");
+            for (line, row) in text.lines().enumerate() {
+                if row.trim().is_empty() {
+                    continue;
+                }
+                let Ok(row) = serde_json::from_str::<Value>(row) else {
+                    panic!("{file}, line {}: not a JSON line", line + 1);
+                };
+                println!("{}", grade(&file, &row));
+            }
+        }
+    }
+
+    /// Bar M2's helper: `KAUSA_SINK_TEXTS` is a file of one JSON string per line (the texts
+    /// collected from log lines, Event notes, Explanation entries and hook bodies); prints the
+    /// shapes found in each, by line number from 1.
+    #[test]
+    #[ignore = "reads KAUSA_SINK_TEXTS; run by hand after a measurement"]
+    fn withhold_sink_texts() {
+        let path = input("KAUSA_SINK_TEXTS");
+        let text = std::fs::read_to_string(&path).expect("KAUSA_SINK_TEXTS is a readable file");
+        for (line, raw) in text.lines().enumerate() {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let Ok(Value::String(sink)) = serde_json::from_str::<Value>(raw) else {
+                panic!("line {}: not a JSON string", line + 1);
+            };
+            println!("{}", json!({"line": line + 1, "shapes": shapes(&sink)}));
+        }
+    }
+}
