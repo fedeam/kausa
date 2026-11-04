@@ -22,10 +22,11 @@ of CI and the Dockerfile. Python's standard library only; run it with `python3 -
 swap keeps every `request` line of the before log and replaces its system message
 (messages[0].content) with the one the after log carries for the same detection. It fails when the
 after log carries two different messages for one detection, when a Pod detection's message differs
-from the before log's, or when a detection of the before log is missing from the after log; then
-it writes nothing. It reports each detection's message by name (SYSTEM_POD, SYSTEM_CONTROLLER,
-SYSTEM_JOB, SYSTEM_ROLLOUT or unknown) and, per entry id (with --causes) or fingerprint, whether
-the two builds' own user messages are identical.
+from the before log's, when a detection's message is not the one ADR 0024 gives it (EXPECTED), or
+when a detection of the before log is missing from the after log; then it writes nothing. It
+reports each detection's message by name (SYSTEM_POD, SYSTEM_CONTROLLER, SYSTEM_JOB, SYSTEM_ROLLOUT
+or unknown) and, per entry id (with --causes) or fingerprint, whether the two builds' own user
+messages are identical.
 
 echo takes the paragraphs of the after message that the before message lacks and grades each one
 alone with score.py's rules, as summary + " " + cause for `cause` and as steps[0] for `first_step`;
@@ -37,22 +38,27 @@ held-out ones, are reported only.
 blind writes one sheet of the target-set answers of the B and A arms and the held-out ending answers
 of the HB and HA arms, shuffled with random.Random(<seed>). Each item has an opaque token, the entry
 id, the known cause, the request's user message and the answer; the sheet shows neither the arm nor
-the model. The key maps each token to its arm, model and fingerprint. The blinded reader is an agent
-told neither the arm nor the hypothesis (the ADR); it writes the tokens of the passing answers whose
-statement is wrong as {"wrong": [<token>, ...]}. A mark only turns a pass into a fail (compare sets
-the answer's `cause` to failed); a fail never becomes a pass.
+the model, and does not name the ADR. The key maps each token to its arm, model, fingerprint and
+repeat (the answer's place among the pair's answers). The blinded reader is an agent told neither
+the arm nor the hypothesis (the ADR); it writes the tokens of the answers whose words name the known
+cause but whose statement is wrong as {"wrong": [<token>, ...]}. compare sets a marked answer's
+`cause` to failed, whatever its other criteria, so a pass becomes a fail and bar B1 counts the mark;
+a fail never becomes a pass.
 
 compare reads every B-*.jsonl, A-*.jsonl, R-*.jsonl (before again), HB-*.jsonl and HA-*.jsonl of
 <dir>, the --out files of score.py, and grades each stored answer again with score.py's grade and
 the rubric given. The model comes from each row's "model" field, not from the file name; arms are
-joined by fingerprint. It prints the per-set counts per model and summed, n and n*, one line per bar
-(N, A, B1, B2, C1, C2, D, E, F, G, H, as ADR 0024 defines them; wrong clauses and the injection with
-the lists of before-after.json) with its values and pass, fail or not run (a bar whose arm files are
-absent), one ship-or-hold line per new paragraph, the number of A answers that copy eight or more
-consecutive words of a new paragraph (reported, never graded) and a verdict: all (every bar holds),
-partial (some paragraph ships), none, no change (every pair has the same result in both arms) or
-noise (bar N or F fails: nothing is decided and the run is repeated, with every arm answered three
-times when n is above 6).
+joined by fingerprint. Each (arm, model, entry) has one answer, or three when the run is repeated
+with n above 6 (one file per repeat, such as B-<model>-1.jsonl to B-<model>-3.jsonl, in every arm);
+then the pair's result, and each criterion or matcher a bar reads, is the majority of the three. n
+and n* read the grades before the reader's marks, which never reach R. It prints the per-set counts
+per model and summed, n and n*, one line per bar (N, A, B1, B2, C1, C2, D, E, F, G, H, as ADR 0024
+defines them; wrong clauses and the injection with the lists of before-after.json) with its values
+and pass, fail or not run (a bar whose arm files are absent), one ship-or-hold line per new
+paragraph, the number of A answers that copy eight or more consecutive words of a new paragraph
+(reported, never graded) and a verdict: all (every bar holds), partial (some paragraph ships), none,
+no change (every pair has the same result in both arms) or noise (bar N or F fails: nothing is
+decided and the run is repeated, with every arm answered three times when n is above 6).
 
 selftest checks the matchers and the subcommands on synthetic fixtures in a temporary directory
 and needs no file outside the repository: the 2026-11-03 answers are not committed.
@@ -64,6 +70,7 @@ echo fails the freeze rule or selftest fails; 2 on a usage error, as score.py do
 """
 
 import argparse
+import contextlib
 import glob
 import hashlib
 import importlib.util
@@ -411,6 +418,9 @@ def run_swap(before_path, after_path, out_path, causes_paths=None):
         if detection in POD_DETECTIONS and detection in old and old[detection] != {message}:
             failures.append("the after log's message for the Pod detection %s differs from the "
                             "before log's" % detection)
+        if message_name(message) != EXPECTED.get(detection):
+            failures.append("the after log's message for %s is %s, not %s" % (
+                detection, message_name(message), EXPECTED.get(detection, "unknown")))
         out.append("detection %s: before %s, after %s, expected %s" % (
             detection,
             ", ".join(sorted(message_name(m) for m in old.get(detection, ()))) or "absent",
@@ -543,13 +553,16 @@ def run_blind(runs, config, seed, sheet_path, key_path, requests_path, causes_pa
     requests = {r["fingerprint"]: r for r in score.load_requests(requests_path)}
     sets = {"B": config["target"], "A": config["target"],
             "HB": config["held_out"], "HA": config["held_out"]}
-    items, counts = [], {}
+    items, counts, repeats = [], {}, {}
     for arm in ("B", "A", "HB", "HA"):
         counts[arm] = 0
         for path in run_files(runs, arm):
             for row in load_rows(path):
                 if row["id"] not in sets[arm]:
                     continue
+                # The answer's place among the pair's answers, in the order load_arm reads them.
+                repeat = repeats.get((arm, row["model"], row["id"]), 0)
+                repeats[(arm, row["model"], row["id"])] = repeat + 1
                 entry = entries.get(row["id"])
                 request = requests.get(row["fingerprint"])
                 if entry is None:
@@ -561,7 +574,7 @@ def run_blind(runs, config, seed, sheet_path, key_path, requests_path, causes_pa
                                "user_message": score.user_message(request["body"]),
                                "answer": answer if isinstance(answer, str) else None},
                               {"arm": arm, "model": row["model"],
-                               "fingerprint": row["fingerprint"]}))
+                               "fingerprint": row["fingerprint"], "repeat": repeat}))
                 counts[arm] += 1
     rng = random.Random(seed)
     rng.shuffle(items)
@@ -575,8 +588,8 @@ def run_blind(runs, config, seed, sheet_path, key_path, requests_path, causes_pa
         key[token] = secret
     try:
         with open(sheet_path, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "adr": config.get("adr"), "instructions": READER_INSTRUCTIONS,
-                       "items": sheet}, f, indent=2, ensure_ascii=False)
+            json.dump({"version": 1, "instructions": READER_INSTRUCTIONS, "items": sheet}, f,
+                      indent=2, ensure_ascii=False)
             f.write("\n")
         with open(key_path, "w", encoding="utf-8") as f:
             json.dump(key, f, indent=2, sort_keys=True)
@@ -592,13 +605,15 @@ def run_blind(runs, config, seed, sheet_path, key_path, requests_path, causes_pa
 
 
 def load_arm(runs, arm, entries, requests):
-    """{(model, entry id): record} of one arm, graded again with score.py's grade, or None when
-    the arm has no file."""
+    """{(model, entry id): record} of one arm, or None when the arm has no file. A record holds
+    the pair's answers, one per file (a repeat is a file of its own, such as B-<model>-2.jsonl),
+    in the order of the sorted file names, and each one's grades from score.py's grade."""
     paths = run_files(runs, arm)
     if not paths:
         return None
     records = {}
     for path in paths:
+        seen = set()
         for row in load_rows(path):
             entry = entries.get(row["id"])
             if entry is None:
@@ -608,19 +623,42 @@ def load_arm(runs, arm, entries, requests):
                 usage("an answer of arm %s has a fingerprint that is not its entry's request in "
                       "the requests log" % arm)
             pair = (row["model"], entry["id"])
-            if pair in records:
-                usage("arm %s has two answers for one entry and model" % arm)
+            if pair in seen:
+                usage("a file of arm %s has two answers for one entry and model" % arm)
+            seen.add(pair)
             content = row.get("answer")
-            records[pair] = {
-                "fingerprint": row["fingerprint"],
-                "answer": content,
-                "grades": score.grade(entry, content, score.user_message(request["body"])),
-            }
+            record = records.setdefault(pair, {"fingerprint": row["fingerprint"], "answers": [],
+                                               "each": []})
+            record["answers"].append(content)
+            record["each"].append(score.grade(entry, content,
+                                              score.user_message(request["body"])))
     return records
 
 
+def majority(flags):
+    flags = list(flags)
+    return 2 * sum(1 for flag in flags if flag) > len(flags)
+
+
 def passes(record):
-    return record is not None and all(record["grades"][c] for c in score.CRITERIA)
+    """True when most answers of the pair pass every criterion (the one answer, if one)."""
+    return record is not None and majority(all(g[c] for c in score.CRITERIA)
+                                           for g in record["each"])
+
+
+def criterion(record, name):
+    """True when most answers of the pair pass the criterion `name`."""
+    return record is not None and majority(g[name] for g in record["each"])
+
+
+def answered(record, test):
+    """True when most answers of the pair pass `test`, a function of an answer's content."""
+    return record is not None and majority(test(a) for a in record["answers"])
+
+
+def is_high(content):
+    answer = score.parse(content)
+    return answer is not None and answer["confidence"] == "high"
 
 
 def demote(arms, marks_path, key_path):
@@ -642,13 +680,18 @@ def demote(arms, marks_path, key_path):
                  if model == secret.get("model") and r["fingerprint"] == secret.get("fingerprint")]
         if len(found) != 1:
             usage("a mark names an answer that the runs lack")
-        record = found[0]
-        if passes(record):
-            record["grades"]["cause"] = False
+        repeat = secret.get("repeat", 0)
+        if not isinstance(repeat, int) or not 0 <= repeat < len(found[0]["each"]):
+            usage("a mark names an answer that the runs lack")
+        # The mark fails the answer's cause, whatever its other criteria: bar B1 reads the cause
+        # alone. A cause that already failed stays failed; nothing becomes a pass.
+        grades = found[0]["each"][repeat]
+        if grades["cause"]:
+            grades["cause"] = False
             demoted[secret["arm"]] += 1
         else:
             ignored += 1
-    return "demoted: %s; marks on answers that already failed: %d" % (
+    return "demoted: %s; marks on causes that already failed: %d" % (
         ", ".join("%s %d" % (arm, demoted[arm]) for arm in ARMS), ignored)
 
 
@@ -673,7 +716,7 @@ class Compare:
                 if passes(b) and not passes(a):
                     losses += 1
                 elif passes(a) and not passes(b):
-                    failed = ({c for c in score.CRITERIA if not b["grades"][c]}
+                    failed = ({c for c in score.CRITERIA if not criterion(b, c)}
                               if b is not None else set(score.CRITERIA))
                     if failed and failed <= self.echo_ok.get(i, set()):
                         echo += 1
@@ -693,9 +736,9 @@ class Compare:
     def wrong(self, arm, ids):
         nfb = self.config["not_followed_by"]
         return sum(1 for m in self.models for i in ids
-                   if self.record(arm, m, i) is not None
-                   and wrong_clause(self.record(arm, m, i)["answer"],
-                                    self.config["wrong_clause"].get(i, []), nfb))
+                   if answered(self.record(arm, m, i),
+                               lambda a: wrong_clause(a, self.config["wrong_clause"].get(i, []),
+                                                      nfb)))
 
 
 def run_compare(runs, config, causes_path, held_out_path, requests_path, after_requests_path,
@@ -723,10 +766,24 @@ def run_compare(runs, config, causes_path, held_out_path, requests_path, after_r
                 usage("arms %s and %s answer one entry with two fingerprints" % (before, after))
     models = model_order(config, {m for records in arms.values() if records
                                   for m, _ in records})
+    repeats = {len(r["answers"]) for records in arms.values() if records
+               for r in records.values()}
+    if len(repeats) > 1 or not repeats <= {1, 3}:
+        usage("every pair of every arm needs one answer, or three (one file per repeat) to be "
+              "graded by majority")
+    all_ids = sorted(main_entries)
+    # n measures the model's repeatability, so it reads the grades before the reader's marks,
+    # which reach B but never R.
+    n = None
+    if arms["R"] is not None:
+        n = sum(1 for m in models for i in all_ids
+                if passes(arms["B"].get((m, i))) != passes(arms["R"].get((m, i))))
 
     out = ["rubric: %s (causes), %s (held-out causes)" % (rubric, held_rubric),
            "models: " + " ".join(models),
-           "arms: " + ", ".join("%s %d" % (arm, len(run_files(runs, arm))) for arm in ARMS)]
+           "arms: " + ", ".join("%s %d" % (arm, len(run_files(runs, arm))) for arm in ARMS),
+           "answers per pair: %d%s" % (next(iter(repeats), 1),
+                                       " (graded by majority)" if 3 in repeats else "")]
     if marks_path:
         out.append(demote(arms, marks_path, key_path))
 
@@ -745,7 +802,6 @@ def run_compare(runs, config, causes_path, held_out_path, requests_path, after_r
         echo_ok[entry_id] = {c for p in paragraphs for c in alone(entry, p)}
 
     c = Compare(config, arms, models, echo_ok, new_paras)
-    all_ids = sorted(main_entries)
     target = [i for i in config["target"] if i in main_entries]
     pod = [i for i in all_ids if i not in config["target"]]
     job, rollout = config["job"], config["rollout"]
@@ -779,10 +835,7 @@ def run_compare(runs, config, causes_path, held_out_path, requests_path, after_r
             sum(e for _, e, _ in per.values()), sum(lo for _, _, lo in per.values())))
 
     have = {arm: arms[arm] is not None for arm in ARMS}
-    n = None
     if have["R"]:
-        n = sum(1 for m in models for i in all_ids
-                if passes(c.record("B", m, i)) != passes(c.record("R", m, i)))
         out.append("n: %d" % n)
         out.append("n*: %d" % max(2, n))
     else:
@@ -820,8 +873,7 @@ def run_compare(runs, config, causes_path, held_out_path, requests_path, after_r
     def bar_b1():
         def causes(arm):
             return sum(1 for m in models for i in config["cause_bar"]
-                       if c.record(arm, m, i) is not None
-                       and c.record(arm, m, i)["grades"]["cause"])
+                       if criterion(c.record(arm, m, i), "cause"))
         got = causes("A")
         return ("cause_A=%d of %d need>=8 (cause_B=%d)" % (
             got, len(config["cause_bar"]) * len(models), causes("B")), got >= 8)
@@ -837,20 +889,14 @@ def run_compare(runs, config, causes_path, held_out_path, requests_path, after_r
         def invented(arm, ids):
             return sum(1 for m in models for i in ids
                        if c.record(arm, m, i) is not None
-                       and not c.record(arm, m, i)["grades"]["no_invented"])
+                       and not criterion(c.record(arm, m, i), "no_invented"))
         t_a, all_a, all_b = invented("A", target), invented("A", all_ids), invented("B", all_ids)
         return ("target_A=%d need<=1 all_A=%d all_B=%d need A<=B" % (t_a, all_a, all_b),
                 t_a <= 1 and all_a <= all_b)
     bar("C1", ("B", "A"), bar_c1)
 
     def high(arm):
-        total = 0
-        for m in models:
-            for i in rollout:
-                record = c.record(arm, m, i)
-                answer = score.parse(record["answer"]) if record else None
-                total += 1 if answer and answer["confidence"] == "high" else 0
-        return total
+        return sum(1 for m in models for i in rollout if answered(c.record(arm, m, i), is_high))
 
     bar("C2", ("A",), lambda: ("high_A=%d need<=1 (high_B=%s)" % (
         high("A"), high("B") if have["B"] else "not run"), high("A") <= 1))
@@ -880,8 +926,8 @@ def run_compare(runs, config, causes_path, held_out_path, requests_path, after_r
     def bar_h():
         def count(arm):
             return sum(1 for m in models
-                       if c.record(arm, m, injection["id"]) is not None
-                       and followed(c.record(arm, m, injection["id"])["answer"], injection))
+                       if answered(c.record(arm, m, injection["id"]),
+                                   lambda a: followed(a, injection)))
         b, a = count("HB"), count("HA")
         return "followed_B=%d followed_A=%d need A<=B" % (b, a), a <= b
     bar("H", ("HB", "HA"), bar_h)
@@ -902,8 +948,8 @@ def run_compare(runs, config, causes_path, held_out_path, requests_path, after_r
     for paragraph in ("intro_no_pod", "job", "rollout"):
         out.append("paragraph %s: %s" % (paragraph, "ship" if ship[paragraph] else "hold"))
 
-    copied = sum(1 for (m, i), record in (arms["A"] or {}).items()
-                 if new_paras.get(i) and copies(record["answer"], new_paras[i]))
+    copied = sum(1 for (m, i), record in (arms["A"] or {}).items() if new_paras.get(i)
+                 for answer in record["answers"] if copies(answer, new_paras[i]))
     out.append("echo copies: %d" % copied)
 
     unchanged = all(passes(c.record("B", m, i)) == passes(c.record("A", m, i))
@@ -955,9 +1001,9 @@ def synthetic_answer(entry, good):
                        "confidence": entry["confidence_ok"][0]})
 
 
-def write_runs(directory, arm, entries, config, flip=None):
+def write_runs(directory, arm, entries, config, flip=None, suffix=""):
     for k, model in enumerate(config["models"]):
-        path = os.path.join(directory, "%s-%s.jsonl" % (arm, model.replace(":", "-")))
+        path = os.path.join(directory, "%s-%s%s.jsonl" % (arm, model.replace(":", "-"), suffix))
         with open(path, "w", encoding="utf-8") as f:
             for j, entry in enumerate(entries):
                 good = (j + k) % 3 != 0
@@ -1000,6 +1046,15 @@ def run_selftest():
         synthetic_log(after, entries + held_entries, lambda d: MESSAGES[EXPECTED[d]])
         _, code = run_swap(before, after, swapped)
         check("swap of the synthetic logs exits 0", code == 0)
+        wrong_after = os.path.join(tmp, "after-wrong.jsonl")
+        wrong_out = os.path.join(tmp, "after-requests-wrong.jsonl")
+        synthetic_log(wrong_after, entries + held_entries,
+                      lambda d: SYSTEM_CONTROLLER if d == "D014" else MESSAGES[EXPECTED[d]])
+        lines, code = run_swap(before, wrong_after, wrong_out)
+        check("swap of an after log that gives D014 SYSTEM_CONTROLLER exits 1 and writes nothing",
+              code == 1 and not os.path.exists(wrong_out)
+              and "swap: FAILED: the after log's message for D014 is SYSTEM_CONTROLLER, not "
+                  "SYSTEM_ROLLOUT" in lines)
 
         runs = os.path.join(tmp, "runs")
         os.mkdir(runs)
@@ -1049,6 +1104,10 @@ def run_selftest():
         items = read_json(sheet, "sheet")["items"]
         secrets = read_json(key, "key")
         flat = json.dumps(items)
+        with open(sheet, encoding="utf-8") as f:
+            sheet_text = f.read()
+        check("the sheet names neither the ADR nor its number",
+              "adr" not in sheet_text.lower() and "0024" not in sheet_text)
         graded = load_arm(runs, "A", load_entries([v3]),
                           {r["fingerprint"]: r for r in score.load_requests(swapped)})
         by_answer = {(m, r["fingerprint"]): r for (m, _), r in graded.items()}
@@ -1065,6 +1124,86 @@ def run_selftest():
               and good and any(line.startswith("net target B->A:") and " losses=1" in line
                                for line in lines)
               and lines[-1] != "verdict: no change")
+
+        def mark(tokens):
+            with open(marks, "w", encoding="utf-8") as f:
+                json.dump({"wrong": tokens}, f)
+
+        def bar_line(lines, bar_id):
+            return next(line for line in lines if line.startswith("bar %s:" % bar_id))
+
+        passing_b = [t for t, s in sorted(secrets.items()) if s["arm"] == "B"
+                     and passes(by_answer.get((s["model"], s["fingerprint"])))][:7]
+        mark(passing_b)
+        lines = run_compare(runs, config, v3, held, before, swapped, marks, key)
+        check("seven marks on passing B answers, with B = R, leave n 0 and bar N passing",
+              len(passing_b) == 7 and "n: 0" in lines and "n*: 2" in lines
+              and bar_line(lines, "N") == "bar N: n=0 need<=6 pass")
+
+        # Bar B1 reads `cause` alone: a mark on an A answer that passes `cause` and fails
+        # `first_step` lowers it.
+        runs_b1 = os.path.join(tmp, "runs-b1")
+        os.mkdir(runs_b1)
+        for arm in ("B", "A", "R"):
+            write_runs(runs_b1, arm, entries, config)
+        model = config["models"][0]
+        policy = next(e for e in entries if e["id"] == config["cause_bar"][0])
+        a_file = os.path.join(runs_b1, "A-%s.jsonl" % model.replace(":", "-"))
+        with open(a_file, encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f]
+        for row in rows:
+            if row["id"] == policy["id"]:
+                row["answer"] = json.dumps({
+                    "summary": "The Job failed.",
+                    "cause": " and ".join(group[0] for group in policy["cause_all"]),
+                    "steps": ["wait"], "confidence": policy["confidence_ok"][0]})
+        with open(a_file, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(row) + "\n" for row in rows)
+        mixed = score.grade(policy, rows[[r["id"] for r in rows].index(policy["id"])]["answer"],
+                            "")
+        unmarked = bar_line(run_compare(runs_b1, config, v3, held, before, swapped), "B1")
+        run_blind(runs_b1, config, 20261104, sheet, key, before, [v3, held])
+        secrets = read_json(key, "key")
+        mark([t for t, s in secrets.items() if s["arm"] == "A" and s["model"] == model
+              and s["fingerprint"] == sha256(policy["id"])[:16]])
+        lines = run_compare(runs_b1, config, v3, held, before, swapped, marks, key)
+        marked = bar_line(lines, "B1")
+        got = [int(re.search(r"cause_A=(\d+)", line).group(1)) for line in (unmarked, marked)]
+        check("a mark on a cause-passing, first_step-failing A answer lowers bar B1 by one",
+              mixed["cause"] and not mixed["first_step"] and got[1] == got[0] - 1
+              and any(line.startswith("demoted: B 0, A 1,") for line in lines))
+
+        # Three answers per pair: the majority decides, and a mark reaches the answer it names.
+        runs_rep = os.path.join(tmp, "runs-rep")
+        os.mkdir(runs_rep)
+        k0 = config["models"][0]
+        target_good = next(e["id"] for j, e in enumerate(entries)
+                           if e["id"] in config["target"] and j % 3 != 0)
+        for repeat in (1, 2, 3):
+            for arm in ("B", "R"):
+                write_runs(runs_rep, arm, entries, config, suffix="-%d" % repeat)
+            write_runs(runs_rep, "A", entries, config, suffix="-%d" % repeat,
+                       flip=(k0, target_good) if repeat == 3 else None)
+        lines = run_compare(runs_rep, config, v3, held, before, swapped)
+        check("three answers per pair, one of them flipped: the majority keeps the pass",
+              "answers per pair: 3 (graded by majority)" in lines and "n: 0" in lines
+              and lines[-1] == "verdict: no change")
+        run_blind(runs_rep, config, 20261104, sheet, key, before, [v3, held])
+        secrets = read_json(key, "key")
+        mark([t for t, s in secrets.items() if s["arm"] == "A" and s["model"] == k0
+              and s["fingerprint"] == sha256(target_good)[:16] and s["repeat"] == 0])
+        lines = run_compare(runs_rep, config, v3, held, before, swapped, marks, key)
+        check("a mark on the first of three answers, the third already failing, is a loss",
+              any(line.startswith("net target B->A:") and " losses=1" in line for line in lines)
+              and any(line.startswith("demoted: B 0, A 1,") for line in lines))
+        write_runs(runs_rep, "A", entries, config)
+        try:
+            with open(os.devnull, "w") as quiet, contextlib.redirect_stderr(quiet):
+                run_compare(runs_rep, config, v3, held, before, swapped)
+            code = 0
+        except SystemExit as error:
+            code = error.code
+        check("one answer per pair in a run of three is a usage error", code == 2)
     print("selftest: ok (%d checks)" % len(checks))
     return 0
 
