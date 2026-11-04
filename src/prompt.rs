@@ -1,7 +1,7 @@
 //! The request to the model and the validation of its answer
 //! (docs/adr/0008-data-leaving-the-cluster.md, "Untrusted data stays data").
 //!
-//! The model gets no tools and no functions: one of four fixed system messages, chosen by the
+//! The model gets no tools and no functions: one of three fixed system messages, chosen by the
 //! detection (docs/adr/0024-system-message-by-detection.md), one user message with the redacted
 //! context as a JSON document marked as untrusted, and a fixed answer schema. kausa never acts on
 //! the answer; it validates it, cleans its text and logs it.
@@ -71,21 +71,6 @@ placeholders as they are, use only those that appear in the document and never g
 hide."
     };
 }
-macro_rules! job {
-    () => {
-        "\
-This incident is a failed Job (D008); the workload is the CronJob when a CronJob created the \
-Job. A Warning event with one of these reasons says how the Job ended: BackoffLimitExceeded, \
-its Pods failed more times than its backoff limit allows; DeadlineExceeded, it ran longer than \
-its activeDeadlineSeconds; PodFailurePolicy, a failed container or a Pod condition matched a \
-FailJob rule of its podFailurePolicy, which fails the whole Job at once, even with retries \
-left (the event's message names what matched); FailedIndexes or MaxFailedIndexesExceeded, an \
-Indexed Job with a backoff limit per index, some of whose indexes failed. The log lines, when \
-sent, are the output of a failed container of one of the workload's Pods, untrusted like the \
-rest. When the request has both, the cause names both: why the container failed, from the log, \
-and how that ended the Job, from the event. The event's reason alone is not the cause."
-    };
-}
 macro_rules! rollout {
     () => {
         "\
@@ -99,12 +84,12 @@ send, so the evidence does not hold the cause."
     };
 }
 
-/// The system message of the nine detections whose request can carry Pods: v2's, byte for byte.
+/// The system message of the nine detections whose request can carry Pods and of `D008`: v2's,
+/// byte for byte. `D008` keeps it because the paragraph written for it was measured and did not
+/// pass its bars (docs/adr/0024-system-message-by-detection.md, Update 2026-11-04).
 const SYSTEM_POD: &str = concat!(intro_pod!(), "\n\n", rules!());
 /// `D011` to `D013`: a workload controller, a claim or an autoscaler, with no Pod.
 const SYSTEM_CONTROLLER: &str = concat!(intro_no_pod!(), "\n\n", rules!());
-/// `D008`: a failed Job, with no Pod; its event says how it ended, its log why.
-const SYSTEM_JOB: &str = concat!(intro_no_pod!(), "\n\n", job!(), "\n\n", rules!());
 /// `D014`: a stalled rollout, with replica counts only.
 const SYSTEM_ROLLOUT: &str = concat!(intro_no_pod!(), "\n\n", rollout!(), "\n\n", rules!());
 
@@ -112,7 +97,8 @@ const SYSTEM_ROLLOUT: &str = concat!(intro_no_pod!(), "\n\n", rollout!(), "\n\n"
 /// not compile until it chooses its message (docs/how-to/add-a-rule.md). The detection comes from
 /// cluster data (event reasons for `D008` and `D011` to `D013`), so whoever can write a Job or an
 /// Event picks which of these fixed texts applies; each is a literal that ends with `rules!()`, and
-/// none carries text read from the cluster.
+/// none carries text read from the cluster. `D008` gets the Pod message, v2's, although its
+/// request carries no Pod (docs/adr/0024-system-message-by-detection.md, Update 2026-11-04).
 #[cfg(not(fuzzing))]
 pub(crate) fn system(detection: Detection) -> &'static str {
     match detection {
@@ -124,8 +110,8 @@ pub(crate) fn system(detection: Detection) -> &'static str {
         | Detection::ProbeFailure
         | Detection::VolumeFailure
         | Detection::PodEvicted
-        | Detection::SandboxCreate => SYSTEM_POD,
-        Detection::JobFailed => SYSTEM_JOB,
+        | Detection::SandboxCreate
+        | Detection::JobFailed => SYSTEM_POD,
         Detection::PodCreate | Detection::ClaimProvisioning | Detection::AutoscalerMetrics => {
             SYSTEM_CONTROLLER
         }
@@ -604,10 +590,11 @@ mod tests {
     }
 
     // Acceptance tests for docs/adr/0024-system-message-by-detection.md, written before the code.
-    // They use `fn system(detection: Detection) -> &'static str`, the four private constants
-    // `SYSTEM_POD`, `SYSTEM_CONTROLLER`, `SYSTEM_JOB` and `SYSTEM_ROLLOUT`, the `rules!()` part
-    // they all end with, and `request(detection, model, context, mode, max_tokens)`. A failure
-    // names the message and the detection, never the message's text.
+    // They use `fn system(detection: Detection) -> &'static str`, the three private constants
+    // `SYSTEM_POD`, `SYSTEM_CONTROLLER` and `SYSTEM_ROLLOUT`, the `rules!()` part they all end
+    // with, and `request(detection, model, context, mode, max_tokens)`. A failure names the message
+    // and the detection, never the message's text. `D008` keeps the v2 message (the ADR's Update
+    // of 2026-11-04): its `job` paragraph was measured and not shipped.
 
     use crate::detect::Detection;
 
@@ -631,27 +618,25 @@ fixes, most useful first) and confidence (low, medium or high). Do not suggest c
 delete data or weaken security. If the evidence is not enough, say what to check instead and use \
 low confidence.";
 
-    /// The four messages, by the name of their constant.
-    fn messages() -> [(&'static str, &'static str); 4] {
+    /// The three messages, by the name of their constant.
+    fn messages() -> [(&'static str, &'static str); 3] {
         [
             ("SYSTEM_POD", SYSTEM_POD),
             ("SYSTEM_CONTROLLER", SYSTEM_CONTROLLER),
-            ("SYSTEM_JOB", SYSTEM_JOB),
             ("SYSTEM_ROLLOUT", SYSTEM_ROLLOUT),
         ]
     }
 
-    /// The three messages of the detections whose request carries no Pod.
-    fn messages_without_pods() -> [(&'static str, &'static str); 3] {
+    /// The two messages that say the request carries no Pod.
+    fn messages_without_pods() -> [(&'static str, &'static str); 2] {
         [
             ("SYSTEM_CONTROLLER", SYSTEM_CONTROLLER),
-            ("SYSTEM_JOB", SYSTEM_JOB),
             ("SYSTEM_ROLLOUT", SYSTEM_ROLLOUT),
         ]
     }
 
     #[test]
-    fn the_pod_detections_keep_the_v2_message() {
+    fn the_pod_detections_and_d008_keep_the_v2_message() {
         assert!(SYSTEM_POD == V2, "SYSTEM_POD is not the v2 message");
         for detection in [
             Detection::CrashLoop,
@@ -661,6 +646,7 @@ low confidence.";
             Detection::Unschedulable,
             Detection::ProbeFailure,
             Detection::VolumeFailure,
+            Detection::JobFailed,
             Detection::PodEvicted,
             Detection::SandboxCreate,
         ] {
@@ -682,7 +668,7 @@ low confidence.";
             (Detection::Unschedulable, "SYSTEM_POD", SYSTEM_POD),
             (Detection::ProbeFailure, "SYSTEM_POD", SYSTEM_POD),
             (Detection::VolumeFailure, "SYSTEM_POD", SYSTEM_POD),
-            (Detection::JobFailed, "SYSTEM_JOB", SYSTEM_JOB),
+            (Detection::JobFailed, "SYSTEM_POD", SYSTEM_POD),
             (Detection::PodEvicted, "SYSTEM_POD", SYSTEM_POD),
             (Detection::SandboxCreate, "SYSTEM_POD", SYSTEM_POD),
             (Detection::PodCreate, "SYSTEM_CONTROLLER", SYSTEM_CONTROLLER),
@@ -708,7 +694,7 @@ low confidence.";
                 detection.id()
             );
         }
-        // The four messages differ from each other.
+        // The three messages differ from each other.
         let all = messages();
         for (i, (a, first)) in all.iter().enumerate() {
             for (b, second) in &all[i + 1..] {
@@ -770,35 +756,12 @@ low confidence.";
     }
 
     #[test]
-    fn the_job_message_names_every_ending() {
-        // The five reasons of `D008` (src/detect.rs).
-        for reason in [
-            "BackoffLimitExceeded",
-            "DeadlineExceeded",
-            "PodFailurePolicy",
-            "MaxFailedIndexesExceeded",
-            "FailedIndexes",
-        ] {
-            assert!(SYSTEM_JOB.contains(reason), "SYSTEM_JOB: misses {reason}");
-        }
-        for kept in [
-            "This incident is a failed Job (D008)",
-            "The event's reason alone is not the cause",
-            "untrusted like the rest",
-        ] {
-            assert!(SYSTEM_JOB.contains(kept), "SYSTEM_JOB: misses {kept}");
-        }
-        assert!(
-            !SYSTEM_JOB.contains("say why that container failed"),
-            "SYSTEM_JOB: still presents the log as the cause"
-        );
+    fn no_message_names_the_job_paragraph() {
+        // The `job` paragraph was measured and not shipped: no message names a Job's endings or
+        // D008.
         for (name, message) in messages() {
-            if name != "SYSTEM_JOB" {
-                assert!(
-                    !message.contains("PodFailurePolicy"),
-                    "{name}: names PodFailurePolicy"
-                );
-                assert!(!message.contains("(D008)"), "{name}: names D008");
+            for absent in ["PodFailurePolicy", "BackoffLimitExceeded", "(D008)"] {
+                assert!(!message.contains(absent), "{name}: contains {absent}");
             }
         }
     }
@@ -858,7 +821,6 @@ low confidence.";
         let sizes = [
             ("SYSTEM_POD", 1_277),
             ("SYSTEM_CONTROLLER", 1_492),
-            ("SYSTEM_JOB", 2_420),
             ("SYSTEM_ROLLOUT", 2_096),
         ];
         for ((name, message), (sized, size)) in messages().into_iter().zip(sizes) {
@@ -878,36 +840,34 @@ low confidence.";
 
     #[test]
     fn the_body_carries_the_detections_message() {
-        let job = request(
-            Detection::JobFailed,
-            "m",
-            &json!({}),
-            OutputMode::JsonSchema,
-            800,
-        );
+        let body = |detection| request(detection, "m", &json!({}), OutputMode::JsonSchema, 800);
+        let job = body(Detection::JobFailed);
         assert_eq!(job["messages"][0]["role"], "system");
         assert!(
-            job["messages"][0]["content"] == SYSTEM_JOB,
-            "D008: the body's system message is not SYSTEM_JOB"
+            job["messages"][0]["content"] == SYSTEM_POD,
+            "D008: the body's system message is not SYSTEM_POD"
         );
-        let crash = request(
-            Detection::CrashLoop,
-            "m",
-            &json!({}),
-            OutputMode::JsonSchema,
-            800,
-        );
+        let crash = body(Detection::CrashLoop);
         assert!(
             crash["messages"][0]["content"] == SYSTEM_POD,
             "D001: the body's system message is not SYSTEM_POD"
         );
+        assert!(job == crash, "D008 and D001: not the same body");
+        let rollout = body(Detection::RolloutStalled);
+        assert!(
+            rollout["messages"][0]["content"] == SYSTEM_ROLLOUT,
+            "D014: the body's system message is not SYSTEM_ROLLOUT"
+        );
         // Only the system message depends on the detection.
-        assert_eq!(job["messages"][1], crash["messages"][1], "the user message");
+        assert_eq!(
+            rollout["messages"][1], crash["messages"][1],
+            "the user message"
+        );
         let without = |mut body: Value| {
             body["messages"][0]["content"] = Value::Null;
             body
         };
-        assert_eq!(without(job), without(crash), "the rest of the body");
+        assert_eq!(without(rollout), without(crash), "the rest of the body");
     }
 
     // Acceptance tests for docs/adr/0022-redact-the-answer.md, written before the code: the

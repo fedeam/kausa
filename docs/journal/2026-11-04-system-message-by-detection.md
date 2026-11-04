@@ -153,3 +153,29 @@ measured](../research/2026-11-04-system-message-by-detection-measured.md).
   message, or keep `D008` on the Pod message until ADR 0025.
 - ADR 0025 (a derived `hints` field, reason-keyed system text as its first alternative), measured
   under this protocol with this run's `B`, bar H included.
+
+## The maintainer's decision on `D008`
+
+The maintainer decided that `D008` keeps v2's system message, `SYSTEM_POD`, unchanged, instead of
+the no-Pod message the ADR's "What ships" gives a request whose paragraph is dropped. v2's message
+is exactly the measured `B` arm, so nothing ships unmeasured and no run is repeated; `intro_no_pod`
+alone on `D008` was never measured whole.
+
+- **Code** (`feat(prompt): keep v2's system message for D008`): `prompt::system` maps
+  `Detection::JobFailed` to `SYSTEM_POD`; the `job!()` part and `SYSTEM_JOB` are removed, so the
+  binary has three messages (`SYSTEM_POD` for `D001` to `D010`, `SYSTEM_CONTROLLER` for `D011` to
+  `D013`, `SYSTEM_ROLLOUT` for `D014`). `PROMPT_VERSION` stays `"3"`. The unit tests in
+  `src/prompt.rs` and `src/explain.rs` now expect `SYSTEM_POD` for `D008`; the byte-identity test
+  of `SYSTEM_POD` with v2 covers `D008` too.
+- **Docs:** Data sent to the provider (three messages, the `job` paragraph no longer quoted), the
+  Architecture page, the codemap row of `ARCHITECTURE.md`, the front page and the changelog. An
+  `Update` paragraph in [0024](../adr/0024-system-message-by-detection.md) records the verdict and
+  this decision, and one in [0008](../adr/0008-data-leaving-the-cluster.md) corrects its earlier
+  `Update` (three messages, not four). The ADRs' Decision sections and Status do not change.
+- **Unchanged:** the research note, `tests/bench/before_after.py` and `tests/bench/runs/`, which
+  record what was measured, `SYSTEM_JOB` included.
+
+### Next steps
+
+- `D008` is the measured case of a later ADR on hints (ADR 0025 in 0024's "What ships"), with this
+  run's `B` as its reference.

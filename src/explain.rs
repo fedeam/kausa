@@ -1469,7 +1469,8 @@ mod tests {
 
     // Acceptance tests for docs/adr/0024-system-message-by-detection.md, written before the code:
     // `fit` passes the incident's detection to `prompt::request(detection, model, context, mode,
-    // max_tokens)`, whose system message is `prompt::system(detection)`. Values are invented.
+    // max_tokens)`, whose system message is `prompt::system(detection)`. `D008` keeps the v2 Pod
+    // message (the ADR's Update of 2026-11-04). Values are invented.
 
     /// A Warning event about Job `nightly-export` in `shop`.
     fn job_event(i: usize, reason: &str, note: &str) -> EventRecord {
@@ -1539,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_sends_the_job_message_for_a_failed_job() {
+    fn fit_sends_the_pod_message_for_a_failed_job() {
         let settings = settings(None, false, 30);
         let mut gathered = failed_job();
         let (body, _) = fit(&mut gathered, &settings).expect("a D008 request fits");
@@ -1548,15 +1549,11 @@ mod tests {
             .expect("the system message");
         assert!(
             system == prompt::system(Detection::JobFailed),
-            "D008: the request does not carry the Job's system message"
+            "D008: the request does not carry D008's system message"
         );
         assert!(
-            system.contains("This incident is a failed Job (D008)"),
-            "D008: the system message does not name the failed Job"
-        );
-        assert!(
-            system != prompt::system(Detection::CrashLoop),
-            "D008: the request carries the Pod message"
+            system == prompt::system(Detection::CrashLoop),
+            "D008: the request does not carry the Pod message"
         );
         // The user message is the context, as before: no Pod, two counted, three events.
         let context = sent_context(&body);
@@ -1568,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn the_longest_message_still_fits_the_default_cap() {
+    fn a_failed_job_with_the_longest_log_fits_the_default_cap() {
         let settings = settings(None, false, 30);
         assert_eq!(settings.max_input_tokens, 6000, "the default cap");
         // A 4 KiB tail of plain words, which no redaction rule changes.
@@ -1581,7 +1578,7 @@ mod tests {
         let (body, _) = fit(&mut gathered, &settings).expect("the longest D008 request fits");
         assert!(
             body["messages"][0]["content"] == prompt::system(Detection::JobFailed),
-            "D008: the request does not carry the Job's system message"
+            "D008: the request does not carry D008's system message"
         );
         let context = sent_context(&body);
         let sent = context["log_tail"].as_str().expect("a log tail");

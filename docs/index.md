@@ -164,7 +164,9 @@ checks](how-to/develop.md).
   signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
   CycloneDX SBOM of an auditable binary to each image](adr/0023-oci-chart-and-sbom.md) and [0024.
   Send one of four fixed system messages, chosen by detection, as `PROMPT_VERSION`
-  3](adr/0024-system-message-by-detection.md), shipped only if its measurement passes.
+  3](adr/0024-system-message-by-detection.md), measured on 2026-11-04 with a partial verdict: it
+  ships with three messages, `D008` keeping the v2 one ([The system message by detection,
+  measured](research/2026-11-04-system-message-by-detection-measured.md)).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

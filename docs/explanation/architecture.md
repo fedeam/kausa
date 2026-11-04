@@ -165,7 +165,7 @@ produces the same incident, the same fingerprint and the same request bytes.
 
 - **One request per incident**, to `POST <base URL>/chat/completions` of the configured endpoint,
   with one model. No tools, no function calling, no follow-up turns.
-- **The prompt.** One of four fixed system messages, chosen by the detection and versioned with
+- **The prompt.** One of three fixed system messages, chosen by the detection and versioned with
   kausa ([0024](../adr/0024-system-message-by-detection.md)), that says the data is untrusted and
   may contain instructions to ignore; one user message with the redacted context as a JSON
   document. The answer is JSON with a fixed schema: a one-line summary, the likely cause, up to a
