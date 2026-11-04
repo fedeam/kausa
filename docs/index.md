@@ -24,7 +24,8 @@ v0.4.0](journal/2026-10-30-release-v0-4-0.md)), and the same day by
 [v0.4.1](https://github.com/fedeam/kausa/releases/tag/v0.4.1), with the Slack fix and `R014`, and on
 2026-11-03 by [v0.5.0](https://github.com/fedeam/kausa/releases/tag/v0.5.0) ([2026-11-03 — Release
 v0.5.0](journal/2026-11-03-release-v0-5-0.md)), and the same day by
-[v0.5.1](https://github.com/fedeam/kausa/releases/tag/v0.5.1), which recognizes a wrong Gemini key.
+[v0.5.1](https://github.com/fedeam/kausa/releases/tag/v0.5.1), which recognizes a wrong Gemini key,
+and [v0.5.2](https://github.com/fedeam/kausa/releases/tag/v0.5.2), a security fix of redaction.
 The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
@@ -172,4 +173,4 @@ checks](how-to/develop.md).
   [2026-10-29 — Notifications](journal/2026-10-29-notifications.md);
   [2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md);
   [2026-11-02 — The good first issues](journal/2026-11-02-good-first-issues.md);
-  [2026-11-03 — Releases v0.5.0 and v0.5.1](journal/2026-11-03-release-v0-5-0.md).
+  [2026-11-03 — Releases v0.5.0 to v0.5.2](journal/2026-11-03-release-v0-5-0.md).

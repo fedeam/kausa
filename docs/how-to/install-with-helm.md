@@ -27,7 +27,7 @@ From v0.6.0 each release also publishes the chart at `oci://ghcr.io/fedeam/chart
 and with provenance, with a CycloneDX SBOM for each image ([0023. Publish the chart as a signed
 OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
 CycloneDX SBOM of an auditable binary to each image](../adr/0023-oci-chart-and-sbom.md)). As of
-2026-11-03 v0.6.0 is not released: the v0.5.1 chart and earlier are only on their GitHub
+2026-11-03 v0.6.0 is not released: the v0.5.2 chart and earlier are only on their GitHub
 releases, and no install from GHCR has been tested. On 2026-11-03 the publishing was rehearsed
 locally: the chart was pushed to a throwaway registry, and a release installed in kind from the
 v0.5.1 chart URL was upgraded to it.
@@ -63,7 +63,7 @@ v0.5.1 chart URL was upgraded to it.
    `CHART=https://github.com/fedeam/kausa/releases/download/v$VERSION/kausa-$VERSION.tgz`; Helm
    3.16.1 and 4.3.1 accept and ignore `--version` with a chart URL (checked on 2026-11-03), so the
    commands below work unchanged, but the URL alone picks the version. Until v0.6.0 is released,
-   this is the way to install: `VERSION=0.5.1` and the URL.
+   this is the way to install: `VERSION=0.5.2` and the URL.
 
 2. **Create the namespace and, for a hosted endpoint, the API key's Secret.** kausa never reads it
    through the API; the kubelet mounts it as a file:
@@ -135,7 +135,7 @@ helm install kausa charts/kausa -n kausa --set rbac.scope=cluster \
 
 ## Upgrade from a chart URL to the OCI chart
 
-A release installed from a chart URL of a GitHub release (v0.5.1 and earlier, or any later one)
+A release installed from a chart URL of a GitHub release (v0.5.2 and earlier, or any later one)
 moves to the chart on GHCR with an upgrade, from v0.6.0 on; `--reuse-values` keeps its values,
 `rbac.scope` included:
 
@@ -448,7 +448,7 @@ helm install kausa kausa-<version>.tgz -n kausa --create-namespace --set rbac.sc
 ```
 
 The notes also verify the same attestations with `gh attestation verify`, which needs `gh auth
-login`. The v0.5.1 release and earlier have no chart on GHCR and no SBOM: their notes verify the
+login`. The v0.5.2 release and earlier have no chart on GHCR and no SBOM: their notes verify the
 image's signature and provenance and the chart's checksum. Why: [0023. Publish the chart as a signed OCI artifact at
 `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX SBOM of an
 auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). As of 2026-11-03 these

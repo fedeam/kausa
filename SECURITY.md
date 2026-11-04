@@ -7,7 +7,7 @@ and where secrets live.
 
 ## Supported versions
 
-Status as of 2026-11-03: the latest release is v0.5.1. Until 1.0, only the latest release will
+Status as of 2026-11-03: the latest release is v0.5.2. Until 1.0, only the latest release will
 receive security fixes.
 
 ## Reporting a vulnerability
@@ -60,7 +60,7 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-11-03: v0.5.1 is released: v0.5.0's redaction of the model's answer, the refilled
+Status as of 2026-11-03: v0.5.2 is released: v0.5.0's redaction of the model's answer, the refilled
 call budget, the endpoint check and breaker, and wider detections, on top of v0.4's Deployment
 watch of `D014`, richer context for the model and optional standby replica. `kausa run`
 reads Pods,
