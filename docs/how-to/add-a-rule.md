@@ -32,9 +32,13 @@ Status as of 2026-11-02: fourteen detection rules (`D001` to `D014`) and fourtee
    - `reads_logs` in `src/explain.rs`: whether the explanation needs the failed container's log
      tail. Reading logs needs `pods/log`, so a new detection that reads them is a decision about
      what kausa reads ([0009](../adr/0009-least-privilege-rbac.md)).
+   - `prompt::system` in `src/prompt.rs`: which fixed system message the new detection's request
+     carries. A new paragraph, or a message for a new kind of incident, needs a measurement like
+     [0024](../adr/0024-system-message-by-detection.md)'s.
 
-   `is_state` and `reads_logs` are exhaustive matches with one arm per variant, so the crate does
-   not compile until you add the new variant to both: give each answer on purpose.
+   `is_state`, `reads_logs` and `prompt::system` are exhaustive matches with one arm per variant,
+   so the crate does not compile until you add the new variant to all three: give each answer on
+   purpose.
 2. **Detect it**, in the function for its kind of signal:
    - a container state (waiting or terminated reason, exit code): `detect_container` in
      `src/detect.rs`;

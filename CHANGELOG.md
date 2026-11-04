@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requests about a failed Job (`D008`), a workload controller, a claim or an autoscaler (`D011` to
+  `D013`) and a stalled rollout (`D014`) carry one of three new fixed system messages, which say
+  that the request has no Pod and, for `D008` and `D014`, what their events and fields mean. The
+  prompt version is `3`, so new Explanation entries store `promptVersion` `"3"`. Requests for the
+  other rules do not change. These messages ship only if the before-and-after measurement fixed by
+  [0024](docs/adr/0024-system-message-by-detection.md) passes.
+
 ## [0.5.2] - 2026-11-03
 
 A security fix of redaction: the name of a Secret or ConfigMap that a Pod cannot mount could
