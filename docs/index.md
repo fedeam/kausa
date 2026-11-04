@@ -138,6 +138,9 @@ checks](how-to/develop.md).
 - [Add a detection or redaction rule](how-to/add-a-rule.md): the files, tests and docs to change.
 - [Alerts](reference/alerts.md): the Prometheus alerting rules for kausa's own metrics
   (`deploy/prometheus/kausa-alerts.yaml`), what each alert means and what to do when it fires.
+- [Run the soak](how-to/run-the-soak.md): seven days of the pinned release on a test cluster,
+  sampled every 30 seconds, and the rule, fixed before any measurement, that decides the chart's
+  memory limit.
 - [Install kausa with Helm](how-to/install-with-helm.md) and the [Helm
   chart](reference/helm-chart.md) values; [0010. Ship a static binary on distroless, with a Helm
   chart, built in CI and not published yet](adr/0010-packaging.md); [0011. Scan the code with

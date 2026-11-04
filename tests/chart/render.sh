@@ -19,7 +19,13 @@
 # promtool unit tests (tests/prometheus/), the promtool step and checks of the Dockerfile and
 # AGENTS.md, the build context, and the new series tests/e2e/run.sh asserts; promtool itself runs
 # in the Dockerfile's ci target.
-# Needs helm, git and coreutils only, and never contacts a cluster (KUBECONFIG points nowhere).
+# For the upgrade test and the soak (v0.6,
+# measured reliability), it renders the pinned release's values upgraded to this chart as
+# helm upgrade --reuse-values does and the soak's values, and checks the soak endpoint's manifest,
+# the e2e workflow's jobs, and the e2e and soak scripts, the soak's against stub kubectl, helm, curl
+# and sleep, and the pages that document them.
+# Needs helm, git, coreutils and python3 (shellcheck when installed), and never contacts a cluster
+# (KUBECONFIG points nowhere) or the network.
 # Run it from anywhere: tests/chart/render.sh. It prints one line per check and exits 1 if any
 # failed.
 #
@@ -3291,6 +3297,1058 @@ for name in kausa_build_info kausa_watch_restarts_total; do
   esac
 done
 passed "$since" "e2e/run.sh: the new series are asserted, the refused Pod's restarts and the standby's"
+
+# --- The upgrade test and the soak (v0.6, measured reliability) --------------------------------
+
+# Theme 3 of v0.6 changes no template: it adds the upgrade test from the pinned latest release
+# (tests/e2e/upgrade-from.txt, tests/e2e/upgrade.sh, the helpers it shares with run.sh in
+# tests/e2e/lib.sh, and the upgrade jobs of .github/workflows/e2e.yml) and the soak scripts
+# (tests/soak/, docs/how-to/run-the-soak.md). Checked here without a cluster: the release's values
+# upgraded to this chart as --reuse-values does, the soak's values on the release's chart and on
+# this one, the soak endpoint's manifest, the workflow's jobs and its warning step (against a stub
+# gh), the scripts' syntax, and the soak scripts against stub kubectl, helm, curl and sleep that log
+# their arguments: each refuses a missing, empty or option-like context before any call, names the
+# context first in every call, and writes what the spec says; summarize.py's verdicts on
+# synthetic samples; and the pages that document both. tests/upgrade_and_soak.rs checks the
+# scripts' text under cargo test.
+if ! command -v python3 >/dev/null 2>&1; then
+  fail "python3 is needed for the upgrade and soak checks"
+fi
+RELIABILITY="$WORK/reliability"
+mkdir -p "$RELIABILITY"
+
+# The pins, read as upgrade.sh reads them.
+UPGRADE_FROM="$ROOT/tests/e2e/upgrade-from.txt"
+upgrade_pin() { sed -n "s/^$1=//p" "$UPGRADE_FROM" 2>/dev/null || true; }
+FROM_VERSION=$(upgrade_pin KAUSA_UPGRADE_FROM_VERSION)
+FROM_DIGEST=$(upgrade_pin KAUSA_UPGRADE_FROM_IMAGE_DIGEST)
+since=$FAILURES
+[ -f "$UPGRADE_FROM" ] || fail "tests/e2e/upgrade-from.txt is missing"
+printf '%s\n' "$FROM_VERSION" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' ||
+  fail "upgrade-from.txt: no version X.Y.Z"
+printf '%s\n' "$FROM_DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' ||
+  fail "upgrade-from.txt: no image digest"
+passed "$since" "upgrade-from.txt: the pinned release v$FROM_VERSION and its image digest"
+# The git ref of the pinned release, whose charts/kausa its chart was packaged from.
+FROM_REF=${KAUSA_CHART_UPGRADE_FROM:-v$FROM_VERSION}
+
+# yaml_docs FILE OUT: every YAML document of FILE as one line of JSON in OUT, read with helm
+# (fromYaml in a throwaway chart), so that the layout of the file is free.
+YAML_DOCS="$RELIABILITY/yaml-docs"
+mkdir -p "$YAML_DOCS/templates"
+printf '%s\n' 'apiVersion: v2' 'name: yaml-docs' 'version: 0.0.0' >"$YAML_DOCS/Chart.yaml"
+cat >"$YAML_DOCS/templates/docs.yaml" <<'TEMPLATE'
+{{- range $doc := regexSplit "(?m)^---[ \t]*$" (.Files.Get "input.yaml") -1 }}
+{{- $o := fromYaml $doc }}
+{{- if $o }}
+# doc {{ $o | toJson }}
+{{- end }}
+{{- end }}
+TEMPLATE
+yaml_docs() {
+  cp "$1" "$YAML_DOCS/input.yaml"
+  if "$HELM" template yaml-docs "$YAML_DOCS" >"$2.raw" 2>"$2.err"; then
+    sed -n 's/^# doc //p' "$2.raw" >"$2"
+  else
+    return 1
+  fi
+}
+
+# json_check NAME SCRIPT ARGS...: runs the Python SCRIPT (stdlib only) with ARGS; each line it
+# prints is a failed check of NAME.
+json_check() {
+  local name=$1 script=$2 line
+  shift 2
+  if ! python3 -I -c "$script" "$@" >"$RELIABILITY/json-check" 2>&1; then
+    fail "$name: the check itself failed: $(head -n 5 "$RELIABILITY/json-check")"
+    return
+  fi
+  while IFS= read -r line; do
+    fail "$name: $line"
+  done <"$RELIABILITY/json-check"
+}
+
+# --- The upgrade, rendered
+
+# With --reuse-values, Helm v4.3.1 renders the new chart's templates with the old release's values
+# in place of the new chart's defaults (pkg/action/upgrade.go, chart.Values = oldVals) and the new
+# --set values on top. So this chart, with the release's values.yaml in place of its own, rendered
+# with upgrade.sh's install values and its four image values, is what the upgrade applies. A
+# template that reads a value the release lacks, without a default, fails here as the upgrade
+# would, while a fresh install of this chart still renders.
+UPGRADE_INSTALL=(--set image.digest="$FROM_DIGEST" --set replicaCount=2
+  --set model.endpoint=http://192.0.2.10:8080/v1 --set model.name=fake --set model.allowHttp=true
+  --set settleSeconds=10 --set history.enabled=true --set budget.callsPerHour=3600
+  --set notifications.enabled=true --set notifications.format=json
+  --set notifications.existingSecret=kausa-notify --set notifications.tokenKey=token
+  --set notifications.allowHttp=true)
+UPGRADE_IMAGE=(--set image.repository=kausa --set image.tag=e2e --set-string image.digest=
+  --set image.pullPolicy=Never)
+FROM_CHART=""
+if [ -n "$FROM_VERSION" ] &&
+  git -C "$ROOT" rev-parse --verify --quiet "$FROM_REF^{commit}" >/dev/null 2>&1; then
+  mkdir -p "$RELIABILITY/from"
+  git -C "$ROOT" archive "$FROM_REF" charts/kausa | tar -x -C "$RELIABILITY/from"
+  FROM_CHART="$RELIABILITY/from/charts/kausa"
+  REUSED="$RELIABILITY/reused/kausa"
+  mkdir -p "$RELIABILITY/reused"
+  cp -R "$CHART" "$REUSED"
+  cp "$FROM_CHART/values.yaml" "$REUSED/values.yaml"
+  for scope in cluster namespaced; do
+    since=$FAILURES
+    case "$scope" in
+      cluster) scope_args=(--set rbac.scope=cluster) ;;
+      *) scope_args=(--set rbac.scope=namespaced --set 'rbac.namespaces={e2e-shop}') ;;
+    esac
+    out="$RELIABILITY/upgrade-$scope"
+    if ! render "$out.before" "$RELEASE" "$FROM_CHART" "${UPGRADE_INSTALL[@]}" "${scope_args[@]}"
+    then
+      fail "upgrade/$scope: $FROM_REF's chart does not render upgrade.sh's install:" \
+        "$(cat "$out.before.err")"
+    elif ! render "$out" "$RELEASE" "$REUSED" "${UPGRADE_INSTALL[@]}" "${scope_args[@]}" \
+      "${UPGRADE_IMAGE[@]}"; then
+      fail "upgrade/$scope: this chart does not render from $FROM_REF's values" \
+        "(helm upgrade --reuse-values): $(cat "$out.err")"
+    else
+      docs "$out.before" Deployment | grep -Eqx " +image: \"?ghcr\.io/fedeam/kausa@$FROM_DIGEST\"?" ||
+        fail "upgrade/$scope: the release is not installed by the pinned digest"
+      docs "$out" Deployment >"$out.deployment"
+      grep -Eqx ' +image: "?kausa:e2e"?' "$out.deployment" ||
+        fail "upgrade/$scope: the upgraded Deployment does not run kausa:e2e"
+      grep -Eqx ' +imagePullPolicy: "?Never"?' "$out.deployment" ||
+        fail "upgrade/$scope: the upgraded Deployment does not pull Never"
+      grep -qx '  replicas: 2' "$out.deployment" ||
+        fail "upgrade/$scope: the upgraded Deployment does not keep two replicas"
+      args "$out" | awk -v want="$NAMESPACE/$RELEASE-leader" '
+        prev == "- --leader-lease" && ($0 == "- " want || $0 == "- \"" want "\"") { ok = 1 }
+        { prev = $0 } END { exit !ok }' ||
+        fail "upgrade/$scope: the upgraded Pods do not run with --leader-lease $NAMESPACE/$RELEASE-leader"
+      [ "$(count_docs "$out" Lease "$NAMESPACE" "$RELEASE-leader")" = 1 ] ||
+        fail "upgrade/$scope: the upgrade drops the Lease"
+    fi
+    passed "$since" "upgrade/$scope: this chart renders from $FROM_REF's values with the four image values"
+  done
+else
+  fail "upgrade: $FROM_REF is not in this clone (git fetch --tags), or no version is pinned"
+fi
+
+# --- The soak's values
+
+# tests/soak/values.yaml with the pinned digest, as install.sh installs it, on the release's chart
+# and on this one (a later soak of this chart reuses the file): cluster scope, two replicas, no
+# Events, no history, no dry-run, the in-cluster endpoint and the notification Secret; nothing
+# namespaced outside kausa-soak and nothing cluster-scoped but kausa-soak's ClusterRole and binding.
+SOAK_VALUES="$ROOT/tests/soak/values.yaml"
+check_soak() {
+  local name=$1 chart=$2 out="$RELIABILITY/soak-$1"
+  since=$FAILURES
+  if ! "$HELM" template kausa-soak "$chart" --kube-version "$KUBE_VERSION" --namespace kausa-soak \
+    -f "$SOAK_VALUES" --set image.digest="$FROM_DIGEST" >"$out" 2>"$out.err"; then
+    fail "soak/$name: does not render: $(cat "$out.err")"
+    return
+  fi
+  [ "$(cluster_scoped "$out")" = \
+    "$(expected_cluster_scoped ClusterRole/kausa-soak ClusterRoleBinding/kausa-soak)" ] ||
+    fail "soak/$name: renders cluster-scoped objects other than kausa-soak's ClusterRole and" \
+      "ClusterRoleBinding: $(cluster_scoped "$out" | tr '\n' ' ')"
+  for kind in Role RoleBinding; do
+    [ "$(count_docs "$out" "$kind")" = "$(count_docs "$out" "$kind" kausa-soak)" ] ||
+      fail "soak/$name: renders a $kind outside kausa-soak"
+    [ "$(count_docs "$out" "$kind" kausa-soak kausa-soak-leader)" = 1 ] ||
+      fail "soak/$name: no $kind kausa-soak-leader"
+  done
+  [ "$(count_docs "$out" Lease kausa-soak kausa-soak-leader)" = 1 ] ||
+    fail "soak/$name: no Lease kausa-soak-leader in kausa-soak"
+  if grep -q CustomResourceDefinition "$out"; then
+    fail "soak/$name: renders a CustomResourceDefinition"
+  fi
+  args "$out" >"$out.args"
+  [ "$(grep -cx -- '- --no-events' "$out.args" || true)" = 1 ] ||
+    fail "soak/$name: not exactly one --no-events arg"
+  for arg in --history --dry-run; do
+    if grep -qx -- "- $arg" "$out.args"; then fail "soak/$name: passes $arg"; fi
+  done
+  awk 'prev == "- --leader-lease" &&
+         ($0 == "- kausa-soak/kausa-soak-leader" || $0 == "- \"kausa-soak/kausa-soak-leader\"") {
+         ok = 1 }
+       { prev = $0 } END { exit !ok }' "$out.args" ||
+    fail "soak/$name: no --leader-lease kausa-soak/kausa-soak-leader"
+  awk 'prev == "- --endpoint" && index($0, "http://kausa-soak-endpoint.kausa-soak.svc:8080/v1") {
+         ok = 1 }
+       { prev = $0 } END { exit !ok }' "$out.args" ||
+    fail "soak/$name: the endpoint is not the in-cluster fake endpoint"
+  grep -qx -- '- --notify-url-file' "$out.args" || fail "soak/$name: notifications are off"
+  docs "$out" Deployment >"$out.deployment"
+  grep -Eqx " +image: \"?ghcr\.io/fedeam/kausa@$FROM_DIGEST\"?" "$out.deployment" ||
+    fail "soak/$name: kausa's image is not the pinned digest"
+  grep -qx '  replicas: 2' "$out.deployment" || fail "soak/$name: not two replicas"
+  grep -Eqx ' +secretName: "?kausa-soak-notify"?' "$out.deployment" ||
+    fail "soak/$name: does not mount the Secret kausa-soak-notify"
+  # The labels sample.py selects kausa's Pods by.
+  for label in 'app.kubernetes.io/name: kausa' 'app.kubernetes.io/instance: kausa-soak'; do
+    grep -qx "        $label" "$out.deployment" ||
+      fail "soak/$name: the Pods do not carry $label"
+  done
+  if "$HELM" lint --strict "$chart" -f "$SOAK_VALUES" --set image.digest="$FROM_DIGEST" \
+    >"$out.lint" 2>&1; then :; else
+    fail "soak/$name: helm lint --strict fails: $(cat "$out.lint")"
+  fi
+  passed "$since" "soak/$name: two replicas, no Events, history or dry-run, nothing outside kausa-soak"
+}
+if [ ! -f "$SOAK_VALUES" ]; then
+  fail "tests/soak/values.yaml is missing"
+else
+  check_soak this-chart "$CHART"
+  if [ -n "$FROM_CHART" ]; then check_soak "$FROM_REF" "$FROM_CHART"; fi
+fi
+
+# --- The soak's endpoint
+
+# tests/soak/endpoint.yaml: a Deployment and a Service kausa-soak-endpoint in kausa-soak, under the
+# restricted Pod Security Standard, running tests/e2e/fake_endpoint.py from the ConfigMap with its
+# logs to /dev/null and its fail file in /tmp; labels that kausa's selector never matches.
+# shellcheck disable=SC2016 # Python, not shell
+ENDPOINT_CHECK='
+import json, re, sys
+docs = [json.loads(l) for l in open(sys.argv[1])]
+problems = []
+def say(m): problems.append(m)
+names = sorted(tuple(str((d.get("metadata") or {}).get(k) or "") if k else str(d.get("kind")) for k in (None, "namespace", "name")) for d in docs)
+want = [("Deployment", "kausa-soak", "kausa-soak-endpoint"), ("Service", "kausa-soak", "kausa-soak-endpoint")]
+if names != want:
+    say("the documents are %s, not a Deployment and a Service kausa-soak-endpoint in kausa-soak" % names)
+mine = {"app.kubernetes.io/name": "kausa-soak-endpoint"}
+for d in docs:
+    if d.get("kind") == "Deployment":
+        spec = d.get("spec") or {}
+        pod = (spec.get("template") or {}).get("spec") or {}
+        labels = ((spec.get("template") or {}).get("metadata") or {}).get("labels") or {}
+        selector = (spec.get("selector") or {}).get("matchLabels") or {}
+        for what, got in (("labels", labels), ("selector", selector)):
+            if got.get("app.kubernetes.io/name") != "kausa-soak-endpoint" or "app.kubernetes.io/instance" in got:
+                say("the Pod %s are not app.kubernetes.io/name=kausa-soak-endpoint alone" % what)
+        if spec.get("replicas", 1) != 1:
+            say("not one replica")
+        if pod.get("automountServiceAccountToken") is not False:
+            say("automountServiceAccountToken is not false")
+        containers = pod.get("containers") or []
+        if len(containers) != 1:
+            say("not one container")
+            continue
+        c = containers[0]
+        if c.get("name") != "endpoint":
+            say("the container is not named endpoint")
+        if not re.fullmatch(r"python:3\.13-slim-trixie@sha256:[0-9a-f]{64}", str(c.get("image"))):
+            say("the image is not python:3.13-slim-trixie by digest")
+        command = ["python3", "-I", "-B", "/app/fake_endpoint.py", "--port", "8080", "--log", "/dev/null",
+                   "--hook-log", "/dev/null", "--fail-file", "/tmp/fail"]
+        if (c.get("command") or []) + (c.get("args") or []) != command:
+            say("the command is not the spec: %s" % json.dumps(command))
+        sc = dict(pod.get("securityContext") or {})
+        sc.update(c.get("securityContext") or {})
+        for key, value in (("runAsNonRoot", True), ("runAsUser", 65534), ("runAsGroup", 65534),
+                           ("allowPrivilegeEscalation", False), ("readOnlyRootFilesystem", True),
+                           ("capabilities", {"drop": ["ALL"]}), ("seccompProfile", {"type": "RuntimeDefault"})):
+            if sc.get(key) != value:
+                say("securityContext.%s is not %s" % (key, json.dumps(value)))
+        if c.get("resources") != {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}}:
+            say("resources are not requests 10m/32Mi and limits 100m/64Mi")
+        if str(((c.get("readinessProbe") or {}).get("tcpSocket") or {}).get("port")) != "8080":
+            say("no tcpSocket readiness probe on 8080")
+        volumes = {v.get("name"): v for v in pod.get("volumes") or []}
+        mounts = {}
+        for m in c.get("volumeMounts") or []:
+            v = volumes.get(m.get("name")) or {}
+            if "configMap" in v:
+                mounts[m.get("mountPath")] = "configMap:" + str(v["configMap"].get("name"))
+            elif "emptyDir" in v:
+                mounts[m.get("mountPath")] = "emptyDir"
+            else:
+                mounts[m.get("mountPath")] = "other"
+        if mounts != {"/app": "configMap:kausa-soak-endpoint", "/tmp": "emptyDir"}:
+            say("the mounts are %s, not the ConfigMap kausa-soak-endpoint at /app and an emptyDir at /tmp" % json.dumps(mounts, sort_keys=True))
+    if d.get("kind") == "Service":
+        spec = d.get("spec") or {}
+        if spec.get("type", "ClusterIP") != "ClusterIP":
+            say("the Service is not ClusterIP")
+        if spec.get("selector") != mine:
+            say("the Service selector is not app.kubernetes.io/name=kausa-soak-endpoint")
+        if [p.get("port") for p in spec.get("ports") or []] != [8080]:
+            say("the Service does not serve port 8080 alone")
+for p in problems:
+    print(p)
+'
+since=$FAILURES
+if [ ! -f "$ROOT/tests/soak/endpoint.yaml" ]; then
+  fail "tests/soak/endpoint.yaml is missing"
+elif ! yaml_docs "$ROOT/tests/soak/endpoint.yaml" "$RELIABILITY/endpoint.json"; then
+  fail "soak/endpoint.yaml cannot be read: $(cat "$RELIABILITY/endpoint.json.err")"
+else
+  json_check soak/endpoint.yaml "$ENDPOINT_CHECK" "$RELIABILITY/endpoint.json"
+fi
+passed "$since" "soak/endpoint.yaml: the fake endpoint, restricted, pinned, never selected as kausa"
+
+# --- The workflow
+
+# .github/workflows/e2e.yml: the five tool pins once, at the workflow level; the kind job as before;
+# the upgrade job of the spec; read-only permissions, one checkout action, GH_TOKEN on the warning
+# step alone.
+WORKFLOW="$ROOT/.github/workflows/e2e.yml"
+# block FILE START: the lines after the first line equal to START that are indented deeper than it.
+block() {
+  awk -v start="$2" '
+    !on && $0 == start { on = 1; match($0, /^ */); ind = RLENGTH; next }
+    on { if ($0 !~ /^ *$/) { match($0, /^ */); if (RLENGTH <= ind) exit } print }' "$1"
+}
+# job FILE NAME: the lines of job NAME.
+job() { block "$1" "  $2:"; }
+# step_run JOB_LINES STEP: the run block of step STEP in the job lines on stdin, unindented.
+step_run() {
+  awk -v step="      - name: $1" '
+    $0 == step { in_step = 1; next }
+    in_step && /^      - / { exit }
+    in_step && $0 == "        run: |" { on = 1; next }
+    on { if ($0 !~ /^ *$/ && $0 !~ /^          /) exit; sub(/^          /, ""); print }'
+}
+since=$FAILURES
+if [ ! -f "$WORKFLOW" ]; then
+  fail "e2e.yml is missing"
+else
+  header=$(awk '/^#/ { on = 1; sub(/^# ?/, ""); printf "%s ", $0; next } on { exit }' "$WORKFLOW")
+  for words in '"upgrade (cluster)"' '"upgrade (namespaced)"' tests/e2e/upgrade.sh; do
+    case "$header" in *"$words"*) ;; *) fail "e2e.yml: the header comment does not name $words" ;; esac
+  done
+  [ "$(block "$WORKFLOW" 'permissions:' | grep -v '^ *#')" = '  contents: read' ] ||
+    fail "e2e.yml: permissions are not contents: read alone"
+  top=$(grep -nE '^(permissions|env|concurrency|jobs):' "$WORKFLOW" | cut -d: -f2 | tr '\n' ' ')
+  [ "$top" = "permissions env concurrency jobs " ] ||
+    fail "e2e.yml: no workflow-level env right after permissions (top-level keys: $top)"
+  for pin in KIND_VERSION KIND_SHA256 HELM_VERSION HELM_SHA256 KIND_NODE_IMAGE; do
+    block "$WORKFLOW" 'env:' | grep -Eq "^  $pin: [^ ]+$" ||
+      fail "e2e.yml: $pin is not in the workflow-level env"
+    [ "$(grep -cE "^ *$pin:" "$WORKFLOW")" = 1 ] || fail "e2e.yml: $pin is set more than once"
+  done
+  jobs=$(block "$WORKFLOW" 'jobs:' | grep -E '^  [a-z][a-z0-9_-]*:$' | tr -d ' :' | tr '\n' ' ')
+  [ "$jobs" = "kind upgrade " ] || fail "e2e.yml: the jobs are $jobs, not kind and upgrade"
+  job "$WORKFLOW" kind >"$RELIABILITY/job-kind"
+  job "$WORKFLOW" upgrade >"$RELIABILITY/job-upgrade"
+  # shellcheck disable=SC2016 # GitHub expressions, not shell
+  for line in "    name: kind (\${{ matrix.scope }}\${{ matrix.replicas == 2 && ', standby' || '' }})" \
+    '    timeout-minutes: 30' '        scope: [cluster, namespaced]' '        replicas: [1]' \
+    '      KAUSA_E2E_SCOPE: ${{ matrix.scope }}' '      KAUSA_E2E_REPLICAS: ${{ matrix.replicas || 1 }}' \
+    '        run: tests/e2e/run.sh'; do
+    grep -qxF -- "$line" "$RELIABILITY/job-kind" || fail "e2e.yml: the kind job lost '$line'"
+  done
+  # shellcheck disable=SC2016 # the same
+  for line in '    name: upgrade (${{ matrix.scope }})' '    runs-on: ubuntu-24.04' \
+    '    timeout-minutes: 20' '      fail-fast: false' '        scope: [cluster, namespaced]' \
+    '      KAUSA_E2E_SCOPE: ${{ matrix.scope }}' '        run: tests/e2e/upgrade.sh' \
+    '          persist-credentials: false'; do
+    grep -qxF -- "$line" "$RELIABILITY/job-upgrade" || fail "e2e.yml: the upgrade job has no '$line'"
+  done
+  grep -q 'KAUSA_E2E_REPLICAS' "$RELIABILITY/job-upgrade" &&
+    fail "e2e.yml: the upgrade job sets KAUSA_E2E_REPLICAS"
+  steps=$(grep -E '^      - name: ' "$RELIABILITY/job-upgrade" | sed 's/^      - name: //' | tr '\n' '|')
+  [ "$steps" = "Check out|Install kind and helm|Warn when a newer release exists|Run the upgrade test|" ] ||
+    fail "e2e.yml: the upgrade job's steps are $steps"
+  step_run 'Install kind and helm' <"$RELIABILITY/job-kind" >"$RELIABILITY/install-kind"
+  step_run 'Install kind and helm' <"$RELIABILITY/job-upgrade" >"$RELIABILITY/install-upgrade"
+  if [ ! -s "$RELIABILITY/install-kind" ] ||
+    ! cmp -s "$RELIABILITY/install-kind" "$RELIABILITY/install-upgrade"; then
+    fail "e2e.yml: the two 'Install kind and helm' run blocks differ"
+  fi
+  uses=$(grep -E '^ *(- )?uses: ' "$WORKFLOW" | sed -E 's/^ *(- )?//' | sort | uniq -c | awk '{ $1 = $1 } 1')
+  case "$uses" in
+    *"
+"*) fail "e2e.yml: more than one action: $(printf '%s' "$uses" | tr '\n' ';')" ;;
+    "2 uses: actions/checkout@"*) ;;
+    *) fail "e2e.yml: not the one checkout action twice: $uses" ;;
+  esac
+  awk '/^      - name: Warn when a newer release exists$/ { on = 1; next } on && /^      - / { exit }
+    on' "$RELIABILITY/job-upgrade" >"$RELIABILITY/step-warn"
+  # shellcheck disable=SC2016 # a GitHub expression
+  if [ "$(grep -c 'GH_TOKEN' "$WORKFLOW")" != 1 ] ||
+    ! grep -qxF '          GH_TOKEN: ${{ github.token }}' "$RELIABILITY/step-warn"; then
+    fail "e2e.yml: GH_TOKEN is not set once, on the warning step"
+  fi
+  grep -q 'secrets\.' "$WORKFLOW" && fail "e2e.yml: reads a secret"
+fi
+passed "$since" "e2e.yml: the pins at the workflow level, the kind job, the upgrade job in both scopes"
+
+# The warning step, run as GitHub runs it (bash -e, pipefail), against a stub gh: silent while the
+# pin is the latest release, one warning when a newer one exists, one when gh fails; never a
+# failure.
+STUB="$RELIABILITY/stub"
+mkdir -p "$STUB/bin"
+cat >"$STUB/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'gh'; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
+[ -n "${STUB_GH_TAG:-}" ] || { echo 'stub gh: no release' >&2; exit 1; }
+printf '%s\n' "$STUB_GH_TAG"
+STUB
+chmod 755 "$STUB/bin/gh"
+since=$FAILURES
+if [ -f "$WORKFLOW" ]; then
+  step_run 'Warn when a newer release exists' <"$RELIABILITY/job-upgrade" >"$RELIABILITY/warn.sh"
+  mkdir -p "$RELIABILITY/warn/tests/e2e"
+  cp "$UPGRADE_FROM" "$RELIABILITY/warn/tests/e2e/" 2>/dev/null || true
+  for latest in "v$FROM_VERSION" v99.0.0 ''; do
+    STUB_LOG="$RELIABILITY/warn.log"
+    : >"$STUB_LOG"
+    if (cd "$RELIABILITY/warn" && STUB_LOG="$STUB_LOG" STUB_GH_TAG="$latest" \
+      GITHUB_REPOSITORY=fedeam/kausa PATH="$STUB/bin:$PATH" \
+      bash --noprofile --norc -eo pipefail "$RELIABILITY/warn.sh") >"$RELIABILITY/warn.out" \
+      2>"$RELIABILITY/warn.err"
+    then :; else fail "e2e.yml: the warning step fails when the latest release is '${latest:-unreadable}'"; fi
+    case "$latest" in
+      "v$FROM_VERSION") want='' ;;
+      v99.0.0) want="::warning::tests/e2e/upgrade-from.txt names v$FROM_VERSION; the latest release is v99.0.0" ;;
+      *) want='::warning::could not read the latest release' ;;
+    esac
+    [ "$(cat "$RELIABILITY/warn.out")" = "$want" ] ||
+      fail "e2e.yml: the warning step prints '$(head -c 200 "$RELIABILITY/warn.out")' for latest '${latest:-unreadable}'"
+    grep -qxF 'gh release view --repo fedeam/kausa --json tagName --jq .tagName' "$STUB_LOG" ||
+      fail "e2e.yml: the warning step does not ask gh for the latest release of the repository"
+  done
+fi
+passed "$since" "e2e.yml: the warning step warns about a newer release and never fails"
+
+# --- The scripts
+
+since=$FAILURES
+SCRIPTS=(tests/e2e/lib.sh tests/e2e/run.sh tests/e2e/upgrade.sh tests/soak/install.sh
+  tests/soak/exercise.sh tests/soak/uninstall.sh)
+for script in "${SCRIPTS[@]}"; do
+  if [ ! -f "$ROOT/$script" ]; then
+    fail "$script is missing"
+  elif ! bash -n "$ROOT/$script" 2>"$RELIABILITY/bash-n"; then
+    fail "$script: bash -n fails: $(cat "$RELIABILITY/bash-n")"
+  fi
+done
+if command -v shellcheck >/dev/null 2>&1; then
+  (cd "$ROOT" && shellcheck -x "${SCRIPTS[@]}") >"$RELIABILITY/shellcheck" 2>&1 ||
+    fail "shellcheck -x: $(head -n 20 "$RELIABILITY/shellcheck")"
+else
+  echo "skipped: shellcheck is not installed; bash -n only"
+fi
+for script in tests/soak/sample.py tests/soak/summarize.py; do
+  if [ ! -f "$ROOT/$script" ]; then
+    fail "$script is missing"
+  elif ! python3 -I -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' \
+    "$ROOT/$script" 2>"$RELIABILITY/compile"; then
+    fail "$script does not compile: $(cat "$RELIABILITY/compile")"
+  fi
+done
+passed "$since" "the e2e and soak scripts: bash -n, shellcheck -x, and the Python compiles"
+
+# --- The soak scripts against stubs
+
+# A kubectl that logs its arguments and answers the reads of the soak with a fake cluster: Pods
+# kausa-soak-stub-1 (the Lease holder) and kausa-soak-stub-2 on nodes stub-node-b and stub-node-a of
+# three, no metrics-server, contexts other-ctx, stub-ctx and stub-ctx-2. It keeps every manifest it
+# is given with -f in $STUB_LOG.manifests and the notification URL file in $STUB_LOG.url.
+cat >"$STUB/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'kubectl'; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
+prev="" raw="" out=""
+for a in "$@"; do
+  case "$prev" in
+    -f | --filename)
+      if [ "$a" = - ]; then cat >>"$STUB_LOG.manifests"; elif [ -f "$a" ]; then cat "$a" >>"$STUB_LOG.manifests"; fi
+      printf '\n---\n' >>"$STUB_LOG.manifests" ;;
+    --raw) raw=$a ;;
+    -o | --output) out=$a ;;
+  esac
+  case "$a" in
+    --from-file=url=*) cat "${a#--from-file=url=}" >"$STUB_LOG.url" 2>/dev/null ;;
+    -o=* | --output=*) out=${a#*=} ;;
+    -ojson) out=json ;;
+    -oname) out=name ;;
+  esac
+  prev=$a
+done
+args=" $* "
+has() { case "$args" in *" $1 "*) return 0 ;; esac; return 1; }
+node_pod() { case "$1" in stub-node-a) echo kausa-soak-stub-2 ;; stub-node-b) echo kausa-soak-stub-1 ;; esac; }
+pod_json() { # NAME NODE
+  printf '{"metadata":{"name":"%s","namespace":"kausa-soak","labels":{"app.kubernetes.io/name":"kausa","app.kubernetes.io/instance":"kausa-soak"}},"spec":{"nodeName":"%s","containers":[{"name":"kausa"}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"kausa","ready":true,"restartCount":0,"lastState":{}}]}}' "$1" "$2"
+}
+if has config; then
+  if has get-contexts; then printf '%s\n' other-ctx stub-ctx stub-ctx-2; fi
+  exit 0
+fi
+if [ -n "$raw" ]; then
+  node=${raw#/api/v1/nodes/}
+  node=${node%%/*}
+  case "$raw" in
+    /api/v1/nodes/*/proxy/stats/summary)
+      if [ -n "${STUB_FAIL_SUMMARY:-}" ]; then echo 'Error from server (ServiceUnavailable)' >&2; exit 1; fi
+      pod=$(node_pod "$node")
+      case "$pod" in
+        kausa-soak-stub-1) ws=24117248 ;;
+        kausa-soak-stub-2) ws=23068672 ;;
+        *) printf '{"node":{"nodeName":"%s"},"pods":[]}\n' "$node"; exit 0 ;;
+      esac
+      printf '{"node":{"nodeName":"%s"},"pods":[{"podRef":{"name":"%s","namespace":"kausa-soak"},"containers":[{"name":"kausa","memory":{"workingSetBytes":%s,"rssBytes":%s,"usageBytes":%s},"cpu":{"usageCoreNanoSeconds":123456789}}]}]}\n' \
+        "$node" "$pod" "$ws" $((ws - 1048576)) $((ws + 2097152))
+      exit 0 ;;
+    /api/v1/nodes/*/proxy/metrics/cadvisor)
+      pod=$(node_pod "$node")
+      [ -n "$pod" ] || exit 0
+      printf '# TYPE container_memory_max_usage_bytes gauge\n'
+      printf 'container_memory_max_usage_bytes{container="kausa",id="/kubepods/x",image="ghcr.io/fedeam/kausa",name="x",namespace="kausa-soak",pod="%s"} 3.145728e+07 1767225600000\n' "$pod"
+      printf 'container_memory_max_usage_bytes{container="other",id="/kubepods/y",image="z",name="y",namespace="kausa-soak",pod="%s"} 999 1767225600000\n' "$pod"
+      printf 'container_oom_events_total{container="kausa",id="/kubepods/x",image="ghcr.io/fedeam/kausa",name="x",namespace="kausa-soak",pod="%s"} 0 1767225600000\n' "$pod"
+      exit 0 ;;
+    /api/v1/namespaces/kausa-soak/pods/kausa-soak-stub-1:9090/proxy/metrics)
+      printf '%s\n' '# HELP kausa_leader 1 while this replica leads.' '# TYPE kausa_leader gauge' 'kausa_leader 1' \
+        'kausa_endpoint_state{state="closed"} 0' 'kausa_endpoint_state{state="half_open"} 0' \
+        'kausa_endpoint_state{state="open"} 1' 'kausa_model_calls_total{outcome="ok"} 3' \
+        'kausa_incidents_total{detection="D001"} 4' 'process_cpu_seconds_total 1'
+      exit 0 ;;
+    /api/v1/namespaces/kausa-soak/pods/kausa-soak-stub-2:9090/proxy/metrics)
+      printf '%s\n' 'kausa_leader 0' 'kausa_model_calls_total{outcome="ok"} 0'
+      exit 0 ;;
+    /apis/metrics.k8s.io/*)
+      echo 'Error from server (NotFound): the server could not find the requested resource' >&2
+      exit 1 ;;
+    *) echo "stub kubectl: no answer for that path" >&2; exit 1 ;;
+  esac
+fi
+if has get; then
+  case "$args" in
+    *" namespace "* | *" namespaces "* | *" ns "* | *" namespace/kausa-soak "* | *" ns/kausa-soak "*)
+      if [ -n "${STUB_NS_EXISTS:-}" ]; then
+        if [ "$out" = json ]; then echo '{"metadata":{"name":"kausa-soak"}}'; else echo namespace/kausa-soak; fi
+        exit 0
+      fi
+      has --ignore-not-found && exit 0
+      echo 'Error from server (NotFound): namespaces "kausa-soak" not found' >&2
+      exit 1 ;;
+  esac
+  if has -A || has --all-namespaces; then
+    if has events || has event || has events.events.k8s.io; then n=2; else n=3; fi
+    if [ "$out" = json ]; then
+      printf '{"items":['; for i in $(seq 1 "$n"); do [ "$i" = 1 ] || printf ','; printf '{"metadata":{"name":"o%s"}}' "$i"; done; printf ']}\n'
+    else
+      for i in $(seq 1 "$n"); do echo "object/o$i"; done
+    fi
+    exit 0
+  fi
+  if has pods || has pod || has po; then
+    case "$out" in
+      json) printf '{"items":[%s,%s]}\n' "$(pod_json kausa-soak-stub-1 stub-node-b)" "$(pod_json kausa-soak-stub-2 stub-node-a)" ;;
+      name) printf '%s\n' pod/kausa-soak-stub-1 pod/kausa-soak-stub-2 ;;
+    esac
+    exit 0
+  fi
+  if has nodes || has node || has no; then
+    case "$out" in
+      json) echo '{"items":[{"metadata":{"name":"stub-node-c"}},{"metadata":{"name":"stub-node-a"}},{"metadata":{"name":"stub-node-b"}}]}' ;;
+      name) printf '%s\n' node/stub-node-c node/stub-node-a node/stub-node-b ;;
+      jsonpath*) echo 'stub-node-c stub-node-a stub-node-b' ;;
+    esac
+    exit 0
+  fi
+  case "$args" in
+    *" lease "* | *" leases "* | *" lease/kausa-soak-leader "* | *" leases.coordination.k8s.io "*)
+      case "$out" in
+        json) echo '{"metadata":{"name":"kausa-soak-leader"},"spec":{"holderIdentity":"kausa-soak-stub-1","leaseTransitions":1}}' ;;
+        jsonpath*) printf 'kausa-soak-stub-1' ;;
+        name) echo lease.coordination.k8s.io/kausa-soak-leader ;;
+      esac
+      exit 0 ;;
+  esac
+fi
+exit 0
+STUB
+cat >"$STUB/bin/helm" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'helm'; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
+STUB
+cat >"$STUB/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+# Writes a fake chart wherever -o points.
+{ printf 'curl'; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = -o ] || [ "$prev" = --output ]; then printf 'stub chart\n' >"$a"; fi
+  prev=$a
+done
+STUB
+cat >"$STUB/bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+# Logs, sleeps a moment, and with STUB_TERM_ON_SLEEP sends TERM to its caller first.
+{ printf 'sleep'; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
+if [ -n "${STUB_TERM_ON_SLEEP:-}" ]; then kill -TERM "$PPID"; fi
+command -p sleep 0.05
+STUB
+chmod 755 "$STUB/bin/kubectl" "$STUB/bin/helm" "$STUB/bin/curl" "$STUB/bin/sleep"
+
+# stub_run NAME SECONDS DIR COMMAND...: runs COMMAND in DIR with the stubs first in PATH, its log in
+# $STUB_LOG, its output in $STUB_LOG.out and .err; stopped with TERM after SECONDS. Sets status.
+stub_run() {
+  local name=$1 seconds=$2 dir=$3 pid watchdog
+  shift 3
+  STUB_LOG="$RELIABILITY/stub-$name.log"
+  rm -f "$STUB_LOG" "$STUB_LOG.manifests" "$STUB_LOG.url"
+  : >"$STUB_LOG"
+  (cd "$dir" && STUB_LOG="$STUB_LOG" PATH="$STUB/bin:$PATH" exec "$@") \
+    >"$STUB_LOG.out" 2>"$STUB_LOG.err" </dev/null &
+  pid=$!
+  (command sleep "$seconds" && kill -TERM "$pid") >/dev/null 2>&1 &
+  watchdog=$!
+  if wait "$pid"; then status=0; else status=$?; fi
+  kill "$watchdog" >/dev/null 2>&1 || true
+  wait "$watchdog" 2>/dev/null || true
+}
+# calls: the kubectl and helm calls of the last stub_run.
+calls() { grep -E '^(kubectl|helm) ' "$STUB_LOG" || true; }
+# refused NAME USAGE COMMAND...: COMMAND exits 2, prints USAGE as a line on stderr (or, for a
+# Python script, a line starting with usage:), and calls nothing.
+refused() {
+  local name=$1 usage=$2
+  shift 2
+  stub_run "$name" 20 "$ROOT" "$@"
+  [ "$status" = 2 ] || fail "$name: exits $status, not 2"
+  if [ "$usage" = argparse ]; then
+    grep -q '^usage: ' "$STUB_LOG.err" || fail "$name: no usage line on stderr"
+  else
+    grep -qxF -- "$usage" "$STUB_LOG.err" || fail "$name: no line '$usage' on stderr"
+  fi
+  [ ! -s "$STUB_LOG" ] || fail "$name: calls $(head -n 1 "$STUB_LOG" | cut -d' ' -f1-2) before refusing"
+}
+# unknown NAME COMMAND...: a context that is not a whole name in the kubeconfig (stub, a prefix of
+# stub-ctx) is refused after the guard's one read and before any other call.
+unknown() {
+  local name=$1
+  shift
+  stub_run "$name" 20 "$ROOT" "$@"
+  [ "$status" != 0 ] || fail "$name: accepts the unknown context stub"
+  [ "$(calls)" = 'kubectl config get-contexts -o name' ] ||
+    fail "$name: calls more than kubectl config get-contexts -o name for an unknown context"
+}
+# named NAME: in the last stub_run, the first call is the guard's and every other call names
+# stub-ctx first.
+named() {
+  local bad
+  [ "$(calls | head -n 1)" = 'kubectl config get-contexts -o name' ] ||
+    fail "$1: the first call is not kubectl config get-contexts -o name"
+  bad=$(calls | grep -vxF 'kubectl config get-contexts -o name' |
+    grep -vE '^kubectl --context stub-ctx |^helm --kube-context stub-ctx ' || true)
+  [ -z "$bad" ] || fail "$1: calls without the context first: $(printf '%s\n' "$bad" | head -n 3 | tr '\n' ';')"
+}
+# line_of PATTERN: the number of the first log line matching the extended regular expression.
+line_of() { grep -nE -- "$1" "$STUB_LOG" | head -n 1 | cut -d: -f1; }
+last_line_of() { grep -nE -- "$1" "$STUB_LOG" | tail -n 1 | cut -d: -f1; }
+
+SOAK="$ROOT/tests/soak"
+if [ -f "$SOAK/install.sh" ] && [ -f "$SOAK/exercise.sh" ] && [ -f "$SOAK/uninstall.sh" ]; then
+  since=$FAILURES
+  for script in install uninstall; do
+    usage="usage: tests/soak/$script.sh <kube-context>"
+    refused "$script-none" "$usage" "tests/soak/$script.sh"
+    refused "$script-empty" "$usage" "tests/soak/$script.sh" ''
+    refused "$script-option" "$usage" "tests/soak/$script.sh" -x
+    refused "$script-extra" "$usage" "tests/soak/$script.sh" stub-ctx extra
+    unknown "$script-unknown" "tests/soak/$script.sh" stub
+  done
+  usage='usage: tests/soak/exercise.sh <kube-context> [minutes]'
+  refused exercise-none "$usage" tests/soak/exercise.sh
+  refused exercise-empty "$usage" tests/soak/exercise.sh ''
+  refused exercise-option "$usage" tests/soak/exercise.sh -x
+  refused exercise-extra "$usage" tests/soak/exercise.sh stub-ctx 5 extra
+  for minutes in 0 61 abc 1.5 -1; do
+    refused "exercise-minutes-$minutes" "$usage" tests/soak/exercise.sh stub-ctx "$minutes"
+  done
+  unknown exercise-unknown tests/soak/exercise.sh stub 1
+  passed "$since" "soak shell scripts: a missing, empty, option-like, extra or unknown context is refused before any call"
+
+  # install.sh, in a copy of tests/ whose pin is the fake chart's SHA-256: the namespace, the
+  # ConfigMap, the endpoint, its rollout, the Secret, then the release from the pinned chart.
+  since=$FAILURES
+  SOAK_ROOT="$RELIABILITY/soak-root"
+  mkdir -p "$SOAK_ROOT/tests"
+  cp -R "$ROOT/tests/e2e" "$ROOT/tests/soak" "$ROOT/tests/bench" "$SOAK_ROOT/tests/"
+  cp "$ROOT/Cargo.toml" "$SOAK_ROOT/"
+  stub_sha=$(printf 'stub chart\n' |
+    python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
+  sed "s/^KAUSA_UPGRADE_FROM_CHART_SHA256=.*/KAUSA_UPGRADE_FROM_CHART_SHA256=$stub_sha/" \
+    "$UPGRADE_FROM" >"$SOAK_ROOT/tests/e2e/upgrade-from.txt"
+  stub_run install 60 "$SOAK_ROOT" tests/soak/install.sh stub-ctx
+  named install
+  install_line=$(line_of "^helm --kube-context stub-ctx install kausa-soak [^ ]+ -n kausa-soak -f tests/soak/values.yaml --set image.digest=$FROM_DIGEST --wait --timeout 300s$")
+  previous=0
+  for step in 'create (namespace|ns) kausa-soak' 'create configmap kausa-soak-endpoint .*fake_endpoint\.py' \
+    'apply .*tests/soak/endpoint\.yaml' 'rollout status (deploy|deployment)/kausa-soak-endpoint' \
+    'create secret generic kausa-soak-notify .*--from-file=url='; do
+    at=$(line_of "^kubectl --context stub-ctx .*$step")
+    if [ -z "$at" ]; then
+      fail "install: no call matching '$step'"
+    elif [ "$at" -le "$previous" ]; then
+      fail "install: '$step' is out of order"
+    else
+      previous=$at
+    fi
+  done
+  if [ -z "$install_line" ]; then
+    fail "install: no helm install of kausa-soak from the downloaded chart with tests/soak/values.yaml and the pinned digest"
+  elif [ "$install_line" -le "$previous" ]; then
+    fail "install: helm install runs before the endpoint and the Secret are ready"
+  fi
+  if ! grep -qF 'pod-security.kubernetes.io/enforce=restricted' "$STUB_LOG" &&
+    ! grep -qF 'pod-security.kubernetes.io/enforce: restricted' "$STUB_LOG.manifests" 2>/dev/null; then
+    fail "install: kausa-soak is not labelled pod-security.kubernetes.io/enforce=restricted"
+  fi
+  [ "$(tr -d '\n' <"$STUB_LOG.url" 2>/dev/null)" = 'http://kausa-soak-endpoint.kausa-soak.svc:8080/hook/soak' ] ||
+    fail "install: the Secret's url is not the fake endpoint's /hook/soak"
+  grep -q kausa-test "$STUB_LOG" && fail "install: touches the seeded failures"
+  if [ "$status" = 0 ]; then
+    grep -qF tests/soak/sample.py "$STUB_LOG.out" "$STUB_LOG.err" ||
+      fail "install: does not print the sampler's command"
+  fi
+  # The real pin and the fake chart: refused before any install.
+  stub_run install-checksum 60 "$ROOT" tests/soak/install.sh stub-ctx
+  [ "$status" != 0 ] || fail "install-checksum: installs a chart that is not the pinned one"
+  calls | grep -q '^helm' && fail "install-checksum: calls helm with a chart that is not the pinned one"
+  # An existing namespace: refused, nothing created.
+  stub_run install-exists 60 "$SOAK_ROOT" env STUB_NS_EXISTS=1 tests/soak/install.sh stub-ctx
+  [ "$status" != 0 ] || fail "install-exists: installs over an existing kausa-soak"
+  grep -qF 'the namespace kausa-soak exists in this context: run tests/soak/uninstall.sh first' \
+    "$STUB_LOG.err" || fail "install-exists: no message about the existing namespace"
+  calls | grep -Eq '^helm| create | apply ' && fail "install-exists: creates or installs something"
+  passed "$since" "soak install.sh: the endpoint, its Secret and the pinned release, in kausa-soak only"
+
+  # exercise.sh: a failing Job, the 401 fail file, the wait, the file removed, also on TERM.
+  since=$FAILURES
+  stub_run exercise 60 "$ROOT" tests/soak/exercise.sh stub-ctx 1
+  [ "$status" = 0 ] || fail "exercise: exits $status: $(head -n 3 "$STUB_LOG.err")"
+  named exercise
+  write=$(line_of '^kubectl .* exec .*deploy(ment)?/kausa-soak-endpoint .*-c endpoint .*printf "401\\n" > /tmp/fail$')
+  remove=$(last_line_of '^kubectl .* exec .*deploy(ment)?/kausa-soak-endpoint .*-c endpoint .*rm -f /tmp/fail$')
+  slept=$(last_line_of '^sleep ')
+  if [ -z "$write" ] || [ -z "$remove" ] || [ -z "$slept" ]; then
+    fail "exercise: no 401 written, no wait or no removal of /tmp/fail in the endpoint container"
+  elif ! [ "$write" -lt "$slept" ] || ! [ "$slept" -lt "$remove" ]; then
+    fail "exercise: the 401 is not written, waited on, then removed, in that order"
+  fi
+  grep -E '^kubectl .* exec ' "$STUB_LOG" | grep -vqE -- '(-n|--namespace)[ =]kausa-soak( |$)' &&
+    fail "exercise: an exec outside kausa-soak"
+  BUSYBOX=$(grep -Eo 'busybox[^ ]*@sha256:[0-9a-f]{64}' "$ROOT/tests/bench/seeded-failures.yaml" | head -n 1)
+  if [ ! -s "$STUB_LOG.manifests" ] || ! yaml_docs "$STUB_LOG.manifests" "$RELIABILITY/job.json"; then
+    fail "exercise: no Job manifest given to kubectl -f"
+  else
+    created=$(grep -E '^kubectl .* (create|apply) ' "$STUB_LOG" | head -n 1)
+    # shellcheck disable=SC2016 # Python, not shell
+    json_check exercise '
+import json, re, sys
+jobs = [d for d in map(json.loads, open(sys.argv[1])) if d.get("kind") == "Job"]
+busybox, created = sys.argv[2], sys.argv[3]
+if len(jobs) != 1:
+    print("not one Job but %d" % len(jobs)); sys.exit()
+job = jobs[0]
+meta, spec = job.get("metadata") or {}, job.get("spec") or {}
+pod = (spec.get("template") or {}).get("spec") or {}
+if not re.fullmatch(r"soak-breaker-[0-9]{12}", str(meta.get("name"))):
+    print("the Job is not named soak-breaker-<UTC yyyymmddHHMM>")
+if meta.get("namespace", "") != "kausa-soak" and not re.search(r"(-n|--namespace)[ =]kausa-soak( |$)", created):
+    print("the Job is not in kausa-soak")
+if spec.get("backoffLimit") != 0 or spec.get("ttlSecondsAfterFinished") != 86400:
+    print("backoffLimit is not 0 or ttlSecondsAfterFinished is not 86400")
+if pod.get("restartPolicy") != "Never":
+    print("restartPolicy is not Never")
+cs = pod.get("containers") or []
+if len(cs) != 1 or cs[0].get("image") != busybox:
+    print("not one container with the busybox of tests/bench/seeded-failures.yaml")
+elif (cs[0].get("command") or []) + (cs[0].get("args") or []) != ["sh", "-c", "exit 1"]:
+    print("the command is not sh -c \"exit 1\"")
+else:
+    sc = dict(pod.get("securityContext") or {})
+    sc.update(cs[0].get("securityContext") or {})
+    for key, value in (("runAsNonRoot", True), ("allowPrivilegeEscalation", False),
+                       ("capabilities", {"drop": ["ALL"]}), ("seccompProfile", {"type": "RuntimeDefault"})):
+        if sc.get(key) != value:
+            print("securityContext.%s is not %s" % (key, json.dumps(value)))
+    if not isinstance(sc.get("runAsUser"), int) or sc.get("runAsUser") == 0:
+        print("no non-root runAsUser")
+' "$RELIABILITY/job.json" "$BUSYBOX" "$created"
+  fi
+  stub_run exercise-term 60 "$ROOT" env STUB_TERM_ON_SLEEP=1 tests/soak/exercise.sh stub-ctx 1
+  write=$(line_of 'printf "401\\n" > /tmp/fail$')
+  remove=$(last_line_of '^kubectl .* exec .*deploy(ment)?/kausa-soak-endpoint .*-c endpoint .*rm -f /tmp/fail$')
+  if [ -z "$write" ] || [ -z "$remove" ] || [ "$remove" -le "$write" ]; then
+    fail "exercise-term: /tmp/fail is not removed when the script is stopped with TERM"
+  fi
+  passed "$since" "soak exercise.sh: a failing Job, 401 in the fail file, removed after the wait and on TERM"
+
+  # uninstall.sh: the release, then the namespace; a reminder, never the cleanup, of the seeded
+  # failures.
+  since=$FAILURES
+  stub_run uninstall 60 "$ROOT" tests/soak/uninstall.sh stub-ctx
+  [ "$status" = 0 ] || fail "uninstall: exits $status: $(head -n 3 "$STUB_LOG.err")"
+  named uninstall
+  helm_at=$(line_of '^helm --kube-context stub-ctx uninstall kausa-soak -n kausa-soak --wait$')
+  ns_at=$(line_of '^kubectl --context stub-ctx delete namespace kausa-soak --wait$')
+  if [ -z "$helm_at" ] || [ -z "$ns_at" ] || [ "$ns_at" -le "$helm_at" ]; then
+    fail "uninstall: not helm uninstall kausa-soak, then the namespace deleted"
+  fi
+  grep -Eiq 'kausa-test|runtimeclass' "$STUB_LOG" && fail "uninstall: deletes the seeded failures"
+  grep -Eq 'seeded-failures|kausa-test' "$STUB_LOG.out" "$STUB_LOG.err" ||
+    fail "uninstall: no reminder of the seeded failures' cleanup"
+  passed "$since" "soak uninstall.sh: the release and kausa-soak, and a reminder of the seeded failures"
+else
+  fail "tests/soak/install.sh, exercise.sh or uninstall.sh is missing"
+fi
+
+# sample.py: the usage refusals, then a few seconds against the fake cluster.
+if [ -f "$SOAK/sample.py" ]; then
+  since=$FAILURES
+  SAMPLE=(python3 -I tests/soak/sample.py)
+  refused sample-none argparse "${SAMPLE[@]}"
+  refused sample-no-out argparse "${SAMPLE[@]}" --context stub-ctx
+  refused sample-empty argparse "${SAMPLE[@]}" --context '' --out "$RELIABILITY/never"
+  refused sample-option argparse "${SAMPLE[@]}" --context -x --out "$RELIABILITY/never"
+  unknown sample-unknown "${SAMPLE[@]}" --context stub --out "$RELIABILITY/never"
+  [ ! -e "$RELIABILITY/never" ] || fail "sample: writes output for a refused context"
+  passed "$since" "soak sample.py: a missing, empty, option-like or unknown context is refused before any call"
+
+  since=$FAILURES
+  SAMPLES="$RELIABILITY/samples"
+  stub_run sample 60 "$ROOT" "${SAMPLE[@]}" --context stub-ctx --out "$SAMPLES" --interval 1 --days 0.00005
+  [ "$status" = 0 ] || fail "sample: exits $status: $(head -n 3 "$STUB_LOG.err")"
+  named sample
+  calls | grep -q '^helm' && fail "sample: calls helm"
+  grep -rqF stub-node "$SAMPLES" "$STUB_LOG.out" "$STUB_LOG.err" && fail "sample: writes a node name"
+  # shellcheck disable=SC2016 # Python, not shell
+  SAMPLE_CHECK='
+import glob, json, os, sys
+out, mode = sys.argv[1], sys.argv[2]
+fields = {"ts", "pod", "node", "holder", "ready", "restarts", "last_terminated_reason", "ws_bytes",
+          "rss_bytes", "usage_bytes", "cpu_ns", "top_memory", "top_cpu", "max_usage_bytes",
+          "oom_events", "kausa", "errors"}
+files = sorted(glob.glob(os.path.join(out, "samples-*.jsonl")))
+if not files:
+    print("no samples-<date>.jsonl"); sys.exit()
+lines = [json.loads(l) for f in files for l in open(f) if l.strip()]
+pods = {l.get("pod") for l in lines}
+if pods != {"kausa-soak-stub-1", "kausa-soak-stub-2"}:
+    print("the samples are not of the two kausa Pods")
+if len(lines) < 4:
+    print("fewer than two samples per Pod")
+ws = {"kausa-soak-stub-1": 24117248, "kausa-soak-stub-2": 23068672}
+first = {}
+for l in lines:
+    missing = fields - set(l)
+    if missing:
+        print("a sample lacks %s" % sorted(missing)); break
+    if not isinstance(l["node"], int) or isinstance(l["node"], bool):
+        print("node is not an index"); break
+    if l["holder"] is not (l["pod"] == "kausa-soak-stub-1"):
+        print("holder is not true for the Lease holder alone"); break
+    if l["ready"] is not True or l["restarts"] != 0:
+        print("ready or restarts is not read from the Pod"); break
+    if l["top_memory"] is not None or l["top_cpu"] is not None or "top" not in l["errors"]:
+        print("without metrics-server, top_* are not null with top in errors"); break
+    if mode == "summary-fails":
+        if l["ws_bytes"] is not None or "summary" not in l["errors"]:
+            print("a failed summary read is not null with summary in errors"); break
+    elif l["ws_bytes"] != ws.get(l["pod"]):
+        print("ws_bytes is not the kubelet summary of the Pod container kausa"); break
+    first.setdefault(l["pod"], l)
+    kausa = l["kausa"] or {}
+    if any(not k.startswith("kausa_") for k in kausa):
+        print("kausa holds a series that is not kausa_"); break
+    if kausa.get("kausa_leader") != (1 if l["pod"] == "kausa-soak-stub-1" else 0):
+        print("kausa does not hold kausa_leader of the Pod"); break
+for pod, l in first.items():
+    if l["max_usage_bytes"] != 31457280 or l["oom_events"] != 0:
+        print("the first sample of %s lacks the cAdvisor max usage and OOM events of container kausa" % pod)
+leader = first.get("kausa-soak-stub-1", {}).get("kausa") or {}
+if leader.get("kausa_endpoint_state{state=\"open\"}") != 1:
+    print("the leader sample lacks kausa_endpoint_state{state=\"open\"} 1")
+cluster = sorted(glob.glob(os.path.join(out, "cluster-*.jsonl")))
+counts = [json.loads(l) for f in cluster for l in open(f) if l.strip()]
+if not counts:
+    print("no cluster-<date>.jsonl")
+elif set(counts[0]) != {"ts", "pods", "warning_events", "nodes"}:
+    print("a cluster line is not ts, pods, warning_events and nodes")
+elif (counts[0]["pods"], counts[0]["warning_events"], counts[0]["nodes"]) != (3, 2, 3):
+    print("the cluster counts are not those of the fake cluster")
+'
+  json_check sample "$SAMPLE_CHECK" "$SAMPLES" ok
+  stub_run sample-summary-fails 60 "$ROOT" env STUB_FAIL_SUMMARY=1 "${SAMPLE[@]}" --context stub-ctx \
+    --out "$RELIABILITY/samples-failing" --interval 1 --days 0.00002
+  [ "$status" = 0 ] || fail "sample-summary-fails: exits $status when the kubelet summary fails"
+  json_check sample-summary-fails "$SAMPLE_CHECK" "$RELIABILITY/samples-failing" summary-fails
+  passed "$since" "soak sample.py: one line per Pod per sample, node indexes, null for a failed read"
+else
+  fail "tests/soak/sample.py is missing"
+fi
+
+# summarize.py: its self-test, the dry run's few minutes, and the decision rule of spec B7 on
+# synthetic samples of 168 hours, two Pods at 30-s intervals: flat (S1 VALID, S2 and S3 PASS);
+# +1 MiB/day (S3 FAIL); +0.3 MiB/day (S3 INCONCLUSIVE, extend to 14 days); a 40% gap, a restart,
+# the breaker open on 3 days only (S1 INVALID); an OOMKilled and a working set over 32 MiB (S2
+# FAIL); and a window shorter than 168 hours (S1 INVALID).
+if [ -f "$SOAK/summarize.py" ]; then
+  since=$FAILURES
+  SUMMARIZE=(python3 -I tests/soak/summarize.py)
+  stub_run summarize-self-test 120 "$ROOT" "${SUMMARIZE[@]}" --self-test
+  [ "$status" = 0 ] || fail "summarize --self-test exits $status: $(tail -n 3 "$STUB_LOG.err")"
+  grep -qx 'self-test: ok' "$STUB_LOG.out" || fail "summarize --self-test does not print self-test: ok"
+  [ ! -s "$STUB_LOG" ] || fail "summarize --self-test calls $(head -n 1 "$STUB_LOG" | cut -d' ' -f1)"
+  if [ -d "$RELIABILITY/samples" ]; then
+    stub_run summarize-dry 60 "$ROOT" "${SUMMARIZE[@]}" "$RELIABILITY/samples" --hours 0.15
+    [ "$status" = 0 ] || fail "summarize of a short run exits $status: $(tail -n 3 "$STUB_LOG.err")"
+    [ ! -s "$STUB_LOG" ] || fail "summarize calls $(head -n 1 "$STUB_LOG" | cut -d' ' -f1)"
+    grep -Eq '^S1 INVALID: .*shorter than 168 hours' "$STUB_LOG.out" ||
+      fail "summarize of a 0.15-hour window: no 'S1 INVALID: ... shorter than 168 hours'"
+    for verdict in 'S2 (PASS|FAIL): ' 'S3 (PASS|FAIL|INCONCLUSIVE): '; do
+      grep -Eq "^$verdict" "$STUB_LOG.out" || fail "summarize of a short run: no line ^$verdict"
+    done
+  fi
+  # shellcheck disable=SC2016 # Python, not shell
+  SYNTHETIC='
+import json, os, sys, time
+out, case = sys.argv[1], sys.argv[2]
+MIB = 2 ** 20
+START = 1767225600  # 2026-01-01T00:00:00Z
+HOURS = 10 if case == "short" else 168
+rate = {"grow-1": 1.0, "grow-0.3": 0.3}.get(case, 0.0)
+breaker_days = (1, 2, 3) if case == "breaker-3-days" else (1, 2, 3, 4, 5)
+files = {}
+def write(name, ts, record):
+    day = time.strftime("%Y-%m-%d", time.gmtime(ts))
+    path = os.path.join(out, "%s-%s.jsonl" % (name, day))
+    if path not in files:
+        files[path] = open(path, "w")
+    files[path].write(json.dumps(record, separators=(",", ":")) + "\n")
+os.makedirs(out, exist_ok=True)
+for i in range(HOURS * 120):
+    ts = START + 30 * i
+    hours = (ts - START) / 3600
+    if case == "gap-40" and 40 <= hours < 40 + 0.4 * HOURS:
+        continue
+    day, hour = int(hours // 24), hours % 24
+    open_now = day in breaker_days and 12 <= hour < 12 + 10 / 60
+    if i % 20 == 0:
+        write("cluster", ts, {"ts": ts, "pods": 100, "warning_events": 40, "nodes": 3})
+    for n, pod in enumerate(("kausa-soak-synth-1", "kausa-soak-synth-2")):
+        leader = n == 0
+        ws = 20 * MIB + n * MIB + rate * MIB * hours / 24
+        restarts, reason = 0, None
+        if hours >= 100 and n == 1 and case in ("restart", "oom"):
+            restarts, reason = 1, ("OOMKilled" if case == "oom" else "Error")
+        if case == "ws-33" and n == 0 and i == 5000:
+            ws = 33 * MIB
+        kausa = {"kausa_leader": 1 if leader else 0}
+        if leader:
+            kausa.update({
+                "kausa_model_calls_total{outcome=\"ok\"}": int(hours // 6),
+                "kausa_model_calls_total{outcome=\"error\"}": sum(1 for d in breaker_days if d < day or (d == day and hour >= 12)),
+                "kausa_incidents_total{detection=\"D001\"}": int(hours // 6),
+                "kausa_explanation_queue_length": 1 if open_now else 0,
+                "kausa_budget_calls_remaining{window=\"hour\"}": 30,
+                "kausa_budget_calls_remaining{window=\"day\"}": 200,
+                "kausa_endpoint_state{state=\"closed\"}": 0 if open_now else 1,
+                "kausa_endpoint_state{state=\"half_open\"}": 0,
+                "kausa_endpoint_state{state=\"open\"}": 1 if open_now else 0,
+            })
+        cadvisor = i % 20 == 0
+        write("samples", ts, {
+            "ts": ts, "pod": pod, "node": n, "holder": leader, "ready": True,
+            "restarts": restarts, "last_terminated_reason": reason,
+            "ws_bytes": int(ws), "rss_bytes": int(ws) - MIB, "usage_bytes": int(ws) + 2 * MIB,
+            "cpu_ns": int(5e6 * 30 * i), "top_memory": None, "top_cpu": None,
+            "max_usage_bytes": int(ws) + 4 * MIB if cadvisor else None,
+            "oom_events": 0 if cadvisor else None, "kausa": kausa, "errors": ["top"],
+        })
+for f in files.values():
+    f.close()
+'
+  # verdict CASE ARGS... -- PATTERNS...: summarize.py on the synthetic CASE prints a line matching
+  # each extended regular expression.
+  verdict() {
+    local case=$1 dir="$RELIABILITY/synthetic-$1" pattern
+    shift
+    local args=()
+    while [ "$1" != -- ]; do args+=("$1"); shift; done
+    shift
+    rm -rf "$dir"
+    if ! python3 -I -c "$SYNTHETIC" "$dir" "$case" 2>"$RELIABILITY/synthetic.err"; then
+      fail "summarize/$case: the synthetic samples cannot be written: $(cat "$RELIABILITY/synthetic.err")"
+      return
+    fi
+    stub_run "summarize-$case" 120 "$ROOT" "${SUMMARIZE[@]}" "$dir" ${args[@]+"${args[@]}"}
+    [ "$status" = 0 ] || fail "summarize/$case: exits $status: $(tail -n 3 "$STUB_LOG.err")"
+    for pattern in "$@"; do
+      grep -Eq -- "$pattern" "$STUB_LOG.out" ||
+        fail "summarize/$case: no line matching '$pattern' in: $(grep -E '^S[123] ' "$STUB_LOG.out" | tr '\n' '|')"
+    done
+    rm -rf "$dir"
+  }
+  verdict flat -- '^S1 VALID: ' '^S2 PASS: ' '^S3 PASS: '
+  verdict grow-1 -- '^S1 VALID: ' '^S2 PASS: ' '^S3 FAIL: '
+  verdict grow-0.3 -- '^S3 INCONCLUSIVE: .*extend to 14 days\.?$'
+  verdict gap-40 -- '^S1 INVALID: '
+  verdict restart -- '^S1 INVALID: '
+  verdict breaker-3-days -- '^S1 INVALID: '
+  verdict oom -- '^S2 FAIL: '
+  verdict ws-33 -- '^S2 FAIL: '
+  verdict short --hours 10 -- '^S1 INVALID: .*shorter than 168 hours'
+  passed "$since" "soak summarize.py: the self-test and the decision rule of spec B7 on synthetic samples"
+else
+  fail "tests/soak/summarize.py is missing"
+fi
+
+# --- The pages
+
+# The five e2e checks named alike wherever the checks are listed; the pin's bump in "Cut a
+# release"; the soak's how-to with its rule, dated before any measurement, linked from the front
+# page and mapped in ARCHITECTURE.md.
+since=$FAILURES
+# joined FILE: the file's text on one line, so that a sentence wrapped across lines still matches.
+joined() { tr '\n' ' ' <"$ROOT/$1" | tr -s ' '; }
+for page in docs/how-to/develop.md CONTRIBUTING.md AGENTS.md ARCHITECTURE.md \
+  docs/explanation/architecture.md; do
+  case "$(joined "$page")" in
+    *tests/e2e/upgrade.sh*) ;;
+    *) fail "$page does not name tests/e2e/upgrade.sh" ;;
+  esac
+done
+develop=$(joined docs/how-to/develop.md)
+for words in 'kind (cluster)' 'kind (namespaced)' 'kind (namespaced, standby)' 'upgrade (cluster)' \
+  'upgrade (namespaced)' tests/e2e/lib.sh tests/e2e/upgrade-from.txt; do
+  case "$develop" in *"$words"*) ;; *) fail "develop.md does not name $words" ;; esac
+done
+maintain=$(joined docs/how-to/maintain.md)
+for words in tests/e2e/upgrade-from.txt 'gh release download' SHA256SUMS \
+  'docker buildx imagetools inspect ghcr.io/fedeam/kausa:'; do
+  case "$maintain" in *"$words"*) ;; *) fail "maintain.md, Cut a release: no '$words'" ;; esac
+done
+# shellcheck disable=SC2016 # Markdown backquotes
+case "$(joined ARCHITECTURE.md)" in
+  *'| `tests/soak/` |'*) ;;
+  *) fail "ARCHITECTURE.md has no tests/soak/ row" ;;
+esac
+grep -q 'how-to/run-the-soak\.md' "$ROOT/docs/index.md" || fail "docs/index.md does not link run-the-soak.md"
+if [ ! -f "$ROOT/docs/how-to/run-the-soak.md" ]; then
+  fail "docs/how-to/run-the-soak.md is missing"
+else
+  soak=$(joined docs/how-to/run-the-soak.md)
+  head -n 1 "$ROOT/docs/how-to/run-the-soak.md" | grep -q '^# ' || fail "run-the-soak.md has no H1 first"
+  for words in 'set on 2026-11-03, before any measurement' 'tests/soak/install.sh' \
+    'tests/soak/exercise.sh' 'tests/soak/uninstall.sh' 'tests/soak/sample.py --context' \
+    'tests/soak/summarize.py' tests/bench/seeded-failures.yaml consent '90%' '32 MiB' '64 MiB' \
+    '0.1 MiB' '0.5 MiB' '14 days' '96 MiB' '128 MiB'; do
+    case "$soak" in *"$words"*) ;; *) fail "run-the-soak.md does not say '$words'" ;; esac
+  done
+  case "$soak" in
+    *'out of the repository'* | *'outside the repository'*) ;;
+    *) fail "run-the-soak.md does not say the output stays out of the repository" ;;
+  esac
+fi
+passed "$since" "the pages: the five e2e checks, the pin's bump, the soak how-to and its rule"
 
 # --- The chart on OCI and Artifact Hub (docs/adr/0023-oci-chart-and-sbom.md) --------------------
 
