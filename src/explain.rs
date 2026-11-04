@@ -370,6 +370,8 @@ pub async fn run(
     if !shared.term.holds() {
         return Ok(Next::Done);
     }
+    // The confidence as the model wrote it, for the log line: a withheld answer's becomes `low`.
+    let model_confidence = explanation.confidence.clone();
     // The answer is untrusted: the pattern rules run on it before any sink sees it, and every
     // copy below (the restores, the cache, the log, the Event, the history and the notification)
     // comes from the redacted text (docs/adr/0022-redact-the-answer.md).
@@ -392,6 +394,21 @@ pub async fn run(
         ];
         explanation.map_clean(|text| redactor.restore_only(text, &names))
     });
+    // The answer is advice for a person: a text that holds a listed destructive command shape, in
+    // any version a sink gets (names mapped back included), is replaced by kausa's notice in all
+    // of them, and nothing runs between this and the sinks
+    // (docs/adr/0025-withhold-destructive-commands.md).
+    let mut versions = vec![explanation, restored];
+    versions.extend(narrow);
+    let (versions, withheld) = prompt::withhold_all(versions);
+    let mut versions = versions.into_iter().skip(1);
+    let Some(restored) = versions.next() else {
+        unreachable!("withhold_all returns as many versions as it was given");
+    };
+    let narrow = versions.next();
+    if restored.withheld() {
+        shared.metrics.inc("kausa_answers_withheld_total", &[]);
+    }
     shared.dedup.borrow_mut().put(
         &fingerprint,
         restored.clone(),
@@ -409,6 +426,8 @@ pub async fn run(
                 "tokens_out": answer.completion_tokens,
                 "redactions": redactions,
                 "answer_redactions": answer_redactions,
+                "withheld": withheld,
+                "model_confidence": model_confidence,
             }),
         ),
     )?;
