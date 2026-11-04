@@ -466,7 +466,10 @@ hold. The versions are one answer mapped field by field, so their steps line up,
 which a shape matches in any version is withheld in all of them. A repeat from the deduplication
 cache is written as it was stored, already checked.
 
-**What it reads.** The `summary`, the `cause` and each step, cleaned as a sink gets them. For
+**What it reads.** The `summary`, the `cause` and each step, cleaned as a sink gets them, each on
+its own: the promise is that no summary, cause or step, as written to the Event, the Explanation,
+the log line or the notification after the names are mapped back, is one in which a shape matches
+(the joined and cut texts are under [Limits](#limits)). For
 matching only, kausa folds a copy of each, never stored or logged: NFKC (fullwidth letters become
 ASCII); `$IFS` and `${IFS}` (the pattern `\$\{?IFS\}?`) replaced by a space; `'`, `"`, `\`,
 U+2018, U+2019, U+201C and U+201D removed (`kube'ctl'`); whitespace collapsed to one space. The
@@ -556,7 +559,12 @@ adding one ([Add a detection or redaction rule](../how-to/add-a-rule.md)).
   `for` loop over `$NAME`); wrappers and plugins such as `kubecolor`, and shell aliases or
   functions (`alias x=kubectl` in another step); other shell expansion (`$IFS$9`, brace
   expansion, variables); combined short flags (`-RA`); indirection ("run the script in the
-  log"); commands split, encoded or past the 300-character cap of a step; other deletions
+  log"); commands split, encoded or past the 300-character cap of a step; a command split across
+  the summary, the cause and the steps: each is checked on its own, while the Event note joins
+  them (with `Likely cause:`, `Check:` and the step numbers) and cuts the note at 1,024 bytes with
+  `…`, and the Slack and Telegram text joins them after a header that holds the workload's real
+  name and cuts it at 4,000 units, so a shape found only across fields, or only in a field as a
+  cut leaves it, is not covered; other deletions
   (`kubectl delete deployment x`, `delete -f`, `drain`, an HTTP `DELETE`); `curl … | sh`;
   security-weakening advice (`cluster-admin`, `privileged`); and a false cause or a demanded
   `high` with no listed shape. The patterns are published, so an injector can look for a form

@@ -198,8 +198,10 @@ produces the same incident, the same fingerprint and the same request bytes.
   published destructive command shapes (`W001`–`W006`: deleting namespaces, nodes, CRDs or
   everything, `--all`, `-A`, `--force`, a grace period of 0, `helm uninstall`, `rm -rf`, and the
   prose "delete every namespace"). A name mapped back can complete a command (a Job named
-  `kubectl`), so the check runs on the text each sink gets, and a text withheld in one version is
-  withheld in all. A matching step is removed and a matching summary or cause replaced; the answer
+  `kubectl`), so the check runs on each summary, cause and step as each sink gets it, and a text
+  withheld in one version is withheld in all. Each field is checked on its own: the Event note and
+  the chat text join the fields and cut them, and a shape found only across fields or at a cut is
+  a documented limit. A matching step is removed and a matching summary or cause replaced; the answer
   then leads with kausa's fixed notice and its confidence becomes `low`. The `withheld` and
   `model_confidence` fields of the `explanation` line and `kausa_answers_withheld_total` show it;
   the withheld text is kept nowhere ([Withheld command

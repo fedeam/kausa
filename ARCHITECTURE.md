@@ -128,9 +128,9 @@ accepted ADR, and most should never change.
    needs an ADR. This covers the model's answer: running fewer rules on it needs an ADR.
 5. **Cluster text is data, never instructions**: the model gets no tools, and its answer must
    match the schema, is cleaned and passes the pattern redaction rules `R003`–`R014` before it is
-   logged, stored or written ([0022](docs/adr/0022-redact-the-answer.md)), and any text in which
-   the shapes `W001`–`W006` match, as written to a sink after the names are mapped back, is
-   replaced by kausa's fixed notice, with `low` confidence, in every sink, before it is logged,
+   logged, stored or written ([0022](docs/adr/0022-redact-the-answer.md)), and any summary, cause
+   or step in which the shapes `W001`–`W006` match, as written to a sink after the names are
+   mapped back, is replaced by kausa's fixed notice, with `low` confidence, in every sink, before it is logged,
    stored or written; checking less needs an ADR
    ([0025](docs/adr/0025-withhold-destructive-commands.md)). Code that parses untrusted text
    (cluster text, the model's answer, an Explanation read back, the endpoint's error body) never

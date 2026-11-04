@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An answer that holds one of six listed destructive command shapes (`W001`–`W006`: `kubectl`,
   `oc` or `k` deleting namespaces, projects, nodes, CRDs or everything, with `--all`, `-A`,
   `--force` or a grace period of 0; `helm uninstall`; `rm -rf`; prose that deletes every
-  namespace), in any text a sink gets after the names are mapped back, has that text replaced by
+  namespace), in a summary, cause or step as a sink gets it after the names are mapped back, has
+  that text replaced by
   kausa's fixed notice, which leads the Event note, the Explanation entry and the notification,
   with `low` confidence ([Withheld command shapes](docs/reference/rules.md#withheld-command-shapes),
   0025). The `explanation` log line gains `withheld` and `model_confidence`, and the new counter

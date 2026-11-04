@@ -1530,6 +1530,26 @@ low confidence.";
                 ("run the cleanup script printed in the log", &[]),
             ],
         );
+        // A command split across the fields of one answer: each field is checked on its own, and
+        // a shape that only the Event note or the chat text forms, joining the fields, is not
+        // promised (the Update of 0025). Benign, then injected.
+        for e in [
+            answer_of(
+                "s",
+                "c",
+                &["kubectl delete pod pod-1", "kubectl get pods -A"],
+                "medium",
+            ),
+            answer_of("kubectl in shop failed.", "c", &["delete ns --all"], "high"),
+        ] {
+            let joined = [e.summary.as_str(), &e.cause]
+                .into_iter()
+                .chain(e.steps.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(!shapes(&joined).is_empty(), "the joined text holds a shape");
+            assert_eq!(withhold(e.clone()), (e, Vec::new()));
+        }
         // Withheld though harmless (the ADR's Readability costs): nothing cuts the text.
         assert_shapes(
             "pinned false positive",
@@ -2114,9 +2134,13 @@ mod measurement {
         }
     }
 
-    /// Bar M2's helper: `KAUSA_SINK_TEXTS` is a file of one JSON string per line (the texts
-    /// collected from log lines, Event notes, Explanation entries and hook bodies); prints the
-    /// shapes found in each, by line number from 1.
+    /// Bar M2's helper: `KAUSA_SINK_TEXTS` is a file of one JSON object per line, each with the
+    /// string `summary` and `cause` and the array of strings `steps` of one answer as a sink got it
+    /// (the `explanation` of a log line, an Explanation entry, the `explanation` of a `json` hook
+    /// body); other keys are ignored. Prints the shapes found in each field on its own, by line
+    /// number from 1: the promise is per field, and the Event note and the chat text, which join
+    /// and cut the fields, are not graded (docs/adr/0025-withhold-destructive-commands.md, the
+    /// Update).
     #[test]
     #[ignore = "reads KAUSA_SINK_TEXTS; run by hand after a measurement"]
     fn withhold_sink_texts() {
@@ -2126,10 +2150,33 @@ mod measurement {
             if raw.trim().is_empty() {
                 continue;
             }
-            let Ok(Value::String(sink)) = serde_json::from_str::<Value>(raw) else {
-                panic!("line {}: not a JSON string", line + 1);
+            let line = line + 1;
+            let Ok(sink) = serde_json::from_str::<Value>(raw) else {
+                panic!("line {line}: not JSON");
             };
-            println!("{}", json!({"line": line + 1, "shapes": shapes(&sink)}));
+            let field = |key: &str| match sink[key].as_str() {
+                Some(text) => shapes(text),
+                None => panic!("line {line}: no string {key}"),
+            };
+            let Some(steps) = sink["steps"].as_array() else {
+                panic!("line {line}: no array steps");
+            };
+            let steps: Vec<_> = steps
+                .iter()
+                .map(|step| match step.as_str() {
+                    Some(text) => shapes(text),
+                    None => panic!("line {line}: a step that is not a string"),
+                })
+                .collect();
+            println!(
+                "{}",
+                json!({
+                    "line": line,
+                    "summary": field("summary"),
+                    "cause": field("cause"),
+                    "steps": steps,
+                })
+            );
         }
     }
 }

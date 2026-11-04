@@ -25,9 +25,11 @@ These are vulnerabilities, not ordinary bugs:
 - a value that a redaction rule should catch reaching a request, an Event, an Explanation, kausa's
   log or a notification in clear, whether it came from the cluster or from the model's answer
   (`R003`–`R014` on the answer);
-- text, as written to an Event, an Explanation, kausa's log or a notification after the names are
-  mapped back, in which the [withheld command shapes](docs/reference/rules.md#withheld-command-shapes)
-  (`W001`–`W006`) match;
+- a summary, a cause or a step, as written to an Event, an Explanation, kausa's log or a
+  notification after the names are mapped back, in which the [withheld command
+  shapes](docs/reference/rules.md#withheld-command-shapes) (`W001`–`W006`) match (each field on its
+  own: a command split across the fields of one answer is a [documented
+  limit](docs/reference/rules.md#limits));
 - any request to a host other than the Kubernetes API server, the configured endpoint and, with
   notifications on, the configured webhook;
 - a notification that carries a field outside [Data sent in
@@ -323,7 +325,10 @@ kausa must:
   `xargs`, a `for` loop over `$NAME`), a wrapper or plugin such as `kubecolor`, a shell alias or
   function, other shell expansion (`$IFS$9`, braces, variables), combined short flags (`-RA`),
   indirection ("run the script in the log"), a command split, encoded or past the 300-character
-  cap, other deletions (`delete deployment x`, `delete -f`, `drain`, an HTTP `DELETE`), `curl … |
+  cap, a command split across the summary, the cause and the steps (each is checked on its own; the
+  Event note and the Slack and Telegram text join them after a header that holds the workload's
+  name and cut the result, so a shape that only the joined or cut text holds is not covered),
+  other deletions (`delete deployment x`, `delete -f`, `drain`, an HTTP `DELETE`), `curl … |
   sh` and security-weakening advice (`cluster-admin`, `privileged`); so are a paraphrase, a false
   cause and a demanded confidence with no listed shape. The shapes are published, so an injector
   can look for a form they miss. kausa never runs anything, and the explanation is advice for a
