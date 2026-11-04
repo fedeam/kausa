@@ -10,8 +10,11 @@
 # message. It also checks, with helm alone, that the detections of v0.5's coverage gaps need no new
 # permission, and the seeded failure the kind test adds for them (tests/e2e/failures.yaml and
 # tests/e2e/run.sh), and the endpoint check's helm test Pod, its NetworkPolicy and
-# model.timeoutSeconds (docs/adr/0020-check-the-endpoint.md). For the upgrade test and the soak
-# (v0.6, measured reliability), it renders the pinned release's values upgraded to this chart as
+# model.timeoutSeconds (docs/adr/0020-check-the-endpoint.md). It checks the chart's Artifact Hub
+# metadata and README, what helm package ships, and the two checks of the artifacthub.io/images
+# annotation, taken from the Dockerfile's ci target and the release workflow and run on copies of
+# Chart.yaml (docs/adr/0023-oci-chart-and-sbom.md). For the upgrade test and the soak (v0.6,
+# measured reliability), it renders the pinned release's values upgraded to this chart as
 # helm upgrade --reuse-values does and the soak's values, and checks the soak endpoint's manifest,
 # the e2e workflow's jobs, and the e2e and soak scripts, the soak's against stub kubectl, helm, curl
 # and sleep, and the pages that document them.
@@ -32,7 +35,10 @@
 # that chart's. KAUSA_CHART_PRE_HA names a git ref with the chart before replicaCount (unset by
 # default, for the same reason as KAUSA_CHART_PREVIOUS); when it is set and in the clone, the
 # one-replica renders are compared with its renders byte for byte (without the endpoint check's
-# documents and --model-timeout arg).
+# documents and --model-timeout arg). KAUSA_CHART_PRE_OCI names a git ref with the same chart
+# version before its Artifact Hub metadata (for example d31dc3e; unset by default, for the same
+# reason); when it is set and in the clone, the templates must be unchanged and both scopes must
+# render byte for byte as there.
 # HELM names the binary.
 # No pipefail: grep -q ends a pipe early, and its writer's SIGPIPE is not a failure.
 set -eu
@@ -4074,6 +4080,319 @@ else
   esac
 fi
 passed "$since" "the pages: the five e2e checks, the pin's bump, the soak how-to and its rule"
+
+# --- The chart on OCI and Artifact Hub (docs/adr/0023-oci-chart-and-sbom.md) --------------------
+
+# The release publishes the chart as oci://ghcr.io/fedeam/charts/kausa and Artifact Hub lists it
+# from there: Chart.yaml names the maintainer (no email) and carries four artifacthub.io
+# annotations, the chart ships a README, and two checks, in the Dockerfile's ci target and in the
+# release workflow's image job, hold the artifacthub.io/images annotation to appVersion and to the
+# tag. None of it reaches a template.
+CHART_YAML="$CHART/Chart.yaml"
+CHART_README="$CHART/README.md"
+IMAGE_REPO=ghcr.io/fedeam/kausa
+APP_VERSION=$(sed -n 's/^appVersion: //p' "$CHART_YAML")
+CHART_VERSION=$(sed -n 's/^version: //p' "$CHART_YAML")
+PRE_OCI=${KAUSA_CHART_PRE_OCI:-}
+
+# block FILE LINE INDENT: the lines under the line LINE (exactly, with its indentation), up to the
+# next non-blank line indented INDENT spaces or less.
+block() {
+  awk -v key="$2" -v ind="$3" '
+    on { match($0, /^ */); if ($0 !~ /^ *$/ && RLENGTH <= ind) exit; print; next }
+    $0 == key { on = 1 }' "$1"
+}
+
+# The maintainer, with a URL and no email (AGENTS.md: the repository publishes none).
+since=$FAILURES
+expected=$(printf '%s\n' '  - name: FedeAM' '    url: https://github.com/fedeam')
+got=$(block "$CHART_YAML" 'maintainers:' 0)
+[ "$got" = "$expected" ] ||
+  fail "Chart.yaml's maintainers are not FedeAM with https://github.com/fedeam and no email: '$got'"
+passed "$since" "Chart.yaml names the maintainer FedeAM, with a URL and no email"
+
+# The four annotations Artifact Hub reads, and no other.
+since=$FAILURES
+annotations=$(block "$CHART_YAML" 'annotations:' 0)
+keys=$(printf '%s\n' "$annotations" | sed -n 's/^  \([^ #][^:]*\):.*/\1/p' | sort)
+expected=$(printf '%s\n' artifacthub.io/category artifacthub.io/images artifacthub.io/license \
+  artifacthub.io/links | sort)
+[ "$keys" = "$expected" ] ||
+  fail "Chart.yaml's annotations are not exactly the four of Artifact Hub: '$keys'"
+printf '%s\n' "$annotations" | grep -qx '  artifacthub.io/category: monitoring-logging' ||
+  fail "Chart.yaml's artifacthub.io/category is not monitoring-logging"
+printf '%s\n' "$annotations" | grep -qx '  artifacthub.io/license: MIT OR Apache-2.0' ||
+  fail "Chart.yaml's artifacthub.io/license is not MIT OR Apache-2.0"
+expected=$(printf '%s\n' '    - name: kausa' "      image: $IMAGE_REPO:$APP_VERSION" \
+  '      platforms:' '        - linux/amd64' '        - linux/arm64')
+got=$(block "$CHART_YAML" '  artifacthub.io/images: |' 2)
+[ "$got" = "$expected" ] ||
+  fail "Chart.yaml's artifacthub.io/images is not kausa at $IMAGE_REPO:$APP_VERSION (appVersion) for linux/amd64 and linux/arm64: '$got'"
+expected=$(printf '%s\n' \
+  '    - name: Documentation' '      url: https://github.com/fedeam/kausa/blob/main/docs/index.md' \
+  '    - name: Changelog' '      url: https://github.com/fedeam/kausa/blob/main/CHANGELOG.md' \
+  '    - name: Security policy' '      url: https://github.com/fedeam/kausa/blob/main/SECURITY.md' \
+  '    - name: Issues' '      url: https://github.com/fedeam/kausa/issues')
+got=$(block "$CHART_YAML" '  artifacthub.io/links: |' 2)
+[ "$got" = "$expected" ] ||
+  fail "Chart.yaml's artifacthub.io/links are not Documentation, Changelog, Security policy and Issues: '$got'"
+passed "$since" "Chart.yaml has Artifact Hub's category, license, images (appVersion) and links"
+
+# Helm reads them: helm show chart prints the maintainer and the annotations, and no email.
+since=$FAILURES
+if "$HELM" show chart "$CHART" >"$WORK/show-chart" 2>"$WORK/show-chart.err"; then
+  for words in 'name: FedeAM' 'url: https://github.com/fedeam' \
+    'artifacthub.io/category: monitoring-logging' 'artifacthub.io/license: MIT OR Apache-2.0' \
+    "image: $IMAGE_REPO:$APP_VERSION" 'url: https://github.com/fedeam/kausa/issues'; do
+    grep -qF -- "$words" "$WORK/show-chart" || fail "helm show chart does not print '$words'"
+  done
+  grep -q 'email' "$WORK/show-chart" && fail "helm show chart prints an email field"
+else
+  fail "helm show chart fails: $(cat "$WORK/show-chart.err")"
+fi
+passed "$since" "helm show chart prints the maintainer and the annotations"
+
+# The chart's README: Artifact Hub's package page and helm show readme. It renders outside the
+# repository, so its links are absolute, and it names no version, so that no release forgets it.
+since=$FAILURES
+if [ ! -f "$CHART_README" ]; then
+  fail "charts/kausa/README.md does not exist"
+else
+  [ "$(head -n 1 "$CHART_README")" = '# kausa' ] || fail "charts/kausa/README.md's H1 is not '# kausa'"
+  # The first sentence is the repository README's.
+  sentence=$(awk '/^A tiny Kubernetes controller/ { print; exit }' "$ROOT/README.md" |
+    sed 's/\. .*/./')
+  first=$(awk 'NR > 1 && /^$/ && seen { exit } NR > 1 && !/^$/ { seen = 1; print }' \
+    "$CHART_README" | tr '\n' ' ' | tr -s ' ')
+  case $first in
+    "$sentence"*) ;;
+    *) fail "charts/kausa/README.md does not start with README.md's first sentence: '$sentence'" ;;
+  esac
+  grep -nE '[0-9]+\.[0-9]+\.[0-9]+' "$CHART_README" >"$WORK/readme-versions" &&
+    fail "charts/kausa/README.md names a version: $(cat "$WORK/readme-versions")"
+  # Every link is absolute; those into the repository's main branch name a file that exists.
+  grep -oE '\]\([^)]*\)' "$CHART_README" | sed 's/^](//; s/)$//' >"$WORK/readme-links"
+  [ -s "$WORK/readme-links" ] || fail "charts/kausa/README.md has no link"
+  while IFS= read -r link; do
+    case $link in
+      https://github.com/fedeam/kausa/blob/main/*)
+        path=${link#https://github.com/fedeam/kausa/blob/main/}
+        path=${path%%#*}
+        [ -e "$ROOT/$path" ] || fail "charts/kausa/README.md links to $path, which does not exist"
+        ;;
+      https://*) ;;
+      *) fail "charts/kausa/README.md has a link that is not absolute: $link" ;;
+    esac
+  done <"$WORK/readme-links"
+  collapsed_readme=$(collapsed "$CHART_README")
+  for words in '`rbac.scope` has no default' \
+    'helm install kausa oci://ghcr.io/fedeam/charts/kausa --version <version> \ -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true' \
+    '`https://github.com/fedeam/kausa/.github/workflows/release.yml@refs/tags/v<version>`' \
+    '`https://token.actions.githubusercontent.com`'; do
+    printf '%s' "$collapsed_readme" | grep -qF -- "$words" ||
+      fail "charts/kausa/README.md does not say '$words'"
+  done
+  # Every helm install or upgrade from the registry passes --version, and sets rbac.scope.
+  awk '{ if (sub(/\\$/, "")) { cmd = cmd $0; next } print cmd $0; cmd = "" }' "$CHART_README" |
+    grep -E 'helm (install|upgrade) ' >"$WORK/readme-helm" || true
+  [ -s "$WORK/readme-helm" ] || fail "charts/kausa/README.md has no helm install"
+  while IFS= read -r cmd; do
+    case $cmd in *oci://*) case $cmd in *' --version '*) ;; *)
+      fail "charts/kausa/README.md installs from the registry without --version: $cmd" ;; esac ;;
+    esac
+    case $cmd in *'--set rbac.scope='*) ;; *)
+      fail "charts/kausa/README.md installs without rbac.scope: $cmd" ;; esac
+  done <"$WORK/readme-helm"
+  if "$HELM" show readme "$CHART" >"$WORK/show-readme" 2>"$WORK/show-readme.err"; then
+    [ "$(cat "$WORK/show-readme")" = "$(cat "$CHART_README")" ] ||
+      fail "helm show readme does not print charts/kausa/README.md"
+  else
+    fail "helm show readme fails: $(cat "$WORK/show-readme.err")"
+  fi
+fi
+passed "$since" "charts/kausa/README.md: no version, absolute links, rbac.scope, --version, the identity and issuer"
+
+# Chart.yaml's links into the repository name files that exist.
+since=$FAILURES
+for path in $(sed -n 's|^ *url: https://github.com/fedeam/kausa/blob/main/||p' "$CHART_YAML"); do
+  [ -e "$ROOT/${path%%#*}" ] || fail "Chart.yaml links to $path, which does not exist"
+done
+passed "$since" "Chart.yaml's links into the repository resolve"
+
+# No email in either file (the certificate identity's '@refs/tags' is not one).
+since=$FAILURES
+for file in "$CHART_YAML" "$CHART_README"; do
+  [ -f "$file" ] || continue
+  lines=$(grep -nE '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}' "$file" |
+    cut -d: -f1 | paste -sd, -)
+  [ -z "$lines" ] || fail "${file#"$ROOT"/} has an email address on line(s) $lines"
+done
+grep -q '^ *email:' "$CHART_YAML" && fail "Chart.yaml has an email field"
+passed "$since" "Chart.yaml and the chart's README name no email"
+
+# What helm package ships: the README, and not Artifact Hub's repository metadata, which lives in
+# charts/ outside the chart and goes to the registry's artifacthub.io tag instead.
+since=$FAILURES
+mkdir -p "$WORK/package"
+if "$HELM" package "$CHART" -d "$WORK/package" >"$WORK/package.out" 2>&1 &&
+  tar -tzf "$WORK/package/kausa-$CHART_VERSION.tgz" >"$WORK/package.list" 2>&1; then
+  grep -qx 'kausa/README.md' "$WORK/package.list" || fail "helm package does not ship kausa/README.md"
+  grep -qx 'kausa/Chart.yaml' "$WORK/package.list" || fail "helm package does not ship kausa/Chart.yaml"
+  grep -q 'artifacthub-repo' "$WORK/package.list" &&
+    fail "helm package ships Artifact Hub's repository metadata"
+else
+  fail "helm package fails: $(cat "$WORK/package.out" "$WORK/package.list" 2>/dev/null)"
+fi
+passed "$since" "helm package ships kausa/README.md and no artifacthub-repo.yml"
+
+# --- The two checks of the artifacthub.io/images annotation ---
+
+# The ci target's check is the RUN right after its helm lint (it runs no crate code, so it comes
+# before clippy); the release's is in the image job's "Check the tag, the versions and the
+# changelog". Both are taken from their files and run on copies of Chart.yaml: they pass on the
+# chart, and refuse, with their exact message, another version, a repeated line, another image, a
+# list item that starts with image:, another appVersion (the ci target) or another tag (the
+# release), and no images annotation at all.
+
+# dockerfile_images_check: the shell of the ci target's first RUN after its helm lint, with
+# Docker's line continuations joined.
+dockerfile_images_check() {
+  awk '
+    /^FROM .* AS build$/ { exit }
+    $0 == "RUN helm lint --strict charts/kausa --set rbac.scope=cluster" { after = 1; next }
+    after && !on && /^RUN / { on = 1; sub(/^RUN /, "") }
+    on { cont = sub(/\\$/, ""); printf "%s", $0; if (!cont) exit }
+  ' "$ROOT/Dockerfile"
+}
+
+# release_images_check: the lines of the release's image check, from images=$( to its fi, from
+# the step "Check the tag, the versions and the changelog", without their indentation.
+release_images_check() {
+  awk '
+    /^ *- name: / { step = ($0 ~ /- name: Check the tag, the versions and the changelog$/) }
+    step && !on && /^ *images=\$\(/ { on = 1; match($0, /^ */); ind = RLENGTH }
+    on { print substr($0, ind + 1); if ($0 ~ /(^|[; ])fi$/) exit }
+  ' "$ROOT/.github/workflows/release.yml"
+}
+
+# variant NAME AWK: a copy of Chart.yaml in $WORK/images-NAME/charts/kausa, edited by AWK.
+variant() {
+  mkdir -p "$WORK/images-$1/charts/kausa"
+  awk "$2" "$CHART_YAML" >"$WORK/images-$1/charts/kausa/Chart.yaml"
+  if [ "$1" != chart ] && cmp -s "$CHART_YAML" "$WORK/images-$1/charts/kausa/Chart.yaml"; then
+    fail "images-check: the variant $1 of Chart.yaml changes nothing"
+  fi
+}
+IMAGE_LINE='/^      image: ghcr\.io\/fedeam\/kausa:/'
+variant chart '{ print }'
+variant version "$IMAGE_LINE"' { sub(/:[^:]*$/, ":9.9.9") } { print }'
+variant repeated '{ print } '"$IMAGE_LINE"' { print }'
+variant other-image "$IMAGE_LINE"' { sub(/ghcr\.io\/fedeam\/kausa/, "docker.io/x/y") } { print }'
+variant list-item '/^    - name: kausa$/ { print "    - image: ghcr.io/fedeam/kausa:9.9.9";
+  print "      name: kausa"; drop = 1; next } drop && /^      image: / { drop = 0; next } { print }'
+variant app-version '/^appVersion: / { $0 = "appVersion: 9.9.9" } { print }'
+variant no-images '/^  artifacthub\.io\/images: \|$/ { skip = 1; next } skip && /^  [^ ]/ { skip = 0 }
+  !skip'
+
+# images_case WHERE NAME STATUS EXPECTED [VERSION [VARIANT]]: runs the check of WHERE (dockerfile
+# or release) on the variant VARIANT (default NAME); it must exit with STATUS and print EXPECTED
+# (the ci target on stderr, the release on stdout, as GitHub reads ::error:: there) and nothing
+# else. VERSION is the tag's (default appVersion).
+images_case() {
+  local where=$1 name=$2 status=$3 expected=$4 version=${5:-$APP_VERSION} rc=0
+  local dir="$WORK/images-${6:-$2}" out="$WORK/images-$where-$name"
+  if [ "$where" = dockerfile ]; then
+    (cd "$dir" && sh -c "$DOCKERFILE_CHECK") >"$out.stdout" 2>"$out.stderr" || rc=$?
+    mv "$out.stderr" "$out.got"
+    [ -s "$out.stdout" ] && fail "images-check/$where/$name prints on stdout: $(cat "$out.stdout")"
+  else
+    (cd "$dir" && IMAGE=$IMAGE_REPO version=$version \
+      bash --noprofile --norc -euo pipefail -c "$RELEASE_CHECK") >"$out.stdout" 2>"$out.stderr" ||
+      rc=$?
+    mv "$out.stdout" "$out.got"
+    [ -s "$out.stderr" ] && fail "images-check/$where/$name prints on stderr: $(cat "$out.stderr")"
+  fi
+  if [ -n "$expected" ]; then printf '%s\n' "$expected" >"$out.want"; else : >"$out.want"; fi
+  if [ "$rc" != "$status" ]; then
+    fail "images-check/$where/$name exits $rc, not $status: $(cat "$out.got")"
+  elif ! cmp -s "$out.got" "$out.want"; then
+    fail "images-check/$where/$name: expected '$(cat "$out.want")', got '$(cat "$out.got")'"
+  else
+    ok "images-check/$where/$name"
+  fi
+}
+
+ON_CHART="$IMAGE_REPO:$APP_VERSION"
+TWICE=$(printf '%s\n%s' "$ON_CHART" "$ON_CHART")
+DOCKERFILE_CHECK=$(dockerfile_images_check)
+case $DOCKERFILE_CHECK in
+  *artifacthub.io/images*)
+    # dockerfile_msg IMAGES APP: the ci target's message.
+    dockerfile_msg() {
+      echo "artifacthub.io/images in charts/kausa/Chart.yaml names '$1', not $IMAGE_REPO:$2 (appVersion)"
+    }
+    images_case dockerfile chart 0 ''
+    images_case dockerfile version 1 "$(dockerfile_msg "$IMAGE_REPO:9.9.9" "$APP_VERSION")"
+    images_case dockerfile repeated 1 "$(dockerfile_msg "$TWICE" "$APP_VERSION")"
+    images_case dockerfile other-image 1 "$(dockerfile_msg "docker.io/x/y:$APP_VERSION" "$APP_VERSION")"
+    images_case dockerfile list-item 1 "$(dockerfile_msg "$IMAGE_REPO:9.9.9" "$APP_VERSION")"
+    images_case dockerfile app-version 1 "$(dockerfile_msg "$ON_CHART" 9.9.9)"
+    images_case dockerfile no-images 1 "$(dockerfile_msg '' "$APP_VERSION")"
+    ;;
+  *) fail "the ci target's RUN right after its helm lint is not the artifacthub.io/images check" ;;
+esac
+
+RELEASE_CHECK=$(release_images_check)
+if [ -n "$RELEASE_CHECK" ]; then
+  # release_msg IMAGES VERSION: the release's message.
+  release_msg() {
+    echo "::error::artifacthub.io/images in charts/kausa/Chart.yaml names '$1', not $IMAGE_REPO:$2"
+  }
+  images_case release chart 0 ''
+  images_case release version 1 "$(release_msg "$IMAGE_REPO:9.9.9" "$APP_VERSION")"
+  images_case release repeated 1 "$(release_msg "$TWICE" "$APP_VERSION")"
+  images_case release other-image 1 "$(release_msg "docker.io/x/y:$APP_VERSION" "$APP_VERSION")"
+  images_case release list-item 1 "$(release_msg "$IMAGE_REPO:9.9.9" "$APP_VERSION")"
+  images_case release tag 1 "$(release_msg "$ON_CHART" 9.9.9)" 9.9.9 chart
+  images_case release no-images 1 "$(release_msg '' "$APP_VERSION")"
+else
+  fail "the release's step 'Check the tag, the versions and the changelog' has no artifacthub.io/images check"
+fi
+
+# --- Renders before the chart's metadata ---
+
+# Chart.yaml's new fields reach no template: when KAUSA_CHART_PRE_OCI names a ref in the clone
+# with the same chart version, the templates, values and .helmignore are unchanged and every
+# scope renders byte for byte as there.
+if [ -n "$PRE_OCI" ] && git -C "$ROOT" rev-parse --verify --quiet "$PRE_OCI^{commit}" >/dev/null 2>&1; then
+  since=$FAILURES
+  git -C "$ROOT" diff --quiet "$PRE_OCI" -- charts/kausa/templates charts/kausa/files \
+    charts/kausa/values.yaml charts/kausa/.helmignore ||
+    fail "the chart's templates, files, values or .helmignore differ from $PRE_OCI"
+  mkdir -p "$WORK/pre-oci"
+  git -C "$ROOT" archive "$PRE_OCI" charts/kausa | tar -x -C "$WORK/pre-oci"
+  for case in "cluster|--set rbac.scope=cluster" \
+    "namespaced|--set rbac.scope=namespaced --set rbac.namespaces={e2e-a,e2e-b}"; do
+    IFS='|' read -r scope sets <<<"$case"
+    read -r -a scope_args <<<"$sets"
+    for name in default endpoint; do
+      values=()
+      [ "$name" = endpoint ] && values=("${ENDPOINT[@]}")
+      out="$WORK/pre-oci-$scope-$name"
+      if render "$out" "$RELEASE" "$WORK/pre-oci/charts/kausa" "${scope_args[@]}" \
+        ${values[@]+"${values[@]}"} && render "$out.now" "$RELEASE" "$CHART" "${scope_args[@]}" \
+        ${values[@]+"${values[@]}"}; then
+        cmp -s "$out" "$out.now" ||
+          fail "$scope/$name renders unlike $PRE_OCI: $(diff "$out" "$out.now" | head -20)"
+      else
+        fail "$scope/$name does not render here or in $PRE_OCI: $(cat "$out.err" "$out.now.err")"
+      fi
+    done
+  done
+  passed "$since" "the templates are unchanged and both scopes render like $PRE_OCI"
+else
+  echo "skipped: KAUSA_CHART_PRE_OCI is unset or not in this clone; the chart's metadata reaches no template"
+fi
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "FAIL: $FAILURES chart checks failed" >&2

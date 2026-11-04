@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.5.1](https://github.com/fedeam/kausa/releases/tag/v0.5.1),
+> Event on the failing workload. The latest release, [v0.5.2](https://github.com/fedeam/kausa/releases/tag/v0.5.2),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,9 +62,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa https://github.com/fedeam/kausa/releases/download/v0.5.1/kausa-0.5.1.tgz \
+helm install kausa https://github.com/fedeam/kausa/releases/download/v0.5.2/kausa-0.5.2.tgz \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.5.1 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.5.2 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -154,7 +154,7 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.5.1 is released (2026-11-03): `kausa run` watches Pods, Warning events and
+Pre-alpha. v0.5.2 is released (2026-11-03): `kausa run` watches Pods, Warning events and
 Deployments, in the whole cluster or in a list of namespaces, groups failures by workload, builds a
 redacted context with the failed container's log, asks the model within a call budget (or logs the
 request with `--dry-run`), reuses explanations of repeated incidents, writes each explanation as an
@@ -167,7 +167,10 @@ endpoint fails, and `kausa check-endpoint` (the chart's `helm test`) checks the 
 demand; its log lines are JSON ([Command line and log format](docs/reference/command-line.md)). The image is
 published at `ghcr.io/fedeam/kausa`, signed with cosign and with SLSA build provenance, and the
 chart is attached to each [GitHub release](https://github.com/fedeam/kausa/releases), next to its
-signed checksums; how to verify them is in the release notes.
+signed checksums; how to verify them is in the release notes. From v0.6.0 the chart is also
+published at `oci://ghcr.io/fedeam/charts/kausa`, signed and with provenance, and each image gets
+an attested CycloneDX SBOM of a binary built with `cargo auditable`, whose crate list scanners can
+read from the image.
 
 What was measured, once each and on small setups: on five seeded failures with the same small
 local model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 calls and 5,128
@@ -268,6 +271,9 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
 - **v0.5.1** (2026-11-03): a wrong or missing key for Google's Gemini API, which its
   OpenAI-compatible endpoint answers with a `400`, is a key error that opens the breaker, and the
   endpoint check names the key instead of `--no-json-schema`.
+- **v0.5.2** (2026-11-03): a security fix of redaction: the name of a Secret or ConfigMap that a
+  Pod cannot mount no longer reaches the request in clear when the volume is named like a secret
+  key (`credentials`, `password`…).
 
 ## Documentation
 

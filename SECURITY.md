@@ -7,7 +7,7 @@ and where secrets live.
 
 ## Supported versions
 
-Status as of 2026-11-03: the latest release is v0.5.1. Until 1.0, only the latest release will
+Status as of 2026-11-03: the latest release is v0.5.2. Until 1.0, only the latest release will
 receive security fixes.
 
 ## Reporting a vulnerability
@@ -60,7 +60,7 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-11-03: v0.5.1 is released: v0.5.0's redaction of the model's answer, the refilled
+Status as of 2026-11-03: v0.5.2 is released: v0.5.0's redaction of the model's answer, the refilled
 call budget, the endpoint check and breaker, and wider detections, on top of v0.4's Deployment
 watch of `D014`, richer context for the model and optional standby replica. `kausa run`
 reads Pods,
@@ -438,9 +438,9 @@ A missing detection or a weak explanation is a bug: open an issue. Anything in t
 - kausa needs no secrets to build or test. To run against a hosted provider it needs that
   provider's API key, which the operator stores in a Kubernetes Secret of their own and the chart
   passes to the container through the kubelet; a local model may need none.
-- CI uses only the token that GitHub Actions or Gitea Actions gives each job automatically. No
-  repository secrets are configured. On GitHub the job token is read-only (`contents: read`). On
-  Gitea Actions the automatic token cannot be narrowed and has write access to this repository;
+- CI uses only the token that GitHub Actions or Gitea Actions gives each job automatically.
+  No repository secrets are configured. On GitHub the job token of the CI workflows is read-only
+  (`contents: read`). On Gitea Actions the automatic token cannot be narrowed and has write access to this repository;
   the workflow uses it only to fetch the commit and removes it from the environment before the
   build.
 - Pull requests are built and tested on GitHub's hosted runners; an outside contributor's runs
@@ -448,6 +448,15 @@ A missing detection or a weak explanation is a bug: open an issue. Anything in t
   included, with network access, and only after the maintainer has reviewed and merged a change
   on GitHub and copied `main` to the private Git server that the runner serves; code from a
   contributor's pull request never reaches it before that.
+- The release workflow uses only the job token and keyless signing, no repository secret, and
+  each of its jobs holds only what it needs: the image job `packages: write`, the SBOM job
+  `contents: read` only, the publish job `packages: write`, `id-token: write` and `attestations:
+  write`, the release job `contents: write` and the Artifact Hub job `packages: write`. Tags on
+  GHCR can be moved by whoever can write the package, so the release notes verify by digest. The
+  publish job checks each architecture's digest against the registry before it signs anything,
+  and uses nothing from the SBOM job but the SBOM files ([0023. Publish the chart as a signed OCI
+  artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX
+  SBOM of an auditable binary to each image](docs/adr/0023-oci-chart-and-sbom.md)).
 - If the project ever needs a secret (for example, to sign releases or to push the image), it
   lives in the maintainer's secret manager (Infisical) and reaches CI as a repository secret. Never
   in git.

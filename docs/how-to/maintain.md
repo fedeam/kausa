@@ -394,20 +394,73 @@ kind publish a security fix:
    gh release download <version> --repo sigstore/cosign --pattern cosign_checksums.txt --output - | grep ' cosign-linux-amd64$'
    ```
 
-5. Build both targets (`docker build --target ci .` and `docker build --target runtime .`) and
-   open a pull request, for example `build(deps): bump distroless to <date>`.
+5. **cargo-auditable** (`Dockerfile`, the build stage): the version and both checksums, from the
+   `.tar.xz.sha256` file next to each archive, cross-checked with GitHub's asset digests:
+
+   ```sh
+   for t in x86_64 aarch64; do curl -fsSL "https://github.com/rust-secure-code/cargo-auditable/releases/download/v<version>/cargo-auditable-$t-unknown-linux-musl.tar.xz.sha256"; done
+   gh api repos/rust-secure-code/cargo-auditable/releases/tags/v<version> \
+     --jq '.assets[] | select(.name | endswith("-unknown-linux-musl.tar.xz")) | "\(.name) \(.digest)"'
+   ```
+
+6. **syft** (`.github/workflows/release.yml`, the `sbom` job): verify the checksums file with
+   cosign, then read the line of `syft_<version>_linux_amd64.tar.gz`:
+
+   ```sh
+   gh release download v<version> --repo anchore/syft --pattern 'syft_*_checksums.txt*'
+   cosign verify-blob syft_<version>_checksums.txt --bundle syft_<version>_checksums.txt.sigstore.json \
+     --certificate-identity https://github.com/anchore/syft/.github/workflows/release.yaml@refs/heads/main \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+   grep ' syft_<version>_linux_amd64.tar.gz$' syft_<version>_checksums.txt
+   ```
+
+7. **oras** (`.github/workflows/release.yml`, the `artifacthub` job): the line of
+   `oras_<version>_linux_amd64.tar.gz` in the checksums file of its release (its `.asc` PGP
+   signature is optional to check):
+
+   ```sh
+   gh release download v<version> --repo oras-project/oras --pattern 'oras_*_checksums.txt' --output - | grep '_linux_amd64.tar.gz$'
+   ```
+
+   Wait three days after a tool's release before bumping it, as Dependabot does for everything
+   else (the cooldown in `.github/dependabot.yml`).
+
+8. Build both targets (`docker build --target ci .` and `docker build --target runtime .`; the
+   runtime build checks cargo-auditable's checksum and that the binary carries its `.dep-v0`
+   section) and open a pull request, for example `build(deps): bump distroless to <date>`. The
+   pins of `.github/workflows/release.yml` (cosign, helm, syft and oras) run only on a tag, so the
+   next release is their first check: bump them some days before a release, not right before
+   tagging.
 
 ## Cut a release
 
 Why releases work this way: [0012. Release from a tag: a signed image on GHCR and the chart on the
-GitHub release](../adr/0012-releases.md). Status as of 2026-10-28: v0.1.0 is the first.
+GitHub release](../adr/0012-releases.md) and [0023. Publish the chart as a signed OCI artifact at
+`oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX SBOM of an
+auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). Status as of 2026-11-03:
+v0.1.0 was the first release; v0.6.0 will be the first with the chart on GHCR and the SBOMs.
 
 1. In a pull request of your own (for example `chore(release): v0.1.1`):
    - set the new `version` in `Cargo.toml`, and run `cargo build` once without `--locked` so that
      `Cargo.lock` records it (check that the lock file changed only there);
-   - set the same `version` and `appVersion` in `charts/kausa/Chart.yaml`;
+   - set the same `version` and `appVersion` in `charts/kausa/Chart.yaml`, and the same version in
+     the `image:` line of its `artifacthub.io/images` annotation (the `ci` target and the release
+     refuse a mismatch);
    - in `CHANGELOG.md`, move the entries under `Unreleased` to a `## [X.Y.Z] - YYYY-MM-DD` section
-     and update the links at the bottom.
+     and update the links at the bottom;
+   - name the new release where the docs name the latest one: in `README.md`, the status note under
+     the badges, the first line of "Status" and both versions in "Try it" (the chart and the
+     `crasher` image); `VERSION=` in step 1 of [Install kausa with Helm](install-with-helm.md); the
+     latest release and the status line in `SECURITY.md`; and the status lines of `docs/index.md`
+     and [Command line and log format](../reference/command-line.md). From v0.6.0, "Try it"
+     installs with `helm install kausa oci://ghcr.io/fedeam/charts/kausa --version X.Y.Z`, not the
+     release URL;
+   - for v0.6.0 only, rewrite the lines that say it is not released: in [Install kausa with
+     Helm](install-with-helm.md), the status paragraph at the top, the end of step 1 ("Until v0.6.0
+     is released"), "Upgrade from a chart URL to the OCI chart" and the end of "Verify a release";
+     the status line of [Helm chart](../reference/helm-chart.md); and the status line of this
+     section. The lines that say no install from GHCR and no command of the notes has run stay
+     until step 5 has run them.
 2. Merge it, sync Gitea, and tag the merged commit on `main`:
 
    ```sh
@@ -415,18 +468,32 @@ GitHub release](../adr/0012-releases.md). Status as of 2026-10-28: v0.1.0 is the
    git tag -a vX.Y.Z -m "kausa X.Y.Z" && git push origin vX.Y.Z
    ```
 
-3. The `Release` workflow on GitHub builds the image on both architectures, publishes
-   `ghcr.io/fedeam/kausa:X.Y.Z`, signs it, attests its provenance and creates the GitHub release
-   with the chart. Watch it with `gh run watch --repo fedeam/kausa`; if the tag does not match the
-   versions, it stops before publishing anything.
-4. **Check that the package is public.** v0.1.0 created `ghcr.io/fedeam/kausa` already public,
+3. The `Release` workflow on GitHub runs five jobs, each with only the permissions it needs:
+   `image` builds the image on both architectures and pushes one tag per architecture; `sbom`
+   writes a CycloneDX SBOM of each with syft, without a registry login; `publish` checks each
+   architecture's digest against the registry, publishes `ghcr.io/fedeam/kausa:X.Y.Z`, signs it,
+   attests its provenance and each architecture's SBOM, pushes, signs and attests the chart at
+   `oci://ghcr.io/fedeam/charts/kausa`, and signs the checksums; `release` creates the GitHub
+   release with the chart, both SBOMs, the signed checksums and the provenance; and `artifacthub`
+   pushes Artifact Hub's metadata once `charts/artifacthub-repo.yml` exists (until then it prints
+   a notice and passes). Watch it with `gh run watch --repo fedeam/kausa`; if the tag does not
+   match the versions, or the `artifacthub.io/images` annotation names another image or version,
+   it stops before publishing anything.
+4. **Check that the packages are public.** v0.1.0 created `ghcr.io/fedeam/kausa` already public,
    with the repository's visibility (an anonymous pull worked on 2026-10-28). If a pull without
    logging in ever fails, set it in the package's page
    (`https://github.com/users/fedeam/packages/container/package/kausa`) → Package settings →
-   Change visibility → Public.
-5. Verify what was published with the commands in the release notes (`cosign verify`, both
-   `gh attestation verify`, `cosign verify-blob`), and that the image can be pulled without
-   logging in: `docker pull ghcr.io/fedeam/kausa:X.Y.Z` from a machine logged out of GHCR.
+   Change visibility → Public. Once, after v0.6.0, do the same for the chart: from a machine logged
+   out of GHCR, `helm show chart oci://ghcr.io/fedeam/charts/kausa --version X.Y.Z`; if it is
+   refused, make
+   `https://github.com/users/fedeam/packages/container/package/charts%2Fkausa` public the same
+   way, and check that it is linked to `fedeam/kausa` (the `%2F` encoding of the nested name is a
+   hypothesis: if the link fails, open the package from the repository's Packages list).
+5. Verify what was published with the commands in the release notes: on a machine with no logins,
+   the `cosign` block and the block that pulls the chart and checks it against the signed
+   checksums; logged in with `gh auth login`, the `gh attestation verify` block. Check that the
+   image can be pulled without logging in: `docker pull ghcr.io/fedeam/kausa:X.Y.Z` from a machine
+   logged out of GHCR. Record the results in the journal.
 6. **Point the upgrade test at the new release** in a pull request of your own
    (`test(e2e): upgrade from vX.Y.Z`): set the three values of `tests/e2e/upgrade-from.txt`
    (the version, the chart's SHA-256 and the image index digest) from what step 5 verified:
@@ -438,6 +505,37 @@ GitHub release](../adr/0012-releases.md). Status as of 2026-10-28: v0.1.0 is the
 
    Until it merges, the `upgrade` jobs of the `e2e` workflow warn that a newer release exists;
    they never fail for it.
+
+## List the chart on Artifact Hub
+
+Once, with the `fedeam` GitHub account, so that Artifact Hub lists the chart from GHCR ([0023.
+Publish the chart as a signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on
+Artifact Hub, and attest a CycloneDX SBOM of an auditable binary to each
+image](../adr/0023-oci-chart-and-sbom.md)). Status as of 2026-11-03: not done;
+`charts/artifacthub-repo.yml` does not exist yet.
+
+1. Sign in at `https://artifacthub.io` with the `fedeam` GitHub account.
+2. Control Panel → Repositories → Add: kind "Helm charts", name `kausa`, display name `kausa`,
+   URL `oci://ghcr.io/fedeam/charts/kausa`, no credentials.
+3. Copy the ID from the repository's card into `charts/artifacthub-repo.yml` in a pull request
+   (the release pull request, if it is before a release). The file holds the comment and the one
+   line below, and no owners (they would publish an email); the ID is public, not a secret:
+
+   ```yaml
+   # Artifact Hub's repository metadata (docs/adr/0023-oci-chart-and-sbom.md). The release pushes it
+   # to ghcr.io/fedeam/charts/kausa:artifacthub.io. The ID is the one on the repository's card in
+   # Artifact Hub's control panel: it is public, not a secret. No owners: they would publish an email.
+   repositoryID: <the ID from Artifact Hub>
+   ```
+
+   If gitleaks flags the ID, add an allowlist entry for this path, with a comment, rather than
+   removing the ID (a hypothesis until the `ci` target scans it).
+4. The next release's `artifacthub` job pushes it to `ghcr.io/fedeam/charts/kausa:artifacthub.io`.
+   Verified publisher appears when Artifact Hub next processes the repository, which for an OCI
+   repository happens when a new version appears. "Signed" comes from the chart's cosign
+   signature.
+5. If Artifact Hub reports processing errors, they are in the control panel ("Errors" on the
+   repository's card).
 
 ## If something fails
 
@@ -458,3 +556,19 @@ GitHub release](../adr/0012-releases.md). Status as of 2026-10-28: v0.1.0 is the
   the next run.
 - **A tool bump fails at `sha256sum -c`** → a checksum does not match the downloaded archive →
   copy it again from the release, for the right architecture and asset name.
+- **The `publish` job fails after `helm push`** (a signature, an attestation or the notes) →
+  re-run the failed jobs. The chart is packaged again from a new checkout (Helm 4.3.1 writes the
+  files' times into the `.tgz`, and the manifest carries the package's time), so `X.Y.Z` moves to
+  a new digest; the old digest stays on GHCR, perhaps signed, and the notes name the new one.
+  Optionally delete the orphaned version from the package's page.
+- **`publish` says the version is already released** → the GitHub release exists, and nothing is
+  pushed or signed again. If the release is wrong, delete it by hand (and its tag only if the
+  version will not be reused), then decide.
+- **The `release` job fails** → re-run it alone: it uses the same files `publish` handed over,
+  and checks them again. If `gh release create` left a partial release, delete it first.
+- **The `artifacthub` job fails** → re-run it alone; the release is complete without it.
+- **The SBOM check of the `sbom` job fails** → syft no longer writes CycloneDX 1.6 or no longer
+  finds kausa, its crates or the Debian packages: compare with the local rehearsal of 2026-11-03
+  (journal) before touching the check.
+- **The image build fails on `.dep-v0`** → cargo-auditable or the toolchain stopped embedding the
+  crate list: read their release notes before bumping either.

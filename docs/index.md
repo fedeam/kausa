@@ -24,7 +24,8 @@ v0.4.0](journal/2026-10-30-release-v0-4-0.md)), and the same day by
 [v0.4.1](https://github.com/fedeam/kausa/releases/tag/v0.4.1), with the Slack fix and `R014`, and on
 2026-11-03 by [v0.5.0](https://github.com/fedeam/kausa/releases/tag/v0.5.0) ([2026-11-03 — Release
 v0.5.0](journal/2026-11-03-release-v0-5-0.md)), and the same day by
-[v0.5.1](https://github.com/fedeam/kausa/releases/tag/v0.5.1), which recognizes a wrong Gemini key.
+[v0.5.1](https://github.com/fedeam/kausa/releases/tag/v0.5.1), which recognizes a wrong Gemini key,
+and [v0.5.2](https://github.com/fedeam/kausa/releases/tag/v0.5.2), a security fix of redaction.
 The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
@@ -58,7 +59,8 @@ measured in kind on 2026-10-29 ([Standby and failover](research/2026-10-29-stand
 
 - **What it is:** a Rust controller on kube-rs, one static binary for linux/amd64 and
   linux/arm64, in a distroless non-root image published at `ghcr.io/fedeam/kausa` with a Helm
-  chart in `charts/kausa`, attached to each GitHub release.
+  chart in `charts/kausa`, attached to each GitHub release and, from v0.6.0, published at
+  `oci://ghcr.io/fedeam/charts/kausa`.
 - **URL:** none: kausa runs in its users' clusters.
 - **Repository:** [`fedeam/kausa`](https://github.com/fedeam/kausa) on GitHub, public since
   2026-10-27. A private copy on the maintainer's Gitea instance, synced by
@@ -117,7 +119,8 @@ checks](how-to/develop.md).
   watches](research/2026-10-29-96-watches.md); [Richer context,
   measured](research/2026-10-29-richer-context-measured.md); [Standby and
   failover](research/2026-10-29-standby-and-failover.md); [List
-  pages](research/2026-11-02-list-pages.md); [Slack and Telegram for
+  pages](research/2026-11-02-list-pages.md); [Explanation quality of six local models against
+  known causes](research/2026-11-03-explanation-quality-more-models.md); [Slack and Telegram for
   notifications](research/2026-10-28-slack-and-telegram-for-notifications.md).
 - [ARCHITECTURE.md](../ARCHITECTURE.md): the map of the code, its invariants and the path of each
   kind of change.
@@ -160,7 +163,11 @@ checks](how-to/develop.md).
   from a start burst of three, and let incidents wait for it in the queue, so that a restart does
   not refill it](adr/0021-refill-the-call-budget.md) and [0022. Pass the model's answer through
   the pattern redaction rules before it is written anywhere, and redact the query of an HTTP
-  request line](adr/0022-redact-the-answer.md).
+  request line](adr/0022-redact-the-answer.md). Accepted for v0.6: [0023. Publish the chart as a
+  signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
+  CycloneDX SBOM of an auditable binary to each image](adr/0023-oci-chart-and-sbom.md) and [0024.
+  Send one of four fixed system messages, chosen by detection, as `PROMPT_VERSION`
+  3](adr/0024-system-message-by-detection.md), shipped only if its measurement passes.
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
@@ -172,4 +179,4 @@ checks](how-to/develop.md).
   [2026-10-29 — Notifications](journal/2026-10-29-notifications.md);
   [2026-10-30 — Release v0.4.0](journal/2026-10-30-release-v0-4-0.md);
   [2026-11-02 — The good first issues](journal/2026-11-02-good-first-issues.md);
-  [2026-11-03 — Releases v0.5.0 and v0.5.1](journal/2026-11-03-release-v0-5-0.md).
+  [2026-11-03 — Releases v0.5.0 to v0.5.2](journal/2026-11-03-release-v0-5-0.md).

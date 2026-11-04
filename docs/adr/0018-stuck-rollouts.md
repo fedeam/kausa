@@ -221,3 +221,8 @@ Secrets and ConfigMaps stay out in every verb. With `rollouts: false` the rules 
   redaction rule](../how-to/add-a-rule.md), the [Security policy](../../SECURITY.md),
   `ARCHITECTURE.md`, `NOTES.txt`, the README and `CHANGELOG.md` (`Added`: `D014`, `--no-rollouts`;
   `Changed`: the grant and three watches). On acceptance, `Update` paragraphs in 0008, 0009, 0013.
+
+Update 2026-11-04: [0024](0024-system-message-by-detection.md) gives `D014` its own system
+message (`PROMPT_VERSION` 3) if its measurement passes; the request's fields are unchanged.
+`warning_events` can carry `FailedCreate` events about the Deployment's ReplicaSets, which kausa
+attributes to the Deployment.

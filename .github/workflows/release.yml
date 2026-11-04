@@ -1,15 +1,25 @@
 name: Release
 
 # A release starts with a tag vX.Y.Z on main that matches the version of Cargo.toml and of the
-# chart (docs/how-to/maintain.md, "Cut a release"; docs/adr/0012-releases.md). It publishes:
-#   - the image ghcr.io/fedeam/kausa:X.Y.Z, for linux/amd64 and linux/arm64 (each built natively),
-#     signed with cosign keyless (the workflow's OIDC identity, no key to keep) and with SLSA build
-#     provenance attested by GitHub;
-#   - a GitHub release with the notes of CHANGELOG.md, the packaged chart, SHA256SUMS, its cosign
-#     signature bundle, and the SLSA build provenance of the chart and SHA256SUMS
-#     (kausa-X.Y.Z.intoto.jsonl, the attestation bundles, one per line).
-# Only GitHub's own actions run here, pinned by full commit SHA; cosign and helm are downloaded
-# and checked against their SHA-256, like the tools of the Dockerfile.
+# chart (docs/how-to/maintain.md, "Cut a release"; docs/adr/0012-releases.md and
+# docs/adr/0023-oci-chart-and-sbom.md). It publishes:
+#   - the image ghcr.io/fedeam/kausa:X.Y.Z, for linux/amd64 and linux/arm64 (each built natively,
+#     with cargo auditable), signed with cosign keyless (the workflow's OIDC identity, no key to
+#     keep), with SLSA build provenance attested by GitHub, and a CycloneDX SBOM attested to the
+#     image of each architecture;
+#   - the chart as oci://ghcr.io/fedeam/charts/kausa, version X.Y.Z: the same bytes as the
+#     release's kausa-X.Y.Z.tgz, signed with cosign keyless and with SLSA build provenance;
+#   - a GitHub release with the notes of CHANGELOG.md, the packaged chart, both SBOMs, SHA256SUMS,
+#     its cosign signature bundle, and the SLSA build provenance of the chart and SHA256SUMS
+#     (kausa-X.Y.Z.intoto.jsonl, the attestation bundles, one per line);
+#   - once charts/artifacthub-repo.yml exists, Artifact Hub's repository metadata at
+#     ghcr.io/fedeam/charts/kausa:artifacthub.io.
+# Each job holds only what it needs: syft runs without a registry login or the OIDC token, oras
+# without the OIDC token, and only the release job, which runs no downloaded tool, can write to the
+# repository. Artifacts handed between jobs are claims: publish checks each digest against the
+# registry and takes nothing else from the sbom job but the SBOM bytes.
+# Only GitHub's own actions run here, pinned by full commit SHA; cosign, helm, syft and oras are
+# downloaded and checked against their SHA-256, like the tools of the Dockerfile.
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
@@ -23,6 +33,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/fedeam/kausa
+  CHART: ghcr.io/fedeam/charts/kausa
 
 jobs:
   image:
@@ -64,6 +75,11 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME, Cargo.toml $cargo, chart $chart, appVersion $app"
             exit 1
           fi
+          # Artifact Hub scans the image this annotation names (docs/adr/0023-oci-chart-and-sbom.md):
+          # every image: line of Chart.yaml together must be exactly this one image.
+          images=$(sed -n 's/^[ -]*image: *//p' charts/kausa/Chart.yaml)
+          if [ "$images" != "$IMAGE:$version" ]; then
+            echo "::error::artifacthub.io/images in charts/kausa/Chart.yaml names '$images', not $IMAGE:$version"; exit 1; fi
 
       - name: Build and push the image for this architecture
         env:
@@ -85,15 +101,88 @@ jobs:
           path: digest-${{ matrix.arch }}.txt
           retention-days: 1
 
-  publish:
+  # One CycloneDX SBOM per architecture, read from the pushed image. syft runs here with no registry
+  # login and no OIDC token (the image package is public). The job still has a contents: read token
+  # and the run's artifact store: publish takes only the SBOM bytes from it, and checks every digest
+  # against the registry itself.
+  sbom:
     needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      amd64: ${{ steps.sbom.outputs.amd64 }}
+      arm64: ${{ steps.sbom.outputs.arm64 }}
+    env:
+      # syft: the line of syft_<version>_checksums.txt, after verifying its cosign bundle
+      # (docs/how-to/maintain.md, "Bump the packaging pins"), https://github.com/anchore/syft/releases
+      SYFT_VERSION: v1.55.0
+      SYFT_SHA256: bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d
+      SYFT_CHECK_FOR_APP_UPDATE: 'false'
+    steps:
+      - name: Get the digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Install syft
+        run: |
+          set -eu
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o /tmp/syft.tar.gz \
+            "https://github.com/anchore/syft/releases/download/$SYFT_VERSION/syft_${SYFT_VERSION#v}_linux_amd64.tar.gz"
+          echo "$SYFT_SHA256  /tmp/syft.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/syft.tar.gz -C /tmp syft
+          sudo install -m 0755 /tmp/syft /usr/local/bin/syft
+          syft version
+
+      - name: Describe the image of each architecture
+        id: sbom
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          mkdir sbom
+          for arch in amd64 arm64; do
+            ref=$(cat "digest-$arch.txt")
+            case "$ref" in "$IMAGE@sha256:"*) ;; *) echo "::error::digest-$arch.txt holds '$ref'"; exit 1 ;; esac
+            # One platform's manifest, not an index: an SBOM describes one filesystem.
+            docker buildx imagetools inspect --raw "$ref" | jq -e 'has("layers") and (has("manifests") | not)' > /dev/null \
+              || { echo "::error::$ref is not a single-platform image manifest"; exit 1; }
+            file="sbom/kausa-$version-linux-$arch.cdx.json"
+            # CycloneDX 1.6 is pinned, so that a syft bump cannot change the format silently.
+            syft scan "registry:$ref" --platform "linux/$arch" -o "cyclonedx-json@1.6=$file"
+            # The crates come from the binary's .dep-v0 section (cargo auditable), the Debian
+            # packages from distroless's dpkg status: without either, the SBOM is wrong.
+            jq -e --arg kausa "pkg:cargo/kausa@$version" '
+              .specVersion == "1.6"
+              and any(.components[]?; .purl == $kausa)
+              and any(.components[]?; (.purl // "") | startswith("pkg:cargo/kube@"))
+              and any(.components[]?; (.purl // "") | startswith("pkg:deb/"))' "$file" > /dev/null \
+              || { echo "::error::$file lacks CycloneDX 1.6, kausa $version, kube or the Debian packages"; exit 1; }
+            echo "$arch=$(sha256sum "$file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+            ls -l "$file"
+          done
+
+      - name: Keep the SBOMs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom/
+          retention-days: 1
+
+  # Registry work and signatures. No contents: write: the release job creates the release.
+  publish:
+    needs: [image, sbom]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
       packages: write
       id-token: write
       attestations: write
+    outputs:
+      handoff: ${{ steps.handoff.outputs.sha256 }}
     env:
       # cosign: the checksums published with each release, https://github.com/sigstore/cosign/releases
       COSIGN_VERSION: v3.1.4
@@ -107,11 +196,71 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Get the digests
+      # By exact name, each into its own directory: any job of the run can upload artifacts, the
+      # sbom job included, so these files are claims, checked against the registry below.
+      - name: Get the linux/amd64 digest
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: digest-*
-          merge-multiple: true
+          name: digest-amd64
+          path: digest-amd64
+
+      - name: Get the linux/arm64 digest
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: digest-arm64
+          path: digest-arm64
+
+      - name: Get the SBOMs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom
+          path: sbom
+
+      # A published release is final: its notes name the chart's digest. Before it exists, a rerun
+      # pushes the chart again (docs/how-to/maintain.md, "If something fails").
+      - name: Check the version and the inputs
+        id: inputs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SBOM_AMD64: ${{ needs.sbom.outputs.amd64 }}
+          SBOM_ARM64: ${{ needs.sbom.outputs.arm64 }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::$GITHUB_REF_NAME is already released: nothing is pushed or signed again"
+            exit 1
+          fi
+          # The SBOMs are the bytes the sbom job described in its outputs, which travel outside the
+          # artifact store.
+          for arch in amd64 arm64; do
+            file="kausa-$version-linux-$arch.cdx.json"
+            if [ "$arch" = amd64 ]; then want=$SBOM_AMD64; else want=$SBOM_ARM64; fi
+            if [ "$(sha256sum < "sbom/$file" | cut -d' ' -f1)" != "$want" ]; then
+              echo "::error::sbom/$file is not the file the sbom job described"; exit 1
+            fi
+          done
+          for arch in amd64 arm64; do
+            file="digest-$arch/digest-$arch.txt"
+            # Exactly one line, one reference to this image by digest: nothing else can reach
+            # GITHUB_OUTPUT, the index or the notes.
+            if [ "$(grep -c '' "$file")" != 1 ] \
+              || ! grep -Eqx '^ghcr\.io/fedeam/kausa@sha256:[0-9a-f]{64}$' "$file"; then
+              echo "::error::$file is not one line ghcr.io/fedeam/kausa@sha256:<64 hex>"; exit 1
+            fi
+            # The registry decides, not the artifact: until this job, only the image job can write
+            # $IMAGE:$version-$arch (the sbom job has no packages: write).
+            docker buildx imagetools inspect --raw "$IMAGE:$version-$arch" > "/tmp/manifest-$arch.json"
+            want="$IMAGE@sha256:$(sha256sum < "/tmp/manifest-$arch.json" | cut -d' ' -f1)"
+            if [ "$(cat "$file")" != "$want" ]; then
+              echo "::error::$file does not name $IMAGE:$version-$arch, which is $want"; exit 1
+            fi
+            jq -e 'has("layers") and (has("manifests") | not)' "/tmp/manifest-$arch.json" > /dev/null \
+              || { echo "::error::$IMAGE:$version-$arch is not a single-platform image manifest"; exit 1; }
+            # Written from the registry's answer, not from the file.
+            echo "$arch=${want#"$IMAGE@"}" >> "$GITHUB_OUTPUT"
+          done
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign and helm
         run: |
@@ -128,15 +277,20 @@ jobs:
           cosign version
           helm version --short
 
+      # The index is made from the checked digests, never from the downloaded files. Its docker
+      # login also serves cosign, helm's fallback, docker buildx imagetools and the attest actions
+      # below.
       - name: Publish the multi-architecture image
         id: index
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AMD64: ${{ steps.inputs.outputs.amd64 }}
+          ARM64: ${{ steps.inputs.outputs.arm64 }}
         run: |
           set -eu
           version=${GITHUB_REF_NAME#v}
           echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx imagetools create -t "$IMAGE:$version" "$(cat digest-amd64.txt)" "$(cat digest-arm64.txt)"
+          docker buildx imagetools create -t "$IMAGE:$version" "$IMAGE@$AMD64" "$IMAGE@$ARM64"
           digest=$(docker buildx imagetools inspect "$IMAGE:$version" --format '{{json .Manifest}}' | jq -r .digest)
           case "$digest" in sha256:*) ;; *) echo "::error::no digest for $IMAGE:$version"; exit 1 ;; esac
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -155,46 +309,150 @@ jobs:
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
 
-      - name: Package the chart, sum and sign the assets
+      - name: Attest the linux/amd64 image's SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/fedeam/kausa
+          subject-digest: ${{ steps.inputs.outputs.amd64 }}
+          sbom-path: sbom/kausa-${{ steps.inputs.outputs.version }}-linux-amd64.cdx.json
+          push-to-registry: true
+          # Storage records exist only for organization-owned repositories (the action's README).
+          create-storage-record: false
+
+      - name: Attest the linux/arm64 image's SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/fedeam/kausa
+          subject-digest: ${{ steps.inputs.outputs.arm64 }}
+          sbom-path: sbom/kausa-${{ steps.inputs.outputs.version }}-linux-arm64.cdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      # helm push appends the chart's name and tags its version: oci://ghcr.io/fedeam/charts
+      # becomes ghcr.io/fedeam/charts/kausa:X.Y.Z. The registry is then asked what it holds.
+      - name: Package and push the chart
+        id: chart
         env:
-          DIGEST: ${{ steps.index.outputs.digest }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
           version=${GITHUB_REF_NAME#v}
           mkdir dist
           helm package charts/kausa --destination dist
-          (cd dist && sha256sum "kausa-$version.tgz" > SHA256SUMS)
+          tgz="dist/kausa-$version.tgz"
+          echo "$TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          out=$(helm push "$tgz" oci://ghcr.io/fedeam/charts 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
+          printf '%s\n' "$out"
+          digest=$(printf '%s\n' "$out" | sed -n 's/^Digest: //p')
+          case "$digest" in sha256:*) ;; *) echo "::error::no digest for $CHART:$version"; exit 1 ;; esac
+          docker buildx imagetools inspect --raw "$CHART:$version" > /tmp/chart-manifest.json
+          if [ "sha256:$(sha256sum < /tmp/chart-manifest.json | cut -d' ' -f1)" != "$digest" ]; then
+            echo "::error::$CHART:$version does not point to $digest"
+            exit 1
+          fi
+          jq -e --arg layer "sha256:$(sha256sum < "$tgz" | cut -d' ' -f1)" '
+            .config.mediaType == "application/vnd.cncf.helm.config.v1+json"
+            and (.layers | length) == 1
+            and .layers[0].mediaType == "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+            and .layers[0].digest == $layer' /tmp/chart-manifest.json > /dev/null \
+            || { echo "::error::the chart on GHCR is not $tgz"; cat /tmp/chart-manifest.json; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the chart
+        env:
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: cosign sign --yes "$CHART@$CHART_DIGEST"
+
+      - name: Attest the chart's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/fedeam/charts/kausa
+          subject-digest: ${{ steps.chart.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      # The notes template's placeholders are replaced with sed: tags, versions and sha256:<hex>
+      # digests contain no slash.
+      - name: Sum and sign the assets, write the notes
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+          AMD64: ${{ steps.inputs.outputs.amd64 }}
+          ARM64: ${{ steps.inputs.outputs.arm64 }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          cp "sbom/kausa-$version-linux-amd64.cdx.json" "sbom/kausa-$version-linux-arm64.cdx.json" dist/
+          (cd dist && sha256sum "kausa-$version.tgz" "kausa-$version-linux-amd64.cdx.json" \
+            "kausa-$version-linux-arm64.cdx.json" > SHA256SUMS)
           cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
           {
             awk -v h="## [$version]" 'index($0, h) == 1 { on = 1; next } on && (/^## / || /^\[/) { exit } on' CHANGELOG.md
             echo
-            echo "## Install"
-            echo
-            echo '```sh'
-            echo "helm install kausa https://github.com/fedeam/kausa/releases/download/$GITHUB_REF_NAME/kausa-$version.tgz \\"
-            echo "  -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true"
-            echo '```'
-            echo
-            echo "Image: \`$IMAGE:$version\` (\`$IMAGE@$DIGEST\`), linux/amd64 and linux/arm64."
-            echo
-            echo "## Verify"
-            echo
-            echo "With cosign v3 or later and the GitHub CLI:"
-            echo
-            echo '```sh'
-            echo "cosign verify $IMAGE@$DIGEST \\"
-            echo "  --certificate-identity https://github.com/fedeam/kausa/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME \\"
-            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
-            echo "gh attestation verify oci://$IMAGE@$DIGEST --repo fedeam/kausa"
-            echo "gh attestation verify kausa-$version.tgz --repo fedeam/kausa \\"
-            echo "  --bundle kausa-$version.intoto.jsonl"
-            echo "cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \\"
-            echo "  --certificate-identity https://github.com/fedeam/kausa/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME \\"
-            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
-            echo "sha256sum -c SHA256SUMS"
-            echo '```'
-          } > notes.md
-          cat notes.md
+            sed -e "s/@TAG@/$GITHUB_REF_NAME/g" -e "s/@VERSION@/$version/g" -e "s/@INDEX@/$DIGEST/g" \
+              -e "s/@AMD64@/$AMD64/g" -e "s/@ARM64@/$ARM64/g" -e "s/@CHART@/$CHART_DIGEST/g" <<'NOTES'
+          ## Install
+
+          ```sh
+          helm install kausa oci://ghcr.io/fedeam/charts/kausa --version @VERSION@ \
+            -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
+          ```
+
+          The same chart is attached below as `kausa-@VERSION@.tgz`, and its URL still works:
+          `helm install kausa https://github.com/fedeam/kausa/releases/download/@TAG@/kausa-@VERSION@.tgz …`.
+          A release installed from a chart URL moves to the registry with
+          `helm upgrade kausa oci://ghcr.io/fedeam/charts/kausa --version @VERSION@ -n kausa --reuse-values`.
+
+          - Image: `ghcr.io/fedeam/kausa:@VERSION@` (`ghcr.io/fedeam/kausa@@INDEX@`); linux/amd64
+            `ghcr.io/fedeam/kausa@@AMD64@`, linux/arm64 `ghcr.io/fedeam/kausa@@ARM64@`.
+          - Chart: `oci://ghcr.io/fedeam/charts/kausa`, version `@VERSION@`
+            (`ghcr.io/fedeam/charts/kausa@@CHART@`), the same bytes as `kausa-@VERSION@.tgz`.
+          - SBOMs (CycloneDX 1.6): `kausa-@VERSION@-linux-amd64.cdx.json`, `kausa-@VERSION@-linux-arm64.cdx.json`.
+
+          ## Verify
+
+          With cosign v3 or later; no login needed. Verify by digest: tags can be moved.
+
+          ```sh
+          ID=https://github.com/fedeam/kausa/.github/workflows/release.yml@refs/tags/@TAG@
+          ISSUER=https://token.actions.githubusercontent.com
+          cosign verify ghcr.io/fedeam/kausa@@INDEX@ --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          cosign verify-attestation --type https://slsa.dev/provenance/v1 ghcr.io/fedeam/kausa@@INDEX@ --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          cosign verify-attestation --type https://cyclonedx.org/bom ghcr.io/fedeam/kausa@@AMD64@ --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          cosign verify-attestation --type https://cyclonedx.org/bom ghcr.io/fedeam/kausa@@ARM64@ --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          cosign verify ghcr.io/fedeam/charts/kausa@@CHART@ --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          cosign verify-attestation --type https://slsa.dev/provenance/v1 ghcr.io/fedeam/charts/kausa@@CHART@ --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          ```
+
+          To install exactly the chart you checked, compare it with the signed checksums
+          (on macOS, `shasum -a 256` in place of `sha256sum`):
+
+          ```sh
+          curl -fsSLO https://github.com/fedeam/kausa/releases/download/@TAG@/SHA256SUMS
+          curl -fsSLO https://github.com/fedeam/kausa/releases/download/@TAG@/SHA256SUMS.sigstore.json
+          cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER"
+          helm pull oci://ghcr.io/fedeam/charts/kausa --version @VERSION@
+          sha256sum --ignore-missing -c SHA256SUMS
+          helm install kausa kausa-@VERSION@.tgz -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
+          ```
+
+          With the GitHub CLI, which needs `gh auth login`:
+
+          ```sh
+          W=fedeam/kausa/.github/workflows/release.yml
+          gh attestation verify oci://ghcr.io/fedeam/kausa@@INDEX@ --repo fedeam/kausa --signer-workflow "$W" --source-ref refs/tags/@TAG@
+          gh attestation verify oci://ghcr.io/fedeam/charts/kausa@@CHART@ --repo fedeam/kausa --signer-workflow "$W" --source-ref refs/tags/@TAG@
+          gh attestation verify oci://ghcr.io/fedeam/kausa@@AMD64@ --repo fedeam/kausa --signer-workflow "$W" --source-ref refs/tags/@TAG@ --predicate-type https://cyclonedx.org/bom
+          gh attestation verify oci://ghcr.io/fedeam/kausa@@ARM64@ --repo fedeam/kausa --signer-workflow "$W" --source-ref refs/tags/@TAG@ --predicate-type https://cyclonedx.org/bom
+          gh release download @TAG@ --repo fedeam/kausa
+          gh attestation verify kausa-@VERSION@.tgz --repo fedeam/kausa --bundle kausa-@VERSION@.intoto.jsonl --signer-workflow "$W" --source-ref refs/tags/@TAG@
+          ```
+          NOTES
+          } > dist/notes.md
+          if grep -qE '@(TAG|VERSION|INDEX|AMD64|ARM64|CHART)@' dist/notes.md; then
+            echo "::error::a placeholder is left in the notes"; exit 1
+          fi
+          cat dist/notes.md
 
       - name: Attest the chart's and the checksums' build provenance
         id: attest
@@ -213,6 +471,51 @@ jobs:
           jq -c . "$BUNDLE" > "dist/kausa-$version.intoto.jsonl"
           test -s "dist/kausa-$version.intoto.jsonl"
 
+      # The release job gets these files through artifact storage and this job's output, which
+      # travels outside it: it never publishes bytes this job did not hand over.
+      - name: Hand the release assets over
+        id: handoff
+        run: |
+          set -eu
+          export LC_ALL=C
+          ls -l dist
+          echo "sha256=$(cd dist && sha256sum -- * | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: dist/
+          retention-days: 1
+
+  # The only job that can write to the repository. It runs no downloaded tool: the runner's GitHub
+  # CLI and GitHub's own actions.
+  release:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Get the release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+
+      - name: Check the hand-off
+        env:
+          HANDOFF: ${{ needs.publish.outputs.handoff }}
+        run: |
+          set -eu
+          export LC_ALL=C
+          got=$(cd dist && sha256sum -- * | sha256sum | cut -d' ' -f1)
+          if [ "$got" != "$HANDOFF" ]; then
+            echo "::error::the release assets differ from what the publish job handed over"
+            exit 1
+          fi
+          (cd dist && sha256sum -c SHA256SUMS)
+
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -220,6 +523,48 @@ jobs:
           set -eu
           version=${GITHUB_REF_NAME#v}
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
-            --notes-file notes.md --verify-tag \
-            "dist/kausa-$version.tgz" dist/SHA256SUMS dist/SHA256SUMS.sigstore.json \
-            "dist/kausa-$version.intoto.jsonl"
+            --notes-file dist/notes.md --verify-tag \
+            "dist/kausa-$version.tgz" \
+            "dist/kausa-$version-linux-amd64.cdx.json" "dist/kausa-$version-linux-arm64.cdx.json" \
+            dist/SHA256SUMS dist/SHA256SUMS.sigstore.json "dist/kausa-$version.intoto.jsonl"
+
+  # Artifact Hub's repository metadata (docs/adr/0023-oci-chart-and-sbom.md). After the release,
+  # so that it never blocks one, and without the OIDC token: oras gets packages: write only.
+  artifacthub:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # oras: the line of oras_<version>_checksums.txt, https://github.com/oras-project/oras/releases
+      ORAS_VERSION: v1.3.6
+      ORAS_SHA256: 66fb0ad7206f3f6fa77ed5b552049d364ccf4b50b1684554f731f76302b52ca0
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Push the Artifact Hub metadata
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          if [ ! -f charts/artifacthub-repo.yml ]; then
+            echo "::notice::no charts/artifacthub-repo.yml yet (docs/how-to/maintain.md, \"List the chart on Artifact Hub\")"
+            exit 0
+          fi
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o /tmp/oras.tar.gz \
+            "https://github.com/oras-project/oras/releases/download/$ORAS_VERSION/oras_${ORAS_VERSION#v}_linux_amd64.tar.gz"
+          echo "$ORAS_SHA256  /tmp/oras.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/oras.tar.gz -C /tmp oras
+          sudo install -m 0755 /tmp/oras /usr/local/bin/oras
+          oras version
+          echo "$TOKEN" | oras login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          # Artifact Hub's documented command (docs/helm_charts_repositories.md in artifacthub/hub).
+          cd charts
+          oras push "$CHART:artifacthub.io" \
+            --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+            artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
