@@ -302,8 +302,8 @@ merge a pull request](#review-and-merge-a-pull-request).
 
 ## Bump the pinned tools
 
-Dependabot does not see cargo-deny, cargo-audit, gitleaks and helm: the `Dockerfile` pins each
-one by `ARG`, with a version and a SHA-256 checksum per architecture. Nor does it see kind, its
+Dependabot does not see cargo-deny, cargo-audit, gitleaks, helm and promtool: the `Dockerfile`
+pins each one by `ARG`, with a version and a SHA-256 checksum per architecture. Nor does it see kind, its
 node image and helm in `.github/workflows/e2e.yml`, or the distroless digest of the `runtime`
 target (its docker updates are only for the `rust` image); those are covered under
 [Bump the packaging pins](#bump-the-packaging-pins). Nothing reports their new releases,
@@ -316,10 +316,13 @@ so check them from time to time, for example with each Rust update.
    gh api 'repos/rustsec/rustsec/releases?per_page=100' \
      --jq '.[].tag_name | select(startswith("cargo-audit/"))' | head -1
    gh release view --repo gitleaks/gitleaks --json tagName --jq .tagName
+   gh release view --repo prometheus/prometheus --json tagName --jq .tagName
    ```
 
    `rustsec/rustsec` publishes releases of several crates, so its latest release is often not
-   cargo-audit's.
+   cargo-audit's. `gh release view` shows the release GitHub marks as latest, never a
+   pre-release such as Prometheus's release candidates; take promtool from the latest that is not
+   a pre-release.
 
 2. Take both checksums of each new version from the official release, as the comment above each
    tool in the `Dockerfile` says (replace `<version>`):
@@ -340,12 +343,18 @@ so check them from time to time, for example with each Rust update.
    # gitleaks: the checksums file of the release
    gh release download v<version> --repo gitleaks/gitleaks \
      --pattern 'gitleaks_*_checksums.txt' --output - | grep -E 'linux_(x64|arm64)\.tar\.gz$'
+
+   # promtool: the sha256sums.txt of the Prometheus release, whose archive holds promtool
+   gh release download v<version> --repo prometheus/prometheus \
+     --pattern sha256sums.txt --output - | grep -E 'linux-(amd64|arm64)\.tar\.gz$'
    ```
 
 3. In the `Dockerfile`, change the tool's `*_VERSION` and both `*_SHA256_AMD64` and
-   `*_SHA256_ARM64` values. Then update the versions that name the tool elsewhere:
+   `*_SHA256_ARM64` values (for promtool, `PROMETHEUS_VERSION`, `PROMETHEUS_SHA256_AMD64` and
+   `PROMETHEUS_SHA256_ARM64`). Then update the versions that name the tool elsewhere:
    [Set up a development environment and run the checks](develop.md) (the versions and the
-   `cargo install` line) and the `cargo-deny` version in the comment at the top of `deny.toml`.
+   `cargo install` line), the `cargo-deny` version in the comment at the top of `deny.toml`, and
+   for promtool the version in [Alerts](../reference/alerts.md).
 4. Build the CI image for both architectures, or let the pull request's CI do it (GitHub's
    runners are linux/amd64, Gitea's linux/arm64). On an arm64 Mac the second build is emulated
    and slow:

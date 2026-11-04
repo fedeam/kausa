@@ -112,10 +112,10 @@ probe paths and node selector, affinity and toleration keys, and through them th
 cluster that includes tenants who are not cluster administrators. The language model endpoint
 controls the answers, and also its error bodies and `Retry-After` headers: a forged `401`, quota
 code or `503` with `Retry-After: 600` pauses kausa's calls for up to 30 minutes at a time (it
-could already refuse every call), visible in the gauge `kausa_endpoint_state`, the example alert
-of [Install kausa with Helm](docs/how-to/install-with-helm.md#verify) and the `endpoint
-unavailable` log line. kausa treats both as untrusted. With `replicaCount: 2`, whoever can write
-Leases in the release namespace (the default `edit` and `admin` roles there, as the reviewer of
+could already refuse every call), visible in the gauge `kausa_endpoint_state`, the alert
+`KausaModelEndpointFailing` ([Alerts](docs/reference/alerts.md#kausamodelendpointfailing)) and
+the `endpoint unavailable` log line. kausa treats both as untrusted. With `replicaCount: 2`,
+whoever can write Leases in the release namespace (the default `edit` and `admin` roles there, as the reviewer of
 [0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md) found in kind, Kubernetes v1.36.4; not re-run since)
 decides which replica acts, and can stop the watches in every replica: by holding kausa's Lease
 under another identity, by changing its version faster than every 30 s (`LEASE_DURATION`) while
@@ -247,8 +247,9 @@ kausa must:
   [0019. Offer an optional standby replica that takes over through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md) found that the default `edit` and `admin`
   ClusterRoles grant every verb on `leases` in kind, Kubernetes v1.36.4 (reported, not re-run
   here). kausa fails closed, as scaling it to zero would (no explanation, no write, nothing sent),
-  and it shows as `sum(kausa_leader) != 1` over both Pods and as `standby` lines in both logs: the
-  alerts in [Install kausa with Helm](docs/how-to/install-with-helm.md#run-a-standby-replica).
+  and it shows as no acting replica in `kausa_leader` over both Pods and as `standby` lines in both
+  logs: the alerts `KausaNoLeader` and `KausaLeaderFlapping` in
+  [Alerts](docs/reference/alerts.md#kausa-replicas).
   The same people can already scale the Deployment to zero.
 - **A deleted Lease or `<full name>-leader` RoleBinding stops kausa until `helm upgrade`**
   (with `replicaCount: 2`): every replica stays a standby, fails closed and logs `lease error`
@@ -277,7 +278,10 @@ kausa must:
   failover](docs/research/2026-10-29-standby-and-failover.md)).
 - **The metrics port shows the budget's state.** `kausa_budget_calls_remaining` and
   `kausa_explanation_queue_length` tell any peer that `networkPolicy.metricsFrom` allows when the
-  budget is spent and how many incidents wait, with no namespace, workload or other name.
+  budget is spent and how many incidents wait, with no namespace, workload or other name. The
+  same peers read kausa's version and prompt version (`kausa_build_info`; the version is also in
+  the `started` log line), how many records and cache entries it holds and how long its model
+  calls take: counts, sizes and durations, again with no name, model or host.
 
 - **Explanations can come late after an outage.** While the breaker holds, incidents wait, and are
   explained up to one hold (30 minutes) after the endpoint is back, their logs read only then; a

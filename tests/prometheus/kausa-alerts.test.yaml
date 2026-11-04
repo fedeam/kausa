@@ -1,0 +1,465 @@
+# Unit tests of deploy/prometheus/kausa-alerts.yaml, run by `promtool test rules` in the ci target
+# of the Dockerfile. Time starts at 0 (the Unix epoch), one sample and one evaluation a minute; `_`
+# is a missing sample. Every threshold, window and `for` of the rules file is evaluated one minute
+# either side of its boundary (silent, then firing; or firing, then silent), so moving any of them
+# fails at least one group. Range selectors are left-open: `[1h]` at minute 61 holds minutes 2-61.
+rule_files:
+  - ../../deploy/prometheus/kausa-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # KausaModelEndpointFailing: the last sample with the breaker closed is at minute 4, so the
+  # `[20m]` window holds only open samples from minute 24. Instance b counts a single failed call.
+  - name: endpoint failing
+    interval: 1m
+    input_series:
+      - series: 'kausa_endpoint_state{state="closed", job="kausa", instance="a"}'
+        values: '1x4 0x60'
+      - series: 'kausa_model_calls_total{outcome="error", job="kausa", instance="a"}'
+        values: '0+1x64'
+      - series: 'kausa_endpoint_state{state="closed", job="kausa", instance="b"}'
+        values: '1x4 0x60'
+      - series: 'kausa_model_calls_total{outcome="error", job="kausa", instance="b"}'
+        values: '0x3 1x60'
+    alert_rule_test:
+      - eval_time: 23m
+        alertname: KausaModelEndpointFailing
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: KausaModelEndpointFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              state: closed
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa stopped calling its model endpoint; incidents wait or are skipped.
+              description: The breaker has not been closed for 20 minutes and a call failed in the last 45. Read kausa's "endpoint unavailable" log line, then run helm test on the release.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausamodelendpointfailing
+          - exp_labels:
+              severity: warning
+              state: closed
+              job: kausa
+              instance: b
+            exp_annotations:
+              summary: kausa stopped calling its model endpoint; incidents wait or are skipped.
+              description: The breaker has not been closed for 20 minutes and a call failed in the last 45. Read kausa's "endpoint unavailable" log line, then run helm test on the release.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausamodelendpointfailing
+
+  # KausaModelEndpointFailing: a quiet cluster stays half open after an outage. The last failed
+  # call is counted at minute 3, so the `[45m]` window still holds it at 46 and no longer at 47.
+  - name: endpoint half open and quiet
+    interval: 1m
+    input_series:
+      - series: 'kausa_endpoint_state{state="closed", job="kausa", instance="a"}'
+        values: '1x4 0x90'
+      - series: 'kausa_model_calls_total{outcome="error", job="kausa", instance="a"}'
+        values: '0 1 2 3 3x90'
+    alert_rule_test:
+      - eval_time: 46m
+        alertname: KausaModelEndpointFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              state: closed
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa stopped calling its model endpoint; incidents wait or are skipped.
+              description: The breaker has not been closed for 20 minutes and a call failed in the last 45. Read kausa's "endpoint unavailable" log line, then run helm test on the release.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausamodelendpointfailing
+      - eval_time: 47m
+        alertname: KausaModelEndpointFailing
+        exp_alerts: []
+
+  # KausaNoSuccessfulModelCall: every call fails from the start and none is ever answered. The
+  # first failure is counted at minute 1, so the `for: 10m` ends at minute 11.
+  - name: no successful call
+    interval: 1m
+    input_series:
+      - series: 'kausa_model_calls_total{outcome="error", job="kausa", instance="a"}'
+        values: '0+1x90'
+      - series: 'kausa_model_last_success_timestamp_seconds{job="kausa", instance="a"}'
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KausaNoSuccessfulModelCall
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: KausaNoSuccessfulModelCall
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: error
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa's model calls fail and none was answered in the last hour.
+              description: Read kausa's "explanation skipped", "endpoint error" and "endpoint unavailable" log lines; the cause and hint of the last two name the flag or chart value to fix.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanosuccessfulmodelcall
+
+  # KausaNoSuccessfulModelCall: the last failure is counted at minute 2, so the `[1h]` window
+  # still holds it at 60 and no longer at 61.
+  - name: calls stop failing
+    interval: 1m
+    input_series:
+      - series: 'kausa_model_calls_total{outcome="error", job="kausa", instance="a"}'
+        values: '0 1 2x90'
+      - series: 'kausa_model_last_success_timestamp_seconds{job="kausa", instance="a"}'
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: KausaNoSuccessfulModelCall
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: error
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa's model calls fail and none was answered in the last hour.
+              description: Read kausa's "explanation skipped", "endpoint error" and "endpoint unavailable" log lines; the cause and hint of the last two name the flag or chart value to fix.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanosuccessfulmodelcall
+      - eval_time: 61m
+        alertname: KausaNoSuccessfulModelCall
+        exp_alerts: []
+
+  # KausaNoSuccessfulModelCall: a chat completion at minute 10 (600 s) counts as recent until
+  # minute 70 (4200 s), then the `for: 10m` ends at minute 80.
+  - name: a recent success
+    interval: 1m
+    input_series:
+      - series: 'kausa_model_calls_total{outcome="error", job="kausa", instance="a"}'
+        values: '0+1x90'
+      - series: 'kausa_model_last_success_timestamp_seconds{job="kausa", instance="a"}'
+        values: '0x9 600x90'
+    alert_rule_test:
+      - eval_time: 79m
+        alertname: KausaNoSuccessfulModelCall
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: KausaNoSuccessfulModelCall
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: error
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa's model calls fail and none was answered in the last hour.
+              description: Read kausa's "explanation skipped", "endpoint error" and "endpoint unavailable" log lines; the cause and hint of the last two name the flag or chart value to fix.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanosuccessfulmodelcall
+
+  # KausaDailyCallBudgetSpent: the leader reaches 0 at minute 5, so the `for: 10m` ends at minute
+  # 15; a former leader at 0 does not count.
+  - name: daily budget spent
+    interval: 1m
+    input_series:
+      - series: 'kausa_budget_calls_remaining{window="day", job="kausa", instance="a"}'
+        values: '5 4 3 2 1 0x30'
+      - series: 'kausa_leader{job="kausa", instance="a"}'
+        values: '1x35'
+      - series: 'kausa_budget_calls_remaining{window="day", job="kausa", instance="b"}'
+        values: '0x35'
+      - series: 'kausa_leader{job="kausa", instance="b"}'
+        values: '0x35'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: KausaDailyCallBudgetSpent
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: KausaDailyCallBudgetSpent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              window: day
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa spent its daily call budget; new incidents wait for it.
+              description: No model call until the oldest of the last 24 hours' calls is 24 hours old. Raise budget.callsPerDay or find what fails so often.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausadailycallbudgetspent
+
+  # KausaExplanationQueueNearlyFull: a start burst drains; a steady flow holds 12 from minute 1,
+  # so the `for: 15m` ends at minute 16; 11 never fires.
+  - name: queue nearly full
+    interval: 1m
+    input_series:
+      - series: 'kausa_explanation_queue_length{job="kausa", instance="a"}'
+        values: '0 16 15 14 13 12 11 10x30'
+      - series: 'kausa_explanation_queue_length{job="kausa", instance="b"}'
+        values: '0 12x30'
+      - series: 'kausa_explanation_queue_length{job="kausa", instance="c"}'
+        values: '0 11x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KausaExplanationQueueNearlyFull
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: KausaExplanationQueueNearlyFull
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kausa
+              instance: b
+            exp_annotations:
+              summary: kausa's explanation queue has held 12 of 16 incidents for 15 minutes.
+              description: The oldest of a full queue is dropped, or skipped while the endpoint is unavailable. Check budget.callsPerHour and the endpoint alerts.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaexplanationqueuenearlyfull
+
+  # KausaExplanationsBehind: the queue holds 1 from minute 1 after the 0 kausa sets at start, so
+  # the `[45m]` window holds no 0 from minute 45; a queue that empties at minute 31 stays silent.
+  - name: explanations behind
+    interval: 1m
+    input_series:
+      - series: 'kausa_explanation_queue_length{job="kausa", instance="a"}'
+        values: '0 1x60'
+      - series: 'kausa_explanation_queue_length{job="kausa", instance="b"}'
+        values: '0 1x30 0 1x30'
+    alert_rule_test:
+      - eval_time: 44m
+        alertname: KausaExplanationsBehind
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: KausaExplanationsBehind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa's explanation queue has not emptied for 45 minutes.
+              description: The budget or the breaker holds the queue. Read kausa's "explanations waiting" log line for the reason.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaexplanationsbehind
+
+  # KausaExplanationsSkipped: one alert per reason. A series that kausa starts at 0 shows the
+  # first skip (counted at minute 11, held by the `[1h]` window until minute 69); one that
+  # appears with the skip at 1 does not, which is why kausa starts every reason at 0.
+  - name: explanations skipped
+    interval: 1m
+    input_series:
+      - series: 'kausa_explanations_skipped_total{reason="budget", job="kausa", instance="a"}'
+        values: '0x10 1x70'
+      - series: 'kausa_explanations_skipped_total{reason="invalid_answer", job="kausa", instance="a"}'
+        values: '0x80'
+      - series: 'kausa_explanations_skipped_total{reason="endpoint", job="kausa", instance="b"}'
+        values: '_x10 1x70'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: KausaExplanationsSkipped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: budget
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa skipped incidents in the last hour (reason budget).
+              description: Each skipped incident has an ExplanationSkipped Event with the reason. What to do depends on the reason.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaexplanationsskipped
+      - eval_time: 69m
+        alertname: KausaExplanationsSkipped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: budget
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa skipped incidents in the last hour (reason budget).
+              description: Each skipped incident has an ExplanationSkipped Event with the reason. What to do depends on the reason.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaexplanationsskipped
+      - eval_time: 70m
+        alertname: KausaExplanationsSkipped
+        exp_alerts: []
+
+  # KausaWatchErrors: a steady 1.35 errors a minute reads 20.25 in the `[15m]` window from minute
+  # 15, so the `for: 15m` ends at minute 30; 1.3 a minute (19.5) never fires. Not exactly 20 and
+  # 21: `increase` extrapolates to the window's edges, so 15 per-minute samples of a steady rate r
+  # read 15r, and a boundary value would rest on float rounding.
+  - name: watch errors
+    interval: 1m
+    input_series:
+      - series: 'kausa_watch_errors_total{watch="events", job="kausa", instance="a"}'
+        values: '0+1.35x60'
+      - series: 'kausa_watch_errors_total{watch="pods", job="kausa", instance="a"}'
+        values: '0+1.3x60'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: KausaWatchErrors
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: KausaWatchErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              watch: events
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa's events watch keeps failing; it may not see the cluster.
+              description: Read kausa's "pod watch error", "event watch error" or "deployment watch error" log lines; their namespace and error fields say which watch and why.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausawatcherrors
+      - eval_time: 45m
+        alertname: KausaWatchErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              watch: events
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa's events watch keeps failing; it may not see the cluster.
+              description: Read kausa's "pod watch error", "event watch error" or "deployment watch error" log lines; their namespace and error fields say which watch and why.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausawatcherrors
+
+  # KausaWatchRefused: a refusal that lasts restarts the watch every minute from minute 1 to 30,
+  # so the `for: 20m` ends at minute 21 and the `[10m]` window holds the last restart until
+  # minute 38; one restart after an upgrade never fires.
+  - name: watch refused
+    interval: 1m
+    input_series:
+      - series: 'kausa_watch_restarts_total{watch="pods", job="kausa", instance="a"}'
+        values: '0+1x30 30x30'
+      - series: 'kausa_watch_restarts_total{watch="events", job="kausa", instance="a"}'
+        values: '0 0 1x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: KausaWatchRefused
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: KausaWatchRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              watch: pods
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: The API server keeps refusing kausa's pods watch (403).
+              description: kausa sees nothing in the refused namespace. Read the "watch error" log lines with "forbidden", then restore kausa's Role or RoleBinding there (helm upgrade with the same values recreates them).
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausawatchrefused
+      - eval_time: 38m
+        alertname: KausaWatchRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              watch: pods
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: The API server keeps refusing kausa's pods watch (403).
+              description: kausa sees nothing in the refused namespace. Read the "watch error" log lines with "forbidden", then restore kausa's Role or RoleBinding there (helm upgrade with the same values recreates them).
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausawatchrefused
+      - eval_time: 39m
+        alertname: KausaWatchRefused
+        exp_alerts: []
+
+  # KausaNoLeader: the leader steps down at minute 11 and the standby never takes over, so the
+  # `for: 2m` ends at minute 13; another release keeps its leader.
+  - name: no leader
+    interval: 1m
+    input_series:
+      - series: 'kausa_leader{namespace="kausa", job="kausa/kausa", pod="kausa-a"}'
+        values: '1x10 0x20'
+      - series: 'kausa_leader{namespace="kausa", job="kausa/kausa", pod="kausa-b"}'
+        values: '0x30'
+      - series: 'kausa_leader{namespace="other", job="other/kausa", pod="kausa-c"}'
+        values: '1x30'
+      - series: 'kausa_leader{namespace="other", job="other/kausa", pod="kausa-d"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: KausaNoLeader
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: KausaNoLeader
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: kausa
+              job: kausa/kausa
+            exp_annotations:
+              summary: 0 kausa replicas act in kausa; exactly one should.
+              description: kausa explains nothing while no replica holds its Lease. Check the Lease <fullname>-leader and its RoleBinding.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanoleader
+
+  # KausaLeaderFlapping: a long-running release (its counter at 10) sees seven takeovers, counted
+  # at minutes 6 to 12. Six in the `[1h]` window stay silent (minute 11, and minute 65 once the
+  # first has left it); seven fire (minutes 12 to 64). Another release had one takeover.
+  - name: leader flapping
+    interval: 1m
+    input_series:
+      - series: 'kausa_leadership_changes_total{to="leader", namespace="kausa", job="kausa/kausa", pod="kausa-a"}'
+        values: '10x5 11+1x6 17x60'
+      - series: 'kausa_leadership_changes_total{to="leader", namespace="other", job="other/kausa", pod="kausa-c"}'
+        values: '0x5 1x70'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: KausaLeaderFlapping
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: KausaLeaderFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: kausa
+              job: kausa/kausa
+            exp_annotations:
+              summary: kausa's Lease changed hands more than 6 times in an hour in kausa.
+              description: Failures, or someone writing the Lease, move it between the replicas.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaleaderflapping
+      - eval_time: 64m
+        alertname: KausaLeaderFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: kausa
+              job: kausa/kausa
+            exp_annotations:
+              summary: kausa's Lease changed hands more than 6 times in an hour in kausa.
+              description: Failures, or someone writing the Lease, move it between the replicas.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaleaderflapping
+      - eval_time: 65m
+        alertname: KausaLeaderFlapping
+        exp_alerts: []
+
+  # KausaNotificationsFailing: one failed notification, counted at minute 2, fires at once and is
+  # held by the `[1h]` window until minute 60.
+  - name: notifications failing
+    interval: 1m
+    input_series:
+      - series: 'kausa_notifications_total{outcome="failed", job="kausa", instance="a"}'
+        values: '0 0 1x90'
+      - series: 'kausa_notifications_total{outcome="sent", job="kausa", instance="a"}'
+        values: '0+1x90'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: KausaNotificationsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: failed
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa could not post notifications to its webhook in the last hour.
+              description: A failed notification is not tried again until its incident comes back. Read kausa's "notification failed" log lines.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanotificationsfailing
+      - eval_time: 60m
+        alertname: KausaNotificationsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: failed
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa could not post notifications to its webhook in the last hour.
+              description: A failed notification is not tried again until its incident comes back. Read kausa's "notification failed" log lines.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanotificationsfailing
+      - eval_time: 61m
+        alertname: KausaNotificationsFailing
+        exp_alerts: []
