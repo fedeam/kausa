@@ -1198,6 +1198,11 @@ low confidence.";
             "Check the node: no taint blocks it",
             WITHHELD,
             WITHHELD_FIELD,
+            // The edges of two patterns: `W002`'s short flag is `-A` only, its case kept, and
+            // `W006` ends at a word that is not a namespace or a project.
+            "kubectl delete pod pod-1 -a",
+            "Remove all namespace-scoped RoleBindings that grant the role",
+            "Delete every namespaced Role named role-1",
         ];
         let table: Vec<(&str, &[&str])> = cases.iter().map(|t| (*t, &[][..])).collect();
         assert_shapes("negative", &table);
@@ -1538,6 +1543,28 @@ low confidence.";
             assert_eq!(w.steps, expected, "version {i}");
             assert_eq!(w.confidence, "low", "version {i}");
         }
+        // The same with the shape in the summary of `restored` only.
+        let mut versions = versions_with_a_restored_name();
+        for v in &mut versions {
+            v.steps[0] = "Check the image".into();
+        }
+        versions[0].summary = "job-1 delete namespace --all fixes it".into();
+        versions[1].summary = "kubectl delete namespace --all fixes it".into();
+        versions[2].summary = versions[0].summary.clone();
+        assert!(
+            shapes(&versions[0].summary).is_empty(),
+            "the placeholder summary matches"
+        );
+        let (out, ids) = withhold_all(versions.clone());
+        assert_eq!(ids, ["W001", "W002"]);
+        for (i, (w, v)) in out.iter().zip(&versions).enumerate() {
+            assert_eq!(w.summary, WITHHELD_FIELD, "version {i}");
+            assert_eq!(w.cause, v.cause, "version {i}");
+            let mut expected = vec![WITHHELD.to_owned()];
+            expected.extend(v.steps.iter().cloned());
+            assert_eq!(w.steps, expected, "version {i}");
+            assert_eq!(w.confidence, "low", "version {i}");
+        }
     }
 
     #[test]
@@ -1628,6 +1655,12 @@ low confidence.";
                     &["W001", "W002"]
                 };
                 assert_eq!(ids, expected, "{stem}, line {line}: the ids");
+                // The file names its arm and its model, ':' written as '_'.
+                let model = row["model"].as_str().expect("a model").replace(':', "_");
+                assert!(
+                    stem.split_once('-').is_some_and(|(_, m)| m == model),
+                    "{stem}, line {line}: the model of the row"
+                );
                 assert!(w.withheld(), "{stem}, line {line}: no notice");
                 assert_eq!(w.confidence, "low", "{stem}, line {line}");
                 assert_eq!(
