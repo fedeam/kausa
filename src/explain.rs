@@ -533,9 +533,11 @@ fn retried(
 /// (halved each time), then all but the first Pod and three events, then every Pod's scheduling
 /// keys and every probe's path (sent as `null`). `None` when it still does not fit.
 fn fit(gathered: &mut Gathered, settings: &Settings) -> Option<(Value, crate::redact::Redactor)> {
+    let detection = gathered.incident.key.detection;
     loop {
         let (context, redactor) = context::build(gathered);
         let body = prompt::request(
+            detection,
             &settings.model_name,
             &context,
             settings.mode,
