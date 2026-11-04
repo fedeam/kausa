@@ -36,7 +36,7 @@ Deployments ────┘                                          │
                                                            ▼
           gather context ─▶ redact ─▶ budget ─▶ model ─▶ validate ─▶ redact the answer
                                                                           │
-                                                         Event ◀─ map names back
+                             Event ◀─ withhold listed commands ◀─ map names back
 ```
 
 Only the model call leaves the cluster, and, with notifications on, the post of each new
@@ -192,6 +192,20 @@ produces the same incident, the same fingerprint and the same request bytes.
   `kausa_answer_redactions_total` and the `answer_redactions` field of the `explanation` log line
   ([On the model's answer](../reference/rules.md#on-the-models-answer)); kausa keeps no unredacted
   copy.
+- **Withheld commands.** After the names are mapped back, and before the deduplication entry, the
+  log line, the Event, the history and the notification, every version of the answer a sink gets
+  (the placeholder text, the one with real names, and the notification's) is checked against six
+  published destructive command shapes (`W001`–`W006`: deleting namespaces, nodes, CRDs or
+  everything, `--all`, `-A`, `--force`, a grace period of 0, `helm uninstall`, `rm -rf`, and the
+  prose "delete every namespace"). A name mapped back can complete a command (a Job named
+  `kubectl`), so the check runs on the text each sink gets, and a text withheld in one version is
+  withheld in all. A matching step is removed and a matching summary or cause replaced; the answer
+  then leads with kausa's fixed notice and its confidence becomes `low`. The `withheld` and
+  `model_confidence` fields of the `explanation` line and `kausa_answers_withheld_total` show it;
+  the withheld text is kept nowhere ([Withheld command
+  shapes](../reference/rules.md#withheld-command-shapes), [0025. Replace the model's text that
+  holds one of six listed destructive command shapes with a fixed notice, show the notice first,
+  and give that answer `low` confidence](../adr/0025-withhold-destructive-commands.md)).
 - **Template markers.** Chat-template markers in cluster text (`<|im_start|>`, `</s>`,
   `<start_of_turn>`, `[INST]`) get their brackets swapped for look-alikes in the user message, so
   that a server that renders the conversation as text cannot read them as turn boundaries.
@@ -301,7 +315,9 @@ produces the same incident, the same fingerprint and the same request bytes.
   `ReasonLengthLimit` in Kubernetes' `pkg/apis/core/validation/events.go`, checked on
   2026-10-23), and the API server keeps Events for one hour by default (`--event-ttl`). The note
   is the summary, `Likely cause:` and the numbered steps, cut at a UTF-8 character boundary with an
-  ellipsis when it does not fit.
+  ellipsis when it does not fit. An `Explained` Event of a withheld answer is still `Normal` and
+  `Explained`, but its note leads with kausa's notice (171 bytes, so it always fits), numbers the
+  other steps from 1 and ends `(confidence: low)`.
 - **The full explanation** goes to kausa's own log, with real names mapped back.
 - **An Explanation beside the Event**, with `--history` (off by default; since v0.3.0): the whole text, not cut to 1024 bytes and not deleted after an
   hour, in an `Explanation` object named `kausa.<fingerprint>` in the failing workload's namespace,
@@ -462,6 +478,7 @@ Summarised here, and in full in the [Security policy](../../SECURITY.md):
   endpoint and, with notifications on, the configured webhook, which gets only the fields of
   [Data sent in notifications](../reference/data-sent-in-notifications.md).
 - **Cluster text is untrusted.** Event messages, log lines and names are data inside the prompt;
-  the model has no tools, its answer is validated, and kausa never acts on it.
+  the model has no tools, its answer is validated, and kausa never acts on it. A listed
+  destructive command in the answer is withheld from every sink.
 - **Bounded everything.** Records instead of objects, capped log bytes, capped requests and
   answers, a bounded queue and cache, a call and token budget.

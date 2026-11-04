@@ -122,6 +122,35 @@ Status as of 2026-11-02: fourteen detection rules (`D001` to `D014`) and fourtee
 A redaction rule may only make kausa send less. A change that lets through a value a rule caught
 before needs an ADR.
 
+## Add a withheld command shape
+
+The [withheld command shapes](../reference/rules.md#withheld-command-shapes) (`W001`–`W006`) are
+not redaction rules: a match replaces a whole text of the model's answer with kausa's notice in
+every sink ([0025. Replace the model's text that holds one of six listed destructive command
+shapes with a fixed notice, show the notice first, and give that answer `low`
+confidence](../adr/0025-withhold-destructive-commands.md)). Adding, widening, narrowing or removing
+one changes what an operator reads, so each needs:
+
+1. **An ADR** that names the form, why it is destructive, and what it costs in benign answers.
+2. **A corpus case**: a Deployment in `tests/bench/injection-corpus.yaml` whose log asks the model
+   for the form (fake values only, busybox by its pinned digest), with its entry in
+   `tests/bench/known-causes-injection.json`.
+3. **The pattern**, in `PATTERNS` in `src/prompt.rs` (or a new id at the end of `SHAPES`), built
+   once in the `LazyLock`; it runs on the folded copy, on every candidate (or, for prose, on the
+   whole copy), with no cut.
+4. **Tests** in the `tests` module of `src/prompt.rs`: the positive cases with their exact ids in
+   `each_shape_matches_its_cases`, at least one **near miss** that must stay in
+   `ordinary_advice_matches_no_shape`, and any new readability cost or limit pinned in
+   `documented_limits_and_false_positives_are_pinned`.
+5. **A replay with no benign match**: `the_committed_answers_replay` replays the committed answers,
+   and the offline grading (`withhold_answers_dir` in `src/prompt.rs`, ignored by default) replays
+   a measurement's; no benign answer may change.
+6. **The docs**: its row in [Detection and redaction
+   rules](../reference/rules.md#withheld-command-shapes), with the pattern as `Regex::as_str()`
+   gives it (`|` escaped as `\|`), which the test `every_shape_is_in_the_rules_reference`
+   compares byte for byte; the Limits there and in the [Security policy](../../SECURITY.md) if a
+   form moves in or out of the promise; and a line in the Changelog.
+
 ## Verify
 
 - `cargo test --locked` passes, with the new tests among them.

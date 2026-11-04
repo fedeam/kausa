@@ -370,7 +370,7 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `owner lookup failed` | warn | `namespace`, `pod`, `job` or `replicaset` (the object a Pod or an event is about), `error`; until a retry works (a failed lookup is retried after 30 seconds, on the Pod's or the event's next update), the incident names the ReplicaSet or Job instead |
 | `stopped` | info | |
 | `request` | info | With `--dry-run`: `detection`, `namespace`, `owner`, `fingerprint`, `request` (the exact body that would be sent) and `redactions` (replacements per rule) |
-| `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them), `redactions` (the request's replacements per rule) and `answer_redactions` (the values replaced in the model's answer per rule, `{}` when none; [On the model's answer](rules.md#on-the-models-answer)); or, when it comes from the deduplication cache, `explanation` and `"cached": true`, with neither count. The `explanation` is the redacted answer: kausa keeps no unredacted copy |
+| `explanation` | info | `detection`, `namespace`, `owner`, `fingerprint`, `explanation` (`summary`, `cause`, `steps`, `confidence`, with the real names mapped back), `prompt_version`, `tokens_in`, `tokens_out` (as the endpoint reported them), `redactions` (the request's replacements per rule), `answer_redactions` (the values replaced in the model's answer per rule, `{}` when none; [On the model's answer](rules.md#on-the-models-answer)), `withheld` (the ids of the [withheld command shapes](rules.md#withheld-command-shapes) found in the answer, in order, `[]` when none) and `model_confidence` (the `confidence` as the model wrote it, which a withheld answer's `explanation` shows as `low`); or, when it comes from the deduplication cache, `explanation` and `"cached": true`, with neither count, `withheld` nor `model_confidence`. The `explanation` is the redacted answer, withheld text replaced by kausa's notice: kausa keeps no unredacted copy and never logs withheld text |
 | `explanation retried` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`, `detail` (the start of the endpoint's error body, at most 512 bytes on one line, or `null`), `cause` (a `transient` cause of [Causes](#causes)), `queued` and `retry_in_seconds`: the first call failed with a transient cause and the incident gets one more. With `queued` `false` the breaker is still closed, and the call is tried again after `retry_in_seconds`, 30 or the endpoint's `Retry-After` (30 to 600); with `queued` `true` the failure left the breaker open, the incident went to the back of the queue, and `retry_in_seconds` is the time left in the hold, rounded up. A call that never reached the endpoint (a failed connection) is given back to the budget |
 | `endpoint error` | warn | `detection`, `namespace`, `owner`, `fingerprint`, `reason`, `detail`, `cause`, `status` (the HTTP status, or `null`): the endpoint's error body, logged before the `explanation skipped` line it leads to, when there is one. The body is the provider's text, so it goes to the log only, not to the Event |
 | `endpoint unavailable` | warn | `cause`, `class`, `status`, `reason`, `hint`, `detail` (as in [Causes](#causes)), `failed_calls` (the failed calls since the failures began: 3 after transient ones, 1 after a configuration error, one more per failed probe), `probe_in_seconds` (the hold): the breaker opened, on the call this line describes ([The breaker](#the-breaker)). Logged at each move into open, so once per hold; no incident field |
@@ -493,6 +493,7 @@ and any other method `405`. The counters live in memory and start over when kaus
 | `kausa_requests_logged_total` | | Requests logged instead of sent (`--dry-run`) |
 | `kausa_redactions_total` | `rule` | Values replaced by redaction in the requests (help text: `Values replaced by redaction in the requests, by rule.`) |
 | `kausa_answer_redactions_total` | `rule` (the twelve ids of [On the model's answer](rules.md#on-the-models-answer), never `R002`) | Values replaced by redaction in the model's answers (help text: `Values replaced by redaction in the model's answers, by rule.`). See below what a rise means |
+| `kausa_answers_withheld_total` | | Fresh model answers in which kausa replaced text with its withheld-command notice ([Withheld command shapes](rules.md#withheld-command-shapes)); a repeat from the deduplication cache counts nothing (help text: `Model answers in which kausa replaced text with its withheld-command notice.`). See below what a rise means |
 | `kausa_events_written_total` | `reason` (`Explained`, `ExplanationSkipped`) | Events created or updated |
 | `kausa_event_write_errors_total` | | Events that could not be written |
 | `kausa_history_writes_total` | `outcome` (`created`, `updated`, `refused`, `conflict`, `error`) | Explanation objects written, by outcome |
@@ -554,6 +555,12 @@ The answer was written redacted all the same, and kausa keeps no unredacted copy
 incident it was, read the `answer_redactions` field of the `explanation` log lines, then that
 workload's logs and events. Some benign answers count too, such as `127.0.0.1` (`R004`) or a link
 to a public site outside `R013`'s allowlist (`R013`).
+
+A rise of `kausa_answers_withheld_total` means an answer held a listed destructive command: read
+the workload's logs and events for text addressed to a model, not the explanation. The `withheld`
+field of the `explanation` log line names the shapes that matched, and `model_confidence` the
+confidence the model gave before kausa set it to `low`. The answer was written with kausa's notice
+first, and the withheld text is kept nowhere.
 
 ## Leader election
 

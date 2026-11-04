@@ -436,4 +436,8 @@ The relists (`kausa_watch_relists_total`, normal after an expired resource versi
 duration histogram (no latency objective exists), the record and cache gauges (no threshold has
 been measured) and `kausa_answer_redactions_total`, whose alert waits for a measured rate ([0022. Pass the model's
 answer through the pattern redaction rules before it is written anywhere, and redact the query of
-an HTTP request line](../adr/0022-redact-the-answer.md)).
+an HTTP request line](../adr/0022-redact-the-answer.md)) and `kausa_answers_withheld_total`, whose
+alert waits for the measurement of [0025. Replace the model's text that holds one of six listed
+destructive command shapes with a fixed notice, show the notice first, and give that answer `low`
+confidence](../adr/0025-withhold-destructive-commands.md): it ships only if no benign answer is
+withheld.

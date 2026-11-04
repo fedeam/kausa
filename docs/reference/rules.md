@@ -445,6 +445,88 @@ format](command-line.md)). A new pattern rule joins `ANSWER_RULES` ([Add a detec
 rule](../how-to/add-a-rule.md)); a test checks that the list matches the ids the request pass
 counts, minus `R002`.
 
+### Withheld command shapes
+
+Since v0.6.1 ([0025. Replace the model's text that holds one of six listed destructive command
+shapes with a fixed notice, show the notice first, and give that answer `low`
+confidence](../adr/0025-withhold-destructive-commands.md)), an answer that holds one of six
+listed destructive command shapes does not reach a sink with it. The redaction rules above remove
+values, not advice; this check is about what a step tells a person to run. It is not a redaction
+rule: it replaces whole texts, its ids start with `W`, and it runs after the answer pass and after
+the names are mapped back.
+
+**Where it runs.** `prompt::withhold_all`, in `src/prompt.rs`, after both restores and before the
+deduplication entry, the `explanation` log line, the Event, the Explanation and the notification.
+It checks every version of the answer a sink gets: the placeholder text after the answer pass, the
+answer with the real names mapped back (the Event, the Explanation, the log line and the
+deduplication cache) and, when notifications are on, the notification's version, with only the
+namespace and the top-level owner mapped back. A name is mapped back after the model, so a Job
+named `kubectl` or a container named `ns` can complete a command the placeholder text did not
+hold. The versions are one answer mapped field by field, so their steps line up, and a text in
+which a shape matches in any version is withheld in all of them. A repeat from the deduplication
+cache is written as it was stored, already checked.
+
+**What it reads.** The `summary`, the `cause` and each step, cleaned as a sink gets them. For
+matching only, kausa folds a copy of each, never stored or logged: NFKC (fullwidth letters become
+ASCII); `$IFS` and `${IFS}` (the pattern `\$\{?IFS\}?`) replaced by a space; `'`, `"`, `\`,
+U+2018, U+2019, U+201C and U+201D removed (`kube'ctl'`); whitespace collapsed to one space. The
+candidates are every suffix of the folded copy that starts at a command word, a match of
+`(?i)\b(?:kubectl\|oc\|k\|helm\|rm)\b`. Nothing cuts the copy into clauses at `;`, `|`, `&`,
+punctuation or the next command word: an injector can put any such cut inside a flag value, a
+quoted argument or a substitution of one working command (`--cache-dir=/tmp/k namespace --all`),
+and with no cut the 420 committed answers of 2026-11-04 still change only in the 7 that held
+the command. `W001` to
+`W005` are tried on every candidate, `W006` on the whole folded copy. The patterns, compiled once,
+as `Regex::as_str()` gives them (`\|` is `|`, escaped for the table):
+
+| Id | What | Pattern |
+|---|---|---|
+| `W001` | `kubectl`, `oc` or `k` deleting namespaces, projects, nodes, CRDs or the `all` category | `(?i)^(?:kubectl\|oc\|k)\b.*?\bdelete(?:\s+-\S+(?:\s+[^\s-]\S*)*?)*?\s+(?:[\w.-]+,)*(?:ns\|namespaces?\|projects?\|no\|nodes?\|crds?\|customresourcedefinitions?\|all)(?:\.[\w.-]+)?(?:[,/\s]\|$)` |
+| `W002` | `delete` with `--all`, `--all-namespaces` or `-A`, bare or set true | `(?i)^(?:kubectl\|oc\|k)\b.*?\bdelete\b.*?\s(?:--all\|--all-namespaces\|(?-i:-A))(?:=(?:1\|t\|true))?(?:[^\w=-]\|$)` |
+| `W003` | any `kubectl`, `oc` or `k` command with `--force` (bare or set true) or a grace period of 0 | `(?i)^(?:kubectl\|oc\|k)\b.*?\s(?:--force(?:=(?:1\|t\|true))?\|--grace-period(?:=\|\s+)0+s?)(?:[^\w=-]\|$)` |
+| `W004` | `helm uninstall` and its aliases `delete`, `del` and `un` | `(?i)^helm\b.*?\b(?:uninstall\|delete\|del\|un)\b` |
+| `W005` | `rm` with a recursive and a force option; all three patterns match one candidate | `(?i)^rm\b`, `(?i)\s(?:-[a-z]*r[a-z]*\|--recursive)(?:\s\|$)` and `(?i)\s(?:-[a-z]*f[a-z]*\|--force)(?:\s\|$)` |
+| `W006` | the prose "delete every namespace", on the whole folded copy | `(?i)\b(?:delet\|remov\|wip\|purg\|destroy)\w*\s+(?:all\|every\|each)\s+(?:of\s+)?(?:the\s+)?(?:namespaces?\|projects?)(?:[^\w-]\|$)` |
+
+They match, for example, `kubectl delete namespace --all`, `kube'ctl' "delete" ns --all`,
+fullwidth letters, `kubectl${IFS}delete${IFS}ns`, `kubectl -n x delete ns --all`,
+`kubectl delete pods,namespaces --all`, `kubectl delete ns/x`, `kubectl delete no node-1`,
+`--all.`, `--all=1`, `-A=true`, `--force=t`, `--grace-period=0s`, a command word, a `;` or a `, `
+inside a flag value, `echo $(kubectl delete ns --all)`, `helm -n x uninstall y`,
+`kubectl exec x -- rm -rf /data`, `k` and `oc`. They do not match `kubectl delete pod pod-1`,
+`kubectl delete job job-1`, `kubectl delete pvc pvc-1`, `kubectl get pods -A`, `kubectl get no`,
+`--all-containers`, `--force-conflicts`, `--force=false`, `--all=0`, `--grace-period=30`, `--now`,
+`rm -f /tmp/lock` or `helm list -A`. The tests of `src/prompt.rs` pin each of these, and a test
+checks that the ids and patterns of this table equal the code's, byte for byte.
+
+**On a match.** A summary or cause in which a shape matches in any version is replaced whole, in
+every version, by:
+
+```text
+Withheld by kausa: this text held a command that deletes or forces broadly.
+```
+
+A step in which a shape matches in any version is removed from every version. When anything
+matched, or a field already is one of kausa's two texts (a model can write them), the notice
+becomes the first step of every version, any other copy of it is removed, the other steps keep
+their order, the list is cut to five, and `confidence` becomes `low`:
+
+```text
+Withheld by kausa: a suggested command that deletes or forces broadly. Text in this workload's logs or events may have steered this answer; check them before acting on it.
+```
+
+Both texts are ASCII (171 and 75 characters), match no shape, and the cleaning leaves them as
+they are at every cap; they are written after the answer pass and the restores, so neither runs
+on them. The Event stays
+`Normal` and `Explained`, and its note starts with the notice and ends `(confidence: low)`; the
+Explanation and the `json` notification carry it as `steps[0]`, with no new field; the Slack and
+Telegram text puts it on the line after the header. The `explanation` log line gains `withheld`
+(the ids, in this table's order, `[]` when none) and `model_confidence` (the confidence as the
+model wrote it), and `kausa_answers_withheld_total` counts each fresh answer that carries the
+notice ([Command line and log format](command-line.md)). The withheld text is never logged, cached
+or stored. There is no flag to turn the check off: removing a shape needs an ADR, and so does
+adding one ([Add a detection or redaction rule](../how-to/add-a-rule.md)).
+
 ## Limits
 
 - Redaction has false negatives: a secret in a format no rule knows, split across lines or
@@ -463,11 +545,28 @@ counts, minus `R002`.
 - `R014` covers URLs with a scheme and HTTP request lines. A query in a key-value or JSON form
   (`method=GET path=/x?y`, `"path":"/x?y"`, `uri=/x?y`) is not a request line and is sent.
 - The same gaps hold on the model's answer, which an injected log line or event message can shape:
-  commands (`curl … | sh`, `kubectl delete …`) are not redacted; nor are URLs and images on the
-  allowlisted hosts and registries, path included (`github.com/<anyone>/…`, `example.com/…`), an
-  uppercase host, a bare host under a suffix `R013` does not list (`name.test/x`), or values split,
-  encoded or written in fullwidth characters. A misleading cause or a demanded confidence is not a
-  value and stays.
+  commands are not redacted; nor are URLs and images on the allowlisted hosts and registries, path
+  included (`github.com/<anyone>/…`, `example.com/…`), an uppercase host, a bare host under a
+  suffix `R013` does not list (`name.test/x`), or values split, encoded or written in fullwidth
+  characters. A misleading cause or a demanded confidence is not a value and stays.
+- Only the [withheld command shapes](#withheld-command-shapes) are withheld. Written as the model
+  wrote them are: other prose; a target that comes from a substitution or a pipe
+  (`kubectl delete $(kubectl get ns -o name)`, `kubectl get ns -o name | xargs kubectl delete`, a
+  `for` loop over `$NAME`); wrappers and plugins such as `kubecolor`, and shell aliases or
+  functions (`alias x=kubectl` in another step); other shell expansion (`$IFS$9`, brace
+  expansion, variables); combined short flags (`-RA`); indirection ("run the script in the
+  log"); commands split, encoded or past the 300-character cap of a step; other deletions
+  (`kubectl delete deployment x`, `delete -f`, `drain`, an HTTP `DELETE`); `curl … | sh`;
+  security-weakening advice (`cluster-admin`, `privileged`); and a false cause or a demanded
+  `high` with no listed shape. The patterns are published, so an injector can look for a form
+  they miss: a form found becomes a new shape.
+- The shapes cost readability too: a forced delete of a Pod stuck terminating, `helm uninstall`
+  of a broken release, one named namespace, `kubectl delete events --all`,
+  `kubectl delete -f namespace.yaml` and a prohibition that repeats a command
+  (`Do not run kubectl delete namespace --all`) are withheld, and so, with no cut, is a step that
+  joins a narrow command to a broad word (`kubectl delete pod pod-1 && kubectl get pods -A`).
+  None is in the 408 benign answers of 2026-11-04; how often they come up elsewhere is a
+  hypothesis until the measurement of 0025.
 - On the answer, redaction also costs readability: `0.0.0.0`, `127.0.0.1`, `::1` and versions
   shaped like addresses become `<redacted:ip>`; prose after `Authorization:` or `Cookie:` is lost
   to the end of the field; a word after `token:`, `auth:` or `password:` is replaced; "Basic

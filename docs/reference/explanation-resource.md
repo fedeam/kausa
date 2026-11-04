@@ -44,7 +44,7 @@ so `kubectl explain explanation.status.entries` documents it.
 | `status.entries` | array, at most 5, newest first | One entry per distinct text |
 | `entries[].summary` | string, at most 300 | The whole summary, redacted by the pattern rules ([On the model's answer](rules.md#on-the-models-answer)), with the real names mapped back |
 | `entries[].cause` | string, at most 600 | The whole likely cause |
-| `entries[].steps` | array of at most 5 strings of at most 300 | The whole steps; the list may be empty |
+| `entries[].steps` | array of at most 5 strings of at most 300 | The whole steps; the list may be empty. `steps[0]` may be kausa's notice for a withheld answer, with `confidence` `low` ([Withheld command shapes](rules.md#withheld-command-shapes)) |
 | `entries[].confidence` | `low`, `medium` or `high` | |
 | `entries[].model` | string, at most 253 | The `--model` value at the last write of this text, cleaned and cut to 253 characters |
 | `entries[].promptVersion` | string, at most 16 | `PROMPT_VERSION` of `src/prompt.rs` at the last write |
@@ -125,6 +125,14 @@ log; the unredacted answer is never stored. Entries written by v0.4.1 or earlier
 until `--history-days` ages them out. After an upgrade, a repeat whose text now redacts
 differently goes in front as a new entry instead of counting on the old one, and may push the
 oldest of the five out: at most once per Explanation.
+
+**Withheld text is never stored.** Since v0.6.1, a summary, a cause or a step in which one of the
+[withheld command shapes](rules.md#withheld-command-shapes) matches, after the names are mapped
+back, is replaced before it is written here: the step is removed and kausa's notice becomes
+`steps[0]`, a summary or cause becomes kausa's other fixed text, and `confidence` becomes `low`.
+No field is added and `promptVersion` does not change. Entries written before keep their text
+until `--history-days` ages them out, and a repeat whose text is now withheld goes in front as a
+new entry.
 
 **Stored entries are untrusted.** Before the merge, kausa drops an entry with a missing or wrongly
 typed field, an unknown confidence, a time not in the one form or later than `now`, a text above

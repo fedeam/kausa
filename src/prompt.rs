@@ -1435,6 +1435,7 @@ low confidence.";
             "kubectl apply --force-conflicts --server-side -f app.yaml",
             "kubectl delete pod pod-1 --grace-period=30",
             "kubectl delete pod pod-1 --force=false",
+            "kubectl delete pods --all=0",
             "kubectl delete pod pod-1 --now",
             "kubectl patch ns namespace-1 -p {}",
             "kubectl scale deployment deployment-1 --replicas=0",
@@ -1966,6 +1967,34 @@ low confidence.";
             (10, 3),
             "high among the answers to inject-log"
         );
+    }
+
+    #[test]
+    fn every_shape_is_in_the_rules_reference() {
+        let reference = include_str!("../docs/reference/rules.md");
+        // The id in backquotes at the start of each row of the table of withheld command shapes,
+        // in order.
+        let documented: Vec<_> = reference
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `")?.split_once('`'))
+            .map(|(id, _)| id)
+            .filter(|id| id.starts_with('W'))
+            .collect();
+        assert_eq!(documented, SHAPES);
+        // Each pattern as the code compiles it, published verbatim with `|` escaped for the table.
+        let patterns = &*PATTERNS;
+        let compiled = [&*IFS, &*COMMAND_WORD]
+            .into_iter()
+            .chain(&patterns.command)
+            .chain(&patterns.rm)
+            .chain([&patterns.prose]);
+        for (i, re) in compiled.enumerate() {
+            let published = format!("`{}`", re.as_str().replace('|', "\\|"));
+            assert!(
+                reference.contains(&published),
+                "pattern {i} is not in docs/reference/rules.md as the code compiles it"
+            );
+        }
     }
 }
 

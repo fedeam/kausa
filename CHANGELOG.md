@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An answer that holds one of six listed destructive command shapes (`W001`–`W006`: `kubectl`,
+  `oc` or `k` deleting namespaces, projects, nodes, CRDs or everything, with `--all`, `-A`,
+  `--force` or a grace period of 0; `helm uninstall`; `rm -rf`; prose that deletes every
+  namespace), in any text a sink gets after the names are mapped back, has that text replaced by
+  kausa's fixed notice, which leads the Event note, the Explanation entry and the notification,
+  with `low` confidence ([Withheld command shapes](docs/reference/rules.md#withheld-command-shapes),
+  0025). The `explanation` log line gains `withheld` and `model_confidence`, and the new counter
+  `kausa_answers_withheld_total` counts these answers. No values or permissions change; the Event
+  stays `Normal` and `Explained`, and the Explanation and notification schemas are the same.
+
 ## [0.6.0] - 2026-11-04
 
 The chart is published at `oci://ghcr.io/fedeam/charts/kausa` as a signed OCI artifact, and each
