@@ -34,6 +34,16 @@
 # notification or an explanation log line, and that kausa_answer_redactions_total counts R004,
 # R013 and R014 and never R002.
 #
+# failing-job runs with the unknown option --e2e-withhold-marker, which kausa's usage error echoes
+# into the log tail of its D008 request, and the fake endpoint answers a request that holds
+# e2e-withhold-marker with a destructive third step
+# (docs/adr/0025-withhold-destructive-commands.md). Both check that kausa withholds it: the Event
+# note, Explanation entry and notification about failing-job lead with the notice, confidence low,
+# and keep the answer's two steps after it; no Event note, Explanation entry, notification or
+# explanation log line holds the command; each fresh explanation log line names the shapes withheld
+# (W001 and W002 for failing-job, none for the others) and the model's own confidence, a cached one
+# neither; and kausa_answers_withheld_total reads 1.
+#
 # Both read kausa's own metrics before the first restart: kausa_build_info names the appVersion of
 # charts/kausa/Chart.yaml and prompt version 3, kausa_records counts at least one Pod, the series
 # kausa_watch_relists_total{watch="pods"} is there,
@@ -244,6 +254,20 @@ echo "Job policy-job: $policy_note"
 echo "Deployment stranded: $stranded_note"
 echo "Deployment stalled: $stalled_note"
 echo "Deployment refused: $refused_note"
+# failing-job's answer carried a destructive step, which kausa withheld
+# (docs/adr/0025-withhold-destructive-commands.md): its note leads with the notice, gives the
+# confidence kausa lowered, and does not hold the command.
+case "$job_note" in
+  "Withheld by kausa:"*) ;;
+  *) fail "the note about Job failing-job does not start with the withheld notice" ;;
+esac
+case "$job_note" in
+  *"(confidence: low)"*) ;;
+  *) fail "the note about Job failing-job does not give confidence low" ;;
+esac
+case "$job_note" in
+  *"delete namespace"*) fail "the note about Job failing-job holds the withheld command" ;;
+esac
 
 # The model named namespace-1; the Event names the real namespace.
 case "$deployment_note" in *"$TARGET"*) ;; *) fail "the placeholder was not mapped back" ;; esac
@@ -612,18 +636,81 @@ k -n "$TARGET" get "$EXPLANATIONS" -o json > "$WORK/explanations.json"
 kausa_log
 # First, so that no later message can print an injected value.
 no_injected_values
+# The withheld answer (docs/adr/0025-withhold-destructive-commands.md): the destructive step of
+# failing-job's answer reached no sink (kausa's Event notes in TARGET, the Explanations' entries,
+# the webhook's bodies and kausa's explanation log lines), each of which holds something to look
+# at. Each fresh explanation line names the shapes kausa withheld and the confidence the model
+# gave: W001 and W002 and high for failing-job, whose explanation says low, none and the
+# explanation's own confidence for every other workload. A cached line has neither field. The
+# messages name the sink or the workload, never a value.
+python3 -c '
+import json, sys
+sys.path.insert(0, "tests/e2e")
+from fake_endpoint import ANSWER
+target, work = sys.argv[1:3]
+COMMAND = "delete namespace"
+
+def fail(message):
+    sys.exit("FAIL: the withheld answer: " + message)
+
+notes = [e.get("note") or "" for e in json.load(open(work + "/events.json"))["items"]
+         if e.get("reportingController") == "kausa"]
+entries = [json.dumps(entry) for item in json.load(open(work + "/explanations.json"))["items"]
+           for entry in (item.get("status") or {}).get("entries") or []]
+hooks = [line for line in open(work + "/hooks.jsonl") if line.strip()]
+lines, texts = [], []
+for line in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "explanation":
+        lines.append(entry)
+        texts.append(line)
+for sink, found in (("an Event note", notes), ("an Explanation entry", entries),
+                    ("a notification", hooks), ("an explanation log line", texts)):
+    if not found:
+        fail("no %s to look for the command in" % sink)
+    if any(COMMAND in text for text in found):
+        fail("%s holds the withheld command" % sink)
+fresh = withheld = 0
+for entry in lines:
+    owner = entry.get("owner") or {}
+    who = "%s %s" % (owner.get("kind"), owner.get("name"))
+    if entry.get("cached") is True:
+        if "withheld" in entry or "model_confidence" in entry:
+            fail("a cached explanation line about %s has withheld or model_confidence" % who)
+        continue
+    fresh += 1
+    confidence = (entry.get("explanation") or {}).get("confidence")
+    if (entry.get("namespace"), owner.get("kind"), owner.get("name")) == (
+            target, "Job", "failing-job"):
+        withheld += 1
+        expected = (["W001", "W002"], ANSWER["confidence"], "low")
+    else:
+        expected = ([], confidence, confidence)
+    if (entry.get("withheld"), entry.get("model_confidence"), confidence) != expected:
+        fail("a fresh explanation line about %s has another withheld, model_confidence or "
+             "confidence" % who)
+if not withheld:
+    fail("no fresh explanation line about Job failing-job")
+print("the withheld answer: the command in none of %d Event notes, %d Explanation entries, %d "
+      "notifications and %d explanation log lines; %d fresh lines, %d about failing-job with W001 "
+      "and W002" % (len(notes), len(entries), len(hooks), len(texts), fresh, withheld))
+' "$TARGET" "$WORK"
 # What reached the webhook: the first POST got 503, every one carried the bearer token and went to
 # the URL's path, and each body is a v1 notification with only the documented fields. Exactly one
 # answered 200 for each failing workload, with the real namespace, the rule, and the fingerprint
 # and first_seen of the incident kausa logged and explained, and the fake endpoint's answer with
-# its second step redacted. No body holds the context sent to the model, a log-tail line the model
-# requests carried, a placeholder other than R013's host-N (never mapped back, by design) or the
-# unlisted namespace, and requests.jsonl holds no notification. The started line names the format
+# its second step redacted, after the notice and with confidence low for failing-job's withheld
+# answer. No body holds the context sent to the model, a log-tail line the model requests carried,
+# a placeholder other than R013's host-N (never mapped back, by design) or the unlisted namespace,
+# and requests.jsonl holds no notification. The started line names the format
 # and the host, and kausa's log holds neither token.
 python3 -c '
 import json, re, sys
 sys.path.insert(0, "tests/e2e")
-from fake_endpoint import ANSWER, REDACTED_STEP
+from fake_endpoint import ANSWER, REDACTED_STEP, WITHHELD
 target, other, work, gateway, path, bearer, bot = sys.argv[1:8]
 
 def fail(message):
@@ -763,13 +850,21 @@ for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1
             kind, name, body["first_seen"], incident.get("first_seen")))
     if body["fingerprint"] not in explained.get((kind, name), set()):
         fail("%s %s: no Explained Event with fingerprint %s" % (kind, name, body["fingerprint"]))
-    if {k: v for k, v in body["explanation"].items() if k != "steps"} != explanation:
+    # The answer about failing-job is withheld (docs/adr/0025-withhold-destructive-commands.md):
+    # the notice first and confidence low, the destructive step gone.
+    withheld = (kind, name) == ("Job", "failing-job")
+    notice = [WITHHELD] if withheld else []
+    expected = dict(explanation, confidence="low") if withheld else explanation
+    if {k: v for k, v in body["explanation"].items() if k != "steps"} != expected:
         fail("%s %s: explanation %s" % (kind, name, json.dumps(body["explanation"])))
-    # The first step as sent, the second redacted (docs/adr/0022-redact-the-answer.md).
+    # The first step as sent, the second redacted (docs/adr/0022-redact-the-answer.md), after the
+    # notice when withheld.
     steps = body["explanation"]["steps"]
-    if (not isinstance(steps, list) or len(steps) != 2 or steps[0] != ANSWER["steps"][0]
-            or not isinstance(steps[1], str) or not re.fullmatch(REDACTED_STEP, steps[1])):
-        fail("%s %s: the steps are not the answer'"'"'s, the second one redacted" % (kind, name))
+    if (not isinstance(steps, list) or len(steps) != len(notice) + 2
+            or steps[:len(notice)] != notice or steps[len(notice)] != ANSWER["steps"][0]
+            or not isinstance(steps[-1], str) or not re.fullmatch(REDACTED_STEP, steps[-1])):
+        fail("%s %s: the steps are not the answer'"'"'s, the second one redacted%s" % (
+            kind, name, ", after the notice" if withheld else ""))
 print("notifications: %d POSTs, the first answered 503; one v1 body each for crasher, "
       "failing-job, policy-job, stranded and stalled" % len(hooks))
 ' "$TARGET" "$OTHER" "$WORK" "$gateway" "$HOOK_PATH" "$FAKE_BEARER" "$FAKE_BOT"
@@ -933,6 +1028,10 @@ done
 if echo "$metrics" | grep -E '^kausa_answer_redactions_total\{([^}]*,)?rule="R002"' >/dev/null; then
   fail "kausa_answer_redactions_total counts R002"
 fi
+# The withheld answer (docs/adr/0025-withhold-destructive-commands.md): failing-job's, counted
+# once.
+[ "$(echo "$metrics" | awk '$1 == "kausa_answers_withheld_total" { print $2 }')" = 1 ] ||
+  fail "kausa_answers_withheld_total is not 1"
 echo "$metrics" | grep -E '^kausa_history_writes_total\{outcome="created"\} [1-9]' >/dev/null ||
   fail "kausa_history_writes_total does not count the Explanations created"
 echo "$metrics" |
