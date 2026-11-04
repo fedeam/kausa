@@ -12,6 +12,11 @@ use regex::Regex;
 use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
 
+// The fuzz targets compile this file on its own (`#[path]` in `fuzz/fuzz_targets/validate.rs` and
+// `history.rs`), in a crate with no other module of kausa's, and `cargo fuzz build` sets
+// `--cfg fuzzing`. So everything here that uses another module of kausa's, the detection, is left
+// out of that build; the rest of the file must not use one.
+#[cfg(not(fuzzing))]
 use crate::detect::Detection;
 
 /// The version of the system messages and the answer schema, logged with each explanation.
@@ -108,6 +113,7 @@ const SYSTEM_ROLLOUT: &str = concat!(intro_no_pod!(), "\n\n", rollout!(), "\n\n"
 /// cluster data (event reasons for `D008` and `D011` to `D013`), so whoever can write a Job or an
 /// Event picks which of these fixed texts applies; each is a literal that ends with `rules!()`, and
 /// none carries text read from the cluster.
+#[cfg(not(fuzzing))]
 pub(crate) fn system(detection: Detection) -> &'static str {
     match detection {
         Detection::CrashLoop
@@ -159,6 +165,7 @@ pub enum OutputMode {
 }
 
 /// The body of `POST <base URL>/chat/completions`, with the system message of `detection`.
+#[cfg(not(fuzzing))]
 pub fn request(
     detection: Detection,
     model: &str,

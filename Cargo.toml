@@ -51,3 +51,6 @@ strip = true
 
 [lints.rust]
 unsafe_code = "forbid"
+# `cargo fuzz build` sets `--cfg fuzzing`; src/prompt.rs leaves out what the fuzz targets cannot
+# compile.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
