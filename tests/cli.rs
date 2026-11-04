@@ -2301,7 +2301,7 @@ fn assert_fields(line: &serde_json::Value, case: &str) {
     names.sort_unstable();
     assert_eq!(names, CHECK_FIELDS, "{case}: the fields of the line");
     assert!(line["latency_ms"].is_u64(), "{case}: {line}");
-    assert_eq!(line["prompt_version"], "2", "{case}: {line}");
+    assert_eq!(line["prompt_version"], "3", "{case}: {line}");
 }
 
 /// The steps of a line: connected, authenticated, model_found, request_accepted, answer_valid.
