@@ -35,7 +35,7 @@
 # R013 and R014 and never R002.
 #
 # Both read kausa's own metrics before the first restart: kausa_build_info names the appVersion of
-# charts/kausa/Chart.yaml and prompt version 2, kausa_records counts at least one Pod, the series
+# charts/kausa/Chart.yaml and prompt version 3, kausa_records counts at least one Pod, the series
 # kausa_watch_relists_total{watch="pods"} is there,
 # kausa_explanations_skipped_total{reason="budget"} reads 0 (counters with fixed labels start at
 # 0), the call-duration histogram's ok count equals kausa_model_calls_total{outcome="ok"} and is
@@ -101,7 +101,7 @@ set -euo pipefail
 # chart's appVersion repeats (the release checks it), and src/prompt.rs's PROMPT_VERSION.
 APP_VERSION=$(awk '$1 == "appVersion:" { gsub(/"/, "", $2); print $2 }' charts/kausa/Chart.yaml)
 [ -n "$APP_VERSION" ] || fail "no appVersion in charts/kausa/Chart.yaml"
-BUILD_LABELS="version=\"$APP_VERSION\",prompt_version=\"2\""
+BUILD_LABELS="version=\"$APP_VERSION\",prompt_version=\"3\""
 
 SCOPE=${KAUSA_E2E_SCOPE:-cluster}
 case "$SCOPE" in
@@ -913,7 +913,7 @@ if [ "$REPLICAS" = 2 ]; then
   [ "$(pod_metric "$first_standby" 'kausa_records{kind="pods"}')" = 0 ] ||
     fail "the standby's kausa_records{kind=\"pods\"} is not 0"
   [ "$(pod_metric "$first_standby" "kausa_build_info{$BUILD_LABELS}")" = 1 ] ||
-    fail "the standby has no kausa_build_info of the chart's appVersion and prompt version 2"
+    fail "the standby has no kausa_build_info of the chart's appVersion and prompt version 3"
   echo "two replicas: only the Lease holder wrote Events; the standby logged no incident," \
     "holds no record and reports its build"
 fi
@@ -943,7 +943,7 @@ echo "$metrics" |
 # call timed, and the explanations kept for repeated incidents.
 echo "$metrics" > "$WORK/metrics.txt"
 [ "$(metric_of "kausa_build_info{$BUILD_LABELS}" "$WORK/metrics.txt")" = 1 ] ||
-  fail "kausa_build_info does not name the chart's appVersion and prompt version 2"
+  fail "kausa_build_info does not name the chart's appVersion and prompt version 3"
 held=$(metric_of 'kausa_records{kind="pods"}' "$WORK/metrics.txt")
 [ "${held:-0}" -ge 1 ] || fail "kausa_records{kind=\"pods\"} is absent or 0"
 [ -n "$(metric_of 'kausa_watch_relists_total{watch="pods"}' "$WORK/metrics.txt")" ] ||

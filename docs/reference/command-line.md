@@ -246,7 +246,7 @@ that is not pulled):
 {"ts":"2026-11-02T18:18:32.166151Z","level":"info","msg":"endpoint check","answer_valid":true,
  "api_key":false,"authenticated":true,"cause":null,"class":null,"connected":true,"detail":null,
  "endpoint":"http://127.0.0.1:11434","hint":null,"json_schema":true,"latency_ms":1632,
- "model":"qwen3:0.6b","model_found":true,"prompt_version":"2","reason":null,
+ "model":"qwen3:0.6b","model_found":true,"prompt_version":"3","reason":null,
  "request_accepted":true,"result":"ok","retry_after_seconds":null,"status":200,
  "timeout_seconds":120,"tokens_in":510,"tokens_out":172}
 {"ts":"2026-11-02T18:18:36.166081Z","level":"error","msg":"endpoint check","answer_valid":null,
@@ -254,7 +254,7 @@ that is not pulled):
  "connected":true,"detail":"{\"error\":{\"message\":\"model \\\"missing-model\\\" not found, try pulling it first\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
  "endpoint":"http://127.0.0.1:11434","hint":"the model or the URL is wrong, or the model is no longer offered: check model.name (--model) and that model.endpoint is the base URL",
  "json_schema":true,"latency_ms":0,"model":"missing-model","model_found":false,
- "prompt_version":"2","reason":"the endpoint answered 404 Not Found","request_accepted":null,
+ "prompt_version":"3","reason":"the endpoint answered 404 Not Found","request_accepted":null,
  "result":"failed","retry_after_seconds":null,"status":404,"timeout_seconds":120,
  "tokens_in":null,"tokens_out":null}
 ```

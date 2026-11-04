@@ -3266,13 +3266,13 @@ done
 passed "$since" ".dockerignore: deploy/ and docs/reference/alerts.md reach the build context"
 
 # tests/e2e/run.sh asserts the new series (the kind runs of .github/workflows/e2e.yml check their
-# values): the build info of the chart's appVersion and prompt version 2, the records, the relists,
+# values): the build info of the chart's appVersion and prompt version 3, the records, the relists,
 # the call-duration count beside the calls, the dedup cache, the budget's skip series at 0; the
 # restarts of each watch from the not-Ready Pod of the refused namespace; and, with two replicas,
 # the standby's records and build info.
 since=$FAILURES
 bash -n "$RUN_SH" || fail "e2e/run.sh: bash -n fails"
-for series in 'kausa_build_info' 'prompt_version=\\?"2' 'kausa_records\\?\{kind=\\?"pods' \
+for series in 'kausa_build_info' 'prompt_version=\\?"3' 'kausa_records\\?\{kind=\\?"pods' \
   'kausa_watch_relists_total\\?\{watch=\\?"pods' \
   'kausa_model_call_duration_seconds_count\\?\{outcome=\\?"ok' \
   'kausa_model_calls_total\\?\{outcome=\\?"ok' 'kausa_dedup_cache_entries' \

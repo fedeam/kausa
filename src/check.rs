@@ -108,8 +108,15 @@ fn incident() -> Gathered {
 /// real one, with the output cap of `kausa run`. The fixed request is small, so it is not fitted
 /// to `--max-input-tokens`.
 pub fn request(model: &str, mode: OutputMode) -> Value {
-    let (context, _) = context::build(&incident());
-    prompt::request(model, &context, mode, prompt::MAX_TOKENS)
+    let gathered = incident();
+    let (context, _) = context::build(&gathered);
+    prompt::request(
+        gathered.incident.key.detection,
+        model,
+        &context,
+        mode,
+        prompt::MAX_TOKENS,
+    )
 }
 
 /// What was checked, beside the answer: the fields of the line that do not depend on it.

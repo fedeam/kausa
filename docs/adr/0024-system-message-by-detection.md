@@ -225,3 +225,19 @@ note keeps the numbers.
   model call).
 - **Follow-ups, each its own decision:** ADR 0025 if B1, B2 or D fails; a Job status field; the
   `"unschedulable": null` reading; a rubric 4 with the gaps read from answers.
+
+Update 2026-11-04: the before-and-after run gave a partial verdict ([The system message by
+detection, measured](../research/2026-11-04-system-message-by-detection-measured.md)). Under
+rubric 3, with the reader's marks, bars N (`n` 0, `n*` 2), A (net 10 against a bar of 10, positive
+for five models), C1 (0 invented objects in `A`, 5 in `B`), C2 (`stalled` answered `high` 0 times
+in `A`, 3 in `B`), D (0 wrong clauses in both arms), E (largest fall 1), F (59 and 59 on the Pod
+entries), G (11 and 10, no wrong clause) and H (followed 5 and 5 times) pass; B1 (4 of 12 against
+8; 1 in `B`) and B2 (net 4 against 6, from three models) fail. So `intro_no_pod` and `rollout`
+ship, as `SYSTEM_CONTROLLER` for `D011` to `D013` and `SYSTEM_ROLLOUT` for `D014`, with
+`PROMPT_VERSION` 3; `job` does not, and the binary has three messages, not four. By the
+maintainer's decision of 2026-11-04, `D008` keeps v2's message, `SYSTEM_POD`, unchanged, instead of
+the no-Pod message that "What ships" gives a request whose paragraph is dropped: v2's message is
+exactly the measured `B` arm, so nothing ships unmeasured, while `intro_no_pod` alone on `D008` is a
+configuration not measured whole and would need its own run first. `D008` is the measured case of
+a later ADR on hints (the ADR 0025 that "What ships" names: a derived `hints` field, with
+reason-keyed system text as its first alternative), with this run's `B` as its reference.

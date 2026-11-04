@@ -551,9 +551,11 @@ fn retried(
 /// (halved each time), then all but the first Pod and three events, then every Pod's scheduling
 /// keys and every probe's path (sent as `null`). `None` when it still does not fit.
 fn fit(gathered: &mut Gathered, settings: &Settings) -> Option<(Value, crate::redact::Redactor)> {
+    let detection = gathered.incident.key.detection;
     loop {
         let (context, redactor) = context::build(gathered);
         let body = prompt::request(
+            detection,
             &settings.model_name,
             &context,
             settings.mode,
@@ -1358,6 +1360,7 @@ mod tests {
     fn estimate(gathered: &Gathered, settings: &Settings) -> usize {
         let (context, _) = context::build(gathered);
         estimate_tokens(&prompt::request(
+            gathered.incident.key.detection,
             &settings.model_name,
             &context,
             settings.mode,
@@ -1486,6 +1489,125 @@ mod tests {
                 "{id}: sent over the cap"
             );
         }
+    }
+
+    // Acceptance tests for docs/adr/0024-system-message-by-detection.md, written before the code:
+    // `fit` passes the incident's detection to `prompt::request(detection, model, context, mode,
+    // max_tokens)`, whose system message is `prompt::system(detection)`. `D008` keeps the v2 Pod
+    // message (the ADR's Update of 2026-11-04). Values are invented.
+
+    /// A Warning event about Job `nightly-export` in `shop`.
+    fn job_event(i: usize, reason: &str, note: &str) -> EventRecord {
+        EventRecord {
+            uid: format!("job-e{i}"),
+            reason: reason.into(),
+            note: Some(note.into()),
+            regarding: Regarding {
+                api_version: "batch/v1".into(),
+                kind: "Job".into(),
+                namespace: "shop".into(),
+                name: "nightly-export".into(),
+                uid: None,
+            },
+            reporting_controller: Some("job-controller".into()),
+            first_seen: None,
+            last_seen: None,
+            count: 1,
+        }
+    }
+
+    /// A failed Job (`D008`): no Pod in the request although the Job had two, three events about
+    /// the Job, no log tail.
+    fn failed_job() -> Gathered {
+        let mut g = work().gathered;
+        let owner = OwnerRef {
+            api_version: "batch/v1".into(),
+            kind: "Job".into(),
+            name: "nightly-export".into(),
+            uid: "an-invented-job-uid".into(),
+        };
+        g.incident.key.detection = Detection::JobFailed;
+        g.incident.key.owner_kind = "Job".into();
+        g.incident.key.owner_name = "nightly-export".into();
+        g.incident.sample.key = g.incident.key.clone();
+        g.incident.owner = owner.clone();
+        g.incident.sample.owner = owner;
+        g.incident.sample.event = Some(("job-e0".into(), None));
+        g.incident.sample.regarding_kind = Some("Job".into());
+        g.incident.sample.pod = None;
+        g.incident.sample.container = None;
+        g.incident.sample.reason = "PodFailurePolicy".into();
+        g.incident.sample.exit_code = None;
+        g.incident.pods.clear();
+        g.pods.clear();
+        g.pods_total = 2;
+        g.events = vec![
+            job_event(
+                0,
+                "PodFailurePolicy",
+                "Container task for pod shop/nightly-export-x7k2p failed with exit code 42 \
+                 matching FailJob rule at index 0",
+            ),
+            job_event(
+                1,
+                "BackoffLimitExceeded",
+                "Job has reached the specified backoff limit",
+            ),
+            job_event(
+                2,
+                "BackoffLimitExceeded",
+                "Job has reached the specified backoff limit",
+            ),
+        ];
+        g.log_tail = None;
+        g
+    }
+
+    #[test]
+    fn fit_sends_the_pod_message_for_a_failed_job() {
+        let settings = settings(None, false, 30);
+        let mut gathered = failed_job();
+        let (body, _) = fit(&mut gathered, &settings).expect("a D008 request fits");
+        let system = body["messages"][0]["content"]
+            .as_str()
+            .expect("the system message");
+        assert!(
+            system == prompt::system(Detection::JobFailed),
+            "D008: the request does not carry D008's system message"
+        );
+        assert!(
+            system == prompt::system(Detection::CrashLoop),
+            "D008: the request does not carry the Pod message"
+        );
+        // The user message is the context, as before: no Pod, two counted, three events.
+        let context = sent_context(&body);
+        assert_eq!(context["detection"]["id"], "D008");
+        assert_eq!(context["pods"], json!([]));
+        assert_eq!(context["pods_total"], 2);
+        assert_eq!(context["warning_events"].as_array().map(Vec::len), Some(3));
+        assert!(context.get("log_tail").is_none(), "a log tail was sent");
+    }
+
+    #[test]
+    fn a_failed_job_with_the_longest_log_fits_the_default_cap() {
+        let settings = settings(None, false, 30);
+        assert_eq!(settings.max_input_tokens, 6000, "the default cap");
+        // A 4 KiB tail of plain words, which no redaction rule changes.
+        let line = "shard stopped because the input file is missing\n";
+        let log = line.repeat(context::MAX_LOG_BYTES / line.len() + 1);
+        let log = log[log.len() - context::MAX_LOG_BYTES..].to_owned();
+        assert_eq!(log.len(), context::MAX_LOG_BYTES);
+        let mut gathered = failed_job();
+        gathered.log_tail = Some(log.clone());
+        let (body, _) = fit(&mut gathered, &settings).expect("the longest D008 request fits");
+        assert!(
+            body["messages"][0]["content"] == prompt::system(Detection::JobFailed),
+            "D008: the request does not carry D008's system message"
+        );
+        let context = sent_context(&body);
+        let sent = context["log_tail"].as_str().expect("a log tail");
+        assert_eq!(sent.len(), context::MAX_LOG_BYTES, "the log tail was cut");
+        assert!(sent == log, "the log tail was changed");
     }
 
     // Acceptance tests for the standby replica (docs/adr/0019-high-availability.md), written before

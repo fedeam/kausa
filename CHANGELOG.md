@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The example alert on a flapping Lease, now `KausaLeaderFlapping`, fires at 7 takeovers in an
   hour (`>= 7`) instead of `> 6`, which six takeovers could cross once `increase` extrapolates.
   It and `KausaNoLeader` add up a release's Pods `by (namespace, job)`.
+- Requests about a workload controller, a claim or an autoscaler (`D011` to `D013`) and a stalled
+  rollout (`D014`) carry one of two new fixed system messages, which say that the request has no
+  Pod and, for `D014`, what its fields and events mean. The prompt version is `3`, so new
+  Explanation entries store `promptVersion` `"3"`. Requests for the other rules do not change, and
+  a failed Job (`D008`) keeps the version 2 message: the paragraph written for it failed bars B1
+  and B2 of the before-and-after measurement fixed by
+  [0024](docs/adr/0024-system-message-by-detection.md), while the other two passed theirs ([The
+  system message by detection,
+  measured](docs/research/2026-11-04-system-message-by-detection-measured.md)).
 
 ## [0.5.2] - 2026-11-03
 

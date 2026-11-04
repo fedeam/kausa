@@ -5785,7 +5785,7 @@ mod tests {
 
         let term = Term::unbounded();
         let build_info = format!(
-            "kausa_build_info{{version=\"{}\",prompt_version=\"2\"}} 1\n",
+            "kausa_build_info{{version=\"{}\",prompt_version=\"3\"}} 1\n",
             env!("CARGO_PKG_VERSION")
         );
         let notifying = |mut options: Options| {

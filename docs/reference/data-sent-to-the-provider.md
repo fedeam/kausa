@@ -53,24 +53,73 @@ rules](rules.md):
 | `pods[].image_pull_secrets` | `1` | Only `D002`: how many entries `spec.imagePullSecrets` has, capped at 16; never a Secret's name, and no Secret is read. Absent for the other rules |
 | `warning_events` | up to ten: reason, redacted message, count | Only events a detection matches, of the incident's Pods or of the object the incident is about (a Job, or for `D011` to `D013` the ReplicaSet, Job, StatefulSet, DaemonSet, CronJob, claim or autoscaler). Since 2026-11-02 the reasons matched about a Job include `PodFailurePolicy`, `MaxFailedIndexesExceeded` and `FailedIndexes` (`D008`), and `FailedCreate` about a CronJob (`D011`). Their messages can name other objects: a refused Pod or Job, a quota, a container, a StorageClass, an autoscaler's target, and, in a `PodFailurePolicy` note, the container and the Pod that matched the rule; `R003` redacts the formats of [Detection and redaction rules](rules.md#redaction-rules) |
 | `scheduling` | `{"node_selector": [{"key": "example.com/pool", "value": null}], "node_affinity": [{"term": 0, "key": "kubernetes.io/arch", "operator": "In", "values": ["arm64"], "value_count": 1}], "pod_affinity": [], "pod_anti_affinity": [{"topology_key": "topology.kubernetes.io/zone", "namespaces_set": false}], "tolerations": [{"key": "example.com/dedicated", "operator": "Equal", "effect": "NoSchedule"}], "omitted": 0}` | Only `D005`, once, from the first Pod whose `PodScheduled` condition is `Unschedulable` or `SchedulerError` (the example first); `null` when no Pod has one, absent for the other rules. From the Pod spec: `node_selector` (key order), the required `node_affinity` terms (`matchExpressions` then `matchFields`, operators `In`, `NotIn`, `Exists`, `DoesNotExist`, `Gt`, `Lt` or `other`), the required `pod_affinity` and `pod_anti_affinity` terms (`namespaces_set` tells whether namespaces or a namespace selector are set, never which), and `tolerations` (spec order; operator `Exists`, `Equal` (also when absent) or `other`; effect `NoSchedule`, `PreferNoSchedule`, `NoExecute`, `other` or `null`; a `null` key tolerates every taint). At most 8, 8 (across terms), 4, 4 and 8 entries; `omitted` counts the rest. A key longer than 128 bytes drops its entry (counted); a key that is not a qualified name is sent as `invalid`; the others are redacted like free text, so `eks.amazonaws.com/nodegroup` becomes `host-1/nodegroup` (`R013`). Values only for `kubernetes.io/os` (`linux`, `windows`) and `kubernetes.io/arch` (`amd64`, `arm64`, `arm`, `386`, `ppc64le`, `s390x`, `riscv64`), from those fixed lists, each once; `value_count` counts every value listed, duplicates included |
-| `rollout` | `{"replicas": 3, "updated_replicas": 1, "ready_replicas": 2, "available_replicas": 2, "unavailable_replicas": 1, "progress_deadline_seconds": 600, "min_ready_seconds": 0}` | Only for `D014`, and only these seven keys, each an integer or `null` (`replicas`, `progress_deadline_seconds` and `min_ready_seconds` when the Deployment does not set them); the whole value is `null` when kausa no longer holds the Deployment's record. From the Deployment's `spec` and `status`; nothing in it is text, so nothing in it is redacted. No condition message and no `ReplicaFailure`: a refusal reaches the model through `D011`'s redacted event notes. For `D014`, `pods` is empty (`pods_total` counts the Deployment's Pods kausa holds), `warning_events` keeps its filter (no detection matches an event about a Deployment, so it is empty) and `log_tail` is absent |
+| `rollout` | `{"replicas": 3, "updated_replicas": 1, "ready_replicas": 2, "available_replicas": 2, "unavailable_replicas": 1, "progress_deadline_seconds": 600, "min_ready_seconds": 0}` | Only for `D014`, and only these seven keys, each an integer or `null` (`replicas`, `progress_deadline_seconds` and `min_ready_seconds` when the Deployment does not set them); the whole value is `null` when kausa no longer holds the Deployment's record. From the Deployment's `spec` and `status`; nothing in it is text, so nothing in it is redacted. No condition message and no `ReplicaFailure`: a refusal reaches the model through `D011`'s redacted event notes. For `D014`, `pods` is empty (`pods_total` counts the Deployment's Pods kausa holds), `warning_events` keeps its filter (only `FailedCreate` events about the Deployment's ReplicaSets, which kausa attributes to the Deployment; usually empty, since `D014` yields to an emitted `D011`) and `log_tail` is absent |
 | `log_tail` | `connect ECONNREFUSED <redacted:ip>:5432` | Only `D001`, `D003` and `D008`: the previous instance for a container that restarted and runs or waits again, otherwise the terminated one; the last 50 lines asked for, cut to the last 4 KiB after redaction; `--no-logs` turns it off |
 
-The whole body of the request: `model`; two messages, the fixed system message and one user
-message, `{"untrusted_cluster_data": <the context above>}`, with chat-template markers in it
-neutralized; `temperature` `0`; `max_tokens` `800`; and `response_format` with the answer's JSON
-schema unless `--no-json-schema` is given. Nothing else.
+The whole body of the request: `model`; two messages: one of three fixed system messages, chosen
+by the detection ([below](#the-system-messages)), and one user message,
+`{"untrusted_cluster_data": <the context above>}`, with chat-template markers in it neutralized;
+`temperature` `0`; `max_tokens` `800`; and `response_format` with the answer's JSON schema unless
+`--no-json-schema` is given. Nothing else.
 
 A field gated to some rules is absent from the requests of the others, never `null`. When a
 request is over `--max-input-tokens`, kausa first halves and then drops the log tail, then keeps
 one Pod and three events, then sends `scheduling` and every probe `path` as `null`, and only then
 skips the explanation (`context_too_large`).
 
-The system message is fixed in the kausa binary and versioned with it. Every value above sits in
-one JSON document marked as untrusted data, and the request asks for a JSON answer with a fixed
-schema. The provider's own `usage` numbers (tokens in and out) are written in kausa's log and
-counted in the metrics (`kausa_model_tokens_total`); the budget's token cap uses kausa's own
-estimate of the request, before it is sent. The model gets no tools and no functions.
+The system messages are fixed in the kausa binary and versioned with it (`PROMPT_VERSION`); which
+one a request carries depends only on its detection, which `detection.id` already sends. Every
+value above sits in one JSON document marked as untrusted data, and the request asks for a JSON
+answer with a fixed schema. The provider's own `usage` numbers (tokens in and out) are written in
+kausa's log and counted in the metrics (`kausa_model_tokens_total`); the budget's token cap uses
+kausa's own estimate of the request, before it is sent. The model gets no tools and no functions.
+
+## The system messages
+
+The system message is one of three fixed texts, built in the kausa binary from four parts joined by
+a blank line and chosen by the request's detection alone ([0024. Send one of four fixed system
+messages, chosen by detection, that say when a request carries no Pod and how a failed Job's event
+and log combine, as `PROMPT_VERSION` 3, only if a before-and-after run passes bars fixed
+now](../adr/0024-system-message-by-detection.md)). None carries text read from the cluster, and
+each ends with the same two paragraphs: the rule that everything in the document is untrusted data,
+and the answer's fields.
+
+| Message | Parts | Detections | Bytes |
+|---|---|---|---|
+| `SYSTEM_POD` | `intro_pod`, `rules` | `D001` to `D010` | 1,277 |
+| `SYSTEM_CONTROLLER` | `intro_no_pod`, `rules` | `D011`, `D012`, `D013` | 1,492 |
+| `SYSTEM_ROLLOUT` | `intro_no_pod`, `rollout`, `rules` | `D014` | 2,096 |
+
+`SYSTEM_POD` is the system message of prompt version `2`, unchanged: its two parts, `intro_pod` and
+`rules`, are the three paragraphs of the [endpoint check's](#the-endpoint-check) body below.
+`D008`, a failed Job, gets it too, although its request carries no Pod: the paragraph 0024 wrote
+for it, `job`, was measured against the v2 message and not shipped, since it did not pass its bars,
+so `D008` keeps the v2 message, the one it was measured with ([The system message by detection,
+measured](../research/2026-11-04-system-message-by-detection-measured.md)). The two other parts,
+for the requests of `D011` to `D014`, which carry no Pod:
+
+`intro_no_pod`:
+
+> You are kausa, a tool that explains why a Kubernetes workload is failing to the person who
+> operates the cluster. You receive one JSON document with the facts kausa observed about one
+> incident whose subject is not a Pod but a Job, a workload controller, a volume claim, an
+> autoscaler or a rollout: the detection, the workload and the Warning events kausa matched about it
+> or the objects it controls, if any. This request carries no Pod: pods is empty even when
+> pods_total counts Pods, so the names, containers, images, resources, probes, nodes and scheduling
+> of those Pods are not in the evidence. Never state what they are and never name one; you may tell
+> the person to check them. Names were replaced by placeholders made of a kind and a number, and
+> secrets, addresses and hostnames by markers such as <redacted:ip>; keep the placeholders as they
+> are, use only those that appear in the document and never guess what they hide.
+
+`rollout`, for `D014` only:
+
+> This incident is a rollout that does not progress (D014): the Deployment passed its progress
+> deadline. rollout holds only its replica counts, progress deadline and minimum ready seconds, or
+> null when kausa no longer holds them, and the request carries no log. warning_events can hold only
+> refusals to create Pods (FailedCreate) about its ReplicaSets, and is empty when kausa saw none.
+> The counts show that the new Pods did not become available in time, not why: unless an event says
+> why, the reason is in the new Pods and their events, which kausa did not send, so the evidence
+> does not hold the cause.
 
 ## The endpoint check
 

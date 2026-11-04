@@ -149,3 +149,7 @@ versioned together (`PROMPT_VERSION` 3), chosen only by the request's detection:
 detections keep v2's, and `D008`, `D011` to `D013` and `D014` get messages that say the request
 has no Pod and what their fields mean. It ships only if its before-and-after measurement passes.
 No field, destination or redaction rule changes.
+
+Update 2026-11-04: after its measurement, [0024](0024-system-message-by-detection.md) ships three
+messages, not four: `D008` keeps the Pod message, v2's, and only `D011` to `D013` and `D014` get
+messages that say the request has no Pod.

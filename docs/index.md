@@ -120,8 +120,9 @@ checks](how-to/develop.md).
   measured](research/2026-10-29-richer-context-measured.md); [Standby and
   failover](research/2026-10-29-standby-and-failover.md); [List
   pages](research/2026-11-02-list-pages.md); [Explanation quality of six local models against
-  known causes](research/2026-11-03-explanation-quality-more-models.md); [Slack and Telegram for
-  notifications](research/2026-10-28-slack-and-telegram-for-notifications.md).
+  known causes](research/2026-11-03-explanation-quality-more-models.md); [The system message by
+  detection, measured](research/2026-11-04-system-message-by-detection-measured.md); [Slack and
+  Telegram for notifications](research/2026-10-28-slack-and-telegram-for-notifications.md).
 - [ARCHITECTURE.md](../ARCHITECTURE.md): the map of the code, its invariants and the path of each
   kind of change.
 - [Architecture](explanation/architecture.md): the planned pipeline, the model call, cost
@@ -169,7 +170,9 @@ checks](how-to/develop.md).
   signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
   CycloneDX SBOM of an auditable binary to each image](adr/0023-oci-chart-and-sbom.md) and [0024.
   Send one of four fixed system messages, chosen by detection, as `PROMPT_VERSION`
-  3](adr/0024-system-message-by-detection.md), shipped only if its measurement passes.
+  3](adr/0024-system-message-by-detection.md), measured on 2026-11-04 with a partial verdict: it
+  ships with three messages, `D008` keeping the v2 one ([The system message by detection,
+  measured](research/2026-11-04-system-message-by-detection-measured.md)).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

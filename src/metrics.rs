@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn build_info_names_this_build_in_one_sample_at_1() {
-        assert_eq!(crate::prompt::PROMPT_VERSION, "2");
+        assert_eq!(crate::prompt::PROMPT_VERSION, "3");
         let m = Metrics::default();
         // As `kausa run` sets it at start.
         m.set_gauge(
@@ -1150,7 +1150,7 @@ mod tests {
         );
         let text = m.render();
         let line = format!(
-            "kausa_build_info{{version=\"{}\",prompt_version=\"2\"}} 1\n",
+            "kausa_build_info{{version=\"{}\",prompt_version=\"3\"}} 1\n",
             env!("CARGO_PKG_VERSION")
         );
         assert!(
