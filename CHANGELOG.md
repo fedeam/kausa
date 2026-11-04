@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-03
+
+A security fix of redaction: the name of a Secret or ConfigMap that a Pod cannot mount could
+reach the request in clear. Nothing to change in values or permissions.
+
 ### Security
 
 - The name of a Secret or ConfigMap that a Pod cannot mount reached the request and kausa's log in
@@ -407,7 +412,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.5.1...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/fedeam/kausa/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/fedeam/kausa/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fedeam/kausa/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/fedeam/kausa/compare/v0.4.0...v0.4.1
