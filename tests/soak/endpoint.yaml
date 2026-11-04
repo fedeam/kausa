@@ -1,0 +1,96 @@
+# The soak's model endpoint and webhook (docs/how-to/run-the-soak.md): tests/e2e/fake_endpoint.py,
+# from the ConfigMap kausa-soak-endpoint that tests/soak/install.sh creates, in kausa-soak, under the
+# restricted Pod Security Standard. It answers every model request at once with the e2e test's fake
+# explanation, and with the status in /tmp/fail while that file exists (tests/soak/exercise.sh).
+# Its request and hook logs go to /dev/null: the redacted contexts are neither kept nor sent out of
+# the cluster. Its labels are its own: kausa's selector (app.kubernetes.io/name=kausa) never
+# matches them. python is pinned by the digest of its multi-architecture index (linux/amd64 and
+# linux/arm64 among them), checked on 2026-11-03 with
+# docker buildx imagetools inspect python:3.13-slim-trixie --format '{{json .Manifest.Digest}}'.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kausa-soak-endpoint
+  namespace: kausa-soak
+  labels:
+    app.kubernetes.io/name: kausa-soak-endpoint
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kausa-soak-endpoint
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kausa-soak-endpoint
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: endpoint
+          image: python:3.13-slim-trixie@sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1
+          command:
+            - python3
+            - -I
+            - -B
+            - /app/fake_endpoint.py
+            - --port
+            - "8080"
+            - --log
+            - /dev/null
+            - --hook-log
+            - /dev/null
+            - --fail-file
+            - /tmp/fail
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: app
+          configMap:
+            name: kausa-soak-endpoint
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kausa-soak-endpoint
+  namespace: kausa-soak
+  labels:
+    app.kubernetes.io/name: kausa-soak-endpoint
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kausa-soak-endpoint
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

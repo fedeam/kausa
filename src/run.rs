@@ -60,6 +60,7 @@ use crate::log;
 use crate::metrics::{self, Metrics};
 use crate::notify::{self, Notifier};
 use crate::owner::{Hop, OwnerLookup, top_owner};
+use crate::prompt;
 use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
 
 /// The reporting controller of the Events kausa writes, excluded from its own watch.
@@ -170,6 +171,12 @@ impl Readiness {
     fn listed(&mut self, kind: Kind, watch: &WatchKey) -> bool {
         self.listed.insert((kind, watch.clone()));
         self.listed.len() >= self.total
+    }
+
+    /// Whether `watch` of `kind` has sent `InitDone` in this term; changes nothing. An `Init` of
+    /// such a watch begins a relist.
+    fn has_listed(&self, kind: Kind, watch: &WatchKey) -> bool {
+        self.listed.contains(&(kind, watch.clone()))
     }
 }
 
@@ -817,9 +824,10 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
     /// dropped with its records, queue, retries and owner cache), the notifications waiting for
     /// the webhook are dropped and counted, and the budget and the deduplication cache are kept
     /// for the next term: the budget's windows are kept, and its credit is cut to the start burst
-    /// when the next term starts (docs/adr/0021-refill-the-call-budget.md). The queue went with
-    /// the controller, so its gauge reads 0. The breaker is kept too, and the endpoint is shown
-    /// closed while a standby (docs/adr/0020-check-the-endpoint.md).
+    /// when the next term starts (docs/adr/0021-refill-the-call-budget.md). The queue, the records
+    /// and the owner cache went with the controller, so their gauges read 0; the deduplication
+    /// cache's gauge is left as it is. The breaker is kept too, and the endpoint is shown closed
+    /// while a standby (docs/adr/0020-check-the-endpoint.md).
     fn step_down(&self, election: &Election<'_, L>, lost: Lost) -> io::Result<()> {
         self.term.close();
         let reason = match lost {
@@ -834,6 +842,7 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
             .inc("kausa_leadership_changes_total", &[("to", "standby")]);
         self.metrics.set_leading(false);
         show_endpoint(self.metrics, BreakerState::Closed);
+        show_held(self.metrics, self.options.rollouts, [0; 3], 0);
         if let Some(shared) = self.shared {
             self.metrics.set_gauge(QUEUE_GAUGE, &[], 0);
             let cleared = shared.notifications.borrow_mut().drain(..).count();
@@ -984,6 +993,12 @@ async fn lead<C: Cluster>(
             item = pods.next() => match item {
                 Some((watch, Some(Ok(event)))) => {
                     let listed = matches!(event, watcher::Event::InitDone);
+                    // A watch that listed in this term starts its list again.
+                    if matches!(event, watcher::Event::Init)
+                        && readiness.has_listed(Kind::Pods, &watch)
+                    {
+                        metrics.inc("kausa_watch_relists_total", &[("watch", "pods")]);
+                    }
                     state.on_pod(&watch, event, &lookup).await?;
                     if listed && readiness.listed(Kind::Pods, &watch) {
                         metrics.set_ready();
@@ -991,6 +1006,10 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "pods")]);
+                    if forbidden(&e) {
+                        // `Restarting` starts a new watcher after a refusal.
+                        metrics.inc("kausa_watch_restarts_total", &[("watch", "pods")]);
+                    }
                     watch_errors.log("pod watch error", Kind::Pods, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Pods, &watch, &e);
                 }
@@ -1000,6 +1019,12 @@ async fn lead<C: Cluster>(
             item = events.next() => match item {
                 Some((watch, Some(Ok(event)))) => {
                     let listed = matches!(event, watcher::Event::InitDone);
+                    // A watch that listed in this term starts its list again.
+                    if matches!(event, watcher::Event::Init)
+                        && readiness.has_listed(Kind::Events, &watch)
+                    {
+                        metrics.inc("kausa_watch_relists_total", &[("watch", "events")]);
+                    }
                     state.on_event(&watch, event, &lookup).await?;
                     if listed && readiness.listed(Kind::Events, &watch) {
                         metrics.set_ready();
@@ -1007,6 +1032,10 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "events")]);
+                    if forbidden(&e) {
+                        // `Restarting` starts a new watcher after a refusal.
+                        metrics.inc("kausa_watch_restarts_total", &[("watch", "events")]);
+                    }
                     watch_errors.log("event watch error", Kind::Events, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Events, &watch, &e);
                 }
@@ -1017,6 +1046,12 @@ async fn lead<C: Cluster>(
                 if deployments.is_some() => match item {
                 Some((watch, Some(Ok(event)))) => {
                     let listed = matches!(event, watcher::Event::InitDone);
+                    // A watch that listed in this term starts its list again.
+                    if matches!(event, watcher::Event::Init)
+                        && readiness.has_listed(Kind::Deployments, &watch)
+                    {
+                        metrics.inc("kausa_watch_relists_total", &[("watch", "deployments")]);
+                    }
                     state.on_deployment(&watch, event);
                     if listed && readiness.listed(Kind::Deployments, &watch) {
                         metrics.set_ready();
@@ -1024,6 +1059,10 @@ async fn lead<C: Cluster>(
                 }
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "deployments")]);
+                    if forbidden(&e) {
+                        // `Restarting` starts a new watcher after a refusal.
+                        metrics.inc("kausa_watch_restarts_total", &[("watch", "deployments")]);
+                    }
                     watch_errors.log("deployment watch error", Kind::Deployments, &watch, &e, Instant::now())?;
                     state.on_watch_error(Kind::Deployments, &watch, &e);
                 }
@@ -1047,6 +1086,13 @@ async fn lead<C: Cluster>(
                         enqueue(&mut queue, state.job(incident), metrics, waiting)?;
                     }
                 }
+                let records = [state.pods.len(), state.events.len(), state.deployments.len()];
+                show_held(metrics, options.rollouts, records, lookup.cached());
+                if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared)
+                    && settings.model.is_some()
+                {
+                    metrics.set_gauge(DEDUP_GAUGE, &[], shared.dedup.borrow().count() as u64);
+                }
             }
         }
     }
@@ -1055,19 +1101,102 @@ async fn lead<C: Cluster>(
 /// The gauge of the incidents waiting for an explanation (docs/adr/0021-refill-the-call-budget.md).
 const QUEUE_GAUGE: &str = "kausa_explanation_queue_length";
 
+/// The gauge of the explanations in the deduplication cache.
+const DEDUP_GAUGE: &str = "kausa_dedup_cache_entries";
+
 /// Sets the gauges a process shows from its start. Those of
 /// docs/adr/0021-refill-the-call-budget.md: the queue whenever kausa explains, the budget only with
 /// a model (a dry run has none to show). Those of docs/adr/0020-check-the-endpoint.md: the
-/// endpoint's state always (closed without one), and its last success only with a model.
+/// endpoint's state always (closed without one), and its last success only with a model. The build
+/// info always, the records and the owner cache at 0 until a term holds some, and the
+/// deduplication cache at 0 only with a model. The counters with fixed labels at 0 in each mode
+/// that can count them (`show_zero_counters`).
 fn show_start(metrics: &Metrics, options: &Options, shared: Option<&Shared<'_>>, now: Instant) {
+    show_zero_counters(metrics, options);
+    metrics.set_gauge(
+        "kausa_build_info",
+        &[
+            ("version", env!("CARGO_PKG_VERSION")),
+            ("prompt_version", prompt::PROMPT_VERSION),
+        ],
+        1,
+    );
     show_endpoint(metrics, BreakerState::Closed);
+    show_held(metrics, options.rollouts, [0; 3], 0);
     if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
         metrics.set_gauge(QUEUE_GAUGE, &[], 0);
         if settings.model.is_some() {
             show_budget(metrics, &shared.budget.borrow(), now);
             metrics.set_gauge(explain::LAST_SUCCESS_GAUGE, &[], 0);
+            metrics.set_gauge(DEDUP_GAUGE, &[], 0);
         }
     }
+}
+
+/// Adds 0 to each series of the counters with fixed labels that this mode can count, so that each
+/// shows from the start: the watch counters always (deployments only with the Deployment watch),
+/// the model calls only with a model, the skips whenever kausa explains, the notifications with a
+/// webhook and the leadership changes with the Lease. Elsewhere a counter keeps its unlabelled 0.
+fn show_zero_counters(metrics: &Metrics, options: &Options) {
+    let watches: &[&str] = if options.rollouts {
+        &["pods", "events", "deployments"]
+    } else {
+        &["pods", "events"]
+    };
+    let settings = options.explain.as_ref();
+    let counters: [(&'static str, &str, &[&str], bool); 7] = [
+        ("kausa_watch_errors_total", "watch", watches, true),
+        ("kausa_watch_relists_total", "watch", watches, true),
+        ("kausa_watch_restarts_total", "watch", watches, true),
+        (
+            "kausa_model_calls_total",
+            "outcome",
+            &["ok", "error", "invalid"],
+            settings.is_some_and(|s| s.model.is_some()),
+        ),
+        (
+            "kausa_explanations_skipped_total",
+            "reason",
+            &explain::SKIP_REASONS,
+            settings.is_some(),
+        ),
+        (
+            "kausa_notifications_total",
+            "outcome",
+            &["sent", "failed", "dropped"],
+            settings.is_some_and(|s| s.notify.is_some()),
+        ),
+        (
+            "kausa_leadership_changes_total",
+            "to",
+            &["leader", "standby"],
+            options.leader_lease.is_some(),
+        ),
+    ];
+    for (name, label, values, shown) in counters {
+        if shown {
+            for value in values {
+                metrics.add(name, &[(label, value)], 0);
+            }
+        }
+    }
+}
+
+/// Sets `kausa_records` from `records` (pods, events and deployments; deployments only with the
+/// Deployment watch, `rollouts`) and `kausa_owner_cache_entries` from `owners`: what a term holds,
+/// or 0 outside one.
+fn show_held(metrics: &Metrics, rollouts: bool, records: [usize; 3], owners: usize) {
+    let [pods, events, deployments] = records;
+    metrics.set_gauge("kausa_records", &[("kind", "pods")], pods as u64);
+    metrics.set_gauge("kausa_records", &[("kind", "events")], events as u64);
+    if rollouts {
+        metrics.set_gauge(
+            "kausa_records",
+            &[("kind", "deployments")],
+            deployments as u64,
+        );
+    }
+    metrics.set_gauge("kausa_owner_cache_entries", &[], owners as u64);
 }
 
 /// Sets `kausa_endpoint_state`: `state` at 1, the other two at 0
@@ -1677,6 +1806,10 @@ impl OwnerLookup for KubeLookup {
         cache.retain(|_, (answer, at)| fresh(answer, at));
         cache.insert(key, (answer.clone(), Instant::now()));
         answer
+    }
+
+    fn cached(&self) -> usize {
+        self.cache.borrow().len()
     }
 }
 
@@ -3419,6 +3552,10 @@ mod tests {
     /// Counts its calls; every lookup fails (the Pods of these tests have no owner).
     struct CountingLookup(Rc<Cell<usize>>);
 
+    /// What `CountingLookup` says its cache holds: a fixed size, so that a test can tell that
+    /// `kausa_owner_cache_entries` reads the term's lookup.
+    const FAKE_CACHED: usize = 5;
+
     impl OwnerLookup for CountingLookup {
         async fn controller_of(
             &self,
@@ -3428,6 +3565,10 @@ mod tests {
         ) -> Result<Option<OwnerRef>, String> {
             self.0.set(self.0.get() + 1);
             Err("no lookup in these tests".into())
+        }
+
+        fn cached(&self) -> usize {
+            FAKE_CACHED
         }
     }
 
@@ -5287,5 +5428,626 @@ mod tests {
             "the model endpoint is unavailable"
         );
         assert_eq!(HOURLY_SPENT, "the hourly call budget is spent");
+    }
+
+    // Acceptance tests for v0.6's self-observability (no ADR), written before the code. They use:
+    // - `Readiness::has_listed(&self, kind: Kind, watch: &WatchKey) -> bool`: whether `watch` of
+    //   `kind` has sent `InitDone` in this term; it changes nothing;
+    // - in `lead`, `kausa_watch_relists_total{watch}` counted on an `Init` of a watch that has
+    //   listed in this term, and `kausa_watch_restarts_total{watch}` on an error that `forbidden`
+    //   holds for, beside `kausa_watch_errors_total`;
+    // - `OwnerLookup::cached(&self) -> usize` (src/owner.rs, 0 by default; `KubeLookup` returns
+    //   the size of its cache) and `Dedup::count(&self) -> usize` (src/budget.rs);
+    // - `explain::SKIP_REASONS: [&str; 5]`;
+    // - `show_start` setting `kausa_build_info{version, prompt_version}` to 1 in every mode,
+    //   `kausa_records{kind}` (pods, events and, unless --no-rollouts, deployments) and
+    //   `kausa_owner_cache_entries` to 0, `kausa_dedup_cache_entries` to 0 with a model, and
+    //   each counter with fixed labels to 0 for each value in the modes that can count it; the
+    //   tick setting the records and the owner cache from the term, and the dedup gauge with a
+    //   model; and `step_down` setting the records and the owner cache to 0, the dedup gauge
+    //   left as it is.
+
+    const RECORDS_OF_PODS: &str = "kausa_records{kind=\"pods\"}";
+    const RECORDS_OF_EVENTS: &str = "kausa_records{kind=\"events\"}";
+    const RECORDS_OF_DEPLOYMENTS: &str = "kausa_records{kind=\"deployments\"}";
+    const OWNER_CACHE: &str = "kausa_owner_cache_entries";
+    const DEDUP_ENTRIES: &str = "kausa_dedup_cache_entries";
+
+    fn relists(metrics: &Metrics, watch: &str) -> u64 {
+        counter(
+            metrics,
+            &format!("kausa_watch_relists_total{{watch=\"{watch}\"}}"),
+        )
+    }
+
+    fn restarts(metrics: &Metrics, watch: &str) -> u64 {
+        counter(
+            metrics,
+            &format!("kausa_watch_restarts_total{{watch=\"{watch}\"}}"),
+        )
+    }
+
+    fn watch_errors(metrics: &Metrics, watch: &str) -> u64 {
+        counter(
+            metrics,
+            &format!("kausa_watch_errors_total{{watch=\"{watch}\"}}"),
+        )
+    }
+
+    #[test]
+    fn has_listed_reads_which_watches_listed_and_changes_nothing() {
+        let namespaces = ["a".to_owned(), "b".to_owned()];
+        let mut readiness = Readiness::new(&namespaces, false);
+        assert!(!readiness.has_listed(Kind::Pods, &ns("a")));
+        assert!(
+            !readiness.has_listed(Kind::Pods, &ns("a")),
+            "asking listed it"
+        );
+        assert!(!readiness.listed(Kind::Pods, &ns("a")));
+        assert!(readiness.has_listed(Kind::Pods, &ns("a")));
+        assert!(!readiness.has_listed(Kind::Pods, &ns("b")));
+        assert!(!readiness.has_listed(Kind::Events, &ns("a")));
+        assert!(!readiness.has_listed(Kind::Pods, &CLUSTER));
+        // Asking never makes kausa ready: three more watches must list.
+        for (kind, watch) in [
+            (Kind::Pods, ns("b")),
+            (Kind::Events, ns("a")),
+            (Kind::Events, ns("b")),
+        ] {
+            assert!(!readiness.has_listed(kind, &watch));
+        }
+        assert!(!readiness.listed(Kind::Pods, &ns("b")));
+        assert!(!readiness.listed(Kind::Events, &ns("a")));
+        assert!(readiness.listed(Kind::Events, &ns("b")));
+    }
+
+    /// The items of one kind's watches, each tagged with its watch; then they wait.
+    type Script<K> = Vec<(WatchKey, Result<watcher::Event<K>, watcher::Error>)>;
+
+    /// Watches that send scripted items and then wait, for one term. Counts the items taken.
+    struct ScriptedCluster {
+        pods: RefCell<Script<Pod>>,
+        events: RefCell<Script<Event>>,
+        deployments: RefCell<Script<Deployment>>,
+        yielded: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedCluster {
+        fn new(pods: Script<Pod>, events: Script<Event>, deployments: Script<Deployment>) -> Self {
+            Self {
+                pods: RefCell::new(pods),
+                events: RefCell::new(events),
+                deployments: RefCell::new(deployments),
+                yielded: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn items(&self) -> usize {
+            self.pods.borrow().len() + self.events.borrow().len() + self.deployments.borrow().len()
+        }
+    }
+
+    fn script_watch<K: Send + 'static>(items: Script<K>, yielded: &Arc<AtomicUsize>) -> Watches<K> {
+        let yielded = Arc::clone(yielded);
+        let items = stream::iter(items).map(move |(watch, item)| {
+            yielded.fetch_add(1, Ordering::SeqCst);
+            (watch, Some(item))
+        });
+        stream::select_all([items.chain(stream::pending()).boxed()])
+    }
+
+    impl Cluster for ScriptedCluster {
+        type Lookup = NoLookup;
+
+        fn watch(&self, _namespaces: &[String], rollouts: bool) -> Watched {
+            Watched {
+                pods: script_watch(self.pods.take(), &self.yielded),
+                events: script_watch(self.events.take(), &self.yielded),
+                deployments: rollouts.then(|| script_watch(self.deployments.take(), &self.yielded)),
+            }
+        }
+
+        fn lookup(&self) -> NoLookup {
+            NoLookup
+        }
+
+        fn explain<'a>(
+            &'a self,
+            _job: Work,
+            _settings: &'a Settings,
+            _shared: &'a Shared<'_>,
+        ) -> Explaining<'a> {
+            unreachable!("these tests explain nothing")
+        }
+    }
+
+    /// The scripts one after the other.
+    fn chain<K>(scripts: Vec<Script<K>>) -> Script<K> {
+        scripts.into_iter().flatten().collect()
+    }
+
+    /// A list of `objects` by `watch`: `Init`, one `InitApply` each, `InitDone`.
+    fn list<K>(watch: &WatchKey, objects: Vec<K>) -> Script<K> {
+        std::iter::once(watcher::Event::Init)
+            .chain(objects.into_iter().map(watcher::Event::InitApply))
+            .chain(std::iter::once(watcher::Event::InitDone))
+            .map(|event| (watch.clone(), Ok(event)))
+            .collect()
+    }
+
+    /// Options that only watch: no explanation, no Lease.
+    fn watching(namespaces: &[&str], rollouts: bool) -> Options {
+        let mut options = options(false, 30);
+        options.explain = None;
+        options.namespaces = namespaces.iter().map(|n| (*n).to_owned()).collect();
+        options.rollouts = rollouts;
+        options
+    }
+
+    /// Runs one term of the controller over `cluster` until it has taken every scripted item,
+    /// and a few ticks more; fails if the term ends.
+    fn lead_through(options: &Options, cluster: &ScriptedCluster, metrics: &Metrics) {
+        let total = cluster.items();
+        runtime().block_on(async {
+            tokio::select! {
+                result = lead(options, cluster, None, metrics, TEST_TICK) => {
+                    let Err(error) = result;
+                    match error {
+                        RunError::Failure(error) => panic!("the term ended: {error}"),
+                        RunError::Output(error) => panic!("the log failed: {error}"),
+                    }
+                }
+                taken = async {
+                    let taken = until(WAIT, || {
+                        cluster.yielded.load(Ordering::SeqCst) >= total
+                    })
+                    .await;
+                    tokio::time::sleep(TEST_TICK * 3).await;
+                    taken
+                } => assert!(taken, "the scripted items were not taken"),
+            }
+        });
+    }
+
+    #[test]
+    fn a_list_after_the_first_of_its_watch_in_a_term_counts_as_a_relist() {
+        let p1 = || vec![pod("shop", "p1")];
+        let error = || {
+            (
+                CLUSTER,
+                Err::<watcher::Event<Pod>, _>(watcher::Error::InitialListFailed(api_error(500))),
+            )
+        };
+        // The Pod watches: the namespaces, the script and the relists expected.
+        let cases: Vec<(&str, Vec<&str>, Script<Pod>, u64)> = vec![
+            ("one list", vec![], list(&CLUSTER, p1()), 0),
+            (
+                "a second list",
+                vec![],
+                chain(vec![list(&CLUSTER, p1()), list(&CLUSTER, p1())]),
+                1,
+            ),
+            (
+                "three lists",
+                vec![],
+                chain(vec![
+                    list(&CLUSTER, p1()),
+                    list(&CLUSTER, vec![]),
+                    list(&CLUSTER, p1()),
+                ]),
+                2,
+            ),
+            (
+                "the first list of each namespace",
+                vec!["a", "b"],
+                chain(vec![list(&ns("a"), vec![]), list(&ns("b"), vec![])]),
+                0,
+            ),
+            (
+                "a second list of one namespace",
+                vec!["a", "b"],
+                chain(vec![
+                    list(&ns("a"), vec![]),
+                    list(&ns("b"), vec![]),
+                    list(&ns("a"), vec![]),
+                ]),
+                1,
+            ),
+            (
+                "a first list that failed before its end",
+                vec![],
+                chain(vec![
+                    vec![(CLUSTER, Ok(watcher::Event::Init)), error()],
+                    list(&CLUSTER, p1()),
+                ]),
+                0,
+            ),
+        ];
+        for (case, namespaces, pods, expected) in cases {
+            let options = watching(&namespaces, true);
+            let watches = |n: &[&str]| -> Vec<WatchKey> {
+                if n.is_empty() {
+                    vec![CLUSTER]
+                } else {
+                    n.iter().map(|n| ns(n)).collect()
+                }
+            };
+            let events = watches(&namespaces)
+                .iter()
+                .flat_map(|w| list(w, Vec::<Event>::new()))
+                .collect();
+            let deployments = watches(&namespaces)
+                .iter()
+                .flat_map(|w| list(w, Vec::<Deployment>::new()))
+                .collect();
+            let cluster = ScriptedCluster::new(pods, events, deployments);
+            let metrics = Metrics::default();
+            lead_through(&options, &cluster, &metrics);
+            assert_eq!(relists(&metrics, "pods"), expected, "{case}");
+            assert_eq!(relists(&metrics, "events"), 0, "{case}");
+            assert_eq!(relists(&metrics, "deployments"), 0, "{case}");
+            assert!(metrics.is_ready(), "{case}: every watch listed");
+        }
+        // The event and Deployment watches count theirs under their own label.
+        let cluster = ScriptedCluster::new(
+            list(&CLUSTER, Vec::<Pod>::new()),
+            chain(vec![
+                list(&CLUSTER, Vec::<Event>::new()),
+                list(&CLUSTER, vec![]),
+            ]),
+            chain(vec![
+                list(&CLUSTER, Vec::<Deployment>::new()),
+                list(&CLUSTER, vec![]),
+                list(&CLUSTER, vec![]),
+            ]),
+        );
+        let metrics = Metrics::default();
+        lead_through(&watching(&[], true), &cluster, &metrics);
+        assert_eq!(relists(&metrics, "pods"), 0);
+        assert_eq!(relists(&metrics, "events"), 1);
+        assert_eq!(relists(&metrics, "deployments"), 2);
+    }
+
+    #[test]
+    fn a_refused_watch_counts_a_restart_beside_its_error() {
+        // A case: its name, the error and the restarts it counts.
+        type Case = (&'static str, fn() -> watcher::Error, u64);
+        let cases: [Case; 5] = [
+            (
+                "list refused",
+                || watcher::Error::InitialListFailed(api_error(403)),
+                1,
+            ),
+            (
+                "watch start refused",
+                || watcher::Error::WatchStartFailed(api_error(403)),
+                1,
+            ),
+            (
+                "watch refused",
+                || watcher::Error::WatchError(status(403, "Forbidden")),
+                1,
+            ),
+            (
+                "expired",
+                || watcher::Error::WatchError(status(410, "Expired")),
+                0,
+            ),
+            (
+                "server error",
+                || watcher::Error::InitialListFailed(api_error(500)),
+                0,
+            ),
+        ];
+        assert_eq!(
+            forbidden_errors().len(),
+            3,
+            "every shape of a refusal is a case"
+        );
+        for (case, error, expected) in cases {
+            assert_eq!(forbidden(&error()), expected == 1, "{case}");
+            // Each watch lists, then fails once with the error.
+            let cluster = ScriptedCluster::new(
+                chain(vec![list(&CLUSTER, vec![]), vec![(CLUSTER, Err(error()))]]),
+                chain(vec![list(&CLUSTER, vec![]), vec![(CLUSTER, Err(error()))]]),
+                chain(vec![list(&CLUSTER, vec![]), vec![(CLUSTER, Err(error()))]]),
+            );
+            let metrics = Metrics::default();
+            lead_through(&watching(&[], true), &cluster, &metrics);
+            for watch in ["pods", "events", "deployments"] {
+                assert_eq!(watch_errors(&metrics, watch), 1, "{case}: {watch}");
+                assert_eq!(restarts(&metrics, watch), expected, "{case}: {watch}");
+                assert_eq!(relists(&metrics, watch), 0, "{case}: {watch}");
+            }
+        }
+        // A refusal that repeats counts each restart.
+        let refused = || {
+            (
+                CLUSTER,
+                Err(watcher::Error::WatchStartFailed(api_error(403))),
+            )
+        };
+        let cluster = ScriptedCluster::new(
+            chain(vec![list(&CLUSTER, vec![]), vec![refused(), refused()]]),
+            list(&CLUSTER, vec![]),
+            list(&CLUSTER, vec![]),
+        );
+        let metrics = Metrics::default();
+        lead_through(&watching(&[], true), &cluster, &metrics);
+        assert_eq!(restarts(&metrics, "pods"), 2);
+        assert_eq!(watch_errors(&metrics, "pods"), 2);
+        assert_eq!(restarts(&metrics, "events"), 0);
+    }
+
+    #[test]
+    fn the_start_shows_build_info_zero_records_and_the_zero_series_of_each_mode() {
+        use crate::notify::Format;
+
+        let term = Term::unbounded();
+        let build_info = format!(
+            "kausa_build_info{{version=\"{}\",prompt_version=\"3\"}} 1\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        let notifying = |mut options: Options| {
+            let url = notify::check_url("https://hooks.example.com/a/b", &Format::Json, false)
+                .expect("a valid URL");
+            options.explain.as_mut().expect("settings").notify =
+                Some(Notifier::new(url, Format::Json, None, false).expect("a client"));
+            options
+        };
+        let no_rollouts = |mut options: Options| {
+            options.rollouts = false;
+            options
+        };
+        // Each mode, and what it can count: a model (--endpoint without --dry-run), explanations
+        // (--endpoint or --dry-run), notifications (--notify-url-file) and the Lease.
+        let modes: Vec<(&str, Options, bool, bool, bool, bool)> = vec![
+            ("watching", watching(&[], true), false, false, false, false),
+            (
+                "watching, --no-rollouts",
+                watching(&[], false),
+                false,
+                false,
+                false,
+                false,
+            ),
+            ("dry run", options(false, 30), false, true, false, false),
+            (
+                "dry run, --no-rollouts",
+                no_rollouts(options(false, 30)),
+                false,
+                true,
+                false,
+                false,
+            ),
+            (
+                "model",
+                with_endpoint(options(false, 30)),
+                true,
+                true,
+                false,
+                false,
+            ),
+            (
+                "model, notifications, --no-rollouts",
+                no_rollouts(notifying(with_endpoint(options(false, 30)))),
+                true,
+                true,
+                true,
+                false,
+            ),
+            (
+                "lease, dry run",
+                options(true, 30),
+                false,
+                true,
+                false,
+                true,
+            ),
+            (
+                "lease, model, notifications",
+                notifying(with_endpoint(options(true, 30))),
+                true,
+                true,
+                true,
+                true,
+            ),
+        ];
+        for (mode, options, model, explaining, notifies, lease) in modes {
+            let settings = options.explain.as_ref();
+            assert_eq!(settings.is_some(), explaining, "{mode}");
+            assert_eq!(settings.is_some_and(|s| s.model.is_some()), model, "{mode}");
+            assert_eq!(
+                settings.is_some_and(|s| s.notify.is_some()),
+                notifies,
+                "{mode}"
+            );
+            assert_eq!(options.leader_lease.is_some(), lease, "{mode}");
+            let rollouts = options.rollouts;
+            let metrics = Metrics::default();
+            let shared = settings.map(|_| shared_of(&options, &metrics, &term));
+            show_start(&metrics, &options, shared.as_ref(), Instant::now());
+            let text = metrics.render();
+            let zero_if = |shown: bool| shown.then_some(0u64);
+
+            // Build info, always, one sample.
+            assert!(text.contains(&build_info), "{mode}: {text}");
+            assert_eq!(
+                text.lines()
+                    .filter(|l| l.starts_with("kausa_build_info"))
+                    .count(),
+                1,
+                "{mode}: {text}"
+            );
+            // Records and the owner cache: 0 before the first term; deployments only with the
+            // Deployment watch.
+            assert_eq!(gauge(&text, RECORDS_OF_PODS), Some(0), "{mode}: {text}");
+            assert_eq!(gauge(&text, RECORDS_OF_EVENTS), Some(0), "{mode}: {text}");
+            assert_eq!(
+                gauge(&text, RECORDS_OF_DEPLOYMENTS),
+                zero_if(rollouts),
+                "{mode}: {text}"
+            );
+            assert_eq!(gauge(&text, OWNER_CACHE), Some(0), "{mode}: {text}");
+            // The deduplication cache only with a model.
+            assert_eq!(
+                gauge(&text, DEDUP_ENTRIES),
+                zero_if(model),
+                "{mode}: {text}"
+            );
+
+            // The watch counters, always, one series per watch.
+            for name in [
+                "kausa_watch_errors_total",
+                "kausa_watch_relists_total",
+                "kausa_watch_restarts_total",
+            ] {
+                for (watch, shown) in [("pods", true), ("events", true), ("deployments", rollouts)]
+                {
+                    assert_eq!(
+                        gauge(&text, &format!("{name}{{watch=\"{watch}\"}}")),
+                        zero_if(shown),
+                        "{mode}: {name} {watch}: {text}"
+                    );
+                }
+                assert!(!text.contains(&format!("\n{name} 0\n")), "{mode}: {text}");
+            }
+            // The other counters with fixed labels: one 0 series per value in the modes that can
+            // count them, the unlabelled 0 line otherwise.
+            let model_calls = ["ok", "error", "invalid"];
+            let notifications = ["sent", "failed", "dropped"];
+            let changes = ["leader", "standby"];
+            for (name, label, values, shown) in [
+                (
+                    "kausa_model_calls_total",
+                    "outcome",
+                    &model_calls[..],
+                    model,
+                ),
+                (
+                    "kausa_explanations_skipped_total",
+                    "reason",
+                    &explain::SKIP_REASONS[..],
+                    explaining,
+                ),
+                (
+                    "kausa_notifications_total",
+                    "outcome",
+                    &notifications[..],
+                    notifies,
+                ),
+                ("kausa_leadership_changes_total", "to", &changes[..], lease),
+            ] {
+                for value in values {
+                    assert_eq!(
+                        gauge(&text, &format!("{name}{{{label}=\"{value}\"}}")),
+                        zero_if(shown),
+                        "{mode}: {name} {value}: {text}"
+                    );
+                }
+                assert_eq!(
+                    text.contains(&format!("\n{name} 0\n")),
+                    !shown,
+                    "{mode}: {name}: {text}"
+                );
+                let series = text
+                    .lines()
+                    .filter(|l| l.starts_with(&format!("{name}{{")))
+                    .count();
+                assert_eq!(
+                    series,
+                    if shown { values.len() } else { 0 },
+                    "{mode}: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tick_shows_the_records_and_owner_cache_and_a_step_down_zeroes_them() {
+        for rollouts in [true, false] {
+            let mut options = with_endpoint(options(true, 30));
+            options.rollouts = rollouts;
+            let (metrics, term) = (Metrics::default(), Term::closed());
+            let shared = shared_of(&options, &metrics, &term);
+            let lease = FakeLease::new(None);
+            // Two incidents, both explained and remembered in the deduplication cache.
+            let cluster = FakeCluster::new(crashing_pods(&["api-1", "api-2"]), Explains::Remember);
+            let leading = RefCell::new(String::new());
+            let result =
+                runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+                    assert!(
+                        until(WAIT, || {
+                            let text = metrics.render();
+                            gauge(&text, RECORDS_OF_PODS) == Some(2)
+                                && gauge(&text, DEDUP_ENTRIES) == Some(2)
+                        })
+                        .await,
+                        "the tick showed the two Pods and the two cached explanations"
+                    );
+                    leading.replace(metrics.render());
+                    // Another replica takes the Lease and keeps renewing it.
+                    lease.renewing.set(true);
+                    lease.write(Some(OTHER));
+                    assert!(
+                        until(WAIT, || counter(&metrics, TO_STANDBY) == 1).await,
+                        "stepped down"
+                    );
+                }));
+            served(result);
+            let leading = leading.into_inner();
+            let deployments = rollouts.then_some(0u64);
+            assert_eq!(gauge(&leading, RECORDS_OF_EVENTS), Some(0), "{leading}");
+            assert_eq!(
+                gauge(&leading, RECORDS_OF_DEPLOYMENTS),
+                deployments,
+                "{leading}"
+            );
+            assert_eq!(
+                gauge(&leading, OWNER_CACHE),
+                Some(u64::try_from(FAKE_CACHED).expect("small")),
+                "{leading}"
+            );
+            assert_eq!(shared.dedup.borrow().count(), 2);
+            // A standby holds no record and no owner cache; the deduplication cache is kept.
+            let text = metrics.render();
+            assert_eq!(gauge(&text, RECORDS_OF_PODS), Some(0), "{text}");
+            assert_eq!(gauge(&text, RECORDS_OF_EVENTS), Some(0), "{text}");
+            assert_eq!(gauge(&text, RECORDS_OF_DEPLOYMENTS), deployments, "{text}");
+            assert_eq!(gauge(&text, OWNER_CACHE), Some(0), "{text}");
+            assert_eq!(gauge(&text, DEDUP_ENTRIES), Some(2), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_new_term_lists_its_watches_again_without_counting_a_relist() {
+        let options = options(true, 10);
+        let (metrics, term) = (Metrics::default(), Term::closed());
+        let shared = shared_of(&options, &metrics, &term);
+        let lease = FakeLease::new(None);
+        let cluster = FakeCluster::new(crashing_pods(&["api-1", "api-2"]), Explains::Done);
+        let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
+            assert!(
+                until(WAIT, || metrics.is_ready()).await,
+                "the first term listed"
+            );
+            let first = cluster.yielded.load(Ordering::SeqCst);
+            // Another replica takes the Lease and dies: it is taken back after lease_duration.
+            lease.write(Some(OTHER));
+            assert!(
+                until(WAIT, || counter(&metrics, TO_LEADER) == 2).await,
+                "a second term"
+            );
+            assert!(
+                until(WAIT, || cluster.yielded.load(Ordering::SeqCst) >= 2 * first).await,
+                "the second term listed"
+            );
+            tokio::time::sleep(TEST_TICK * 3).await;
+        }));
+        served(result);
+        assert_eq!(cluster.watches.get(), 2, "two terms' watches");
+        for watch in ["pods", "events", "deployments"] {
+            assert_eq!(relists(&metrics, watch), 0, "{watch}");
+        }
     }
 }

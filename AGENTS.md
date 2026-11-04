@@ -114,15 +114,18 @@ cargo fmt --all -- --check
 cargo deny --locked check
 cargo audit
 helm lint --strict charts/kausa --set rbac.scope=cluster
+promtool check rules --lint=all --lint-fatal deploy/prometheus/kausa-alerts.yaml
+promtool test rules tests/prometheus/kausa-alerts.test.yaml
+promtool check metrics < tests/golden/metrics.prom
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 docker build --target ci .
 ```
 
 The ci target also renders the chart with the value sets that change its templates (see the
-Dockerfile). The image is `docker build --target runtime .`, and the end-to-end test in kind is
-`tests/e2e/run.sh` ([Set up a development environment and run the
-checks](docs/how-to/develop.md)); GitHub runs both.
+Dockerfile). The image is `docker build --target runtime .`, the end-to-end test in kind is
+`tests/e2e/run.sh`, and the upgrade test is `tests/e2e/upgrade.sh` ([Set up a development
+environment and run the checks](docs/how-to/develop.md)); GitHub runs them all.
 
 The checks that run no code from the crate or its dependencies come first: clippy and the tests
 compile and run build scripts, procedural macros and tests, which could tamper with whatever runs

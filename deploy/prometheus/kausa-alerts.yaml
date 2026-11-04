@@ -1,0 +1,157 @@
+# Prometheus alerting rules for kausa: what each alert means and what to do is in
+# docs/reference/alerts.md, which each runbook_url links. Checked in CI with
+# `promtool check rules` and unit-tested with `promtool test rules`
+# (tests/prometheus/kausa-alerts.test.yaml). Load this file with `rule_files`, or copy its
+# `groups` under the `spec` of a PrometheusRule.
+#
+# Every expression reads only kausa's own metrics (docs/reference/command-line.md, "Metrics"); one
+# that combines two of them matches the series of one process with `ignoring(...)` on kausa's own
+# labels, so it works whatever target labels your scrape configuration adds. KausaNoLeader and
+# KausaLeaderFlapping add up a release's Pods `by (namespace, job)`: adjust that to your labels if
+# they differ.
+groups:
+  - name: kausa-model
+    rules:
+      - alert: KausaModelEndpointFailing
+        # The breaker has not been closed for 20 minutes, and a call failed in the last 45 (the
+        # longest hold is 30 minutes, plus a probe of up to --model-timeout).
+        # docs/adr/0020-check-the-endpoint.md
+        expr: |
+          max_over_time(kausa_endpoint_state{state="closed"}[20m]) == 0
+            and ignoring(state, outcome)
+          increase(kausa_model_calls_total{outcome="error"}[45m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa stopped calling its model endpoint; incidents wait or are skipped.
+          description: The breaker has not been closed for 20 minutes and a call failed in the last 45. Read kausa's "endpoint unavailable" log line, then run helm test on the release.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausamodelendpointfailing
+      - alert: KausaNoSuccessfulModelCall
+        # Calls failed in the last hour, and none was answered with a chat completion in that
+        # hour (or ever). Also fires while the breaker stays closed, as when every request is
+        # rejected.
+        expr: |
+          increase(kausa_model_calls_total{outcome="error"}[1h]) > 0
+            unless ignoring(outcome)
+          (
+              kausa_model_last_success_timestamp_seconds > 0
+            and
+              kausa_model_last_success_timestamp_seconds > time() - 3600
+          )
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa's model calls fail and none was answered in the last hour.
+          description: Read kausa's "explanation skipped", "endpoint error" and "endpoint unavailable" log lines; the cause and hint of the last two name the flag or chart value to fix.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanosuccessfulmodelcall
+      - alert: KausaDailyCallBudgetSpent
+        # The acting replica has spent --max-calls-per-day. A former leader that spent its day
+        # still reads 0, hence the kausa_leader condition.
+        expr: |
+          kausa_budget_calls_remaining{window="day"} == 0
+            and ignoring(window)
+          kausa_leader == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa spent its daily call budget; new incidents wait for it.
+          description: No model call until the oldest of the last 24 hours' calls is 24 hours old. Raise budget.callsPerDay or find what fails so often.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausadailycallbudgetspent
+
+  - name: kausa-explanations
+    rules:
+      - alert: KausaExplanationQueueNearlyFull
+        # 12 of 16 for 15 minutes: incidents come in about as fast as the budget lets them out,
+        # and the oldest of a full queue is dropped or skipped.
+        expr: kausa_explanation_queue_length >= 12
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa's explanation queue has held {{ $value }} of 16 incidents for 15 minutes.
+          description: The oldest of a full queue is dropped, or skipped while the endpoint is unavailable. Check budget.callsPerHour and the endpoint alerts.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaexplanationqueuenearlyfull
+      - alert: KausaExplanationsBehind
+        # Incidents have waited for 45 minutes without the queue ever emptying: room for a full
+        # queue to drain after an upgrade at the defaults (13 calls of 120 seconds, plus the
+        # settle window).
+        expr: min_over_time(kausa_explanation_queue_length[45m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa's explanation queue has not emptied for 45 minutes.
+          description: The budget or the breaker holds the queue. Read kausa's "explanations waiting" log line for the reason.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaexplanationsbehind
+      - alert: KausaExplanationsSkipped
+        # One alert per reason (budget, context_too_large, endpoint, invalid_answer,
+        # endpoint_unavailable): each skip wrote an ExplanationSkipped Event.
+        expr: increase(kausa_explanations_skipped_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa skipped incidents in the last hour (reason {{ $labels.reason }}).
+          description: Each skipped incident has an ExplanationSkipped Event with the reason. What to do depends on the reason.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaexplanationsskipped
+
+  - name: kausa-watches
+    rules:
+      - alert: KausaWatchErrors
+        # A watch that fails without a break retries every 30 seconds once its backoff has grown:
+        # about 30 errors in 15 minutes. A few errors that a working watch recovers from stay
+        # under 20.
+        expr: increase(kausa_watch_errors_total[15m]) > 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa's {{ $labels.watch }} watch keeps failing; it may not see the cluster.
+          description: Read kausa's "pod watch error", "event watch error" or "deployment watch error" log lines; their namespace and error fields say which watch and why.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausawatcherrors
+      - alert: KausaWatchRefused
+        # A 403 starts a new watcher; one that keeps coming for 20 minutes is a refusal that
+        # lasts, not a RoleBinding recreated by an upgrade.
+        expr: increase(kausa_watch_restarts_total[10m]) > 0
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: The API server keeps refusing kausa's {{ $labels.watch }} watch (403).
+          description: kausa sees nothing in the refused namespace. Read the "watch error" log lines with "forbidden", then restore kausa's Role or RoleBinding there (helm upgrade with the same values recreates them).
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausawatchrefused
+
+  - name: kausa-replicas
+    rules:
+      - alert: KausaNoLeader
+        # Summed over a release's Pods, kausa_leader is 1: one acts. 0 means nobody does (the
+        # Lease is held by another identity, deleted, or cannot be renewed); 2 is never expected.
+        expr: sum by (namespace, job) (kausa_leader) != 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $value }} kausa replicas act in {{ $labels.namespace }}; exactly one should.'
+          description: kausa explains nothing while no replica holds its Lease. Check the Lease <fullname>-leader and its RoleBinding.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanoleader
+      - alert: KausaLeaderFlapping
+        # Seven takeovers or more in an hour. Not `> 6`: increase() extrapolates to the window's
+        # edges, so six takeovers in a long-running release read a little more than 6.
+        expr: sum by (namespace, job) (increase(kausa_leadership_changes_total{to="leader"}[1h])) >= 7
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa's Lease changed hands more than 6 times in an hour in {{ $labels.namespace }}.
+          description: Failures, or someone writing the Lease, move it between the replicas.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaleaderflapping
+
+  - name: kausa-notifications
+    rules:
+      - alert: KausaNotificationsFailing
+        expr: increase(kausa_notifications_total{outcome="failed"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa could not post notifications to its webhook in the last hour.
+          description: A failed notification is not tried again until its incident comes back. Read kausa's "notification failed" log lines.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausanotificationsfailing

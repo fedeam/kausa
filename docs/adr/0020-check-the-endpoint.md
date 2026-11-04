@@ -235,3 +235,11 @@ captured that quotes the request wraps it in Gemini's own words, and the whole m
 If Google rewords a message, its `400` is `rejected` again, as before. The bodies are the unit
 tests' fixtures, and the `endpoint_error` fuzz target checks that a key error comes only from a
 listed pair.
+
+Update 2026-11-03: the example alert ships as `KausaModelEndpointFailing` in
+`deploy/prometheus/kausa-alerts.yaml`, checked by `promtool check rules` and unit-tested by
+`promtool test rules` in the `ci` target, which settles the last hypothesis above. With one sample
+a minute, the tests pin both windows to the minute: it fires 20 minutes after the last sample that
+saw the breaker closed while a call failed in the last 45 minutes, and stops 45 minutes after the
+last failed call, so a quiet half-open cluster goes silent. What it means and what to do:
+[Alerts](../reference/alerts.md#kausamodelendpointfailing).

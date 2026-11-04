@@ -246,7 +246,7 @@ that is not pulled):
 {"ts":"2026-11-02T18:18:32.166151Z","level":"info","msg":"endpoint check","answer_valid":true,
  "api_key":false,"authenticated":true,"cause":null,"class":null,"connected":true,"detail":null,
  "endpoint":"http://127.0.0.1:11434","hint":null,"json_schema":true,"latency_ms":1632,
- "model":"qwen3:0.6b","model_found":true,"prompt_version":"2","reason":null,
+ "model":"qwen3:0.6b","model_found":true,"prompt_version":"3","reason":null,
  "request_accepted":true,"result":"ok","retry_after_seconds":null,"status":200,
  "timeout_seconds":120,"tokens_in":510,"tokens_out":172}
 {"ts":"2026-11-02T18:18:36.166081Z","level":"error","msg":"endpoint check","answer_valid":null,
@@ -254,7 +254,7 @@ that is not pulled):
  "connected":true,"detail":"{\"error\":{\"message\":\"model \\\"missing-model\\\" not found, try pulling it first\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
  "endpoint":"http://127.0.0.1:11434","hint":"the model or the URL is wrong, or the model is no longer offered: check model.name (--model) and that model.endpoint is the base URL",
  "json_schema":true,"latency_ms":0,"model":"missing-model","model_found":false,
- "prompt_version":"2","reason":"the endpoint answered 404 Not Found","request_accepted":null,
+ "prompt_version":"3","reason":"the endpoint answered 404 Not Found","request_accepted":null,
  "result":"failed","retry_after_seconds":null,"status":404,"timeout_seconds":120,
  "tokens_in":null,"tokens_out":null}
 ```
@@ -464,8 +464,12 @@ kausa's log sees them.
 
 ## Metrics
 
-With `--metrics-address`, `GET /metrics` returns these counters and the gauges below in the
-Prometheus text format; each counter is `0` until something counts. `GET /healthz` answers
+With `--metrics-address`, `GET /metrics` returns these counters, the gauges and the histogram
+below in the Prometheus text format. Each counter starts at `0`: a counter with a fixed set of
+label values shows one `0` series per value from the start of `kausa run`, in the modes that
+can count it (the second table below), and any other counter one unlabelled `name 0` line until
+something counts. [Alerts](alerts.md) relies on those `0` series: a series that appears for the
+first time at `1` reads to Prometheus as no increase. `GET /healthz` answers
 `200` while kausa runs, and `GET /readyz` answers `200` with `ready` once every watch has listed at
 least once (the three of the whole cluster, or three per namespace with `--namespace`: 3 × N; two
 and 2 × N with `--no-rollouts`), and `503` with `starting` before. With `--leader-lease`, a
@@ -499,10 +503,23 @@ and any other method `405`. The counters live in memory and start over when kaus
 | `kausa_leadership_changes_total` | `to` (`leader`, `standby`) | Times this process took the Lease or stepped down to standby (help text: ``Times this process became leader or stepped down to standby, by `to` (leader, standby).``) |
 | `kausa_lease_errors_total` | `call` (`get`, `patch`) | Failed calls on the Lease; a `409` is not one (help text: ``Failed calls on the Lease, by `call` (get, patch); conflicts are not errors.``) |
 | `kausa_watch_errors_total` | `watch` (`pods`, `events`, `deployments`) | Errors of the Pod, Event and Deployment watches (every namespace's together; the namespace is in the log line), which retry with backoff (the counter's help text: `Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch.`); a steady rise with no incidents means kausa is not seeing the cluster |
+| `kausa_watch_relists_total` | `watch` (`pods`, `events`, `deployments`) | Lists of a watch after its first in a term, every namespace's together: after an expired resource version (`410`), or a new watcher after a `403` (help text: `Lists of the Pod, Event and Deployment watches after the first of each watch, by watch.`). Normal now and then; no alert reads it |
+| `kausa_watch_restarts_total` | `watch` (`pods`, `events`, `deployments`) | New watchers started after the API server refused a watch with a `403`, every namespace's together; each is also a watch error (help text: `New watchers started after the API server refused a watch (403), by watch.`). One that keeps rising is a refusal that lasts ([`KausaWatchRefused`](alerts.md#kausawatchrefused)) |
+
+The counters whose `0` series show from the start, one per value:
+
+| Counter | Values | When |
+|---|---|---|
+| `kausa_watch_errors_total`, `kausa_watch_relists_total`, `kausa_watch_restarts_total` | `watch`: `pods`, `events`, and `deployments` unless `--no-rollouts` | Always, a standby included |
+| `kausa_model_calls_total` | `outcome`: `ok`, `error`, `invalid` | With `--endpoint` and without `--dry-run` |
+| `kausa_explanations_skipped_total` | `reason`: each of the five in the table above | With `--endpoint` or `--dry-run` |
+| `kausa_notifications_total` | `outcome`: `sent`, `failed`, `dropped` | With `--notify-url-file` |
+| `kausa_leadership_changes_total` | `to`: `leader`, `standby` | With `--leader-lease` |
 
 The gauges, rendered after the counters, in this order, each with `# TYPE <name> gauge`.
-`kausa_leader` is always rendered, and `kausa_endpoint_state` from the start of `kausa run` in
-every mode; the others only once they have a value, so a mode that does not set them shows no line
+`kausa_leader` is always rendered, and `kausa_endpoint_state`, `kausa_build_info`,
+`kausa_records` and `kausa_owner_cache_entries` from the start of `kausa run` in every mode; the
+others only once they have a value, so a mode that does not set them shows no line
 for them, not a `0`:
 
 | Gauge | Labels | Value |
@@ -512,8 +529,23 @@ for them, not a `0`:
 | `kausa_explanation_queue_length` | | With `--endpoint` or `--dry-run`. Incidents waiting for an explanation, 0 to 16: not the one being explained, nor the delayed retries. Set once per pass of the loop; `0` on a standby and after a step-down (help text: `Incidents waiting for an explanation (at most 16).`) |
 | `kausa_endpoint_state` | `state` (`closed`, `half_open`, `open`) | Three series under one `# HELP` and `# TYPE`, exactly one at `1`: the state of [the breaker](#the-breaker). Set to `closed` at start in every mode (also without `--endpoint` and with `--dry-run`), then from the breaker at each pass of the loop while this process acts, and to `closed` on a standby and after a step-down (help text: `State of the model endpoint's breaker: 1 for the current state (closed, open, half_open), 0 for the others; closed on a standby.`) |
 | `kausa_model_last_success_timestamp_seconds` | | With `--endpoint` and without `--dry-run` only. The Unix time of the last call answered with a chat completion, valid or not; `0` before the first. Kept across terms (help text: `Unix time of the last call answered with a chat completion, 0 before the first.`) |
+| `kausa_build_info` | `version` (kausa's version), `prompt_version` (the version of the request sent to the model, as in the `explanation` line) | Always `1`, set at start in every mode: one series that names this build (help text: `Always 1; the labels name this build of kausa (version, prompt_version).`) |
+| `kausa_records` | `kind` (`pods`, `events`, `deployments`) | The records kausa holds: every Pod it watches, the Warning events that match a rule and the Deployments that match `D014`; `deployments` only without `--no-rollouts`. `0` at start, set at each tick (every 5 seconds) while this process acts, and `0` on a standby and after a step-down, which drops the term's records (help text: `Records kausa holds, by kind (pods, events, deployments); 0 on a standby.`) |
+| `kausa_owner_cache_entries` | | The owner lookups in the cache (ReplicaSet → Deployment and Job → CronJob, 10 minutes each, failures 30 seconds), expired ones included until a lookup that reads the API server prunes them. `0` at start, set at each tick while this process acts, `0` on a standby and after a step-down (help text: `Owner lookups in the cache, expired ones included until the next lookup that reads the API server; 0 on a standby.`) |
+| `kausa_dedup_cache_entries` | | With `--endpoint` and without `--dry-run` only. The explanations in the deduplication cache, at most 1024, expired ones included until read again or evicted. `0` at start, set at each tick while this process acts, and kept on a step-down, as the cache is (help text: `Explanations in the deduplication cache (at most 1024), expired ones included until read again or evicted.`) |
 
-No metric names a Pod, a namespace or the Lease.
+The histogram, rendered after the gauges, once a call has been timed (`# TYPE <name> histogram`,
+then for each `outcome` its cumulative `_bucket` series with `le`, its `_sum` and its `_count`):
+
+| Histogram | Labels | Buckets (`le`, seconds) | Value |
+|---|---|---|---|
+| `kausa_model_call_duration_seconds` | `outcome` (`ok`, `error`, `invalid`, as `kausa_model_calls_total`) | `0.5`, `1`, `2.5`, `5`, `10`, `20`, `30`, `60`, `120`, `300`, `600`, `+Inf` | The duration of each call to the model endpoint, as the client makes it: connecting, sending the request and reading the whole answer; not the wait for the budget or the breaker, nor the validation. Every call counted in `kausa_model_calls_total` is timed under the same `outcome`, so `_count` equals that counter. A dry run, a cached repeat and `kausa check-endpoint` time nothing (help text: `Duration of the calls to the model endpoint, by outcome (ok, error, invalid).`) |
+
+The buckets cover a local model that answers within seconds and a hosted reasoning model that
+takes minutes. Among the bounds are 10 seconds (the connection timeout and the lowest
+`--model-timeout`), 120 (the default) and 600 (the highest).
+
+No metric names a Pod, a namespace or the Lease, nor a model or a host.
 
 A rise of `kausa_answer_redactions_total` means an answer carried a value kausa would not send:
 usually text injected into the failing workload's logs or events, a value the model invented, or
@@ -566,11 +598,8 @@ A `started` line with notifications in the `json` format, with invented values:
  "settle_seconds":60,"version":"0.2.0"}
 ```
 
-Alert on failed notifications, for example:
-
-```text
-increase(kausa_notifications_total{outcome="failed"}[1h]) > 0
-```
+Alert on failed notifications with [`KausaNotificationsFailing`](alerts.md#kausanotificationsfailing)
+of [Alerts](alerts.md).
 
 How to set it up and check it: [Send notifications to Slack, Telegram or a
 webhook](../how-to/send-notifications.md).

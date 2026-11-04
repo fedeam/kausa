@@ -23,6 +23,14 @@ chart of v0.5.0 adds `helm test`, which checks the endpoint, the key
 and the model with one synthetic request (step 6); its kind test runs on GitHub Actions, and the
 v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa check-endpoint` and
 `helm test`, and hold calls behind a breaker while it fails](../adr/0020-check-the-endpoint.md)).
+From v0.6.0 each release also publishes the chart at `oci://ghcr.io/fedeam/charts/kausa`, signed
+and with provenance, with a CycloneDX SBOM for each image ([0023. Publish the chart as a signed
+OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a
+CycloneDX SBOM of an auditable binary to each image](../adr/0023-oci-chart-and-sbom.md)). As of
+2026-11-03 v0.6.0 is not released: the v0.5.2 chart and earlier are only on their GitHub
+releases, and no install from GHCR has been tested. On 2026-11-03 the publishing was rehearsed
+locally: the chart was pushed to a throwaway registry, and a release installed in kind from the
+v0.5.1 chart URL was upgraded to it.
 
 ## Before you start
 
@@ -31,21 +39,31 @@ v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa 
   namespace instead: [Watch only some namespaces](#watch-only-some-namespaces)); with the history
   on, also a CustomResourceDefinition and a ClusterRole, unless an administrator installs them
   ([Keep the history of explanations](#keep-the-history-of-explanations)); and `kubectl` and
-  Helm (CI uses 4.3.1; the chart was also rendered and installed with 3.16) pointed at it: check
-  `kubectl config current-context`.
+  Helm (CI uses 4.3.1; the chart was also rendered and installed with 3.16; OCI charts need Helm
+  3.8 or later) pointed at it: check `kubectl config current-context`.
 - Nodes on linux/amd64 or linux/arm64 that can pull from `ghcr.io` (or your own build, below).
 - A model endpoint: a hosted one with its API key, or one in the cluster (for example Ollama).
 
 ## Steps
 
-1. **Pick the release and, optionally, verify it.** The chart of each release is an asset of
-   its [GitHub release](https://github.com/fedeam/kausa/releases) and uses the image
-   `ghcr.io/fedeam/kausa` of the same version. The release notes have the commands to verify the
-   image's signature and provenance and the chart's checksum with cosign and the GitHub CLI.
+1. **Pick the release and, optionally, verify it.** From v0.6.0 the chart of each release is
+   published at `oci://ghcr.io/fedeam/charts/kausa` and uses the image `ghcr.io/fedeam/kausa` of
+   the same version. The commands below name the chart as `"$CHART" --version "$VERSION"`: without
+   `--version`, Helm takes the newest chart on GHCR, and with it a newer image. The release notes
+   have the commands to verify the image, the chart and their SBOMs and provenance ([Verify a
+   release](#verify-a-release)).
 
    ```sh
-   CHART=https://github.com/fedeam/kausa/releases/download/v0.5.2/kausa-0.5.2.tgz
+   CHART=oci://ghcr.io/fedeam/charts/kausa
+   VERSION=0.6.0
    ```
+
+   The chart of each release is also an asset of its [GitHub
+   release](https://github.com/fedeam/kausa/releases). To use it, set
+   `CHART=https://github.com/fedeam/kausa/releases/download/v$VERSION/kausa-$VERSION.tgz`; Helm
+   3.16.1 and 4.3.1 accept and ignore `--version` with a chart URL (checked on 2026-11-03), so the
+   commands below work unchanged, but the URL alone picks the version. Until v0.6.0 is released,
+   this is the way to install: `VERSION=0.5.2` and the URL.
 
 2. **Create the namespace and, for a hosted endpoint, the API key's Secret.** kausa never reads it
    through the API; the kubelet mounts it as a file:
@@ -59,7 +77,7 @@ v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa 
 3. **See what kausa would send, first:**
 
    ```sh
-   helm install kausa "$CHART" -n kausa --set rbac.scope=cluster --set dryRun=true
+   helm install kausa "$CHART" --version "$VERSION" -n kausa --set rbac.scope=cluster --set dryRun=true
    kubectl -n kausa logs deploy/kausa -f
    ```
 
@@ -73,7 +91,7 @@ v0.4.1 chart has no test ([0020. Check the model endpoint on demand with `kausa 
 4. **Point it at the model.** `--reuse-values` keeps the values of step 3, `rbac.scope` included:
 
    ```sh
-   helm upgrade kausa "$CHART" -n kausa --reuse-values --set dryRun=false \
+   helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set dryRun=false \
      --set model.endpoint=https://api.openai.com/v1 --set model.name=<model> \
      --set model.apiKey.existingSecret=kausa-api-key
    ```
@@ -115,6 +133,20 @@ helm install kausa charts/kausa -n kausa --set rbac.scope=cluster \
   --set image.repository=<registry>/kausa --set image.tag=<tag> --set dryRun=true
 ```
 
+## Upgrade from a chart URL to the OCI chart
+
+A release installed from a chart URL of a GitHub release (v0.5.2 and earlier, or any later one)
+moves to the chart on GHCR with an upgrade, from v0.6.0 on; `--reuse-values` keeps its values,
+`rbac.scope` included:
+
+```sh
+helm upgrade kausa oci://ghcr.io/fedeam/charts/kausa --version <version> -n kausa --reuse-values
+```
+
+Rehearsed on 2026-11-03 in kind with Helm 4.3.1, from the v0.5.1 chart URL to the same chart
+pushed to a throwaway local registry: `helm get values` kept `rbac.scope` and `dryRun`, and `helm
+history` showed revision 2. Not yet done against GHCR, where the first OCI chart is v0.6.0.
+
 ## Upgrade from a chart without rbac.scope
 
 The charts of v0.2.0 and v0.1.0 have no `rbac.scope`, so the first upgrade to a chart that requires
@@ -124,7 +156,7 @@ release, which have no `rbac` map, and the chart refuses to render without it (c
 and the release stays as it was; the v0.2.0 chart's values have no `rbac` map either).
 
 ```sh
-helm upgrade kausa <chart> -n kausa --reuse-values --set rbac.scope=cluster
+helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set rbac.scope=cluster
 ```
 
 `rbac.scope=cluster` keeps the ClusterRole, its rules and the whole-cluster watch. After that,
@@ -193,7 +225,7 @@ Status as of 2026-10-29: v0.3.0 is the first release with this scope. The v0.2.0
    ```
 
    ```sh
-   helm install kausa <chart> -n kausa -f kausa-values.yaml --set dryRun=true
+   helm install kausa "$CHART" --version "$VERSION" -n kausa -f kausa-values.yaml --set dryRun=true
    ```
 
    Later upgrades pass `-f kausa-values.yaml` again, or use `--reuse-values`. An upgrade that
@@ -236,7 +268,7 @@ v0.3.0 is the first release with it.
    incidents only:
 
    ```sh
-   helm upgrade kausa <chart> -n kausa --reuse-values --set history.enabled=true
+   helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set history.enabled=true
    ```
 
    The chart installs the CustomResourceDefinition `explanations.kausa.fedeam.com` and a reader
@@ -267,7 +299,7 @@ v0.3.0 is the first release with it.
   CustomResourceDefinition and the reader role from the same values:
 
   ```sh
-  helm template kausa <chart> --kube-version 1.36.0 -f kausa-values.yaml \
+  helm template kausa "$CHART" --version "$VERSION" --kube-version 1.36.0 -f kausa-values.yaml \
     --set history.enabled=true --set history.installCRD=true \
     --show-only templates/explanation-crd.yaml --show-only templates/explanation-reader.yaml |
     kubectl apply -f -
@@ -304,7 +336,7 @@ code](../adr/0019-high-availability.md)).
 1. **Turn it on**, in either scope:
 
    ```sh
-   helm upgrade kausa <chart> -n kausa --reuse-values --set replicaCount=2 --wait
+   helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set replicaCount=2 --wait
    ```
 
    The chart runs two Pods with `--leader-lease kausa/kausa-leader` and adds, in the release
@@ -355,18 +387,14 @@ code](../adr/0019-high-availability.md)).
    configuration uses them). With `networkPolicy.metricsFrom`, allow your Prometheus to reach both
    Pods.
 
-4. **Alert** on nobody acting, or two, and on a Lease that changes hands too often:
-
-   ```text
-   sum(kausa_leader) != 1                                          for: 2m
-   increase(kausa_leadership_changes_total{to="leader"}[1h]) > 6
-   ```
-
-   Scope both to your release's Pods (for example by their `namespace` and `pod` labels). The
-   first fires when the Lease is held by someone else, has been deleted, or cannot be renewed (an
-   API server outage, a deleted `kausa-leader` RoleBinding): kausa then explains nothing, on
-   purpose, rather than act without the Lease. The second shows a Lease that flips, by failures or
-   by someone writing it.
+4. **Alert** on nobody acting, or two, and on a Lease that changes hands too often, with
+   [`KausaNoLeader`](../reference/alerts.md#kausanoleader) and
+   [`KausaLeaderFlapping`](../reference/alerts.md#kausaleaderflapping) of
+   [Alerts](../reference/alerts.md). Both add up a release's Pods by their `namespace` and `job`
+   labels; adjust that to your scrape configuration. The first fires when the Lease is held by
+   someone else, has been deleted, or cannot be renewed (an API server outage, a deleted
+   `kausa-leader` RoleBinding): kausa then explains nothing, on purpose, rather than act without
+   the Lease. The second shows a Lease that flips, by failures or by someone writing it.
 
 What to expect:
 
@@ -384,6 +412,44 @@ What to expect:
   RoleBinding and the PodDisruptionBudget, and the remaining Pod runs without `--leader-lease`
   (Helm deletes what a release no longer renders; not checked in kind for these objects).
 
+## Verify a release
+
+Each release's notes, from v0.6.0, give these commands with the release's digests filled in: run
+them from there. Below, `<version>` is the release without its `v`, and `<index>`, `<amd64>`,
+`<arm64>` and `<chart-digest>` are the `sha256:…` digests the notes list for the image, the image
+of each architecture and the chart. Verify by digest: a tag on GHCR can be moved. With cosign v3 or
+later, and no login:
+
+```sh
+ID=https://github.com/fedeam/kausa/.github/workflows/release.yml@refs/tags/v<version>
+ISSUER=https://token.actions.githubusercontent.com
+cosign verify ghcr.io/fedeam/kausa@<index> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+cosign verify-attestation --type https://slsa.dev/provenance/v1 ghcr.io/fedeam/kausa@<index> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+cosign verify-attestation --type https://cyclonedx.org/bom ghcr.io/fedeam/kausa@<amd64> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+cosign verify-attestation --type https://cyclonedx.org/bom ghcr.io/fedeam/kausa@<arm64> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+cosign verify ghcr.io/fedeam/charts/kausa@<chart-digest> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+cosign verify-attestation --type https://slsa.dev/provenance/v1 ghcr.io/fedeam/charts/kausa@<chart-digest> --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER" > /dev/null
+```
+
+To install exactly the chart you checked, compare it with the release's signed checksums (on
+macOS, `shasum -a 256` in place of `sha256sum`):
+
+```sh
+curl -fsSLO https://github.com/fedeam/kausa/releases/download/v<version>/SHA256SUMS
+curl -fsSLO https://github.com/fedeam/kausa/releases/download/v<version>/SHA256SUMS.sigstore.json
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json --certificate-identity "$ID" --certificate-oidc-issuer "$ISSUER"
+helm pull oci://ghcr.io/fedeam/charts/kausa --version <version>
+sha256sum --ignore-missing -c SHA256SUMS
+helm install kausa kausa-<version>.tgz -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
+```
+
+The notes also verify the same attestations with `gh attestation verify`, which needs `gh auth
+login`. The v0.5.2 release and earlier have no chart on GHCR and no SBOM: their notes verify the
+image's signature and provenance and the chart's checksum. Why: [0023. Publish the chart as a signed OCI artifact at
+`oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX SBOM of an
+auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). As of 2026-11-03 these
+commands have not run against a release: v0.6.0, the first that publishes them, is not out yet.
+
 ## Verify
 
 - `kubectl -n kausa get pods`: one Pod, ready once every watch has listed (three, or three per
@@ -397,47 +463,15 @@ What to expect:
 - `kubectl get --raw /api/v1/namespaces/kausa/services/kausa-metrics:9090/proxy/metrics` shows
   the counters and the gauges; `kausa_endpoint_state{state="closed"} 1` while kausa calls its
   endpoint.
-- To hear when the budget holds explanations back, two example alerts on the gauges of [Command
-  line and log format](../reference/command-line.md#metrics):
-
-  ```yaml
-  - alert: KausaDailyCallBudgetSpent
-    expr: kausa_budget_calls_remaining{window="day"} == 0 and on (pod) kausa_leader == 1
-    for: 10m
-  - alert: KausaExplanationsBehind
-    expr: min_over_time(kausa_explanation_queue_length[45m]) > 0
-  ```
-
-  The first fires when the acting replica has spent its daily cap; it keeps to the leader because
-  a former leader that spent its day still reads 0. It assumes your scrape configuration gives
-  each series a `pod` label (a hypothesis: adjust the `on (pod)` to your labels). The second fires
-  when incidents have waited for 45 minutes without the queue ever emptying, room for a full
-  queue to drain after an upgrade at the defaults (13 calls of 120 seconds, plus the settle
-  window); a standby and a replica that stepped down read 0. `window="hour"` at 0 is normal under
-  load and is not worth an alert.
-- To hear when kausa stops calling its endpoint because it keeps failing (the breaker of [Command
-  line and log format](../reference/command-line.md#the-breaker)), an example alert:
-
-  ```yaml
-  - alert: KausaModelEndpointFailing
-    # The breaker has not been closed for 20 minutes, and a call failed in the last 45
-    # (the longest hold is 30 minutes, plus a probe of up to --model-timeout).
-    expr: |
-      max_over_time(kausa_endpoint_state{state="closed"}[20m]) == 0
-        and ignoring(state, outcome)
-      increase(kausa_model_calls_total{outcome="error"}[45m]) > 0
-    labels: {severity: warning}
-    annotations:
-      summary: kausa stopped calling its model endpoint; incidents wait or are skipped.
-      description: Read kausa's "endpoint unavailable" log line, then run helm test on the release.
-  ```
-
-  It fires about 20 minutes after the breaker opens and keeps firing while probes fail. It never
-  fires on a standby (always `closed`), nor on a quiet cluster that sits half open after an
-  outage, where no call fails; it resolves when a call closes the breaker, or 45 minutes after
-  the last failed call. A passing `helm test` does not resolve it: the test is another process.
-  The expression is a hypothesis until `promtool check rules` runs on it (not run as of
-  2026-11-02).
+- To hear when kausa itself needs attention, load the alerting rules
+  [`deploy/prometheus/kausa-alerts.yaml`](../../deploy/prometheus/kausa-alerts.yaml), which
+  [Alerts](../reference/alerts.md) explains alert by alert. Among them:
+  `KausaDailyCallBudgetSpent` fires when the acting replica has spent its daily call budget,
+  `KausaExplanationsBehind` when incidents have waited for 45 minutes without the queue ever
+  emptying, and `KausaModelEndpointFailing` when kausa has stopped calling its endpoint for 20
+  minutes because calls keep failing (the breaker of [Command line and log
+  format](../reference/command-line.md#the-breaker)); a passing `helm test` does not resolve the
+  last one, since the test is another process.
 
 ## If something fails
 

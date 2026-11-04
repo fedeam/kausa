@@ -412,8 +412,8 @@ record across a failover, in the same object, and is never read back into `Dedup
 held under another identity, or whose version changes faster than every 30 s, by whoever can
 write Leases in the release namespace; a deleted Lease or `<full name>-leader` RoleBinding; or
 Lease calls failing for 20 s, as in an API server outage, which also drops the records and settle
-progress a single replica keeps. Each shows as `sum(kausa_leader) != 1` over the Pods ([Install
-kausa with Helm](../how-to/install-with-helm.md#run-a-standby-replica)).
+progress a single replica keeps. Each shows as no acting replica in `kausa_leader` over the Pods,
+which the alert `KausaNoLeader` reports ([Alerts](../reference/alerts.md#kausanoleader)).
 
 **Cost:** about 0.4 API requests per second (a read and a renewal every 5 s), and a second Pod
 (10m CPU and 32 MiB requested).
@@ -439,7 +439,10 @@ and not published yet](../adr/0010-packaging.md).
   and checks the Events, that no real name reached the endpoint, the chart's role against the
   reference, and the metrics, once per `rbac.scope` (`KAUSA_E2E_SCOPE`), and once more in the
   namespaced scope with a standby (`KAUSA_E2E_REPLICAS=2`): graceful, frozen and fail-closed
-  handovers.
+  handovers; and an upgrade test in kind (`tests/e2e/upgrade.sh`) that installs the latest
+  release with two replicas, upgrades it with `helm upgrade --reuse-values` to the checkout's
+  chart and image, and checks the rollout, the values, the Lease split and an explanation after
+  the upgrade, once per `rbac.scope`.
 
 ## Exit codes
 

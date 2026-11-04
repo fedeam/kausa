@@ -59,7 +59,8 @@ measured in kind on 2026-10-29 ([Standby and failover](research/2026-10-29-stand
 
 - **What it is:** a Rust controller on kube-rs, one static binary for linux/amd64 and
   linux/arm64, in a distroless non-root image published at `ghcr.io/fedeam/kausa` with a Helm
-  chart in `charts/kausa`, attached to each GitHub release.
+  chart in `charts/kausa`, attached to each GitHub release and, from v0.6.0, published at
+  `oci://ghcr.io/fedeam/charts/kausa`.
 - **URL:** none: kausa runs in its users' clusters.
 - **Repository:** [`fedeam/kausa`](https://github.com/fedeam/kausa) on GitHub, public since
   2026-10-27. A private copy on the maintainer's Gitea instance, synced by
@@ -136,6 +137,11 @@ checks](how-to/develop.md).
 - [Try kausa against a cluster with a local model](how-to/try-with-a-local-model.md): a
   read-only run with Ollama.
 - [Add a detection or redaction rule](how-to/add-a-rule.md): the files, tests and docs to change.
+- [Alerts](reference/alerts.md): the Prometheus alerting rules for kausa's own metrics
+  (`deploy/prometheus/kausa-alerts.yaml`), what each alert means and what to do when it fires.
+- [Run the soak](how-to/run-the-soak.md): seven days of the pinned release on a test cluster,
+  sampled every 30 seconds, and the rule, fixed before any measurement, that decides the chart's
+  memory limit.
 - [Install kausa with Helm](how-to/install-with-helm.md) and the [Helm
   chart](reference/helm-chart.md) values; [0010. Ship a static binary on distroless, with a Helm
   chart, built in CI and not published yet](adr/0010-packaging.md); [0011. Scan the code with

@@ -119,7 +119,8 @@ GitHub](docs/adr/0007-contributions-and-merges-on-github.md).
   the cluster changes. A bug fix adds a test that fails without it. A pull request without tests
   says why (documentation, for example).
 - **CI.** For every pull request, GitHub Actions run the checks of `docker build --target ci .`
-  on linux/amd64 and linux/arm64, build the image on both, and run the end-to-end test in kind;
+  on linux/amd64 and linux/arm64, build the image on both, and run the end-to-end test and the
+  upgrade test (`tests/e2e/upgrade.sh`, the latest release upgraded to the pull request) in kind;
   the `ci`, `ci-arm64`, `image (ubuntu-24.04)`, `image (ubuntu-24.04-arm)`, `kind (cluster)` and
   `kind (namespaced)` checks have to pass before merging. The `pr title` check is not among
   them, but a title that fails it is fixed before merging. For a first contribution, the

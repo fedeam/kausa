@@ -19,6 +19,9 @@ Telegram](../adr/0015-notifications.md).
 - kausa installed with the chart in its namespace (`kausa` below) and explaining incidents with a
   model: `model.endpoint` set and `dryRun` false ([Install kausa with
   Helm](install-with-helm.md)). Notifications need both, and the chart refuses them otherwise.
+  `CHART` and `VERSION` below are the chart and the release of that page's step 1: keep the
+  version you run, as an upgrade from GHCR without `--version` takes the newest chart and its
+  image.
 - Read [Data sent in notifications](../reference/data-sent-in-notifications.md) first: a
   notification leaves the cluster with the **real** names of the namespace and the failing
   workload, and the model's text, which can repeat redacted log lines. The receiver keeps it under
@@ -86,7 +89,7 @@ Telegram](../adr/0015-notifications.md).
    ```
 
    ```sh
-   helm upgrade kausa <chart> -n kausa --reuse-values -f notifications.yaml
+   helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values -f notifications.yaml
    ```
 
    `urlKey` (default `url`) names the key of the URL if your Secret uses another. `allowHttp:
@@ -162,11 +165,10 @@ acknowledged it.
 ## Alert on failures
 
 A failed notification is not tried again until its incident comes back, never stops kausa and
-never shows in an Event. Alert on the counter, for example in a Prometheus rule:
-
-```text
-increase(kausa_notifications_total{outcome="failed"}[1h]) > 0
-```
+never shows in an Event. Alert on it with
+[`KausaNotificationsFailing`](../reference/alerts.md#kausanotificationsfailing), one of the
+alerting rules of [Alerts](../reference/alerts.md), which fires for about an hour after a failed
+notification.
 
 `kausa_notifications_total{outcome="dropped"}` counts notifications pushed out of the queue of 16
 by a burst; `kausa_notifications_retried_total` counts second attempts.
@@ -174,7 +176,7 @@ by a burst; `kausa_notifications_retried_total` counts second attempts.
 ## Turn it off
 
 ```sh
-helm upgrade kausa <chart> -n kausa --reuse-values --set notifications.enabled=false
+helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set notifications.enabled=false
 kubectl -n kausa delete secret kausa-notify
 ```
 

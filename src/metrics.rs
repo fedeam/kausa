@@ -1,8 +1,9 @@
 //! Prometheus metrics and health endpoints (docs/reference/command-line.md, "Metrics").
 //!
-//! Counters in memory, rendered in the text exposition format, and a minimal HTTP/1.1 responder
-//! for `GET /metrics`, `/healthz` and `/readyz`: kausa serves nothing else, so it needs no HTTP
-//! framework. Each connection is answered and closed, with a short timeout.
+//! Counters, gauges and one histogram in memory, rendered in the text exposition format, and a
+//! minimal HTTP/1.1 responder for `GET /metrics`, `/healthz` and `/readyz`: kausa serves nothing
+//! else, so it needs no HTTP framework. Each connection is answered and closed, with a short
+//! timeout.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -12,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 20] = [
+pub const COUNTERS: [(&str, &str); 22] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -93,14 +94,23 @@ pub const COUNTERS: [(&str, &str); 20] = [
         "kausa_answer_redactions_total",
         "Values replaced by redaction in the model's answers, by rule.",
     ),
+    (
+        "kausa_watch_relists_total",
+        "Lists of the Pod, Event and Deployment watches after the first of each watch, by watch.",
+    ),
+    (
+        "kausa_watch_restarts_total",
+        "New watchers started after the API server refused a watch (403), by watch.",
+    ),
 ];
 
 /// The gauges kausa exports, with their help text, rendered after the counters
 /// (docs/adr/0019-high-availability.md). `kausa_leader` is always rendered; the budget and queue
 /// gauges (docs/adr/0021-refill-the-call-budget.md) and the endpoint gauges
 /// (docs/adr/0020-check-the-endpoint.md) only once a series was set, so that a process that has
-/// no budget, no queue or no endpoint shows no 0 an alert could fire on.
-pub const GAUGES: [(&str, &str); 5] = [
+/// no budget, no queue or no endpoint shows no 0 an alert could fire on. So are the build, record
+/// and cache gauges, which `kausa run` sets at start (the deduplication cache only with a model).
+pub const GAUGES: [(&str, &str); 9] = [
     (
         "kausa_leader",
         "1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a \
@@ -124,13 +134,55 @@ pub const GAUGES: [(&str, &str); 5] = [
         "kausa_model_last_success_timestamp_seconds",
         "Unix time of the last call answered with a chat completion, 0 before the first.",
     ),
+    (
+        "kausa_build_info",
+        "Always 1; the labels name this build of kausa (version, prompt_version).",
+    ),
+    (
+        "kausa_records",
+        "Records kausa holds, by kind (pods, events, deployments); 0 on a standby.",
+    ),
+    (
+        "kausa_owner_cache_entries",
+        "Owner lookups in the cache, expired ones included until the next lookup that reads the \
+         API server; 0 on a standby.",
+    ),
+    (
+        "kausa_dedup_cache_entries",
+        "Explanations in the deduplication cache (at most 1024), expired ones included until \
+         read again or evicted.",
+    ),
 ];
+
+/// The upper bounds, in seconds, of the buckets of `kausa_model_call_duration_seconds`.
+pub const CALL_DURATION_BUCKETS: [f64; 11] = [
+    0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+];
+
+/// The histograms kausa exports, with their help text and bucket bounds, rendered after the
+/// gauges and only once observed.
+pub const HISTOGRAMS: [(&str, &str, &[f64]); 1] = [(
+    "kausa_model_call_duration_seconds",
+    "Duration of the calls to the model endpoint, by outcome (ok, error, invalid).",
+    &CALL_DURATION_BUCKETS,
+)];
+
+/// One series of a histogram: the observations in each bucket (not cumulative; the values past
+/// the last bound are in `count` only), their sum and their number.
+#[derive(Debug, Default)]
+struct Histogram {
+    counts: Vec<u64>,
+    sum: f64,
+    count: u64,
+}
 
 #[derive(Debug)]
 pub struct Metrics {
     counters: RefCell<BTreeMap<(&'static str, String), u64>>,
     /// The series of every gauge but `kausa_leader`, by name and labels; set, never added to.
     gauges: RefCell<BTreeMap<(&'static str, String), u64>>,
+    /// The series of the histograms, by name and labels.
+    histograms: RefCell<BTreeMap<(&'static str, String), Histogram>>,
     /// Set once, never cleared (docs/adr/0013-namespaced-install-mode.md).
     ready: Cell<bool>,
     /// Whether this process acts: it holds the Lease, or runs without --leader-lease.
@@ -143,6 +195,7 @@ impl Default for Metrics {
         Self {
             counters: RefCell::default(),
             gauges: RefCell::default(),
+            histograms: RefCell::default(),
             ready: Cell::new(false),
             leading: Cell::new(true),
         }
@@ -164,6 +217,27 @@ impl Metrics {
         self.gauges
             .borrow_mut()
             .insert((name, label_set(labels)), value);
+    }
+
+    /// Observes `value` in the histogram `name` with the given labels: the first bucket whose
+    /// bound is at least `value` counts it (none: only `+Inf`). An unknown name is a bug.
+    pub fn observe(&self, name: &'static str, labels: &[(&str, &str)], value: f64) {
+        let Some((_, _, bounds)) = HISTOGRAMS.iter().find(|(n, _, _)| *n == name) else {
+            debug_assert!(false, "unknown histogram {name}");
+            return;
+        };
+        let mut histograms = self.histograms.borrow_mut();
+        let series = histograms
+            .entry((name, label_set(labels)))
+            .or_insert_with(|| Histogram {
+                counts: vec![0; bounds.len()],
+                ..Histogram::default()
+            });
+        if let Some(bucket) = bounds.iter().position(|bound| value <= *bound) {
+            series.counts[bucket] += 1;
+        }
+        series.sum += value;
+        series.count += 1;
     }
 
     pub fn inc(&self, name: &'static str, labels: &[(&str, &str)]) {
@@ -213,6 +287,38 @@ impl Metrics {
             if push_series(&mut series, name, &gauges) {
                 out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
                 out.push_str(&series);
+            }
+        }
+        let histograms = self.histograms.borrow();
+        for (name, help, bounds) in HISTOGRAMS {
+            let mut any = false;
+            for ((n, labels), series) in histograms.iter() {
+                if *n != name {
+                    continue;
+                }
+                if !any {
+                    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} histogram\n"));
+                    any = true;
+                }
+                let sep = if labels.is_empty() { "" } else { "," };
+                let mut cumulative = 0;
+                for (bound, n) in bounds.iter().zip(&series.counts) {
+                    cumulative += n;
+                    out.push_str(&format!(
+                        "{name}_bucket{{{labels}{sep}le=\"{bound}\"}} {cumulative}\n"
+                    ));
+                }
+                let (count, sum) = (series.count, series.sum);
+                out.push_str(&format!(
+                    "{name}_bucket{{{labels}{sep}le=\"+Inf\"}} {count}\n"
+                ));
+                if labels.is_empty() {
+                    out.push_str(&format!("{name}_sum {sum}\n{name}_count {count}\n"));
+                } else {
+                    out.push_str(&format!(
+                        "{name}_sum{{{labels}}} {sum}\n{name}_count{{{labels}}} {count}\n"
+                    ));
+                }
             }
         }
         out
@@ -388,9 +494,10 @@ mod tests {
     // code: two more counters, appended to `COUNTERS`.
     #[test]
     fn the_notification_counters_come_last_with_their_help() {
-        // The two counters of docs/adr/0019-high-availability.md and the one of
-        // docs/adr/0022-redact-the-answer.md come after these.
-        assert_eq!(COUNTERS.len(), 20);
+        // The two counters of docs/adr/0019-high-availability.md, the one of
+        // docs/adr/0022-redact-the-answer.md and the two watch counters of v0.6's
+        // self-observability come after these.
+        assert_eq!(COUNTERS.len(), 22);
         assert_eq!(
             COUNTERS[15],
             (
@@ -470,9 +577,10 @@ mod tests {
     // `watch="deployments"`, and `D014` incidents under `kausa_incidents_total`.
     #[test]
     fn the_deployment_watch_adds_no_counter() {
-        // 20: the standby's two counters (docs/adr/0019-high-availability.md) and the answer's
-        // redactions (docs/adr/0022-redact-the-answer.md) came later.
-        assert_eq!(COUNTERS.len(), 20, "a counter was added");
+        // 22: the standby's two counters (docs/adr/0019-high-availability.md), the answer's
+        // redactions (docs/adr/0022-redact-the-answer.md) and the watch relists and restarts of
+        // v0.6's self-observability came later.
+        assert_eq!(COUNTERS.len(), 22, "a counter was added");
         assert!(COUNTERS.contains(&(
             "kausa_watch_errors_total",
             "Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch."
@@ -500,8 +608,9 @@ mod tests {
 
     #[test]
     fn the_standby_counters_come_last_with_their_help() {
-        // The counter of docs/adr/0022-redact-the-answer.md comes after these.
-        assert_eq!(COUNTERS.len(), 20);
+        // The counter of docs/adr/0022-redact-the-answer.md and the two watch counters of v0.6's
+        // self-observability come after these.
+        assert_eq!(COUNTERS.len(), 22);
         assert_eq!(
             COUNTERS[17],
             (
@@ -548,10 +657,10 @@ mod tests {
 
     #[test]
     fn the_leader_gauge_comes_after_the_counters_and_is_1_by_default() {
-        // 5: the budget and queue gauges (docs/adr/0021-refill-the-call-budget.md) and the
-        // endpoint gauges (docs/adr/0020-check-the-endpoint.md) came later, and are not rendered
-        // until set.
-        assert_eq!(GAUGES.len(), 5);
+        // 9: the budget and queue gauges (docs/adr/0021-refill-the-call-budget.md), the
+        // endpoint gauges (docs/adr/0020-check-the-endpoint.md) and the build, record and cache
+        // gauges of v0.6's self-observability came later, and are not rendered until set.
+        assert_eq!(GAUGES.len(), 9);
         assert_eq!(GAUGES[0], ("kausa_leader", LEADER_HELP));
         let gauge = |value: u8| {
             format!(
@@ -793,10 +902,12 @@ mod tests {
     }
 
     #[test]
-    fn the_endpoint_gauges_come_last_with_their_help() {
-        assert_eq!(COUNTERS.len(), 20, "a counter was added");
+    fn the_endpoint_gauges_follow_the_queue_gauge_with_their_help() {
+        // By position: the build, record and cache gauges of v0.6's self-observability follow
+        // these, and the watch counters came with them (22 counters).
+        assert_eq!(COUNTERS.len(), 22, "a counter was added");
         assert_eq!(
-            GAUGES,
+            GAUGES[..5],
             [
                 ("kausa_leader", LEADER_HELP),
                 ("kausa_budget_calls_remaining", BUDGET_HELP),
@@ -881,6 +992,656 @@ mod tests {
                 .filter(|l| l.starts_with("kausa_endpoint_state{") && l.ends_with(" 1"))
                 .count();
             assert_eq!(ones, 1, "{current}: {text}");
+        }
+    }
+
+    // Acceptance tests for v0.6's self-observability (no ADR), written before the code. They use:
+    // - `COUNTERS: [(&str, &str); 22]`: `kausa_watch_relists_total`, then
+    //   `kausa_watch_restarts_total`, appended after `kausa_answer_redactions_total`;
+    // - `GAUGES: [(&str, &str); 9]`: `kausa_build_info`, `kausa_records`,
+    //   `kausa_owner_cache_entries` and `kausa_dedup_cache_entries`, in that order, appended after
+    //   `kausa_model_last_success_timestamp_seconds`, rendered only once set;
+    // - `pub const CALL_DURATION_BUCKETS: [f64; 11]` and
+    //   `pub const HISTOGRAMS: [(&str, &str, &[f64]); 1]`;
+    // - `Metrics::observe(&self, name: &'static str, labels: &[(&str, &str)], value: f64)`: the
+    //   first bucket whose bound is at least `value` counts it (none: only `+Inf`), `_sum` adds it
+    //   and `_count` adds 1. A histogram renders after the gauges, only once observed: `# HELP`,
+    //   `# TYPE <name> histogram`, then per series (sorted by labels) one cumulative
+    //   `_bucket{<labels>,le="<bound>"}` line per bound in bucket order, `le="+Inf"` with the
+    //   count, `_sum` and `_count`; bounds and sums written with Rust's `{}` for `f64`.
+
+    const RELISTS_HELP: &str =
+        "Lists of the Pod, Event and Deployment watches after the first of each watch, by watch.";
+    const RESTARTS_HELP: &str =
+        "New watchers started after the API server refused a watch (403), by watch.";
+    const BUILD_INFO_HELP: &str =
+        "Always 1; the labels name this build of kausa (version, prompt_version).";
+    const RECORDS_HELP: &str =
+        "Records kausa holds, by kind (pods, events, deployments); 0 on a standby.";
+    const OWNER_CACHE_HELP: &str = "Owner lookups in the cache, expired ones included until the \
+                                    next lookup that reads the API server; 0 on a standby.";
+    const DEDUP_CACHE_HELP: &str = "Explanations in the deduplication cache (at most 1024), \
+                                    expired ones included until read again or evicted.";
+    const CALL_DURATION: &str = "kausa_model_call_duration_seconds";
+    const CALL_DURATION_HELP: &str =
+        "Duration of the calls to the model endpoint, by outcome (ok, error, invalid).";
+
+    #[test]
+    fn the_watch_relist_and_restart_counters_come_last_with_their_help() {
+        assert_eq!(COUNTERS.len(), 22);
+        assert_eq!(
+            COUNTERS[COUNTERS.len() - 2..],
+            [
+                ("kausa_watch_relists_total", RELISTS_HELP),
+                ("kausa_watch_restarts_total", RESTARTS_HELP),
+            ]
+        );
+        assert_eq!(
+            counter_at("kausa_watch_relists_total"),
+            counter_at("kausa_answer_redactions_total") + 1
+        );
+        let names: std::collections::BTreeSet<&str> = COUNTERS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), COUNTERS.len(), "a counter is listed twice");
+        for (name, _) in COUNTERS {
+            assert!(name.ends_with("_total"), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_watch_relist_and_restart_counters_render_as_zero_when_unused() {
+        let m = Metrics::default();
+        let text = m.render();
+        for (name, help) in [
+            ("kausa_watch_relists_total", RELISTS_HELP),
+            ("kausa_watch_restarts_total", RESTARTS_HELP),
+        ] {
+            assert!(
+                text.contains(&format!(
+                    "# HELP {name} {help}\n# TYPE {name} counter\n{name} 0\n"
+                )),
+                "{name}: {text}"
+            );
+        }
+        m.inc("kausa_watch_relists_total", &[("watch", "pods")]);
+        m.add("kausa_watch_restarts_total", &[("watch", "events")], 2);
+        let text = respond("GET /metrics HTTP/1.1", &m).2;
+        for line in [
+            "kausa_watch_relists_total{watch=\"pods\"} 1\n",
+            "kausa_watch_restarts_total{watch=\"events\"} 2\n",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        assert!(!text.contains("kausa_watch_relists_total 0\n"), "{text}");
+    }
+
+    #[test]
+    fn the_build_record_and_cache_gauges_follow_the_last_success_with_their_help() {
+        assert_eq!(GAUGES.len(), 9);
+        assert_eq!(GAUGES[4].0, "kausa_model_last_success_timestamp_seconds");
+        assert_eq!(
+            GAUGES[5..],
+            [
+                ("kausa_build_info", BUILD_INFO_HELP),
+                ("kausa_records", RECORDS_HELP),
+                ("kausa_owner_cache_entries", OWNER_CACHE_HELP),
+                ("kausa_dedup_cache_entries", DEDUP_CACHE_HELP),
+            ]
+        );
+        let names: std::collections::BTreeSet<&str> = GAUGES.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), GAUGES.len(), "a gauge is listed twice");
+        // Never set, never rendered: no 0 an alert could fire on.
+        let m = Metrics::default();
+        let text = m.render();
+        for (name, _) in &GAUGES[5..] {
+            assert!(!text.contains(name), "{name}: {text}");
+        }
+        // Once set: in the order of GAUGES, after the last success, the series sorted by labels.
+        m.set_gauge("kausa_model_last_success_timestamp_seconds", &[], 0);
+        m.set_gauge("kausa_dedup_cache_entries", &[], 2);
+        m.set_gauge("kausa_owner_cache_entries", &[], 3);
+        m.set_gauge("kausa_records", &[("kind", "pods")], 7);
+        m.set_gauge("kausa_records", &[("kind", "events")], 4);
+        m.set_gauge("kausa_records", &[("kind", "deployments")], 1);
+        m.set_gauge(
+            "kausa_build_info",
+            &[("version", "0.0.0-test"), ("prompt_version", "2")],
+            1,
+        );
+        let expected = format!(
+            "# TYPE kausa_model_last_success_timestamp_seconds gauge\n\
+             kausa_model_last_success_timestamp_seconds 0\n\
+             # HELP kausa_build_info {BUILD_INFO_HELP}\n\
+             # TYPE kausa_build_info gauge\n\
+             kausa_build_info{{version=\"0.0.0-test\",prompt_version=\"2\"}} 1\n\
+             # HELP kausa_records {RECORDS_HELP}\n\
+             # TYPE kausa_records gauge\n\
+             kausa_records{{kind=\"deployments\"}} 1\n\
+             kausa_records{{kind=\"events\"}} 4\n\
+             kausa_records{{kind=\"pods\"}} 7\n\
+             # HELP kausa_owner_cache_entries {OWNER_CACHE_HELP}\n\
+             # TYPE kausa_owner_cache_entries gauge\n\
+             kausa_owner_cache_entries 3\n\
+             # HELP kausa_dedup_cache_entries {DEDUP_CACHE_HELP}\n\
+             # TYPE kausa_dedup_cache_entries gauge\n\
+             kausa_dedup_cache_entries 2\n"
+        );
+        let text = m.render();
+        assert!(text.ends_with(&expected), "{text}");
+        // A gauge is set, not added to.
+        m.set_gauge("kausa_records", &[("kind", "pods")], 0);
+        assert!(
+            m.render().contains("kausa_records{kind=\"pods\"} 0\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn build_info_names_this_build_in_one_sample_at_1() {
+        assert_eq!(crate::prompt::PROMPT_VERSION, "3");
+        let m = Metrics::default();
+        // As `kausa run` sets it at start.
+        m.set_gauge(
+            "kausa_build_info",
+            &[
+                ("version", env!("CARGO_PKG_VERSION")),
+                ("prompt_version", crate::prompt::PROMPT_VERSION),
+            ],
+            1,
+        );
+        let text = m.render();
+        let line = format!(
+            "kausa_build_info{{version=\"{}\",prompt_version=\"3\"}} 1\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(
+            text.contains(&format!(
+                "# HELP kausa_build_info {BUILD_INFO_HELP}\n# TYPE kausa_build_info gauge\n{line}"
+            )),
+            "{text}"
+        );
+        let samples = text
+            .lines()
+            .filter(|l| l.starts_with("kausa_build_info"))
+            .count();
+        assert_eq!(samples, 1, "{text}");
+    }
+
+    /// The lines of one series of the call-duration histogram: `labels` is the label set before
+    /// `le` (empty for none), `cumulative` the count at each bound of `CALL_DURATION_BUCKETS`.
+    fn histogram_series(labels: &str, cumulative: [u64; 11], count: u64, sum: &str) -> String {
+        let bounds = [
+            "0.5", "1", "2.5", "5", "10", "20", "30", "60", "120", "300", "600",
+        ];
+        let (open, sep, close) = if labels.is_empty() {
+            ("", "", "")
+        } else {
+            ("{", ",", "}")
+        };
+        let mut out = String::new();
+        for (bound, n) in bounds.iter().zip(cumulative) {
+            out.push_str(&format!(
+                "{CALL_DURATION}_bucket{{{labels}{sep}le=\"{bound}\"}} {n}\n"
+            ));
+        }
+        out.push_str(&format!(
+            "{CALL_DURATION}_bucket{{{labels}{sep}le=\"+Inf\"}} {count}\n"
+        ));
+        out.push_str(&format!("{CALL_DURATION}_sum{open}{labels}{close} {sum}\n"));
+        out.push_str(&format!(
+            "{CALL_DURATION}_count{open}{labels}{close} {count}\n"
+        ));
+        out
+    }
+
+    #[test]
+    fn the_call_duration_histogram_has_its_buckets_and_help() {
+        assert_eq!(
+            CALL_DURATION_BUCKETS,
+            [
+                0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0
+            ]
+        );
+        assert_eq!(HISTOGRAMS.len(), 1);
+        let (name, help, bounds) = HISTOGRAMS[0];
+        assert_eq!((name, help), (CALL_DURATION, CALL_DURATION_HELP));
+        assert_eq!(bounds, &CALL_DURATION_BUCKETS[..]);
+        assert!(bounds.windows(2).all(|w| w[0] < w[1]), "bounds in order");
+        // No name is both a histogram and a counter or a gauge, nor ends like a histogram's series.
+        for (other, _) in COUNTERS.iter().chain(GAUGES.iter()) {
+            assert_ne!(*other, name);
+            for suffix in ["_bucket", "_sum", "_count"] {
+                assert!(!other.ends_with(suffix), "{other}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_call_duration_histogram_renders_cumulative_buckets_after_the_gauges() {
+        let m = Metrics::default();
+        // Never observed: no line at all, not even its help.
+        m.set_gauge("kausa_dedup_cache_entries", &[], 0);
+        let text = m.render();
+        assert!(!text.contains(CALL_DURATION), "{text}");
+        // 1.0 lies on a bound and counts in le="1"; 700.0 is past the last bound: +Inf only.
+        m.observe(CALL_DURATION, &[("outcome", "ok")], 0.25);
+        m.observe(CALL_DURATION, &[("outcome", "ok")], 1.0);
+        m.observe(CALL_DURATION, &[("outcome", "ok")], 700.0);
+        m.observe(CALL_DURATION, &[("outcome", "error")], 3.0);
+        let expected = format!(
+            "# HELP {CALL_DURATION} {CALL_DURATION_HELP}\n# TYPE {CALL_DURATION} histogram\n{}{}",
+            histogram_series(
+                "outcome=\"error\"",
+                [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+                1,
+                "3"
+            ),
+            histogram_series(
+                "outcome=\"ok\"",
+                [1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+                3,
+                "701.25"
+            ),
+        );
+        let text = m.render();
+        assert!(text.ends_with(&expected), "{text}");
+        assert_eq!(
+            text.matches(&format!("# TYPE {CALL_DURATION} histogram\n"))
+                .count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            text.find("# TYPE kausa_dedup_cache_entries gauge")
+                < text.find(&format!("# TYPE {CALL_DURATION} histogram")),
+            "{text}"
+        );
+        assert!(
+            text.find("# TYPE kausa_leader gauge")
+                < text.find(&format!("# TYPE {CALL_DURATION} histogram")),
+            "{text}"
+        );
+        // The same value again adds to the same series.
+        m.observe(CALL_DURATION, &[("outcome", "error")], 3.0);
+        assert!(
+            m.render().contains(&histogram_series(
+                "outcome=\"error\"",
+                [0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2],
+                2,
+                "6"
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_histogram_without_labels_renders_le_alone_and_bare_sum_and_count() {
+        let m = Metrics::default();
+        m.observe(CALL_DURATION, &[], 0.5);
+        let text = m.render();
+        assert!(
+            text.ends_with(&histogram_series(
+                "",
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+                1,
+                "0.5"
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn histogram_label_values_are_escaped() {
+        let m = Metrics::default();
+        m.observe(CALL_DURATION, &[("outcome", "a\"b\\c\nd")], 0.1);
+        let text = m.render();
+        for line in [
+            r#"kausa_model_call_duration_seconds_bucket{outcome="a\"b\\c\nd",le="0.5"} 1"#,
+            r#"kausa_model_call_duration_seconds_bucket{outcome="a\"b\\c\nd",le="+Inf"} 1"#,
+            r#"kausa_model_call_duration_seconds_sum{outcome="a\"b\\c\nd"} 0.1"#,
+            r#"kausa_model_call_duration_seconds_count{outcome="a\"b\\c\nd"} 1"#,
+        ] {
+            assert!(text.contains(&format!("{line}\n")), "{line}: {text}");
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn an_unknown_histogram_is_a_bug() {
+        Metrics::default().observe("kausa_no_such_histogram_seconds", &[], 1.0);
+    }
+
+    /// Every counter, gauge and histogram series kausa can show, with fixed values: the fixture of
+    /// tests/golden/metrics.prom. The build info names a fixed version, so that a release, which
+    /// moves `CARGO_PKG_VERSION`, does not change the file.
+    fn golden_fixture() -> Metrics {
+        let m = Metrics::default();
+        for (name, labels, by) in [
+            ("kausa_incidents_total", vec![("detection", "D001")], 4),
+            ("kausa_incidents_total", vec![("detection", "D014")], 1),
+            ("kausa_model_calls_total", vec![("outcome", "ok")], 5),
+            ("kausa_model_calls_total", vec![("outcome", "error")], 2),
+            ("kausa_model_calls_total", vec![("outcome", "invalid")], 1),
+            ("kausa_model_tokens_total", vec![("direction", "in")], 1200),
+            ("kausa_model_tokens_total", vec![("direction", "out")], 300),
+            ("kausa_explanations_cached_total", vec![], 3),
+            (
+                "kausa_explanations_skipped_total",
+                vec![("reason", "budget")],
+                1,
+            ),
+            (
+                "kausa_explanations_skipped_total",
+                vec![("reason", "context_too_large")],
+                0,
+            ),
+            (
+                "kausa_explanations_skipped_total",
+                vec![("reason", "endpoint")],
+                2,
+            ),
+            (
+                "kausa_explanations_skipped_total",
+                vec![("reason", "invalid_answer")],
+                1,
+            ),
+            (
+                "kausa_explanations_skipped_total",
+                vec![("reason", "endpoint_unavailable")],
+                0,
+            ),
+            ("kausa_explanations_retried_total", vec![], 1),
+            ("kausa_explanations_dropped_total", vec![], 0),
+            ("kausa_requests_logged_total", vec![], 0),
+            ("kausa_redactions_total", vec![("rule", "R004")], 7),
+            ("kausa_redactions_total", vec![("rule", "R010")], 2),
+            (
+                "kausa_events_written_total",
+                vec![("reason", "Explained")],
+                5,
+            ),
+            (
+                "kausa_events_written_total",
+                vec![("reason", "ExplanationSkipped")],
+                4,
+            ),
+            ("kausa_event_write_errors_total", vec![], 1),
+            ("kausa_watch_errors_total", vec![("watch", "pods")], 2),
+            ("kausa_watch_errors_total", vec![("watch", "events")], 3),
+            (
+                "kausa_watch_errors_total",
+                vec![("watch", "deployments")],
+                0,
+            ),
+            (
+                "kausa_history_writes_total",
+                vec![("outcome", "created")],
+                4,
+            ),
+            (
+                "kausa_history_writes_total",
+                vec![("outcome", "updated")],
+                2,
+            ),
+            (
+                "kausa_history_writes_total",
+                vec![("outcome", "refused")],
+                0,
+            ),
+            (
+                "kausa_history_writes_total",
+                vec![("outcome", "conflict")],
+                1,
+            ),
+            ("kausa_history_writes_total", vec![("outcome", "error")], 0),
+            ("kausa_history_deleted_total", vec![("reason", "age")], 2),
+            ("kausa_history_deleted_total", vec![("reason", "cap")], 1),
+            ("kausa_history_sweep_errors_total", vec![], 0),
+            ("kausa_notifications_total", vec![("outcome", "sent")], 4),
+            ("kausa_notifications_total", vec![("outcome", "failed")], 1),
+            ("kausa_notifications_total", vec![("outcome", "dropped")], 0),
+            ("kausa_notifications_retried_total", vec![], 1),
+            ("kausa_leadership_changes_total", vec![("to", "leader")], 2),
+            ("kausa_leadership_changes_total", vec![("to", "standby")], 1),
+            ("kausa_lease_errors_total", vec![("call", "get")], 0),
+            ("kausa_lease_errors_total", vec![("call", "patch")], 1),
+            ("kausa_answer_redactions_total", vec![("rule", "R004")], 1),
+            ("kausa_watch_relists_total", vec![("watch", "pods")], 2),
+            ("kausa_watch_relists_total", vec![("watch", "events")], 1),
+            (
+                "kausa_watch_relists_total",
+                vec![("watch", "deployments")],
+                0,
+            ),
+            ("kausa_watch_restarts_total", vec![("watch", "pods")], 1),
+            ("kausa_watch_restarts_total", vec![("watch", "events")], 0),
+            (
+                "kausa_watch_restarts_total",
+                vec![("watch", "deployments")],
+                0,
+            ),
+        ] {
+            m.add(name, &labels, by);
+        }
+        for (name, labels, value) in [
+            ("kausa_budget_calls_remaining", vec![("window", "hour")], 3),
+            ("kausa_budget_calls_remaining", vec![("window", "day")], 195),
+            ("kausa_explanation_queue_length", vec![], 2),
+            ("kausa_endpoint_state", vec![("state", "closed")], 1),
+            ("kausa_endpoint_state", vec![("state", "half_open")], 0),
+            ("kausa_endpoint_state", vec![("state", "open")], 0),
+            (
+                "kausa_model_last_success_timestamp_seconds",
+                vec![],
+                1_793_620_800,
+            ),
+            (
+                "kausa_build_info",
+                vec![("version", "0.0.0-golden"), ("prompt_version", "2")],
+                1,
+            ),
+            ("kausa_records", vec![("kind", "pods")], 9),
+            ("kausa_records", vec![("kind", "events")], 12),
+            ("kausa_records", vec![("kind", "deployments")], 1),
+            ("kausa_owner_cache_entries", vec![], 4),
+            ("kausa_dedup_cache_entries", vec![], 5),
+        ] {
+            m.set_gauge(name, &labels, value);
+        }
+        m.set_leading(true);
+        for (outcome, seconds) in [
+            ("ok", 0.5),
+            ("ok", 0.75),
+            ("ok", 2.0),
+            ("ok", 4.5),
+            ("ok", 130.0),
+            ("error", 10.0),
+            ("error", 0.25),
+            ("invalid", 1.5),
+        ] {
+            m.observe(CALL_DURATION, &[("outcome", outcome)], seconds);
+        }
+        m
+    }
+
+    #[test]
+    fn the_exposition_is_the_golden_file() {
+        // promtool check metrics lints the same file in the ci target. On a change of a metric,
+        // edit the file by hand, as the check-endpoint goldens are.
+        let golden = include_str!("../tests/golden/metrics.prom");
+        let text = golden_fixture().render();
+        if text != golden {
+            panic!(
+                "render() differs from tests/golden/metrics.prom; render() gave:\n{text}\n\
+                 first differing line: {:?}",
+                text.lines()
+                    .zip(golden.lines())
+                    .position(|(a, b)| a != b)
+                    .map(|i| i + 1)
+            );
+        }
+        // Every counter, gauge and histogram of the lists has a series in it.
+        for (name, _) in COUNTERS.iter().chain(GAUGES.iter()) {
+            assert!(
+                golden.contains(&format!("\n{name}{{")) || golden.contains(&format!("\n{name} ")),
+                "{name} has no series in the golden file"
+            );
+        }
+        for (name, _, _) in HISTOGRAMS {
+            assert!(
+                golden.contains(&format!("# TYPE {name} histogram\n")),
+                "{name}"
+            );
+        }
+        // A fixed version, so that a release does not change the file.
+        assert!(
+            golden.contains("kausa_build_info{version=\"0.0.0-golden\",prompt_version=\"2\"} 1\n")
+        );
+    }
+
+    /// One alert of deploy/prometheus/kausa-alerts.yaml, read line by line: the file is plain
+    /// YAML in one fixed layout, which promtool checks in the ci target.
+    #[derive(Debug, Default)]
+    struct Alert {
+        name: String,
+        expr: String,
+        labels: Vec<String>,
+        runbook_url: String,
+    }
+
+    fn indent(line: &str) -> usize {
+        line.len() - line.trim_start().len()
+    }
+
+    fn alerts(rules: &str) -> Vec<Alert> {
+        let lines: Vec<&str> = rules.lines().collect();
+        let mut alerts: Vec<Alert> = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim_start();
+            if let Some(name) = trimmed.strip_prefix("- alert: ") {
+                alerts.push(Alert {
+                    name: name.to_string(),
+                    ..Alert::default()
+                });
+            } else if let Some(alert) = alerts.last_mut() {
+                // The lines nested under this one: a block expression or the labels.
+                let nested = || {
+                    lines[i + 1..]
+                        .iter()
+                        .take_while(|l| l.trim().is_empty() || indent(l) > indent(line))
+                        .copied()
+                        .collect::<Vec<_>>()
+                };
+                if trimmed == "expr: |" {
+                    let block = nested();
+                    let cut = block
+                        .iter()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| indent(l))
+                        .min()
+                        .unwrap_or(0);
+                    alert.expr = block
+                        .iter()
+                        .map(|l| l.get(cut..).unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim_end()
+                        .to_string();
+                    i += block.len();
+                } else if let Some(expr) = trimmed.strip_prefix("expr: ") {
+                    alert.expr = expr.to_string();
+                } else if trimmed == "labels:" {
+                    let block = nested();
+                    alert.labels = block
+                        .iter()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    i += block.len();
+                } else if let Some(url) = trimmed.strip_prefix("runbook_url: ") {
+                    alert.runbook_url = url.to_string();
+                }
+            }
+            i += 1;
+        }
+        alerts
+    }
+
+    #[test]
+    fn the_alert_rules_read_only_kausas_metrics_and_each_has_its_section_in_alerts_md() {
+        let rules = include_str!("../deploy/prometheus/kausa-alerts.yaml");
+        let reference = include_str!("../docs/reference/alerts.md");
+        let alerts = alerts(rules);
+        assert_eq!(alerts.len(), 11, "the alerts of the rules file");
+
+        // Every metric a rule (or a comment) names is one kausa exports: a histogram also by its
+        // _bucket, _sum and _count series.
+        let mut known: Vec<String> = COUNTERS
+            .iter()
+            .chain(GAUGES.iter())
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for (name, _, _) in HISTOGRAMS {
+            for suffix in ["", "_bucket", "_sum", "_count"] {
+                known.push(format!("{name}{suffix}"));
+            }
+        }
+        let token = regex::Regex::new("kausa_[a-z_]+").unwrap();
+        let read: Vec<&str> = token.find_iter(rules).map(|m| m.as_str()).collect();
+        assert!(!read.is_empty());
+        for name in &read {
+            assert!(
+                known.iter().any(|k| k == name),
+                "{name} is in the rules file but kausa exports no such metric"
+            );
+        }
+
+        let headings: Vec<&str> = reference
+            .lines()
+            .filter_map(|l| l.strip_prefix("### "))
+            .collect();
+        for alert in &alerts {
+            let name = &alert.name;
+            assert_eq!(
+                alert.labels,
+                ["severity: warning"],
+                "{name}: severity: warning is the only label"
+            );
+            assert_eq!(
+                alert.runbook_url,
+                format!(
+                    "https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#{}",
+                    name.to_lowercase()
+                ),
+                "{name}: runbook_url"
+            );
+            assert!(
+                headings.contains(&name.as_str()),
+                "{name} has no ### {name} section in docs/reference/alerts.md"
+            );
+            // The section's expression is the rule's, as the file holds it.
+            let section = reference
+                .split_once(&format!("\n### {name}\n"))
+                .map(|(_, rest)| rest)
+                .unwrap_or_default();
+            let shown = section
+                .split_once("```promql\n")
+                .and_then(|(_, rest)| rest.split_once("\n```"))
+                .map(|(expr, _)| expr)
+                .unwrap_or_default();
+            assert!(!alert.expr.is_empty(), "{name} has no expr");
+            assert_eq!(
+                shown, alert.expr,
+                "{name}: the promql block of its section differs from the rules file"
+            );
+        }
+        for heading in headings.iter().filter(|h| h.starts_with("Kausa")) {
+            assert!(
+                alerts.iter().any(|a| a.name == *heading),
+                "### {heading} in docs/reference/alerts.md is no alert of the rules file"
+            );
         }
     }
 }
