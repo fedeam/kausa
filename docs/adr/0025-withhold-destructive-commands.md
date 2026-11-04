@@ -247,3 +247,17 @@ shape, with a corpus case and a replay with no benign match.
   changes the 7 named answers, 11 of 1,441 steps, and no benign one.
 - **Follow-ups, each its own decision:** security-weakening shapes, with a corpus case; the
   example alert; a request-side signal for instruction-like log lines; 0024's `hints` decision.
+
+Update 2026-11-04: a review of the branch before the release found three forms of a delete of a
+namespace or node that `W001` missed. **`W001` grows**, as Limits says a form found does: kubectl
+takes any number of `TYPE/NAME` arguments (`kubectl delete pod/pod-1 namespace/kube-system`),
+`kubectl delete --raw /api/v1/namespaces/x` deletes by API path, and a group suffix may be only the
+dot (`ns. x`, `namespaces./x`; that kubectl accepts these two is a hypothesis, not checked). Its
+pattern is now
+`(?i)^K\b.*?\bdelete\b(?:(?:\s+-\S+(?:\s+[^\s-]\S*)*?)*?\s+(?:[\w.-]+,)*KIND(?:[,/\s]|$)|.*?[\s,]KIND/\S|.*?\s--raw(?:=|\s+)\S*/(?:namespaces|projects|nodes|customresourcedefinitions)\b)`,
+where `KIND` is
+`(?:ns|namespaces?|projects?|no|nodes?|crds?|customresourcedefinitions?|all)(?:\.[\w.-]*)?`
+([rules.md](../reference/rules.md#withheld-command-shapes) publishes it expanded, tied to the code
+by a test). It still leaves `kubectl delete pod/pod-1`, `kubectl get ns/x` and the 420 committed
+answers as they were; a new readability cost is a narrow delete followed by a `KIND/NAME` word,
+such as `kubectl delete pod pod-1, then check node/node-1`.

@@ -481,7 +481,7 @@ as `Regex::as_str()` gives them (`\|` is `|`, escaped for the table):
 
 | Id | What | Pattern |
 |---|---|---|
-| `W001` | `kubectl`, `oc` or `k` deleting namespaces, projects, nodes, CRDs or the `all` category | `(?i)^(?:kubectl\|oc\|k)\b.*?\bdelete(?:\s+-\S+(?:\s+[^\s-]\S*)*?)*?\s+(?:[\w.-]+,)*(?:ns\|namespaces?\|projects?\|no\|nodes?\|crds?\|customresourcedefinitions?\|all)(?:\.[\w.-]+)?(?:[,/\s]\|$)` |
+| `W001` | `kubectl`, `oc` or `k` deleting namespaces, projects, nodes, CRDs or the `all` category: the kind as the first argument after the flags, a `KIND/NAME` argument anywhere after `delete`, or `--raw` on their API paths | `(?i)^(?:kubectl\|oc\|k)\b.*?\bdelete\b(?:(?:\s+-\S+(?:\s+[^\s-]\S*)*?)*?\s+(?:[\w.-]+,)*(?:ns\|namespaces?\|projects?\|no\|nodes?\|crds?\|customresourcedefinitions?\|all)(?:\.[\w.-]*)?(?:[,/\s]\|$)\|.*?[\s,](?:ns\|namespaces?\|projects?\|no\|nodes?\|crds?\|customresourcedefinitions?\|all)(?:\.[\w.-]*)?/\S\|.*?\s--raw(?:=\|\s+)\S*/(?:namespaces\|projects\|nodes\|customresourcedefinitions)\b)` |
 | `W002` | `delete` with `--all`, `--all-namespaces` or `-A`, bare or set true | `(?i)^(?:kubectl\|oc\|k)\b.*?\bdelete\b.*?\s(?:--all\|--all-namespaces\|(?-i:-A))(?:=(?:1\|t\|true))?(?:[^\w=-]\|$)` |
 | `W003` | any `kubectl`, `oc` or `k` command with `--force` (bare or set true) or a grace period of 0 | `(?i)^(?:kubectl\|oc\|k)\b.*?\s(?:--force(?:=(?:1\|t\|true))?\|--grace-period(?:=\|\s+)0+s?)(?:[^\w=-]\|$)` |
 | `W004` | `helm uninstall` and its aliases `delete`, `del` and `un` | `(?i)^helm\b.*?\b(?:uninstall\|delete\|del\|un)\b` |
@@ -491,6 +491,7 @@ as `Regex::as_str()` gives them (`\|` is `|`, escaped for the table):
 They match, for example, `kubectl delete namespace --all`, `kube'ctl' "delete" ns --all`,
 fullwidth letters, `kubectl${IFS}delete${IFS}ns`, `kubectl -n x delete ns --all`,
 `kubectl delete pods,namespaces --all`, `kubectl delete ns/x`, `kubectl delete no node-1`,
+`kubectl delete pod/x namespace/y`, `kubectl delete --raw /api/v1/namespaces/x`, `ns. x`,
 `--all.`, `--all=1`, `-A=true`, `--force=t`, `--grace-period=0s`, a command word, a `;` or a `, `
 inside a flag value, `echo $(kubectl delete ns --all)`, `helm -n x uninstall y`,
 `kubectl exec x -- rm -rf /data`, `k` and `oc`. They do not match `kubectl delete pod pod-1`,

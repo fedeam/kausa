@@ -404,12 +404,16 @@ static PATTERNS: LazyLock<Patterns> = LazyLock::new(|| {
     // (`strconv.ParseBool`; `(?i)` folds the case).
     const K: &str = "(?:kubectl|oc|k)";
     const B: &str = "(?:=(?:1|t|true))?";
+    // `W001`'s kinds, with an optional group after a dot (`crd.apiextensions.k8s.io`, `ns.`).
+    const KIND: &str = r"(?:ns|namespaces?|projects?|no|nodes?|crds?|customresourcedefinitions?|all)(?:\.[\w.-]*)?";
     let re = |pattern: &str| Regex::new(pattern).expect("a valid pattern");
     Patterns {
         command: [
-            // W001: `delete` of namespaces, projects, nodes, CRDs or the `all` category.
+            // W001: `delete` of namespaces, projects, nodes, CRDs or the `all` category: the kind
+            // as the first argument after the flags, a `KIND/NAME` argument anywhere after
+            // `delete` (kubectl takes any number of them), or `--raw` on their API paths.
             re(&format!(
-                r"(?i)^{K}\b.*?\bdelete(?:\s+-\S+(?:\s+[^\s-]\S*)*?)*?\s+(?:[\w.-]+,)*(?:ns|namespaces?|projects?|no|nodes?|crds?|customresourcedefinitions?|all)(?:\.[\w.-]+)?(?:[,/\s]|$)"
+                r"(?i)^{K}\b.*?\bdelete\b(?:(?:\s+-\S+(?:\s+[^\s-]\S*)*?)*?\s+(?:[\w.-]+,)*{KIND}(?:[,/\s]|$)|.*?[\s,]{KIND}/\S|.*?\s--raw(?:=|\s+)\S*/(?:namespaces|projects|nodes|customresourcedefinitions)\b)"
             )),
             // W002: `delete` with `--all`, `--all-namespaces` or `-A`, bare or set true.
             re(&format!(
@@ -1377,6 +1381,32 @@ low confidence.";
                     "kubectl delete --cache-dir 'a b c' namespace kube-system",
                     &["W001"],
                 ),
+                // A `KIND/NAME` argument after the first: kubectl takes any number of them.
+                ("kubectl delete pod/pod-1 namespace/kube-system", &["W001"]),
+                ("kubectl delete deployment/app-1 node/node-1", &["W001"]),
+                ("kubectl delete pod/pod-1,ns/namespace-1", &["W001"]),
+                (
+                    "kubectl delete -n x pod/pod-1 crd.example.com/crd-1",
+                    &["W001"],
+                ),
+                ("oc delete pod/pod-1 project/project-1", &["W001"]),
+                // A delete by API path.
+                (
+                    "kubectl delete --raw /api/v1/namespaces/kube-system",
+                    &["W001"],
+                ),
+                ("kubectl delete --raw=/api/v1/nodes/node-1", &["W001"]),
+                (
+                    "kubectl delete --raw /apis/apiextensions.k8s.io/v1/customresourcedefinitions/crd-1",
+                    &["W001"],
+                ),
+                (
+                    "oc delete --raw /apis/project.openshift.io/v1/projects/project-1",
+                    &["W001"],
+                ),
+                // A group suffix that is only the dot.
+                ("kubectl delete ns. kube-system", &["W001"]),
+                ("kubectl delete namespaces./kube-system", &["W001"]),
             ],
         );
     }
@@ -1465,6 +1495,13 @@ low confidence.";
             // The edges of two patterns: `W002`'s short flag is `-A` only, its case kept, and
             // `W006` ends at a word that is not a namespace or a project.
             "kubectl delete pod pod-1 -a",
+            // `W001`'s `KIND/NAME` and `--raw` forms need `delete` and one of its kinds.
+            "kubectl delete pod/pod-1",
+            "kubectl delete pod/pod-1 deployment/deployment-1",
+            "kubectl get ns/x",
+            "kubectl describe node/node-1",
+            "kubectl get --raw /api/v1/namespaces/namespace-1",
+            "kubectl delete --raw /api/v1/persistentvolumes/pv-1",
             "Remove all namespace-scoped RoleBindings that grant the role",
             "Delete every namespaced Role named role-1",
         ];
