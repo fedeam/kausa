@@ -5,6 +5,11 @@
 //! detection (docs/adr/0024-system-message-by-detection.md), one user message with the redacted
 //! context as a JSON document marked as untrusted, and a fixed answer schema. kausa never acts on
 //! the answer; it validates it, cleans its text and logs it.
+//!
+//! An answer can still hold a command that someone could copy and run: a log line can ask the
+//! model for one. Every text a sink gets is checked against six published command shapes
+//! (`W001`-`W006`), and a text in which one matches is replaced by a fixed notice, with `low`
+//! confidence (docs/adr/0025-withhold-destructive-commands.md).
 
 use std::sync::LazyLock;
 
@@ -223,6 +228,13 @@ impl Explanation {
             "confidence": self.confidence,
         })
     }
+
+    /// Whether the answer carries kausa's notice: true exactly when its first step is
+    /// [`WITHHELD`] (after [`withhold_all`], the notice always leads the steps;
+    /// docs/adr/0025-withhold-destructive-commands.md).
+    pub fn withheld(&self) -> bool {
+        self.steps.first().is_some_and(|s| s == WITHHELD)
+    }
 }
 
 /// Validates the text of an answer: one JSON object (a Markdown code fence around it is
@@ -349,6 +361,257 @@ fn is_format(c: char) -> bool {
             | '\u{FEFF}'
             | '\u{FFF9}'..='\u{FFFB}'
     )
+}
+
+// Withheld command shapes (docs/adr/0025-withhold-destructive-commands.md). Nothing here uses
+// another module of kausa's: the `validate` fuzz target compiles it alone.
+
+/// The notice that replaces withheld steps and leads every rendering of a withheld answer
+/// (docs/adr/0025-withhold-destructive-commands.md). Fixed, so that a repeat patches the same
+/// Event. ASCII, 171 bytes; it matches no shape and `clean` leaves it as it is at every cap.
+pub const WITHHELD: &str = "Withheld by kausa: a suggested command that deletes or forces broadly. \
+     Text in this workload's logs or events may have steered this answer; check them before acting \
+     on it.";
+
+/// What replaces a summary or a cause in which a shape matched (ASCII, 75 bytes).
+pub const WITHHELD_FIELD: &str =
+    "Withheld by kausa: this text held a command that deletes or forces broadly.";
+
+/// The ids of the withheld command shapes, in the order [`shapes`] and [`withhold_all`] report
+/// them. docs/reference/rules.md publishes their patterns.
+pub const SHAPES: [&str; 6] = ["W001", "W002", "W003", "W004", "W005", "W006"];
+
+/// `$IFS` and `${IFS}`, which a shell expands to whitespace.
+static IFS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{?IFS\}?").expect("a valid pattern"));
+
+/// The words a candidate starts at: the commands of `W001`-`W005`.
+static COMMAND_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:kubectl|oc|k|helm|rm)\b").expect("a valid pattern"));
+
+/// The compiled patterns of the shapes, built once.
+struct Patterns {
+    /// `W001`-`W004`, in `SHAPES` order, each tried on every candidate.
+    command: [Regex; 4],
+    /// `W005`: it holds when all three match one candidate.
+    rm: [Regex; 3],
+    /// `W006`, tried on the whole folded text.
+    prose: Regex,
+}
+
+static PATTERNS: LazyLock<Patterns> = LazyLock::new(|| {
+    // A command that talks to the API server, and a boolean flag set true as pflag reads it
+    // (`strconv.ParseBool`; `(?i)` folds the case).
+    const K: &str = "(?:kubectl|oc|k)";
+    const B: &str = "(?:=(?:1|t|true))?";
+    let re = |pattern: &str| Regex::new(pattern).expect("a valid pattern");
+    Patterns {
+        command: [
+            // W001: `delete` of namespaces, projects, nodes, CRDs or the `all` category.
+            re(&format!(
+                r"(?i)^{K}\b.*?\bdelete(?:\s+-\S+(?:\s+[^\s-]\S*)*?)*?\s+(?:[\w.-]+,)*(?:ns|namespaces?|projects?|no|nodes?|crds?|customresourcedefinitions?|all)(?:\.[\w.-]+)?(?:[,/\s]|$)"
+            )),
+            // W002: `delete` with `--all`, `--all-namespaces` or `-A`, bare or set true.
+            re(&format!(
+                r"(?i)^{K}\b.*?\bdelete\b.*?\s(?:--all|--all-namespaces|(?-i:-A)){B}(?:[^\w=-]|$)"
+            )),
+            // W003: any command with `--force` (bare or set true) or a grace period of 0.
+            re(&format!(
+                r"(?i)^{K}\b.*?\s(?:--force{B}|--grace-period(?:=|\s+)0+s?)(?:[^\w=-]|$)"
+            )),
+            // W004: `helm uninstall` and its aliases.
+            re(r"(?i)^helm\b.*?\b(?:uninstall|delete|del|un)\b"),
+        ],
+        // W005: `rm` with a recursive and a force option.
+        rm: [
+            re(r"(?i)^rm\b"),
+            re(r"(?i)\s(?:-[a-z]*r[a-z]*|--recursive)(?:\s|$)"),
+            re(r"(?i)\s(?:-[a-z]*f[a-z]*|--force)(?:\s|$)"),
+        ],
+        // W006: the prose "delete every namespace".
+        prose: re(
+            r"(?i)\b(?:delet|remov|wip|purg|destroy)\w*\s+(?:all|every|each)\s+(?:of\s+)?(?:the\s+)?(?:namespaces?|projects?)(?:[^\w-]|$)",
+        ),
+    }
+});
+
+/// A copy of `text` used only for matching, never stored or logged: NFKC (fullwidth letters
+/// become ASCII), `$IFS` and `${IFS}` replaced by a space, quotes and backslashes removed
+/// (`kube'ctl'`, `kube\ctl`), whitespace collapsed.
+fn fold(text: &str) -> String {
+    let normalized: String = text.nfkc().collect();
+    let kept: String = IFS
+        .replace_all(&normalized, " ")
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\'' | '"' | '\\' | '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}'
+            )
+        })
+        .collect();
+    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Every suffix of the folded text that starts at a command word. Nothing cuts the text: a
+/// separator, a comma or a command word inside a flag value, a quoted argument or a substitution
+/// cannot split one command from its kind or flag (docs/adr/0025-withhold-destructive-commands.md,
+/// "Cut the text into clauses"). More starts only add matches.
+fn candidates(folded: &str) -> Vec<&str> {
+    COMMAND_WORD
+        .find_iter(folded)
+        .map(|m| &folded[m.start()..])
+        .collect()
+}
+
+/// The shapes found in one text, in `SHAPES` order, with no repeats. Pure and total. A field is
+/// at most 600 characters, so it has at most 300 candidates, and each match is linear in its
+/// length.
+pub fn shapes(text: &str) -> Vec<&'static str> {
+    let folded = fold(text);
+    let starts = candidates(&folded);
+    let patterns = &*PATTERNS;
+    let [w001, w002, w003, w004] =
+        [0, 1, 2, 3].map(|i| starts.iter().any(|c| patterns.command[i].is_match(c)));
+    let w005 = starts
+        .iter()
+        .any(|c| patterns.rm.iter().all(|re| re.is_match(c)));
+    let w006 = patterns.prose.is_match(&folded);
+    SHAPES
+        .into_iter()
+        .zip([w001, w002, w003, w004, w005, w006])
+        .filter_map(|(id, hit)| hit.then_some(id))
+        .collect()
+}
+
+/// What [`withhold_all`] changes, decided on every version at once, so that the versions keep
+/// their steps in line.
+struct Plan {
+    /// A shape matched in the summary of some version.
+    summary: bool,
+    /// A shape matched in the cause of some version.
+    cause: bool,
+    /// Step `i` is removed from every version: a shape matched in it, or it is the notice (which
+    /// goes first again).
+    drop: Vec<bool>,
+    /// The shapes found, in `SHAPES` order.
+    found: [bool; SHAPES.len()],
+}
+
+impl Plan {
+    /// The plan for `versions`, or `None` when no shape matched and no field is already one of
+    /// kausa's two texts: then nothing changes.
+    fn of(versions: &[Explanation]) -> Option<Self> {
+        let steps = versions.iter().map(|v| v.steps.len()).max().unwrap_or(0);
+        let mut plan = Self {
+            summary: false,
+            cause: false,
+            drop: vec![false; steps],
+            found: [false; SHAPES.len()],
+        };
+        let mut written = false;
+        for v in versions {
+            plan.summary |= plan.check(&v.summary);
+            plan.cause |= plan.check(&v.cause);
+            for (i, step) in v.steps.iter().enumerate() {
+                let hit = plan.check(step);
+                plan.drop[i] |= hit || step == WITHHELD;
+            }
+            written |= [&v.summary, &v.cause]
+                .into_iter()
+                .chain(&v.steps)
+                .any(|t| t == WITHHELD || t == WITHHELD_FIELD);
+        }
+        (written || plan.found.contains(&true)).then_some(plan)
+    }
+
+    /// Whether a shape matches `text`, adding the ones it found.
+    fn check(&mut self, text: &str) -> bool {
+        let ids = shapes(text);
+        for (found, id) in self.found.iter_mut().zip(SHAPES) {
+            *found |= ids.contains(&id);
+        }
+        !ids.is_empty()
+    }
+
+    /// The ids of the shapes found, in `SHAPES` order.
+    fn ids(&self) -> Vec<&'static str> {
+        SHAPES
+            .into_iter()
+            .zip(self.found)
+            .filter_map(|(id, hit)| hit.then_some(id))
+            .collect()
+    }
+
+    /// One version withheld: the matching summary and cause replaced, the notice first, the
+    /// dropped steps removed, the rest in order, at most `MAX_STEPS`, `low` confidence.
+    fn apply(&self, v: Explanation) -> Explanation {
+        let steps = std::iter::once(WITHHELD.to_owned())
+            .chain(
+                v.steps
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| !self.drop[*i])
+                    .map(|(_, step)| step),
+            )
+            .take(MAX_STEPS)
+            .collect();
+        Explanation {
+            summary: if self.summary {
+                WITHHELD_FIELD.to_owned()
+            } else {
+                v.summary
+            },
+            cause: if self.cause {
+                WITHHELD_FIELD.to_owned()
+            } else {
+                v.cause
+            },
+            steps,
+            confidence: "low".to_owned(),
+        }
+    }
+}
+
+/// Every version of one answer with each text withheld that holds a shape in any version, and the
+/// shapes found, in `SHAPES` order (docs/adr/0025-withhold-destructive-commands.md). The versions
+/// are one answer mapped field by field ([`Explanation::map_clean`]): the placeholder text, the
+/// restored one and the notification's narrow one, so a name mapped back that completes a command
+/// in one of them is withheld in all.
+///
+/// A summary or cause in which a shape matches in any version becomes [`WITHHELD_FIELD`] in every
+/// version; a step in which one matches is removed from every version. When anything matched, or
+/// a field already is one of the two texts (a model can write them), [`WITHHELD`] becomes the
+/// first step, any other copy of it is removed, the rest keep their order, the list is cut to
+/// `MAX_STEPS` and the confidence becomes `low`. Otherwise the versions come back as they were,
+/// with no ids. The output matches no shape, is its own result (a second pass returns it with no
+/// ids), and keeps the fixed point of `clean` of its fields. Total: a step missing from a version
+/// matches nothing there.
+pub fn withhold_all(versions: Vec<Explanation>) -> (Vec<Explanation>, Vec<&'static str>) {
+    match Plan::of(&versions) {
+        None => (versions, Vec::new()),
+        Some(plan) => (
+            versions.into_iter().map(|v| plan.apply(v)).collect(),
+            plan.ids(),
+        ),
+    }
+}
+
+/// [`withhold_all`] on one version: the replay of the committed answers, the fuzz target and the
+/// offline grading.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "kausa run withholds every version at once; the tests, the fuzz target and the \
+                  offline grading withhold one"
+    )
+)]
+pub fn withhold(e: Explanation) -> (Explanation, Vec<&'static str>) {
+    match Plan::of(std::slice::from_ref(&e)) {
+        None => (e, Vec::new()),
+        Some(plan) => (plan.apply(e), plan.ids()),
+    }
 }
 
 #[cfg(test)]
