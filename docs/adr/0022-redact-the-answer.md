@@ -211,3 +211,9 @@ answers were identical in both builds; the other had a different request. None o
 that reopen this decision held. The `gemini-3.5-flash-lite` column is run separately by the
 maintainer with the same script, and is pending as of 2026-11-02. The measurement ran kausa once
 per namespace: with both, 23 incidents at once overflow the queue of 16.
+
+Update 2026-11-04: [0025. Replace the model's text that holds one of six listed destructive command shapes with a
+fixed notice, show the notice first, and give that answer `low` confidence](0025-withhold-destructive-commands.md) takes up the "A URL and command denylist in `steps`" rejected here, for
+destructive commands only: after the answer pass and both restores, a field that holds one of six
+listed shapes is replaced by a fixed notice in every sink, and the answer gets `low` confidence.
+Redaction itself does not change.

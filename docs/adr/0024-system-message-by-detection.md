@@ -241,3 +241,8 @@ exactly the measured `B` arm, so nothing ships unmeasured, while `intro_no_pod` 
 configuration not measured whole and would need its own run first. `D008` is the measured case of
 a later ADR on hints (the ADR 0025 that "What ships" names: a derived `hints` field, with
 reason-keyed system text as its first alternative), with this run's `B` as its reference.
+
+Update 2026-11-04: the `hints` follow-up that this record calls "ADR 0025" takes the next free
+number: [0025](0025-withhold-destructive-commands.md) is the decision on destructive commands in
+the answer (issue [#84](https://github.com/fedeam/kausa/issues/84)), which the same measurement
+found.
