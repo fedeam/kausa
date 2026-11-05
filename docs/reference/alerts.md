@@ -4,7 +4,8 @@ The Prometheus alerting rules in
 [`deploy/prometheus/kausa-alerts.yaml`](../../deploy/prometheus/kausa-alerts.yaml): what each
 alert means, its expression and what to do when it fires.
 
-Status as of 2026-11-04 (released in v0.6.0): eleven alerts in five groups, all on kausa's own
+Status as of 2026-11-05: twelve alerts in five groups (eleven released in v0.6.0, and
+`KausaAnswerWithheld` since the measurement of 0025), all on kausa's own
 metrics ([Command line and log format](command-line.md#metrics)). The `ci` target of the
 `Dockerfile` checks the file with `promtool check rules --lint=all --lint-fatal` and runs its unit
 tests, [`tests/prometheus/kausa-alerts.test.yaml`](../../tests/prometheus/kausa-alerts.test.yaml),
@@ -272,6 +273,35 @@ hour after its last skip.
 
 **Tests:** `explanations skipped`.
 
+### KausaAnswerWithheld
+
+```promql
+increase(kausa_answers_withheld_total[1h]) > 0
+```
+
+`for`: none.
+
+**What it means:** in the last hour kausa replaced text of a model's answer with its withheld
+notice: the answer held one of the destructive command shapes of [0025. Replace the model's text
+that holds one of six listed destructive command shapes with a fixed notice, show the notice first,
+and give that answer `low` confidence](../adr/0025-withhold-destructive-commands.md) (`W001` to
+`W006`, [Detection and redaction rules](rules.md)).
+
+**Why:** the measured cause is text in a workload's logs or events addressed to the model. No
+benign answer was withheld in the measurement of 2026-11-05 ([Destructive commands,
+measured](../research/2026-11-05-destructive-commands-measured.md)), so a withheld answer is
+worth a look.
+
+**When it does not fire:** when no answer was withheld in the last hour; it resolves about an hour
+after the last one.
+
+**What to do:** read the `explanation` log line whose `withheld` field is not empty (it names the
+shapes and the incident), then the workload's logs and Warning events for a line addressed to a
+model. The Event and the notification already lead with the notice; do not run the withheld
+command.
+
+**Tests:** `answer withheld`.
+
 ## kausa-watches
 
 ### KausaWatchErrors
@@ -436,8 +466,4 @@ The relists (`kausa_watch_relists_total`, normal after an expired resource versi
 duration histogram (no latency objective exists), the record and cache gauges (no threshold has
 been measured) and `kausa_answer_redactions_total`, whose alert waits for a measured rate ([0022. Pass the model's
 answer through the pattern redaction rules before it is written anywhere, and redact the query of
-an HTTP request line](../adr/0022-redact-the-answer.md)) and `kausa_answers_withheld_total`, whose
-alert waits for the measurement of [0025. Replace the model's text that holds one of six listed
-destructive command shapes with a fixed notice, show the notice first, and give that answer `low`
-confidence](../adr/0025-withhold-destructive-commands.md): it ships only if no benign answer is
-withheld.
+an HTTP request line](../adr/0022-redact-the-answer.md)).

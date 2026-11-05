@@ -275,6 +275,45 @@ tests:
         alertname: KausaExplanationsSkipped
         exp_alerts: []
 
+  # KausaAnswerWithheld: kausa starts the counter at 0, so the first withheld answer (counted at
+  # minute 11) fires at once and the `[1h]` window holds it until minute 69.
+  - name: answer withheld
+    interval: 1m
+    input_series:
+      - series: 'kausa_answers_withheld_total{job="kausa", instance="a"}'
+        values: '0x10 1x70'
+      - series: 'kausa_answers_withheld_total{job="kausa", instance="b"}'
+        values: '0x80'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KausaAnswerWithheld
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: KausaAnswerWithheld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa withheld a destructive command from a model's answer in the last hour.
+              description: Read the explanation log line with a non-empty withheld field, then the workload's logs and events for text addressed to a model.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaanswerwithheld
+      - eval_time: 69m
+        alertname: KausaAnswerWithheld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kausa
+              instance: a
+            exp_annotations:
+              summary: kausa withheld a destructive command from a model's answer in the last hour.
+              description: Read the explanation log line with a non-empty withheld field, then the workload's logs and events for text addressed to a model.
+              runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaanswerwithheld
+      - eval_time: 70m
+        alertname: KausaAnswerWithheld
+        exp_alerts: []
+
   # KausaWatchErrors: a steady 1.35 errors a minute reads 20.25 in the `[15m]` window from minute
   # 15, so the `for: 15m` ends at minute 30; 1.3 a minute (19.5) never fires. Not exactly 20 and
   # 21: `increase` extrapolates to the window's edges, so 15 per-minute samples of a steady rate r
