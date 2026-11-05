@@ -520,8 +520,9 @@ SBOMs.
 Once, with the `fedeam` GitHub account, so that Artifact Hub lists the chart from GHCR ([0023.
 Publish the chart as a signed OCI artifact at `oci://ghcr.io/fedeam/charts/kausa`, list it on
 Artifact Hub, and attest a CycloneDX SBOM of an auditable binary to each
-image](../adr/0023-oci-chart-and-sbom.md)). Status as of 2026-11-03: not done;
-`charts/artifacthub-repo.yml` does not exist yet.
+image](../adr/0023-oci-chart-and-sbom.md)). Status as of 2026-11-05: done; the repository was
+registered on 2026-11-05 and `charts/artifacthub-repo.yml` holds its ID, so the release after it
+pushes the metadata.
 
 1. Sign in at `https://artifacthub.io` with the `fedeam` GitHub account.
 2. Control Panel → Repositories → Add: kind "Helm charts", name `kausa`, display name `kausa`,
