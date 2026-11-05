@@ -45,3 +45,16 @@ under `[0.6.1] - 2026-11-05`: 0025's withheld command shapes, the alert `KausaAn
 the listing on Artifact Hub. The README, `SECURITY.md`, the front page, the command-line reference
 and the install guide name v0.6.1. The release's verification, the check of Artifact Hub and the
 bump of `tests/e2e/upgrade-from.txt` follow the tag.
+
+- **Verification:** every command of the v0.6.1 notes passed on 2026-11-05: the `cosign` block
+  (image signature and provenance, both SBOMs, chart signature and provenance) and the checksum
+  block against an anonymous `helm pull` of the OCI chart, with no login, and the `gh` block,
+  logged in. The `artifacthub.io` tag of the chart answers an anonymous pull.
+- **Upgrade:** in kind (node `v1.36.4`), a release installed from the v0.6.0 OCI chart, namespaced
+  to `default` with two replicas and `dryRun`, was upgraded to v0.6.1 with `--reuse-values`: the
+  values stayed, both new Pods ran `ghcr.io/fedeam/kausa:0.6.1`, one of them took the Lease about
+  30 s later, and no line was `warn` or `error`.
+- **Artifact Hub:** within the hour after the tag, Artifact Hub listed 0.6.1, signed, with the
+  publisher verified and no tracking errors (its public API, read without an account). This closes
+  the next step above.
+- **Next:** `tests/e2e/upgrade-from.txt` pins v0.6.1.
