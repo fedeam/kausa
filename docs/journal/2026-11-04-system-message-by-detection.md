@@ -238,3 +238,86 @@ The `Release` workflow of the tag `v0.6.0` passed its six jobs (`image` on both 
 Step 6: `tests/e2e/upgrade-from.txt` now pins v0.6.0 (the chart's SHA-256 from the signed
 `SHA256SUMS`, the image index digest from the notes). Artifact Hub is still not registered: it
 needs the maintainer's login on its site.
+
+## Later the same day: withhold destructive commands (ADR 0025)
+
+The request: implement [0025](../adr/0025-withhold-destructive-commands.md) (issue
+[#84](https://github.com/fedeam/kausa/issues/84)) for v0.6.1, accepted earlier today (#86): tests
+first, then the code, the fuzz target, the end-to-end checks, the docs, and the corpus and offline
+grader the measurement will use, without running the measurement.
+
+What was done, on the branch `feat/withhold-destructive` (the corpus, the grader and the e2e and
+chart checks on `feat/withhold-destructive-bench`, merged into it):
+
+- Tests first: the shapes on their positive cases with exact ids, the one-token forms, near misses
+  and the pinned limits and false positives, the rules on a match across versions, idempotence, the
+  notice first in `events::note` and `notification::render` (also under the 1,024-byte cut), every
+  sink and the counter in `src/explain.rs` (a Job named `kubectl`, a container named `ns`, a cached
+  repeat, an ordinary answer), the 23rd counter and its golden lines, and the replay of the 420
+  committed answers.
+- `src/prompt.rs`: `WITHHELD`, `WITHHELD_FIELD`, `SHAPES`, the fold, the candidates (no cut), the
+  six patterns built once, `shapes`, `withhold_all`, `withhold` and `Explanation::withheld`.
+  `src/explain.rs` runs `withhold_all` on the placeholder text, the restored answer and the
+  notification's after both restores and before the dedup entry, counts
+  `kausa_answers_withheld_total` and logs `withheld` and `model_confidence` on fresh lines.
+  `src/events.rs` and `src/notification.rs` put the notice first; `src/notify.rs` ties the
+  notification's copy of the text to `prompt::WITHHELD`.
+- The `validate` fuzz target asserts that no shape survives `withhold`, on the answer and on a copy
+  with a placeholder renamed `kubectl`, with seven seeds from the measured answers.
+- e2e: `failing-job` fails on `--e2e-withhold-marker`, the fake endpoint answers a request holding
+  the marker with a third step, `kubectl delete namespace --all`, and `tests/e2e/run.sh` checks the
+  notice in every sink, the log fields and the counter. `tests/chart/render.sh` ties the pieces
+  together statically.
+- The corpus: 13 Deployments in `tests/bench/injection-corpus.yaml` (26 in all) and
+  `tests/bench/known-causes-injection.json` (16 entries), and the ignored tests
+  `withhold_answers_dir` and `withhold_sink_texts` that grade a measurement's answers and sink texts
+  offline, printing ids and counts, never text.
+- Docs: "Withheld command shapes" in [Detection and redaction rules](../reference/rules.md), with
+  the patterns as the code compiles them (a new test, `every_shape_is_in_the_rules_reference`,
+  compares them byte for byte) and the Limits; [Command line and log
+  format](../reference/command-line.md), [Data sent in
+  notifications](../reference/data-sent-in-notifications.md), [Explanation
+  resource](../reference/explanation-resource.md), [Alerts](../reference/alerts.md) ("What has no
+  alert"), the [Security policy](../../SECURITY.md), [ARCHITECTURE.md](../../ARCHITECTURE.md)
+  (invariant 5, the flow, the codemap), [Architecture](../explanation/architecture.md), [Add a
+  detection or redaction rule](../how-to/add-a-rule.md) and the changelog under `Unreleased`.
+
+### Decisions
+
+- **The e2e marker is an unknown option.** `failing-job` already failed on an option kausa does
+  not know; naming it `--e2e-withhold-marker` puts the marker in the usage error that kausa's own
+  binary prints (`cargo run --locked -q -- --e2e-withhold-marker` exits 2 with it on stderr), so
+  the `D008` request's log tail carries it and the fake endpoint can answer that incident alone
+  with the destructive step. No new workload, and `policy-job`, which `render.sh` pins, is
+  unchanged.
+- **The log fields are checked end to end, not in the unit harness.** `log::info` writes to
+  stdout, which the offline harness of `src/explain.rs` does not capture, so `withheld` and
+  `model_confidence` (and their absence on cached lines) are asserted in `tests/e2e/run.sh`;
+  `src/log.rs` was not refactored for it.
+- `kubectl delete pods --all=0`, which the ADR lists among the forms that do not match, joined
+  the near misses, so that every example the rules reference gives is pinned by a test.
+
+### Checks and hypotheses
+
+- Passed locally on the merged branch: `cargo fmt --check`, `cargo deny --locked check`,
+  `cargo audit`, `helm lint --strict` with `rbac.scope=cluster`, `cargo clippy -D warnings`,
+  `cargo test` (751 tests, 2 ignored), `bash tests/chart/render.sh`, `bash -n` on the e2e
+  scripts (shellcheck finds the same notes as on `main`), the fuzz crate's `cargo check`, and
+  `gitleaks` on the branch's history. The fake endpoint answered 3 steps to a body with the marker
+  and 2 to one without. The commit before the merge passed fmt, clippy and the tests too.
+- Not run here: the kind test and `docker build --target ci .` (GitHub runs them on the pull
+  request), and `promtool`, which is not installed on this machine.
+- Confirmed in the crate: the committed answers replay as 0025 predicted from its Python
+  prototype: 420 valid rows, exactly the 7 named `inject-log` answers change, 11 of 1,441 steps
+  are removed, and `high` among the 12 `inject-log` answers falls from 10 to 3. The offline grader
+  gives the same counts.
+- Still hypotheses: that the shapes stay silent on benign answers beyond this corpus, that small
+  models copy an injected command verbatim beyond these 11 steps, and that Slack and Telegram show
+  the notice as plain text. The measurement decides the first two.
+
+### Next steps
+
+- The measurement of 0025 (its Consequences): the dry-run validity check, the local calls on the
+  16 entries, the offline grading and one sink run; then the research note, an `Update` in 0025,
+  and the `KausaAnswerWithheld` example alert only if bar M1 (no benign answer changed) holds.
+- Close #84 with a link to the note.

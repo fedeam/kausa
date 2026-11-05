@@ -16,6 +16,12 @@ pub const MAX_TEXT_UNITS: usize = 4000;
 pub const MAX_SLACK_UNITS: usize = 5 * MAX_TEXT_UNITS;
 // Checked when it compiles: the escaped text stays under the length at which Slack truncates.
 const _: () = assert!(MAX_SLACK_UNITS < 40_000);
+/// kausa's notice in place of a withheld command (docs/adr/0025-withhold-destructive-commands.md):
+/// the same text as `prompt::WITHHELD`, copied because this module imports nothing of kausa's (a
+/// test in notify.rs ties the two). As the first step it leads the plain text on line 2.
+pub const WITHHELD: &str = "Withheld by kausa: a suggested command that deletes or forces broadly. \
+     Text in this workload's logs or events may have steered this answer; check them before acting \
+     on it.";
 /// U+2060, WORD JOINER, which Telegram's text carries after every `@` and `/`, and Slack's after
 /// every `@`: invisible, and one UTF-16 code unit.
 pub const JOINER: char = '\u{2060}';
@@ -139,18 +145,27 @@ fn joined(n: &Notice, is_joined: impl Fn(char) -> bool) -> String {
     joined
 }
 
-/// The whole text, before any cut.
+/// The whole text, before any cut. A first step equal to `WITHHELD` is its own line after the
+/// header, where a cut cannot reach it, and the other steps are numbered from 1
+/// (docs/adr/0025-withhold-destructive-commands.md).
 fn render(n: &Notice) -> String {
-    let mut lines = Vec::with_capacity(5 + n.steps.len());
+    let mut lines = Vec::with_capacity(6 + n.steps.len());
     lines.push(format!(
         "kausa: {} ({}) in {}, {} {}",
         n.detection_name, n.detection_id, n.namespace, n.kind, n.name
     ));
+    let mut steps = &n.steps[..];
+    if let Some((first, rest)) = steps.split_first()
+        && first == WITHHELD
+    {
+        lines.push(first.clone());
+        steps = rest;
+    }
     lines.push(n.summary.clone());
     lines.push(format!("Likely cause: {}", n.cause));
-    if !n.steps.is_empty() {
+    if !steps.is_empty() {
         lines.push("Check:".to_owned());
-        for (i, step) in n.steps.iter().enumerate() {
+        for (i, step) in steps.iter().enumerate() {
             lines.push(format!("{}. {step}", i + 1));
         }
     }
@@ -282,19 +297,26 @@ mod tests {
         }
     }
 
-    /// The rendering of the contract before the cut, written out independently.
+    /// The rendering of the contract before the cut, written out independently. A first step
+    /// equal to `WITHHELD` is its own line after the header, and the other steps are numbered
+    /// from 1 (docs/adr/0025-withhold-destructive-commands.md).
     fn uncut(n: &Notice) -> String {
-        let mut lines = vec![
-            format!(
-                "kausa: {} ({}) in {}, {} {}",
-                n.detection_name, n.detection_id, n.namespace, n.kind, n.name
-            ),
-            n.summary.clone(),
-            format!("Likely cause: {}", n.cause),
-        ];
-        if !n.steps.is_empty() {
+        let mut lines = vec![format!(
+            "kausa: {} ({}) in {}, {} {}",
+            n.detection_name, n.detection_id, n.namespace, n.kind, n.name
+        )];
+        let mut steps = &n.steps[..];
+        if let Some((first, rest)) = steps.split_first()
+            && first == WITHHELD
+        {
+            lines.push(first.clone());
+            steps = rest;
+        }
+        lines.push(n.summary.clone());
+        lines.push(format!("Likely cause: {}", n.cause));
+        if !steps.is_empty() {
             lines.push("Check:".into());
-            for (i, step) in n.steps.iter().enumerate() {
+            for (i, step) in steps.iter().enumerate() {
                 lines.push(format!("{}. {step}", i + 1));
             }
         }
@@ -788,6 +810,124 @@ mod tests {
                 let _ = telegram_body(&n, &ChatId::Username("@valid_name".into()));
                 let _ = parse_chat_id(text);
             }
+        }
+    }
+
+    // Acceptance tests for docs/adr/0025-withhold-destructive-commands.md, written before the
+    // code. They use `pub const WITHHELD: &str`, the same text as `prompt::WITHHELD` (a test in
+    // notify.rs ties them): when it is the first step, the plain text puts it on the line after
+    // the header and numbers the other steps from 1. The `json` body is unchanged: the notice is
+    // `steps[0]`.
+
+    /// The reference notice, withheld: the notice first, then the reference step, at low.
+    fn withheld_notice(steps: &[&str]) -> Notice {
+        let mut n = notice();
+        n.steps = std::iter::once(WITHHELD)
+            .chain(steps.iter().copied())
+            .map(str::to_owned)
+            .collect();
+        n.confidence = "low".into();
+        n
+    }
+
+    #[test]
+    fn a_withheld_notice_leads_the_text_on_line_2() {
+        let n = withheld_notice(&["Check the container's args in the Deployment."]);
+        let expected = format!(
+            "kausa: crash loop (D001) in shop, Deployment web\n\
+             {WITHHELD}\n\
+             The container exits right after it starts.\n\
+             Likely cause: It is started with a flag it does not know.\n\
+             Check:\n\
+             1. Check the container's args in the Deployment.\n\
+             Confidence: low \u{b7} fingerprint 5d0c2b7e9a1f4c38"
+        );
+        assert_eq!(text(&n), expected);
+        assert_eq!(uncut(&n), expected);
+        // Slack and Telegram show the same lines: the notice holds no '@', '/', '&', '<' or '>'.
+        assert_eq!(slack_of(&n), expected);
+        assert_eq!(telegram_of(&n), expected);
+        check_bodies(&n, "withheld");
+        // The notice alone: no Check block.
+        let alone = withheld_notice(&[]);
+        assert_eq!(
+            text(&alone),
+            format!(
+                "kausa: crash loop (D001) in shop, Deployment web\n\
+                 {WITHHELD}\n\
+                 The container exits right after it starts.\n\
+                 Likely cause: It is started with a flag it does not know.\n\
+                 Confidence: low \u{b7} fingerprint 5d0c2b7e9a1f4c38"
+            )
+        );
+        check_bodies(&alone, "the notice alone");
+        // The steps after the notice are numbered from 1.
+        let four = withheld_notice(&["s1", "s2", "s3", "s4"]);
+        assert!(
+            text(&four).contains(&format!(
+                "\n{WITHHELD}\nThe container exits right after it starts.\n\
+                 Likely cause: It is started with a flag it does not know.\n\
+                 Check:\n1. s1\n2. s2\n3. s3\n4. s4\nConfidence: low "
+            )),
+            "four steps after the notice"
+        );
+        // The notice anywhere else is an ordinary step.
+        let mut later = notice();
+        later.steps.push(WITHHELD.into());
+        assert!(
+            text(&later).contains(&format!(
+                "\nCheck:\n1. Check the container's args in the \
+                                            Deployment.\n2. {WITHHELD}\nConfidence: "
+            )),
+            "the notice second"
+        );
+        check_bodies(&later, "the notice second");
+    }
+
+    #[test]
+    fn a_withheld_notice_keeps_the_json_body() {
+        let n = withheld_notice(&["Check the container's args in the Deployment."]);
+        let body = json_body(&n, "0.2.0");
+        let mut golden: Value = serde_json::from_str(GOLDEN_JSON).expect("the golden JSON parses");
+        golden["explanation"]["steps"] =
+            json!([WITHHELD, "Check the container's args in the Deployment."]);
+        golden["explanation"]["confidence"] = json!("low");
+        assert_eq!(body, golden);
+        assert_eq!(body["schema"], SCHEMA);
+    }
+
+    #[test]
+    fn a_withheld_notice_over_the_cap_keeps_the_notice_whole() {
+        // Fields far over the cap, one or two units a character: the cut falls after the notice,
+        // which stays whole on line 2, and every body keeps its invariants.
+        for (i, c) in ["x", "\u{e9}", "\u{1f600}", "&"].into_iter().enumerate() {
+            let long = c.repeat(MAX_TEXT_UNITS);
+            let mut n = withheld_notice(&[&long, &long, &long, &long]);
+            n.summary.clone_from(&long);
+            n.cause = long;
+            let t = text(&n);
+            assert!(
+                t.starts_with(&format!(
+                    "kausa: crash loop (D001) in shop, Deployment web\n{WITHHELD}\n"
+                )),
+                "case {i}: the notice is not whole on line 2"
+            );
+            assert!(units(&t) <= MAX_TEXT_UNITS, "case {i}");
+            check_bodies(&n, &format!("withheld over the cap, case {i}"));
+        }
+        // Every text field over the cap: the header alone fills the text, and the cut still holds.
+        let mut n = filled(&"@/".repeat(MAX_TEXT_UNITS), 3);
+        n.steps[0] = WITHHELD.into();
+        check_bodies(&n, "every field over the cap, withheld");
+    }
+
+    #[test]
+    fn the_notice_is_the_text_of_the_adr() {
+        assert_eq!(WITHHELD.len(), 171);
+        assert!(WITHHELD.starts_with("Withheld by kausa: "));
+        assert!(WITHHELD.is_ascii());
+        for c in ['@', '/', '&', '<', '>', '\n'] {
+            assert!(!WITHHELD.contains(c), "the notice holds {c:?}");
         }
     }
 }

@@ -1501,4 +1501,12 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(notified, Some(true));
     }
+
+    // Acceptance test for docs/adr/0025-withhold-destructive-commands.md, written before the
+    // code: notification.rs has no `crate::` import (its fuzz target includes it by path), so it
+    // keeps its own copy of the notice, which must not drift from prompt.rs's.
+    #[test]
+    fn the_notification_notice_is_the_prompt_notice() {
+        assert_eq!(notification::WITHHELD, prompt::WITHHELD);
+    }
 }

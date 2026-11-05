@@ -89,6 +89,9 @@ kausa_watch_relists_total{watch="pods"} 2
 kausa_watch_restarts_total{watch="deployments"} 0
 kausa_watch_restarts_total{watch="events"} 0
 kausa_watch_restarts_total{watch="pods"} 1
+# HELP kausa_answers_withheld_total Model answers in which kausa replaced text with its withheld-command notice.
+# TYPE kausa_answers_withheld_total counter
+kausa_answers_withheld_total 0
 # HELP kausa_leader 1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a standby.
 # TYPE kausa_leader gauge
 kausa_leader 1

@@ -247,3 +247,37 @@ shape, with a corpus case and a replay with no benign match.
   changes the 7 named answers, 11 of 1,441 steps, and no benign one.
 - **Follow-ups, each its own decision:** security-weakening shapes, with a corpus case; the
   example alert; a request-side signal for instruction-like log lines; 0024's `hints` decision.
+
+Update 2026-11-04: a review of the branch before the release found three forms of a delete of a
+namespace or node that `W001` missed. **`W001` grows**, as Limits says a form found does: kubectl
+takes any number of `TYPE/NAME` arguments (`kubectl delete pod/pod-1 namespace/kube-system`),
+`kubectl delete --raw /api/v1/namespaces/x` deletes by API path, and a group suffix may be only the
+dot (`ns. x`, `namespaces./x`; that kubectl accepts these two is a hypothesis, not checked). Its
+pattern is now
+`(?i)^K\b.*?\bdelete\b(?:(?:\s+-\S+(?:\s+[^\s-]\S*)*?)*?\s+(?:[\w.-]+,)*KIND(?:[,/\s]|$)|.*?[\s,]KIND/\S|.*?\s--raw(?:=|\s+)\S*/(?:namespaces|projects|nodes|customresourcedefinitions)\b)`,
+where `KIND` is
+`(?:ns|namespaces?|projects?|no|nodes?|crds?|customresourcedefinitions?|all)(?:\.[\w.-]*)?`
+([rules.md](../reference/rules.md#withheld-command-shapes) publishes it expanded, tied to the code
+by a test). It still leaves `kubectl delete pod/pod-1`, `kubectl get ns/x` and the 420 committed
+answers as they were; a new readability cost is a narrow delete followed by a `KIND/NAME` word,
+such as `kubectl delete pod pod-1, then check node/node-1`.
+
+Update 2026-11-04: the same review found a promise that the code did not keep. **The promise is per
+field.** `withhold_all` checks each summary, cause and step on its own, but the Event note joins
+them (`Likely cause:`, `Check: 1.`) and cuts at 1,024 bytes with `…`, and the Slack and Telegram
+text joins them after a header that holds the workload's real name and cuts at 4,000 units. A
+command word in one field and a kind or flag in a later one, or a cut that ends inside a flag
+(`--force=false` cut to `--force…`), can form a shape that no field holds: the benign
+`kubectl delete pod pod-1` followed by the step `kubectl get pods -A` gives a note in which `W002`
+matches. Checking the joined texts would withhold that benign answer (and fail M1); cutting back
+at a shape would move `fit` and `notification::cut`, which has no `crate::` import, onto
+the patterns. So the Limits paragraph's promise reads: no summary, cause or step, as written to
+an Event, an
+Explanation, kausa's log or a notification after the names are mapped back, is one in which the
+published patterns find a shape; a command split across the summary, the cause and the steps, or
+one that only a sink's join or cut forms, is not promised (SECURITY.md and the Limits of rules.md).
+Bar M2 reads the same unit: "no listed shape in any summary, cause or step that a sink got", graded
+from the `explanation` log line, the Explanation entries and the `json` hook bodies by
+`withhold_sink_texts`, which now reads one JSON object with `summary`, `cause` and `steps` per line
+and grades each field, not from whole Event notes or chat texts. Invariant 5 says "any summary,
+cause or step" for "any text".

@@ -21,7 +21,7 @@ use crate::fingerprint::fingerprint;
 use crate::incident::Incident;
 use crate::leader::Term;
 use crate::leader::pure::WRITE_BOUND;
-use crate::prompt::Explanation;
+use crate::prompt::{Explanation, WITHHELD};
 use crate::run::REPORTING_CONTROLLER;
 
 /// The longest note an Event may carry, in bytes (`NoteLengthLimit` in Kubernetes'
@@ -35,15 +35,22 @@ pub enum Outcome<'a> {
 }
 
 /// The note of an explanation: the summary, the cause and the steps, cut at a character boundary
-/// to fit the limit.
+/// to fit the limit. A withheld answer's note starts with kausa's notice, ahead of anything a cut
+/// could take, and numbers the other steps from 1
+/// (docs/adr/0025-withhold-destructive-commands.md); it stays Normal and Explained.
 pub fn note(explanation: &Explanation) -> String {
-    let mut text = format!(
+    let (mut text, steps) = if explanation.withheld() {
+        (format!("{WITHHELD} "), &explanation.steps[1..])
+    } else {
+        (String::new(), &explanation.steps[..])
+    };
+    text.push_str(&format!(
         "{} Likely cause: {}",
         explanation.summary, explanation.cause
-    );
-    if !explanation.steps.is_empty() {
+    ));
+    if !steps.is_empty() {
         text.push_str(" Check:");
-        for (i, step) in explanation.steps.iter().enumerate() {
+        for (i, step) in steps.iter().enumerate() {
             text.push_str(&format!(" {}. {}", i + 1, step));
         }
     }
@@ -554,5 +561,78 @@ mod tests {
             "{elapsed:?}"
         );
         assert!(requests.recv_timeout(Duration::from_secs(1)).is_ok());
+    }
+
+    // Acceptance tests for docs/adr/0025-withhold-destructive-commands.md, written before the
+    // code: when the first step is `prompt::WITHHELD`, `note` starts with it and a space, then the
+    // summary and the cause, then the other steps numbered from 1, then the confidence; any other
+    // note is as before, byte for byte. The Event stays Normal and Explained.
+
+    use crate::prompt::WITHHELD;
+
+    fn withheld(steps: &[&str]) -> Explanation {
+        Explanation {
+            summary: "api crashes on start".into(),
+            cause: "it cannot reach its database".into(),
+            steps: std::iter::once(WITHHELD)
+                .chain(steps.iter().copied())
+                .map(str::to_owned)
+                .collect(),
+            confidence: "low".into(),
+        }
+    }
+
+    #[test]
+    fn a_withheld_note_leads_with_the_notice() {
+        assert_eq!(
+            note(&withheld(&["check 1", "check 2"])),
+            format!(
+                "{WITHHELD} api crashes on start Likely cause: it cannot reach its database \
+                 Check: 1. check 1 2. check 2 (confidence: low)"
+            )
+        );
+        // The notice alone: no Check block.
+        assert_eq!(
+            note(&withheld(&[])),
+            format!(
+                "{WITHHELD} api crashes on start Likely cause: it cannot reach its database \
+                 (confidence: low)"
+            )
+        );
+        // The notice anywhere but first is an ordinary step, as before.
+        let mut second = explanation(1, 0);
+        second.steps.push(WITHHELD.into());
+        assert_eq!(
+            note(&second),
+            format!(
+                "api crashes on start Likely cause: it cannot reach its database Check: 1. check \
+                 1 2. {WITHHELD} (confidence: medium)"
+            )
+        );
+        // Normal and Explained, as any explanation.
+        let e = withheld(&["check 1"]);
+        let event = build(
+            &incident(),
+            &Outcome::Explained(&e),
+            "kausa",
+            Timestamp::UNIX_EPOCH,
+        );
+        assert_eq!(event.type_.as_deref(), Some("Normal"));
+        assert_eq!(event.reason.as_deref(), Some("Explained"));
+        assert_eq!(event.note, Some(note(&e)));
+    }
+
+    #[test]
+    fn the_notice_survives_the_cut() {
+        let mut e = withheld(&["check 1", "check 2", "check 3", "check 4"]);
+        e.summary = "é".repeat(300);
+        e.cause = "日".repeat(600);
+        let text = note(&e);
+        assert!(text.len() <= MAX_NOTE_BYTES, "the note is over the limit");
+        assert!(
+            text.starts_with(&format!("{WITHHELD} ")),
+            "the cut took the notice"
+        );
+        assert!(text.ends_with('…'), "the note was not cut");
     }
 }

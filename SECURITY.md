@@ -25,6 +25,11 @@ These are vulnerabilities, not ordinary bugs:
 - a value that a redaction rule should catch reaching a request, an Event, an Explanation, kausa's
   log or a notification in clear, whether it came from the cluster or from the model's answer
   (`R003`–`R014` on the answer);
+- a summary, a cause or a step, as written to an Event, an Explanation, kausa's log or a
+  notification after the names are mapped back, in which the [withheld command
+  shapes](docs/reference/rules.md#withheld-command-shapes) (`W001`–`W006`) match (each field on its
+  own: a command split across the fields of one answer is a [documented
+  limit](docs/reference/rules.md#limits));
 - any request to a host other than the Kubernetes API server, the configured endpoint and, with
   notifications on, the configured webhook;
 - a notification that carries a field outside [Data sent in
@@ -176,9 +181,14 @@ kausa must:
   it against a fixed schema, caps its length, strips control and invisible formatting characters
   and markup, passes it through the pattern redaction rules `R003`–`R014` (an address, a token, a
   URL's query or a host outside the allowlist the model writes is redacted, whoever put it there),
-  and writes it only as plain text in an Event, its own log and, when they are on, the history and
-  the notification ([0022. Pass the model's answer through the pattern redaction rules before it
-  is written anywhere, and redact the query of an HTTP request line](docs/adr/0022-redact-the-answer.md)).
+  maps the names back, replaces every summary, cause or step in which a listed destructive command
+  shape matches, in any version a sink gets, with a fixed notice that leads the answer at `low` confidence ([0025.
+  Replace the model's text that holds one of six listed destructive command shapes with a fixed
+  notice, show the notice first, and give that answer `low`
+  confidence](docs/adr/0025-withhold-destructive-commands.md)), and writes it only as plain text
+  in an Event, its own log and, when they are on, the history and the notification ([0022. Pass
+  the model's answer through the pattern redaction rules before it is written anywhere, and redact
+  the query of an HTTP request line](docs/adr/0022-redact-the-answer.md)).
   The endpoint's error body and `Retry-After` go through a pure parser, fuzzed
   (`fuzz/fuzz_targets/endpoint_error.rs`), that reads fixed keys only and lets out only a cause
   kausa defines and a delay clamped to 30-600 seconds; the start of the body stays in kausa's log.
@@ -306,9 +316,23 @@ kausa must:
   the fixed `kubernetes.io/os` and `kubernetes.io/arch` ones.
 - **A misleading explanation is still possible.** Injected text can shape what the model writes,
   for example a suggested command that does harm, a misleading cause or a demanded `high`
-  confidence. The redaction rules on the answer remove values, not advice: commands (`curl … |
-  sh`, `kubectl delete …`) are written as the model wrote them. kausa never runs anything, and the
-  explanation is advice for a person, who has to read it as such.
+  confidence. Commands of the [withheld command
+  shapes](docs/reference/rules.md#withheld-command-shapes) (`kubectl`, `oc` or `k` deleting
+  namespaces, projects, nodes, CRDs or everything, `--all`, `-A`, `--force` or a grace period of
+  0; `helm uninstall`; `rm -rf`; prose that deletes every namespace) are withheld from every sink,
+  names mapped back included, and the answer leads with kausa's notice at `low` confidence. Any
+  other command is written as the model wrote it: a target from a substitution or a pipe (`$( )`,
+  `xargs`, a `for` loop over `$NAME`), a wrapper or plugin such as `kubecolor`, a shell alias or
+  function, other shell expansion (`$IFS$9`, braces, variables), combined short flags (`-RA`),
+  indirection ("run the script in the log"), a command split, encoded or past the 300-character
+  cap, a command split across the summary, the cause and the steps (each is checked on its own; the
+  Event note and the Slack and Telegram text join them after a header that holds the workload's
+  name and cut the result, so a shape that only the joined or cut text holds is not covered),
+  other deletions (`delete deployment x`, `delete -f`, `drain`, an HTTP `DELETE`), `curl … |
+  sh` and security-weakening advice (`cluster-admin`, `privileged`); so are a paraphrase, a false
+  cause and a demanded confidence with no listed shape. The shapes are published, so an injector
+  can look for a form they miss. kausa never runs anything, and the explanation is advice for a
+  person, who has to read it as such.
 - **The provider sees what is sent.** Its retention and training policies are the provider's.
   kausa documents what it sends; choosing the provider is the operator's decision.
 - **The webhook's operator learns what a notification says.** With notifications on, the real

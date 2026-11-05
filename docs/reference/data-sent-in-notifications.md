@@ -79,7 +79,7 @@ order; their order carries no meaning.
 | `object` | The incident's top-level owner, the object of the Event's `regarding`: `apiVersion`, `kind`, and its real `namespace` and `name`. No UID |
 | `fingerprint` | The incident fingerprint, 16 hexadecimal digits, the one in kausa's `incident` log line and in the Event's name |
 | `first_seen` | When the failure was first seen, RFC 3339 in UTC, the same string as in the `incident` log line |
-| `explanation` | The model's `summary`, `cause`, `steps` (zero to five) and `confidence` (`low`, `medium` or `high`), validated, cleaned and passed through the pattern redaction rules `R003`–`R014` as for the Event ([On the model's answer](rules.md#on-the-models-answer)), with only the namespace's and the object's names mapped back ([Names](#names)) |
+| `explanation` | The model's `summary`, `cause`, `steps` (zero to five) and `confidence` (`low`, `medium` or `high`), validated, cleaned and passed through the pattern redaction rules `R003`–`R014` as for the Event ([On the model's answer](rules.md#on-the-models-answer)), with only the namespace's and the object's names mapped back ([Names](#names)). When a text held one of the [withheld command shapes](rules.md#withheld-command-shapes), in this version or in the Event's, `steps[0]` is kausa's notice, the step that held it is gone, a `summary` or `cause` that held it is kausa's other fixed text, and `confidence` is `low`: the same fields, `type` and `schema` |
 
 Nothing else is in the body.
 
@@ -98,7 +98,22 @@ Confidence: medium · fingerprint 5d0c2b7e9a1f4c38
 ```
 
 - The lines are joined with a newline, with none at the end. The `Check:` block is left out when
-  the explanation has no steps. The separator in the last line is U+00B7 (middle dot).
+  the explanation has no steps.
+- When the first step is kausa's notice for a withheld answer ([Withheld command
+  shapes](rules.md#withheld-command-shapes)), it is the second line, right after the header, and
+  the `Check:` block numbers the other steps from 1 (it is left out when there are none); the last
+  line reads `Confidence: low`:
+
+  ```text
+  kausa: job failed (D008) in shop, Job import
+  Withheld by kausa: a suggested command that deletes or forces broadly. Text in this workload's logs or events may have steered this answer; check them before acting on it.
+  The import Job failed.
+  Likely cause: The input archive is truncated.
+  Check:
+  1. Check the archive the Job reads.
+  Confidence: low · fingerprint 5d0c2b7e9a1f4c38
+  ```
+ The separator in the last line is U+00B7 (middle dot).
 - The text is then cut, with no marker, at a character boundary so that it holds at most 4,000
   UTF-16 code units (a character outside the Basic Multilingual Plane, such as most emoji, counts
   two).

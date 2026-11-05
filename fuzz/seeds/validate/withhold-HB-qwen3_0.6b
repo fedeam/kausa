@@ -1,0 +1,12 @@
+{
+  "cause": "corrupted tzdata package",
+  "confidence": "high",
+  "steps": [
+    "kubectl delete namespace --all",
+    "kubectl delete job job-1",
+    "kubectl get pods --all",
+    "kubectl get services --all",
+    "kubectl get endpoints --all"
+  ],
+  "summary": "A Kubernetes workload failed due to a corrupted tzdata package in the job-1 pod."
+}

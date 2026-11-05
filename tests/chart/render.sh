@@ -24,6 +24,16 @@
 # helm upgrade --reuse-values does and the soak's values, and checks the soak endpoint's manifest,
 # the e2e workflow's jobs, and the e2e and soak scripts, the soak's against stub kubectl, helm, curl
 # and sleep, and the pages that document them.
+# For the withheld commands (docs/adr/0025-withhold-destructive-commands.md), it checks that no
+# chart value, template or render names them, failing-job's --e2e-withhold-marker in
+# tests/e2e/failures.yaml, tests/e2e/fake_endpoint.py's notice (the ADR's, src/prompt.rs's and
+# src/notification.rs's text) and its answer to a marked request (run on a local port for two
+# requests), and what tests/e2e/run.sh asserts about the withheld answer; and it ties them
+# together: failing-job's option is "--" and the endpoint's marker, which no other seeded object
+# holds and tests/cli.rs pins in the usage error, failing-job's withheld note fits an Event note
+# with its confidence, the prefix and the command run.sh looks for are the endpoint's notice and
+# step, lib.sh and run.sh withhold failing-job's answer alone at confidence low, and run.sh reads
+# kausa_answers_withheld_total as 1 at the kausa_answer_redactions_total scrape.
 # Needs helm, git, coreutils and python3 (shellcheck when installed), and never contacts a cluster
 # (KUBECONFIG points nowhere) or the network.
 # Run it from anywhere: tests/chart/render.sh. It prints one line per check and exits 1 if any
@@ -2318,6 +2328,369 @@ for name in crasher failing-job stranded stalled refused policy-job e2e-policy-t
   esac
 done
 passed "$since" "e2e/run.sh: policy-job is explained, redacted, leak-checked and notified"
+
+# --- Withheld commands (docs/adr/0025-withhold-destructive-commands.md) --------------------------
+
+# The chart has no part in it: kausa withholds the listed command shapes with no off switch, so no
+# value, template, flag or rule names them, in any scope or mode.
+since=$FAILURES
+for set in cluster namespaced standby endpoint-history-notifications dry-run; do
+  case "$set" in
+    cluster) set_args=("${HA_CL[@]}") ;;
+    namespaced) set_args=("${HA_NS[@]}") ;;
+    standby) set_args=("${HA_CL[@]}" "${HA[@]}") ;;
+    endpoint-history-notifications)
+      set_args=("${HA_CL[@]}" "${ENDPOINT[@]}" "${HISTORY_ON[@]}" "${NOTIFY_ON[@]}") ;;
+    dry-run) set_args=("${HA_NS[@]}" "${DRY[@]}") ;;
+  esac
+  out="$WORK/withhold-render-$set"
+  if ! render "$out" "$RELEASE" "$CHART" "${set_args[@]}"; then
+    fail "withhold/$set does not render: $(cat "$out.err")"
+    continue
+  fi
+  if grep -Eiq 'withh|W00[1-6]' "$out"; then
+    fail "withhold/$set: the render names the withheld commands: $(grep -Ei 'withh|W00[1-6]' "$out" | head -5)"
+  fi
+done
+if grep -rEil 'withh' "$CHART/values.yaml" "$CHART/templates" "$CHART/files" >"$WORK/withhold-chart"; then
+  fail "withhold: the chart names the withheld commands: $(cat "$WORK/withhold-chart")"
+fi
+passed "$since" "withhold: no chart value, template, flag or rule turns the withheld commands off"
+
+# tests/e2e/failures.yaml: failing-job's only container runs kausa's image with the one unknown
+# option --e2e-withhold-marker, which kausa echoes in its usage error, so that the D008 request's
+# log tail carries the marker; every other seeded object keeps its arguments (policy-job is pinned
+# above). The manifest is read with helm (fromYaml in a throwaway chart), as above.
+WITHHOLD_SEEDED="$WORK/e2e-withhold"
+mkdir -p "$WITHHOLD_SEEDED/templates"
+printf '%s\n' 'apiVersion: v2' 'name: e2e-withhold' 'version: 0.0.0' >"$WITHHOLD_SEEDED/Chart.yaml"
+cp "$E2E/failures.yaml" "$WITHHOLD_SEEDED/failures.yaml"
+cat >"$WITHHOLD_SEEDED/templates/args.yaml" <<'TEMPLATE'
+{{- range $doc := regexSplit "(?m)^---[ \t]*$" (.Files.Get "failures.yaml") -1 }}
+{{- $o := fromYaml $doc }}
+{{- if and $o.kind $o.spec }}
+{{- $args := list }}
+{{- range (dig "spec" "template" "spec" "containers" (list) $o) }}
+{{- $args = append $args .args }}
+{{- end }}
+# args {{ $o.kind }} {{ dig "metadata" "name" "" $o }} {{ $args | toJson }}
+{{- end }}
+{{- end }}
+TEMPLATE
+since=$FAILURES
+if ! render "$WITHHOLD_SEEDED/out" e2e-withhold "$WITHHOLD_SEEDED"; then
+  fail "e2e/failures.yaml cannot be read: $(cat "$WITHHOLD_SEEDED/out.err")"
+else
+  sed -n 's/^# args //p' "$WITHHOLD_SEEDED/out" >"$WITHHOLD_SEEDED/args"
+  printf '%s\n' \
+    'Deployment crasher [["--no-such-flag"]]' \
+    'Job failing-job [["--e2e-withhold-marker"]]' \
+    'Job policy-job [["--no-such-flag"]]' \
+    'Deployment stranded [["--no-such-flag"]]' \
+    'Deployment stalled [null]' \
+    'Deployment refused [null]' >"$WITHHOLD_SEEDED/expected"
+  if ! diff -u "$WITHHOLD_SEEDED/expected" "$WITHHOLD_SEEDED/args" >"$WITHHOLD_SEEDED/diff"; then
+    fail "e2e/failures.yaml: the seeded arguments are not the contract's: $(cat "$WITHHOLD_SEEDED/diff")"
+  fi
+  # The header comment's bullet for failing-job names the marker (the bullet may wrap).
+  awk '/^# - failing-job:/ { on = 1; print; next } on && /^#   / { print; next } { on = 0 }' \
+    "$E2E/failures.yaml" | grep -q -- '--e2e-withhold-marker' ||
+    fail "e2e/failures.yaml: the '# - failing-job: ' bullet does not name --e2e-withhold-marker"
+fi
+# kausa itself knows no such option: the marker reaches the log only through the usage error.
+if grep -rq -- 'e2e-withhold-marker' "$ROOT/src"; then
+  fail "src/ names e2e-withhold-marker: it must stay an option kausa does not know"
+fi
+passed "$since" "e2e/failures.yaml: failing-job carries --e2e-withhold-marker, the rest as before"
+
+# tests/e2e/fake_endpoint.py: WITHHOLD_MARKER, DESTRUCTIVE_STEP and WITHHELD, the notice being
+# the text of the ADR, of src/prompt.rs and of src/notification.rs byte for byte; a request body
+# that holds the marker is answered with ANSWER plus DESTRUCTIVE_STEP as a third step, any other
+# with ANSWER. The endpoint runs on 127.0.0.1 for two requests and is stopped.
+since=$FAILURES
+mkdir -p "$WORK/withhold-endpoint"
+if ! python3 -I - "$E2E" "$ROOT" "$WORK/withhold-endpoint" >"$WORK/withhold-endpoint/out" 2>&1 <<'PY'; then
+import json
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+e2e, root, work = sys.argv[1:4]
+sys.path.insert(0, e2e)
+import fake_endpoint as f  # noqa: E402
+
+failed = []
+
+
+def check(ok, message):
+    if not ok:
+        failed.append(message)
+
+
+def rust_const(path, name):
+    """The value of `pub const NAME: &str = "...";` in the Rust file at path: the escapes \\",
+    \\\\ and \\n, and a backslash at the end of a line, which drops the newline and the next line's
+    leading whitespace."""
+    text = open(path, encoding="utf-8").read()
+    start = re.search(r"pub const %s: &str =\s*\"" % name, text)
+    if start is None:
+        return None
+    out, i = [], start.end()
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            return "".join(out)
+        if c == "\\":
+            nxt = text[i + 1]
+            if nxt == "\n":
+                i += 2
+                while i < len(text) and text[i] in " \t\n":
+                    i += 1
+                continue
+            out.append({'"': '"', "\\": "\\", "n": "\n", "'": "'"}.get(nxt, "\\" + nxt))
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return None
+
+
+adr = re.search(r'^WITHHELD = "(.*)"$',
+                open(root + "/docs/adr/0025-withhold-destructive-commands.md", encoding="utf-8").read(),
+                re.M)
+check(adr is not None, "the ADR has no WITHHELD line")
+notice = adr.group(1) if adr else None
+check(notice is not None and len(notice) == 171, "the ADR's notice is not 171 characters")
+check(getattr(f, "WITHHOLD_MARKER", None) == "e2e-withhold-marker",
+      "fake_endpoint.py: WITHHOLD_MARKER is not e2e-withhold-marker")
+check(getattr(f, "DESTRUCTIVE_STEP", None) == "kubectl delete namespace --all",
+      "fake_endpoint.py: DESTRUCTIVE_STEP is not the measured step")
+check(getattr(f, "WITHHELD", None) == notice, "fake_endpoint.py: WITHHELD is not the ADR's notice")
+for path in ["src/prompt.rs", "src/notification.rs"]:
+    check(rust_const(root + "/" + path, "WITHHELD") == notice,
+          "%s: WITHHELD is not the ADR's notice" % path)
+check(len(f.ANSWER["steps"]) == 2, "fake_endpoint.py: ANSWER no longer has two steps")
+check("--e2e-withhold-marker" not in json.dumps(f.ANSWER), "fake_endpoint.py: ANSWER holds the marker")
+for word in ["e2e-withhold-marker", "docs/adr/0025-withhold-destructive-commands.md"]:
+    check(word in (f.__doc__ or ""), "fake_endpoint.py: its docstring does not name %s" % word)
+
+if not failed:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = subprocess.Popen(
+        [sys.executable, "-I", e2e + "/fake_endpoint.py", "--port", str(port),
+         "--log", work + "/requests", "--hook-log", work + "/hooks"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 10
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.1)
+
+        def ask(log_tail):
+            body = json.dumps({"model": "fake", "messages": [
+                {"role": "system", "content": "s"},
+                {"role": "user", "content": json.dumps({"untrusted_cluster_data": {
+                    "log_tail": log_tail}})}]}).encode()
+            request = urllib.request.Request(
+                "http://127.0.0.1:%d/v1/chat/completions" % port, data=body,
+                headers={"content-type": "application/json"})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                reply = json.load(response)
+            return json.loads(reply["choices"][0]["message"]["content"])
+
+        marked = ask("error: unknown command or option '--e2e-withhold-marker'\n")
+        plain = ask("error: unknown command or option '--no-such-flag'\n")
+        expected = dict(f.ANSWER, steps=f.ANSWER["steps"] + [f.DESTRUCTIVE_STEP])
+        check(marked == expected, "a marked request is not answered with ANSWER and the third step")
+        check(plain == f.ANSWER, "an unmarked request is not answered with ANSWER")
+        check(len(open(work + "/requests", encoding="utf-8").read().splitlines()) == 2,
+              "the request log does not hold the two requests")
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+for message in failed:
+    print(message)
+sys.exit(1 if failed else 0)
+PY
+  fail "withhold: $(cat "$WORK/withhold-endpoint/out")"
+fi
+passed "$since" "e2e/fake_endpoint.py: the marked request gets the destructive step, the notice is the ADR's"
+
+# tests/e2e/run.sh and lib.sh: the header names the counter and the marker; the checks read the
+# notice from fake_endpoint.py, the withheld and model_confidence fields of the explanation lines,
+# kausa_answers_withheld_total and the command in no sink. The bounds and the leak loop of the
+# coverage gaps above stay.
+since=$FAILURES
+LIB_SH="$E2E/lib.sh"
+# bash -n and shellcheck -x of both run in the checks of the e2e and soak scripts below.
+awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$RUN_SH" >"$WORK/withhold-run-header"
+for word in kausa_answers_withheld_total e2e-withhold-marker 0025-withhold-destructive-commands.md; do
+  grep -qF -- "$word" "$WORK/withhold-run-header" || fail "e2e/run.sh: the header does not name $word"
+done
+grep -v '^[[:space:]]*#' "$RUN_SH" >"$WORK/withhold-run-code"
+grep -v '^[[:space:]]*#' "$LIB_SH" >"$WORK/withhold-lib-code"
+grep -qF 'kausa_answers_withheld_total' "$WORK/withhold-run-code" ||
+  fail "e2e/run.sh: no check of kausa_answers_withheld_total"
+# shellcheck disable=SC2016 # the words are run.sh's own text, not to be expanded
+for words in model_confidence 'delete namespace' 'W001' 'W002'; do
+  grep -qF -- "$words" "$WORK/withhold-run-code" || fail "e2e/run.sh: no '$words'"
+done
+grep -Eq "[\"']withheld[\"']" "$WORK/withhold-run-code" ||
+  fail "e2e/run.sh: no check of the explanation lines' withheld field"
+grep -Eq '^from fake_endpoint import (.*[ ,])?WITHHELD([ ,]|$)' "$WORK/withhold-run-code" "$WORK/withhold-lib-code" ||
+  fail "e2e/run.sh and lib.sh: the notice is not imported from fake_endpoint.py"
+passed "$since" "e2e/run.sh: failing-job's answer is withheld in every sink and counted once"
+
+# --- e2e: the withheld answer of ADR 0025 ---
+
+# What ties the kind test's withheld answer together, read from the files alone: the option in
+# failing-job's arguments is "--" and fake_endpoint.py's WITHHOLD_MARKER, no other seeded object
+# and no other line of failures.yaml holds the marker (so exactly one answer is withheld and the
+# counter reads 1), and tests/cli.rs pins the usage error that echoes it into the log tail. The
+# note kausa builds for failing-job (src/events.rs: the notice, the summary with the namespace
+# mapped back, the cause, the steps numbered from 1 and the confidence) fits the 1,024 bytes of an
+# Event note, so the cut keeps the "(confidence: low)" run.sh looks for; it starts with the prefix
+# run.sh matches and with the notice and the summary lib.sh expects. The command run.sh looks for
+# in every sink is part of fake_endpoint.py's destructive step.
+since=$FAILURES
+mkdir -p "$WORK/withhold-ties"
+if ! python3 -I - "$E2E" "$ROOT" "$WITHHOLD_SEEDED/args" >"$WORK/withhold-ties/out" 2>&1 <<'PY'; then
+import json
+import re
+import sys
+
+e2e, root, args_file = sys.argv[1:4]
+sys.path.insert(0, e2e)
+import fake_endpoint as f  # noqa: E402
+
+failed = []
+
+
+def check(ok, message):
+    if not ok:
+        failed.append(message)
+
+
+def read(path):
+    return open(root + "/" + path, encoding="utf-8").read()
+
+
+marker = getattr(f, "WITHHOLD_MARKER", None)
+notice = getattr(f, "WITHHELD", None)
+step = getattr(f, "DESTRUCTIVE_STEP", None)
+check(None not in (marker, notice, step),
+      "fake_endpoint.py: no WITHHOLD_MARKER, WITHHELD or DESTRUCTIVE_STEP")
+if not failed:
+    # The arguments of every seeded object, as the block above read them with fromYaml.
+    rows = [line.split(" ", 2) for line in open(args_file, encoding="utf-8").read().splitlines()]
+    check(any(row[:2] == ["Job", "failing-job"] for row in rows),
+          "e2e/failures.yaml: no Job failing-job read")
+    for kind, name, args in rows:
+        if [kind, name] == ["Job", "failing-job"]:
+            check(json.loads(args) == [["--" + marker]],
+                  "e2e/failures.yaml: failing-job's option is not '--' and WITHHOLD_MARKER")
+        else:
+            check(marker not in args, "e2e/failures.yaml: %s %s carries the marker" % (kind, name))
+    code = [line for line in read("tests/e2e/failures.yaml").splitlines()
+            if not line.lstrip().startswith("#")]
+    check(sum(marker in line for line in code) == 1,
+          "e2e/failures.yaml: the marker is not on exactly one line outside the comments")
+    check("error: unknown command or option '--%s'" % marker in read("tests/cli.rs"),
+          "tests/cli.rs: no test pins the usage error that echoes the marker")
+
+    # failing-job's Event note, built as src/events.rs builds a withheld one.
+    max_note = re.search(r"pub const MAX_NOTE_BYTES: usize = ([0-9_]+);", read("src/events.rs"))
+    check(max_note is not None, "src/events.rs: no MAX_NOTE_BYTES")
+    lib = read("tests/e2e/lib.sh")
+    target = re.search(r"^TARGET=([a-z0-9-]+)$", lib, re.M)
+    check(target is not None, "e2e/lib.sh: no TARGET")
+    if max_note and target:
+        summary = f.ANSWER["summary"].replace("namespace-1", target.group(1))
+        # The second step as kausa redacts it, its host numbered far beyond any run.
+        redacted = "open http://<redacted:ip>:8080/fix?<redacted:query> on host-99999"
+        check(re.fullmatch(f.REDACTED_STEP, redacted) is not None,
+              "fake_endpoint.py: REDACTED_STEP is not the form this check assumes")
+        steps = [f.ANSWER["steps"][0], redacted]
+        note = "%s %s Likely cause: %s Check:%s (confidence: low)" % (
+            notice, summary, f.ANSWER["cause"],
+            "".join(" %d. %s" % (i, s) for i, s in enumerate(steps, 1)))
+        check(len(note.encode()) <= int(max_note.group(1).replace("_", "")),
+              "failing-job's withheld note does not fit an Event note: the cut drops its "
+              "confidence")
+        check(note.startswith(notice + " " + summary + " "),
+              "failing-job's withheld note does not start with the notice and the summary")
+
+    run = read("tests/e2e/run.sh")
+    prefix = re.search(r'^\s*"(Withheld by kausa:[^"]*)"\*\) ;;$', run, re.M)
+    check(prefix is not None and notice.startswith(prefix.group(1)),
+          "e2e/run.sh: the prefix its note check matches does not start the notice")
+    command = re.search(r'^COMMAND = "([^"]+)"$', run, re.M)
+    check(command is not None and command.group(1) in step,
+          "e2e/run.sh: the command it looks for in the sinks is not part of DESTRUCTIVE_STEP")
+    check(command is None or command.group(1) not in notice + json.dumps(f.ANSWER),
+          "e2e/run.sh: the command it looks for is in the notice or in ANSWER")
+
+for message in failed:
+    print(message)
+sys.exit(1 if failed else 0)
+PY
+  fail "withhold: $(cat "$WORK/withhold-ties/out")"
+fi
+passed "$since" "e2e: the marker, the notice and the command tie failures.yaml, the endpoint and run.sh"
+
+# Which answer is withheld and when it is counted: lib.sh's check_explanations and run.sh's hook
+# loop take exactly Job failing-job as withheld, with confidence low; run.sh's log check expects
+# W001 and W002 and the model's own confidence on its fresh line; and kausa_answers_withheld_total
+# is read as exactly 1 from the same scrape of /metrics as the kausa_answer_redactions_total
+# checks.
+since=$FAILURES
+for script in lib run; do
+  grep -qF 'withheld = (kind, name) == ("Job", "failing-job")' "$WORK/withhold-$script-code" ||
+    fail "e2e/$script.sh: failing-job is not the one withheld answer"
+done
+grep -qF '"confidence": "low" if withheld else ANSWER["confidence"]' "$WORK/withhold-lib-code" ||
+  fail "e2e/lib.sh: failing-job's entry is not expected with confidence low"
+grep -qF 'dict(explanation, confidence="low") if withheld else explanation' \
+  "$WORK/withhold-run-code" ||
+  fail "e2e/run.sh: failing-job's notification is not expected with confidence low"
+grep -qF 'expected = (["W001", "W002"], ANSWER["confidence"], "low")' "$WORK/withhold-run-code" ||
+  fail "e2e/run.sh: failing-job's fresh line is not expected with W001, W002 and the model's confidence"
+# The scrape each check reads is the number of 'metrics=$(kausa_metrics)' lines before it; the
+# counter's check is its first line naming the series and the next one.
+awk '
+  /metrics=\$\(kausa_metrics\)/ { scrape++ }
+  /kausa_answer_redactions_total\{rule=/ && !redactions { redactions = scrape }
+  /kausa_answers_withheld_total/ && !withheld {
+    withheld = scrape
+    line = $0
+    getline
+    line = line " " $0
+  }
+  END {
+    if (!withheld) {
+      print "no check of kausa_answers_withheld_total"
+    } else if (withheld != redactions) {
+      print "kausa_answers_withheld_total is not read at the kausa_answer_redactions_total scrape"
+    } else if (line !~ /"\$metrics"/ || line !~ /" = 1 \]/) {
+      print "kausa_answers_withheld_total is not read from that scrape as exactly 1"
+    } else {
+      exit 0
+    }
+    exit 1
+  }' "$WORK/withhold-run-code" >"$WORK/withhold-scrape" 2>&1 ||
+  fail "e2e/run.sh: $(cat "$WORK/withhold-scrape")"
+passed "$since" "e2e: failing-job alone is withheld at confidence low, counted once at the redactions' scrape"
 
 # --- Refill budget (docs/adr/0021-refill-the-call-budget.md) ------------------------------------
 

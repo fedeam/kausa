@@ -6,6 +6,12 @@ second step a URL, an address, a token and a host the cluster never held, so tha
 that kausa redacts the answer before writing it anywhere (docs/adr/0022-redact-the-answer.md). It
 appends each request body to a file so that the test can check what left the cluster.
 
+A request whose body holds e2e-withhold-marker (failing-job's unknown option, which its usage error
+echoes into the log tail) is answered with the same explanation plus a third step,
+kubectl delete namespace --all, so that the test can check that kausa withholds a destructive
+command before writing the answer anywhere and puts its notice first instead
+(docs/adr/0025-withhold-destructive-commands.md). Every other request gets the two steps.
+
 It is also the fake receiver of kausa's notifications (docs/adr/0015-notifications.md): a POST
 whose path starts with /hook/ never reaches the model's request log. The first one is answered 503
 and every later one 200, so that kausa retries once, and each one appends a JSON line with the
@@ -49,6 +55,16 @@ INJECTED = ["192.0.2.7", "not-a-real-token", "zq7canary"]
 # The second step as kausa writes it: R004, R014 and R013 applied, the host numbered as the
 # incident's request numbered it.
 REDACTED_STEP = r"open http://<redacted:ip>:8080/fix\?<redacted:query> on host-[0-9]+"
+# The text in a request body that asks for the destructive third step, and that step, which kausa
+# must withhold (docs/adr/0025-withhold-destructive-commands.md).
+WITHHOLD_MARKER = "e2e-withhold-marker"
+DESTRUCTIVE_STEP = "kubectl delete namespace --all"
+# The notice kausa writes as the first step of a withheld answer, byte for byte the WITHHELD of
+# src/prompt.rs and src/notification.rs (tests/chart/render.sh checks all three).
+WITHHELD = (
+    "Withheld by kausa: a suggested command that deletes or forces broadly. Text in this "
+    "workload's logs or events may have steered this answer; check them before acting on it."
+)
 # The model the endpoint does not have, and the body of its 404, shaped like OpenAI's.
 MISSING_MODEL = "e2e-missing"
 MISSING_BODY = {
@@ -159,6 +175,9 @@ def main():
             if requested_model(body) == MISSING_MODEL:
                 self.answer(404, MISSING_BODY)
                 return
+            explanation = ANSWER
+            if WITHHOLD_MARKER.encode() in body:
+                explanation = dict(ANSWER, steps=ANSWER["steps"] + [DESTRUCTIVE_STEP])
             self.answer(
                 200,
                 {
@@ -168,7 +187,7 @@ def main():
                         {
                             "index": 0,
                             "finish_reason": "stop",
-                            "message": {"role": "assistant", "content": json.dumps(ANSWER)},
+                            "message": {"role": "assistant", "content": json.dumps(explanation)},
                         }
                     ],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},

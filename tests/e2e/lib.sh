@@ -330,13 +330,16 @@ restart_kausa() {
 # events, the Explanations and kausa's log in WORK: named kausa.<fingerprint> after the Event, its
 # spec {$3, $4 $1 $2} cross-checked with the incident kausa logged under that fingerprint, its
 # newest entry the fake endpoint's answer with the namespace mapped back and the injected step
-# redacted, starting the Event's note, and every field kausa writes read back (none pruned). Prints
-# the Explanations' names.
+# redacted, starting the Event's note, and every field kausa writes read back (none pruned). Job
+# failing-job's answer carries the destructive third step, which kausa withholds
+# (docs/adr/0025-withhold-destructive-commands.md): its entry has the notice as its first step, the
+# answer's two steps after it, confidence low, and its note starts with the notice and the summary.
+# Prints the Explanations' names.
 check_explanations() {
   python3 -c '
 import json, re, sys
 sys.path.insert(0, "tests/e2e")
-from fake_endpoint import ANSWER, REDACTED_STEP
+from fake_endpoint import ANSWER, REDACTED_STEP, WITHHELD
 kind, name, rule, api_version, target, work = sys.argv[1:7]
 
 def fail(message):
@@ -365,8 +368,11 @@ if not explained:
     fail("no Explained Event")
 spec = {"rule": rule, "target": {"apiVersion": api_version, "kind": kind, "name": name}}
 summary = ANSWER["summary"].replace("namespace-1", target)
-answer = {"summary": summary, "cause": ANSWER["cause"], "confidence": ANSWER["confidence"],
-          "model": "fake"}
+# The one workload whose answer kausa withholds: the notice first, confidence low.
+withheld = (kind, name) == ("Job", "failing-job")
+notice = [WITHHELD] if withheld else []
+answer = {"summary": summary, "cause": ANSWER["cause"],
+          "confidence": "low" if withheld else ANSWER["confidence"], "model": "fake"}
 names = set()
 for event in explained:
     match = re.match(r"kausa\.([0-9a-f]{16})\.", event["metadata"]["name"])
@@ -402,16 +408,20 @@ for event in explained:
         if first[key] != value:
             fail("its newest entry has %s %s, not %s" % (key, json.dumps(first[key]),
                                                          json.dumps(value)))
-    # The first step as sent, the second redacted (docs/adr/0022-redact-the-answer.md); the
-    # message names no value, in case one reached the entry.
+    # The first step as sent, the second redacted (docs/adr/0022-redact-the-answer.md), after the
+    # notice when withheld, and the destructive step gone; the message names no value, in case one
+    # reached the entry.
     steps = first["steps"]
-    if (not isinstance(steps, list) or len(steps) != 2 or steps[0] != ANSWER["steps"][0]
-            or not isinstance(steps[1], str) or not re.fullmatch(REDACTED_STEP, steps[1])):
-        fail("its newest entry does not have the answer'"'"'s steps, the second one redacted")
+    if (not isinstance(steps, list) or len(steps) != len(notice) + 2
+            or steps[:len(notice)] != notice or steps[len(notice)] != ANSWER["steps"][0]
+            or not isinstance(steps[-1], str) or not re.fullmatch(REDACTED_STEP, steps[-1])):
+        fail("its newest entry does not have the answer'"'"'s steps, the second one redacted"
+             + (", after the notice" if withheld else ""))
     if target not in first["summary"]:
         fail("the summary does not name " + target)
-    if not event["note"].startswith(first["summary"] + " "):
-        fail("the summary does not start the Event note")
+    if not event["note"].startswith(" ".join(notice + [first["summary"]]) + " "):
+        fail("the notice and the summary do not start the Event note" if withheld
+             else "the summary does not start the Event note")
     if not isinstance(first["promptVersion"], str) or not 1 <= len(first["promptVersion"]) <= 16:
         fail("its promptVersion is %s" % json.dumps(first["promptVersion"]))
     times = [first["firstTime"], first["lastTime"], status["lastTime"]]
