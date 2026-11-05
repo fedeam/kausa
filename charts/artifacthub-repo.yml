@@ -1,0 +1,4 @@
+# Artifact Hub's repository metadata (docs/adr/0023-oci-chart-and-sbom.md). The release pushes it
+# to ghcr.io/fedeam/charts/kausa:artifacthub.io. The ID is the one on the repository's card in
+# Artifact Hub's control panel: it is public, not a secret. No owners: they would publish an email.
+repositoryID: 455e157a-098d-4527-b6f1-3db2beffe643

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The chart is listed on Artifact Hub: `charts/artifacthub-repo.yml` holds the repository's ID,
+  which the release pushes to `ghcr.io/fedeam/charts/kausa:artifacthub.io`, so Artifact Hub shows
+  kausa's publisher as verified from the next release.
 - An answer that holds one of six listed destructive command shapes (`W001`–`W006`: `kubectl`,
   `oc` or `k` deleting namespaces, projects, nodes, CRDs or everything, with `--all`, `-A`,
   `--force` or a grace period of 0; `helm uninstall`; `rm -rf`; prose that deletes every
