@@ -8,7 +8,7 @@ A tiny Kubernetes controller that explains failing workloads with an LLM: one re
 
 > **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
 > OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.6.0](https://github.com/fedeam/kausa/releases/tag/v0.6.0),
+> Event on the failing workload. The latest release, [v0.6.1](https://github.com/fedeam/kausa/releases/tag/v0.6.1),
 > publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
 
 ## The problem
@@ -62,9 +62,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa oci://ghcr.io/fedeam/charts/kausa --version 0.6.0 \
+helm install kausa oci://ghcr.io/fedeam/charts/kausa --version 0.6.1 \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.6.0 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.6.1 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -154,7 +154,7 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.6.0 is released (2026-11-04): `kausa run` watches Pods, Warning events and
+Pre-alpha. v0.6.1 is released (2026-11-05): `kausa run` watches Pods, Warning events and
 Deployments, in the whole cluster or in a list of namespaces, groups failures by workload, builds a
 redacted context with the failed container's log, asks the model within a call budget (or logs the
 request with `--dry-run`), reuses explanations of repeated incidents, writes each explanation as an
@@ -163,7 +163,8 @@ rules for them in `deploy/prometheus/` ([Alerts](docs/reference/alerts.md)); wit
 `--history` it keeps each incident's explanations in an Explanation object, and with
 `--notify-url-file` it posts each new explanation to one webhook, both off by default; with the
 chart's `replicaCount: 2`, off by default, a standby replica takes over through a Lease; it
-redacts the model's answer as it redacts the request, holds its calls behind a breaker while the
+redacts the model's answer as it redacts the request, withholds an answer that holds a listed
+destructive command, holds its calls behind a breaker while the
 endpoint fails, and `kausa check-endpoint` (the chart's `helm test`) checks the endpoint on
 demand; its log lines are JSON ([Command line and log format](docs/reference/command-line.md)). The image is
 published at `ghcr.io/fedeam/kausa`, signed with cosign and with SLSA build provenance, and the
@@ -292,6 +293,13 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
   [The system message by detection,
   measured](docs/research/2026-11-04-system-message-by-detection-measured.md)). The counters with
   a fixed set of labels start at `0` for each label, and their unlabelled `0` line is gone.
+- **v0.6.1** (2026-11-05): an answer that holds one of six listed destructive command shapes
+  (deleting every namespace, `helm uninstall`, `rm -rf`…) reaches no sink: a fixed notice replaces
+  it at `low` confidence ([0025. Replace the model's text that holds one of six listed destructive
+  command shapes with a fixed notice, show the notice first, and give that answer `low`
+  confidence](docs/adr/0025-withhold-destructive-commands.md); [Destructive commands withheld,
+  measured](docs/research/2026-11-05-destructive-commands-measured.md)), with the alert
+  `KausaAnswerWithheld`; and the chart is listed on Artifact Hub.
 
 ## Documentation
 

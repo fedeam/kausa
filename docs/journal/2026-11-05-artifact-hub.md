@@ -37,3 +37,11 @@ the example alert `KausaAnswerWithheld` is added (`deploy/prometheus/kausa-alert
   pinned version, in a container removed afterwards), `cargo test`, `tests/chart/render.sh`.
 - **Next:** v0.6.1, with 0025 and the alert; then check that Artifact Hub shows the publisher as
   verified.
+
+## Release v0.6.1
+
+Version 0.6.1 in `Cargo.toml`, `Cargo.lock` and the chart, with the changelog's Unreleased entries
+under `[0.6.1] - 2026-11-05`: 0025's withheld command shapes, the alert `KausaAnswerWithheld` and
+the listing on Artifact Hub. The README, `SECURITY.md`, the front page, the command-line reference
+and the install guide name v0.6.1. The release's verification, the check of Artifact Hub and the
+bump of `tests/e2e/upgrade-from.txt` follow the tag.
