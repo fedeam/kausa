@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The alert `KausaAnswerWithheld` (`increase(kausa_answers_withheld_total[1h]) > 0`), with its
+  `promtool` unit test and its section in [Alerts](docs/reference/alerts.md): the measurement of
+  0025 withheld no benign answer ([Destructive commands withheld,
+  measured](docs/research/2026-11-05-destructive-commands-measured.md)).
 - The chart is listed on Artifact Hub: `charts/artifacthub-repo.yml` holds the repository's ID,
   which the release pushes to `ghcr.io/fedeam/charts/kausa:artifacthub.io`, so Artifact Hub shows
   kausa's publisher as verified from the next release.

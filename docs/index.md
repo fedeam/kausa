@@ -123,7 +123,8 @@ checks](how-to/develop.md).
   failover](research/2026-10-29-standby-and-failover.md); [List
   pages](research/2026-11-02-list-pages.md); [Explanation quality of six local models against
   known causes](research/2026-11-03-explanation-quality-more-models.md); [The system message by
-  detection, measured](research/2026-11-04-system-message-by-detection-measured.md); [Slack and
+  detection, measured](research/2026-11-04-system-message-by-detection-measured.md); [Destructive
+  commands withheld, measured](research/2026-11-05-destructive-commands-measured.md); [Slack and
   Telegram for notifications](research/2026-10-28-slack-and-telegram-for-notifications.md).
 - [ARCHITECTURE.md](../ARCHITECTURE.md): the map of the code, its invariants and the path of each
   kind of change.

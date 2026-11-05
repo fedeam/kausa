@@ -3434,7 +3434,7 @@ done
 passed "$since" "observability: the chart renders no PrometheusRule, ServiceMonitor or PodMonitor"
 
 # The rules file and its unit tests, read with helm (fromYaml in a throwaway chart, as the seeded
-# failures above): 11 alerts in 5 groups, labels severity: warning alone, annotations summary,
+# failures above): 12 alerts in 5 groups, labels severity: warning alone, annotations summary,
 # description and runbook_url, the runbook_url naming the alert's section of
 # docs/reference/alerts.md, and only kausa's own metrics, each one src/metrics.rs exports.
 RULES="$ROOT/deploy/prometheus/kausa-alerts.yaml"
@@ -3496,6 +3496,7 @@ kausa-model KausaDailyCallBudgetSpent
 kausa-explanations KausaExplanationQueueNearlyFull
 kausa-explanations KausaExplanationsBehind
 kausa-explanations KausaExplanationsSkipped
+kausa-explanations KausaAnswerWithheld
 kausa-watches KausaWatchErrors
 kausa-watches KausaWatchRefused
 kausa-replicas KausaNoLeader
@@ -3503,7 +3504,7 @@ kausa-replicas KausaLeaderFlapping
 kausa-notifications KausaNotificationsFailing
 ALERTS
     diff -u "$OBS/alerts-expected" "$OBS/alerts" >"$OBS/alerts-diff" ||
-      fail "observability: the alerts are not the eleven of the spec, in order: $(cat "$OBS/alerts-diff")"
+      fail "observability: the alerts are not the twelve of the spec, in order: $(cat "$OBS/alerts-diff")"
     while read -r _ _ _ alert labels annotations runbook; do
       lower=$(printf '%s' "$alert" | tr '[:upper:]' '[:lower:]')
       [ "$labels" = '{"severity":"warning"}' ] ||
@@ -3522,7 +3523,7 @@ ALERTS
     # The metrics the rules read: exactly these, and each one a name src/metrics.rs exports (its
     # code, before the tests).
     grep '^# expr ' "$OBS/out" | grep -oE 'kausa_[a-z_]+' | sort -u >"$OBS/metrics"
-    printf '%s\n' kausa_budget_calls_remaining kausa_endpoint_state \
+    printf '%s\n' kausa_answers_withheld_total kausa_budget_calls_remaining kausa_endpoint_state \
       kausa_explanation_queue_length kausa_explanations_skipped_total kausa_leader \
       kausa_leadership_changes_total kausa_model_calls_total \
       kausa_model_last_success_timestamp_seconds kausa_notifications_total \
@@ -3556,7 +3557,7 @@ ALERTS
       fail "observability: the unit tests name alerts the rules do not have: $(cat "$OBS/unknown")"
   fi
 fi
-passed "$since" "observability: 11 alerts in 5 groups, severity warning, runbooks, tests for each"
+passed "$since" "observability: 12 alerts in 5 groups, severity warning, runbooks, tests for each"
 
 # The Dockerfile's ci target installs promtool pinned by version and SHA-256 per architecture, as
 # root after helm's step and before the unprivileged user, with no BuildKit-only feature, and runs

@@ -20,3 +20,20 @@ chart on Artifact Hub") and [0023](../adr/0023-oci-chart-and-sbom.md) describe.
 - After the next release: check that Artifact Hub processed the repository with no errors, that
   it shows the publisher as verified and the chart as signed, and record it here or in that day's
   journal.
+
+## Later the same day: 0025 measured
+
+The measurement of [0025](../adr/0025-withhold-destructive-commands.md), run by hand: the agents
+that were to run it had hit their usage limit. Result and method in [Destructive commands
+withheld, measured](../research/2026-11-05-destructive-commands-measured.md): every bar holds, so
+the example alert `KausaAnswerWithheld` is added (`deploy/prometheus/kausa-alerts.yaml`, its
+`promtool` test, its section in [Alerts](../reference/alerts.md), and the counts of alerts in
+`src/metrics.rs` and `tests/chart/render.sh`).
+
+- **Deviations:** the sink run's caps were raised to 36,000 calls, and the entries outside the
+  sixteen measured were removed from the throwaway cluster, since the queue of 16 dropped most of
+  the 31 incidents that arrived at once; `inject-log`'s Job was re-created for the same reason.
+- **Checks:** `promtool check rules --lint=all --lint-fatal` and `promtool test rules` (3.15.1, the
+  pinned version, in a container removed afterwards), `cargo test`, `tests/chart/render.sh`.
+- **Next:** v0.6.1, with 0025 and the alert; then check that Artifact Hub shows the publisher as
+  verified.

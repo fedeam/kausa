@@ -1586,7 +1586,7 @@ mod tests {
         let rules = include_str!("../deploy/prometheus/kausa-alerts.yaml");
         let reference = include_str!("../docs/reference/alerts.md");
         let alerts = alerts(rules);
-        assert_eq!(alerts.len(), 11, "the alerts of the rules file");
+        assert_eq!(alerts.len(), 12, "the alerts of the rules file");
 
         // Every metric a rule (or a comment) names is one kausa exports: a histogram also by its
         // _bucket, _sum and _count series.

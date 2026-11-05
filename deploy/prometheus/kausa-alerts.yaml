@@ -94,6 +94,16 @@ groups:
           summary: kausa skipped incidents in the last hour (reason {{ $labels.reason }}).
           description: Each skipped incident has an ExplanationSkipped Event with the reason. What to do depends on the reason.
           runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaexplanationsskipped
+      - alert: KausaAnswerWithheld
+        # kausa withheld a listed destructive command from a model's answer
+        # (docs/adr/0025-withhold-destructive-commands.md).
+        expr: increase(kausa_answers_withheld_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: kausa withheld a destructive command from a model's answer in the last hour.
+          description: Read the explanation log line with a non-empty withheld field, then the workload's logs and events for text addressed to a model.
+          runbook_url: https://github.com/fedeam/kausa/blob/main/docs/reference/alerts.md#kausaanswerwithheld
 
   - name: kausa-watches
     rules:
