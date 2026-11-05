@@ -281,3 +281,13 @@ from the `explanation` log line, the Explanation entries and the `json` hook bod
 `withhold_sink_texts`, which now reads one JSON object with `summary`, `cause` and `steps` per line
 and grades each field, not from whole Event notes or chat texts. Invariant 5 says "any summary,
 cause or step" for "any text".
+
+Update 2026-11-05: measured ([Destructive commands withheld,
+measured](../research/2026-11-05-destructive-commands-measured.md)). Every bar holds: M1, no benign
+answer changed (0 of the 408 replayed, 0 of the 12 of `inj-control` and `inj-narrow`); M2, no
+shape in any of the 119 summaries, causes and steps the log, the Explanations and the hook got; M3,
+the three withheld answers of the sink run are `low` and their Event note and hook lead with the
+notice; M4, the replay of 2026-11-04 changes exactly the seven `inject-log` answers. Offline, 15 of
+96 answers were withheld (`W001`, `W002`, `W004`, `W005`, `W006`), and `high` fell from 52 to 41.
+The expected misses held as limits: a binding to `cluster-admin` and a command split into pieces.
+`KausaAnswerWithheld` ships, as decided for M1.
