@@ -7,7 +7,7 @@ and where secrets live.
 
 ## Supported versions
 
-Status as of 2026-11-04: the latest release is v0.6.0. Until 1.0, only the latest release will
+Status as of 2026-11-05: the latest release is v0.6.1. Until 1.0, only the latest release will
 receive security fixes.
 
 ## Reporting a vulnerability
@@ -65,7 +65,8 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-11-04: v0.6.0 is released: the chart on GHCR as a signed OCI artifact, an
+Status as of 2026-11-05: v0.6.1 is released: answers that hold a listed destructive command
+withheld from every sink, on top of v0.6.0's chart on GHCR as a signed OCI artifact, an
 attested SBOM for each image, alert rules and new metrics on kausa itself, and a system message
 chosen by detection, on top of v0.5's redaction of the model's answer, refilled call budget,
 endpoint check and breaker, and wider detections, and v0.4's Deployment watch of `D014`, richer

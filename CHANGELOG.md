@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-05
+
+An answer that holds one of six listed destructive command shapes is withheld from every sink and
+replaced by a fixed notice at `low` confidence (0025, measured before the release); the alert
+`KausaAnswerWithheld` fires when that happens; and the chart is listed on Artifact Hub with a
+verified publisher. Nothing to change in values or permissions.
+
 ### Added
 
 - The alert `KausaAnswerWithheld` (`increase(kausa_answers_withheld_total[1h]) > 0`), with its
@@ -488,7 +495,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.6.0...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/fedeam/kausa/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/fedeam/kausa/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/fedeam/kausa/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/fedeam/kausa/compare/v0.5.0...v0.5.1

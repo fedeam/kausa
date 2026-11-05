@@ -28,7 +28,10 @@ v0.5.0](journal/2026-11-03-release-v0-5-0.md)), and the same day by
 and [v0.5.2](https://github.com/fedeam/kausa/releases/tag/v0.5.2), a security fix of redaction,
 and on 2026-11-04 by [v0.6.0](https://github.com/fedeam/kausa/releases/tag/v0.6.0), the first with
 the chart on GHCR ([2026-11-04 — A system message chosen by
-detection](journal/2026-11-04-system-message-by-detection.md), "Release v0.6.0"). The
+detection](journal/2026-11-04-system-message-by-detection.md), "Release v0.6.0"), and on 2026-11-05
+by [v0.6.1](https://github.com/fedeam/kausa/releases/tag/v0.6.1), which withholds listed destructive
+commands from the model's answer ([2026-11-05 — Artifact
+Hub](journal/2026-11-05-artifact-hub.md), "Release v0.6.1"). The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -192,4 +195,6 @@ checks](how-to/develop.md).
   [2026-11-02 — The good first issues](journal/2026-11-02-good-first-issues.md);
   [2026-11-03 — Releases v0.5.0 to v0.5.2](journal/2026-11-03-release-v0-5-0.md);
   [2026-11-04 — A system message chosen by
-  detection](journal/2026-11-04-system-message-by-detection.md), with the release of v0.6.0.
+  detection](journal/2026-11-04-system-message-by-detection.md), with the release of v0.6.0;
+  [2026-11-05 — Artifact Hub](journal/2026-11-05-artifact-hub.md), with the measurement of 0025
+  and the release of v0.6.1.
