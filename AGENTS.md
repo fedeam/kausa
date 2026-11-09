@@ -26,9 +26,9 @@ explanation to one webhook (JSON, Slack or Telegram, off by default) and serves 
 chart's `replicaCount: 2` (off by default) a second replica waits as a standby and takes over
 through a Lease. `kausa run` holds its calls behind a breaker while the endpoint fails, and `kausa
 check-endpoint` (and the chart's `helm test`) sends one synthetic request to the endpoint on
-demand and says which step failed. The image and the Helm
-chart are in the repository (not published); the kind test passes locally and waits for GitHub
-Actions.
+demand and says which step failed. Each release publishes the signed image on GHCR and the chart
+as a signed OCI artifact, listed on Artifact Hub ([0012](docs/adr/0012-releases.md),
+[0023](docs/adr/0023-oci-chart-and-sbom.md)); the kind tests run on GitHub Actions.
 Maintainer: FedeAM (GitHub: `fedeam`).
 
 ## How to work

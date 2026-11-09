@@ -9,9 +9,11 @@ Status as of 2026-10-26: **the code of the four implementation weekends of v0.1 
 watching, detection, the settle window, owner correlation, fingerprints, the context with log
 tails, redaction, the prompt, the client, the validation of answers, dry-run, the call and token
 budget, deduplication, the Events on the failing workload and the metrics ([Command line and log
-format](../reference/command-line.md)). The image and the Helm chart are built and checked in CI,
-not published; the kind test passed on the maintainer's machine on 2026-10-27. Measured on a
-Raspberry Pi 4: about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
+format](../reference/command-line.md)). The image and the Helm chart are built and checked in
+CI and published with each release: the signed image on GHCR, the chart as a signed OCI artifact
+listed on Artifact Hub ([0012](../adr/0012-releases.md),
+[0023](../adr/0023-oci-chart-and-sbom.md)). Measured on a Raspberry Pi 4: about 2 MiB of
+memory ([Memory and CPU on a Raspberry Pi
 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)). This page describes the target
 for v0.1 and is updated as the code lands. Why kausa exists and what it leaves out:
 [0001. Build a small, read-only explainer that writes one redacted explanation per
@@ -447,7 +449,8 @@ and not published yet](../adr/0010-packaging.md).
   the non-root user, no shell), pinned by digest, running as user 65532. Each architecture is
   built natively. 4.3 MB compressed for linux/arm64 on 2026-10-26, under the 10 MB of the Rust
   controllers found in the [Competitive
-  landscape](../research/2026-10-23-competitive-landscape.md). Built in CI, not published.
+  landscape](../research/2026-10-23-competitive-landscape.md). Built in CI and, since 0012,
+  published with each release.
 - **Install:** the Helm chart in `charts/kausa`, with the permissions in
   [Permissions](../reference/permissions.md) (only those the settings use), the restricted Pod
   Security settings, and declared requests and limits ([Helm chart](../reference/helm-chart.md)).
