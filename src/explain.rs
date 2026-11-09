@@ -2361,13 +2361,14 @@ mod tests {
         let shared_dry = shared(&settings_dry, &metrics);
         assert!(!explain(work(), &settings_dry, &shared_dry));
         assert!(metrics.render().contains(unused), "dry-run: counted");
-        // An answer that arrives after the term ended is dropped before the pass.
+        // An answer that arrives after the term ended is dropped before the pass. A term long
+        // enough for the call to start on a loaded CI runner, and a model slower than the term.
         let (api, _api_calls) = counted_api_server();
         let metrics = Metrics::default();
         let left = explain_under(
-            slow_model(Duration::from_millis(400), hostile_answer()),
+            slow_model(Duration::from_millis(3000), hostile_answer()),
             &api,
-            Some(Duration::from_millis(150)),
+            Some(Duration::from_millis(1000)),
             false,
             &metrics,
         );
@@ -3080,11 +3081,13 @@ mod tests {
             (reply("401 Unauthorized", "", "{}"), State::Open),
             (valid_reply(), State::Closed),
         ] {
-            let (url, calls) = answering(response, Duration::from_millis(400));
+            // A term long enough for the call to start on a loaded CI runner, and an answer
+            // slower than the term.
+            let (url, calls) = answering(response, Duration::from_millis(3000));
             let settings = settings(Some(url), false, 30);
             let metrics = Metrics::default();
             let term = Term::closed();
-            term.extend_to(std::time::Instant::now() + Duration::from_millis(150));
+            term.extend_to(std::time::Instant::now() + Duration::from_millis(1000));
             let shared = shared_in(&settings, &metrics, &term);
             if expected == State::Closed {
                 half_open(&shared);

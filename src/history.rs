@@ -1299,12 +1299,14 @@ mod tests {
 
     #[test]
     fn a_term_that_ends_during_the_list_makes_no_create() {
+        // A term long enough for the list to start on a loaded CI runner, and an answer slower
+        // than the term.
         let (url, requests) =
-            slow_api_server(Duration::from_millis(300), "200 OK", page(vec![], ""));
+            slow_api_server(Duration::from_millis(3000), "200 OK", page(vec![], ""));
         let metrics = Metrics::default();
         let term = Term::closed();
         block_on(async {
-            term.extend_to(std::time::Instant::now() + Duration::from_millis(100));
+            term.extend_to(std::time::Instant::now() + Duration::from_millis(1000));
             history(&url)
                 .write(&incident(), &explanation(), "m", &metrics, &term)
                 .await
