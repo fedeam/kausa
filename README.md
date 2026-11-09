@@ -11,7 +11,7 @@
 > describe`, from a model of their choice, including one served inside the cluster.
 >
 > **Status: pre-alpha.** The latest release,
-> [v0.6.1](https://github.com/fedeam/kausa/releases/tag/v0.6.1), publishes a signed image for
+> [v0.6.2](https://github.com/fedeam/kausa/releases/tag/v0.6.2), publishes a signed image for
 > linux/amd64 and linux/arm64 and the Helm chart; see [Limits / Known gaps](#limits--known-gaps).
 >
 > The `internet: no` badge means kausa serves nothing on the internet: it only calls the Kubernetes
@@ -70,9 +70,9 @@ dry-run kausa logs the redacted request of each incident and sends nothing:
 
 ```sh
 kind create cluster --name kausa-try
-helm install kausa oci://ghcr.io/fedeam/charts/kausa --version 0.6.1 \
+helm install kausa oci://ghcr.io/fedeam/charts/kausa --version 0.6.2 \
   -n kausa --create-namespace --set rbac.scope=cluster --set dryRun=true
-kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.6.1 -- /kausa --no-such-flag
+kubectl create deployment crasher --image=ghcr.io/fedeam/kausa:0.6.2 -- /kausa --no-such-flag
 kubectl -n kausa logs deploy/kausa -f    # an incident and its request after about a minute
 kind delete cluster --name kausa-try
 ```
@@ -162,7 +162,7 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.6.1 is released (2026-11-05). What there is:
+Pre-alpha. v0.6.2 is released (2026-11-09). What there is:
 
 - **Detection and explanation:** `kausa run` watches Pods, Warning events and Deployments, in the
   whole cluster or in a list of namespaces, groups failures by workload, builds a redacted context

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-09
+
 ### Fixed
 
 - An expired resource version (`410` in a watch) is no longer a watch error: it gives no
@@ -511,7 +513,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.6.1...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/fedeam/kausa/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/fedeam/kausa/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/fedeam/kausa/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/fedeam/kausa/compare/v0.5.1...v0.5.2

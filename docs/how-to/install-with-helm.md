@@ -55,7 +55,7 @@ v0.5.2 chart URL was upgraded to it with `--reuse-values`.
 
    ```sh
    CHART=oci://ghcr.io/fedeam/charts/kausa
-   VERSION=0.6.1
+   VERSION=0.6.2
    ```
 
    The chart of each release is also an asset of its [GitHub
