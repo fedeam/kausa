@@ -7,7 +7,7 @@ may go back from `192Mi` to `128Mi`.
 Status as of 2026-11-04: the scripts in `tests/soak/` were run once, for nine minutes, in a
 throwaway kind cluster; a dry-run soak of v0.5.1 started on 2026-11-03 ([A dry-run
 soak](#a-dry-run-soak)) and has no result yet. `install.sh` installs the release pinned in
-`tests/e2e/upgrade-from.txt`, v0.6.1 since 2026-11-05.
+`tests/e2e/upgrade-from.txt`, v0.6.2 since 2026-11-09.
 
 ## What the soak answers, and what it cannot
 
