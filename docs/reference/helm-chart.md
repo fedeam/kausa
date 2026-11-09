@@ -276,7 +276,10 @@ renders:
 - **`templates/leader-election.yaml`**: the Lease with `spec: {}`, and the Role and RoleBinding
   `<full name>-leader` with the one rule of [Permissions](permissions.md#in-kausas-own-namespace-with-two-replicas).
   Helm keeps the `spec` kausa wrote across upgrades, recreates a deleted Lease on the next
-  upgrade and deletes it on uninstall (seen in kind on 2026-10-29 with Helm v3.16.1). Going back
+  upgrade and deletes it on uninstall (seen in kind on 2026-10-29 with Helm v3.16.1). Argo CD
+  does not apply it by default: its `resource.exclusions` skip Leases, so create the Lease once by
+  hand ([Install with Helm](../how-to/install-with-helm.md), troubleshooting;
+  [#79](https://github.com/fedeam/kausa/issues/79)). Going back
   to `1` drops the three objects from the release, so Helm deletes them too (expected from how
   Helm upgrades, not checked in kind).
 - **`templates/poddisruptionbudget.yaml`**: `maxUnavailable: 1`, so a drain never evicts both

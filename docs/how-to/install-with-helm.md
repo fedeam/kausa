@@ -504,8 +504,25 @@ auditable binary to each image](../adr/0023-oci-chart-and-sbom.md). v0.6.0, rele
 - **With `replicaCount=2`, both Pods log `standby` and `sum(kausa_leader)` is 0** → nobody holds
   the Lease → a `lease error` line names the call and, on a `403`, has the hint `kausa needs get
   and patch on this Lease`: the `kausa-leader` Role or RoleBinding was deleted or changed; on a
-  `404`, `the chart creates this Lease: run helm upgrade`: the Lease was deleted. `helm upgrade`
-  with the same values puts all three back. Without a `lease error`, someone else holds the Lease:
+  `404`, `the chart creates this Lease: run helm upgrade, or create it once if your deploy tool
+  skips Leases (Argo CD does)`: the Lease was deleted, or never created. `helm upgrade` with the
+  same values puts all three back. Argo CD's default `resource.exclusions` (in `argocd-cm`) skip
+  `coordination.k8s.io/Lease`, so an Argo CD Application of the chart never creates it (seen with
+  Argo CD v3.5.5 on 2026-11-03, [#79](https://github.com/fedeam/kausa/issues/79)): create it once
+  with `spec: {}`, or remove that exclusion. kausa takes it within seconds:
+
+  ```sh
+  kubectl -n kausa apply -f - <<'EOF'
+  apiVersion: coordination.k8s.io/v1
+  kind: Lease
+  metadata:
+    name: kausa-leader
+  spec: {}
+  EOF
+  ```
+
+  The name is `<full name>-leader`, in the release namespace. A later `helm install` of the same
+  release into that namespace refuses a Lease it does not own: delete it first. Without a `lease error`, someone else holds the Lease:
   `kubectl -n kausa get lease kausa-leader -o yaml` shows who, and whoever can write Leases in the
   namespace can take it.
 - **The Pod restarts with exit code 2** → kausa refused its arguments → `kubectl -n kausa logs

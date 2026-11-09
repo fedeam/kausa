@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- With `replicaCount: 2`, the `lease error` hint on a `404` also names the deploy tools that skip
+  Leases: `the chart creates this Lease: run helm upgrade, or create it once if your deploy tool
+  skips Leases (Argo CD does)`. Argo CD's default `resource.exclusions` skip
+  `coordination.k8s.io/Lease`, so an Application of the chart never creates the Lease and neither
+  replica leads; [Install with Helm](docs/how-to/install-with-helm.md) gives the Lease to create
+  once ([#79](https://github.com/fedeam/kausa/issues/79)). kausa's permissions do not change: it
+  still never creates the Lease (0019).
+
 ## [0.6.1] - 2026-11-05
 
 An answer that holds one of six listed destructive command shapes is withheld from every sink and

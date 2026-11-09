@@ -106,8 +106,10 @@ name>-leader`, and only the replica that holds the Lease watches, explains and w
   listed, and nothing else there.
 - **Helm owns the object, kausa its `spec`.** kausa never creates the Lease: RBAC cannot bind
   `create` to a name, so a grant to create would let kausa create any Lease name in the namespace.
-  A deleted Lease is a `lease error` with the hint `the chart creates this Lease: run helm
-  upgrade`, and no replica acts until it is back. `helm uninstall`, or going back to
+  A deleted or missing Lease is a `lease error` with the hint `the chart creates this Lease: run
+  helm upgrade, or create it once if your deploy tool skips Leases (Argo CD does)`, and no replica
+  acts until it is back. A Lease created by hand works the same: kausa reads and patches only its
+  `spec`. `helm uninstall`, or going back to
   `replicaCount: 1`, deletes the Lease, the Role and the RoleBinding.
 - **`patch` is not narrowed to `spec`.** RBAC cannot limit a patch to some fields, so the token can
   also change the Lease's labels and annotations (checked in kind, Kubernetes v1.36.4, on

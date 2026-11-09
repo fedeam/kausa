@@ -96,7 +96,9 @@ pub fn hint(error: &LeaseError) -> Option<&'static str> {
         LeaseError::Forbidden(_) => {
             Some("kausa needs get and patch on this Lease (docs/reference/permissions.md)")
         }
-        LeaseError::NotFound => Some("the chart creates this Lease: run helm upgrade"),
+        LeaseError::NotFound => Some(
+            "the chart creates this Lease: run helm upgrade, or create it once if your deploy tool skips Leases (Argo CD does)",
+        ),
         _ => None,
     }
 }
@@ -1102,7 +1104,9 @@ mod tests {
         );
         assert_eq!(
             hint(&LeaseError::NotFound),
-            Some("the chart creates this Lease: run helm upgrade")
+            Some(
+                "the chart creates this Lease: run helm upgrade, or create it once if your deploy tool skips Leases (Argo CD does)"
+            )
         );
         for error in [
             LeaseError::Other("an invented failure".into()),
