@@ -1639,10 +1639,11 @@ mod tests {
 
     use crate::events::Writer;
     use crate::history::History;
+    use crate::leader::hold::{self, Held, Hold};
 
-    /// A fake model that answers every request with `answer()` after `wait`, and tells the channel
-    /// of each connection. Returns its base URL.
-    fn counted_model(wait: Duration) -> (String, mpsc::Receiver<()>) {
+    /// A fake model that answers every request with `answer()`, the first one once `held` lets
+    /// it, and tells the channel of each connection. Returns its base URL.
+    fn counted_model(mut held: Option<Held>) -> (String, mpsc::Receiver<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
         let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
         let (seen, calls) = mpsc::channel();
@@ -1673,7 +1674,9 @@ mod tests {
                         break;
                     }
                 }
-                std::thread::sleep(wait);
+                if let Some(held) = held.take() {
+                    held.wait();
+                }
                 let body = json!({
                     "choices": [{"message": {"content": answer()}}],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 20},
@@ -1726,6 +1729,16 @@ mod tests {
         Client::try_from(kube::Config::new(url.parse().expect("a URL"))).expect("a client")
     }
 
+    /// The term of one guarded explanation.
+    enum Guard {
+        /// No term: kausa without `--leader-lease`.
+        Unbounded,
+        /// A term that has ended before the explanation starts.
+        Closed,
+        /// A term that `Hold` ends while the model's answer is held.
+        EndedBy(Hold),
+    }
+
     /// What one guarded explanation left behind.
     struct Left {
         retry: bool,
@@ -1735,12 +1748,12 @@ mod tests {
     }
 
     /// Runs one explanation of `work()` with Events and the history on, written to the fake API
-    /// server at `api`, under a term that ends `term_left` from now (`None`: unbounded). `entry`
-    /// is put in the cache first. The budget allows one call.
+    /// server at `api`, under the term of `guard`. `entry` is put in the cache first. The budget
+    /// allows one call.
     fn explain_under(
         model_url: String,
         api: &str,
-        term_left: Option<Duration>,
+        guard: Guard,
         entry: bool,
         metrics: &Metrics,
     ) -> Left {
@@ -1752,15 +1765,10 @@ mod tests {
             .build()
             .expect("a runtime")
             .block_on(async {
-                let term = match term_left {
-                    None => Term::unbounded(),
-                    Some(left) => {
-                        let term = Term::closed();
-                        if !left.is_zero() {
-                            term.extend_to(std::time::Instant::now() + left);
-                        }
-                        term
-                    }
+                let (term, hold) = match guard {
+                    Guard::Unbounded => (Term::unbounded(), None),
+                    Guard::Closed => (Term::closed(), None),
+                    Guard::EndedBy(hold) => (Term::unbounded(), Some(hold)),
                 };
                 let mut shared = shared_in(&settings, metrics, &term);
                 shared.writer = Some(Writer::new(kube_client(api), "kausa".into()));
@@ -1773,15 +1781,19 @@ mod tests {
                         std::time::Instant::now(),
                     );
                 }
-                let retry = run(
+                let explained = run(
                     work(),
                     kube_client("http://127.0.0.1:9"),
                     &settings,
                     &shared,
-                )
-                .await
-                .expect("the log")
-                .is_given_back();
+                );
+                let end = async {
+                    if let Some(hold) = hold {
+                        hold.end(&term).await;
+                    }
+                };
+                let (next, ()) = futures::join!(explained, end);
+                let retry = next.expect("the log").is_given_back();
                 let budget_left = shared
                     .budget
                     .borrow_mut()
@@ -1815,10 +1827,10 @@ mod tests {
 
     #[test]
     fn a_closed_term_calls_nothing_and_spends_nothing() {
-        let (model_url, model_calls) = counted_model(Duration::ZERO);
+        let (model_url, model_calls) = counted_model(None);
         let (api, api_calls) = counted_api_server();
         let metrics = Metrics::default();
-        let left = explain_under(model_url, &api, Some(Duration::ZERO), false, &metrics);
+        let left = explain_under(model_url, &api, Guard::Closed, false, &metrics);
         assert!(!left.retry);
         assert!(left.budget_left, "the budget was spent");
         assert!(!left.cached);
@@ -1838,18 +1850,11 @@ mod tests {
 
     #[test]
     fn an_answer_that_arrives_after_the_term_is_dropped() {
-        // A term long enough for the call to start on a loaded CI runner, and a model slower
-        // than the term, so that the answer always arrives after it.
-        let (model_url, model_calls) = counted_model(Duration::from_millis(3000));
+        let (held, hold) = hold::new();
+        let (model_url, model_calls) = counted_model(Some(held));
         let (api, api_calls) = counted_api_server();
         let metrics = Metrics::default();
-        let left = explain_under(
-            model_url,
-            &api,
-            Some(Duration::from_millis(1000)),
-            false,
-            &metrics,
-        );
+        let left = explain_under(model_url, &api, Guard::EndedBy(hold), false, &metrics);
         assert!(!left.retry);
         assert!(
             model_calls.recv_timeout(Duration::from_secs(5)).is_ok(),
@@ -1876,7 +1881,7 @@ mod tests {
     fn a_cached_explanation_is_not_written_past_the_term() {
         let (api, api_calls) = counted_api_server();
         let metrics = Metrics::default();
-        let left = explain_under(nowhere(), &api, Some(Duration::ZERO), true, &metrics);
+        let left = explain_under(nowhere(), &api, Guard::Closed, true, &metrics);
         assert!(!left.retry);
         assert!(left.budget_left);
         assert!(
@@ -1895,10 +1900,10 @@ mod tests {
 
     #[test]
     fn an_unbounded_term_explains_and_writes_as_before() {
-        let (model_url, model_calls) = counted_model(Duration::ZERO);
+        let (model_url, model_calls) = counted_model(None);
         let (api, api_calls) = counted_api_server();
         let metrics = Metrics::default();
-        let left = explain_under(model_url, &api, None, false, &metrics);
+        let left = explain_under(model_url, &api, Guard::Unbounded, false, &metrics);
         assert!(!left.retry);
         assert!(!left.budget_left, "the one call of the budget was spent");
         assert!(left.cached);
@@ -2288,8 +2293,9 @@ mod tests {
         }
     }
 
-    /// A fake model that answers one request with `content` after `wait`. Returns its base URL.
-    fn slow_model(wait: Duration, content: String) -> String {
+    /// A fake model that answers one request with `content` once `held` lets it. Returns its base
+    /// URL.
+    fn held_model(held: Held, content: String) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
         let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
         std::thread::spawn(move || {
@@ -2297,7 +2303,7 @@ mod tests {
                 return;
             };
             read_request(&mut stream);
-            std::thread::sleep(wait);
+            held.wait();
             let body = json!({
                 "choices": [{"message": {"content": content}}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 20},
@@ -2361,14 +2367,14 @@ mod tests {
         let shared_dry = shared(&settings_dry, &metrics);
         assert!(!explain(work(), &settings_dry, &shared_dry));
         assert!(metrics.render().contains(unused), "dry-run: counted");
-        // An answer that arrives after the term ended is dropped before the pass. A term long
-        // enough for the call to start on a loaded CI runner, and a model slower than the term.
+        // An answer that arrives after the term ended is dropped before the pass.
         let (api, _api_calls) = counted_api_server();
         let metrics = Metrics::default();
+        let (held, hold) = hold::new();
         let left = explain_under(
-            slow_model(Duration::from_millis(3000), hostile_answer()),
+            held_model(held, hostile_answer()),
             &api,
-            Some(Duration::from_millis(1000)),
+            Guard::EndedBy(hold),
             false,
             &metrics,
         );
@@ -2479,6 +2485,25 @@ mod tests {
     /// A fake model that answers every request with `response` after `wait`, and counts them.
     /// Returns its base URL.
     fn answering(response: String, wait: Duration) -> (String, Arc<AtomicUsize>) {
+        answering_after(response, move || std::thread::sleep(wait))
+    }
+
+    /// As `answering`, with the first answer sent once `held` lets it.
+    fn answering_held(response: String, held: Held) -> (String, Arc<AtomicUsize>) {
+        let mut held = Some(held);
+        answering_after(response, move || {
+            if let Some(held) = held.take() {
+                held.wait();
+            }
+        })
+    }
+
+    /// A fake model that answers every request with `response` once `before` has returned, and
+    /// counts them. Returns its base URL.
+    fn answering_after(
+        response: String,
+        mut before: impl FnMut() + Send + 'static,
+    ) -> (String, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
         let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2487,7 +2512,7 @@ mod tests {
             while let Ok((mut stream, _)) = listener.accept() {
                 counted.fetch_add(1, Ordering::SeqCst);
                 read_request(&mut stream);
-                std::thread::sleep(wait);
+                before();
                 let _ = stream.write_all(response.as_bytes());
             }
         });
@@ -2595,6 +2620,26 @@ mod tests {
             .build()
             .expect("a runtime")
             .block_on(async { run(job, kube_client(api), settings, shared).await })
+            .expect("the log")
+    }
+
+    /// As `run_job`, with the term of `shared` ended by `hold` during the job.
+    fn run_job_held(
+        job: Work,
+        settings: &Settings,
+        shared: &Shared<'_>,
+        api: &str,
+        hold: Hold,
+    ) -> Next {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(async {
+                let ran = run(job, kube_client(api), settings, shared);
+                let (next, ()) = futures::join!(ran, hold.end(shared.term));
+                next
+            })
             .expect("the log")
     }
 
@@ -3081,18 +3126,16 @@ mod tests {
             (reply("401 Unauthorized", "", "{}"), State::Open),
             (valid_reply(), State::Closed),
         ] {
-            // A term long enough for the call to start on a loaded CI runner, and an answer
-            // slower than the term.
-            let (url, calls) = answering(response, Duration::from_millis(3000));
+            let (held, hold) = hold::new();
+            let (url, calls) = answering_held(response, held);
             let settings = settings(Some(url), false, 30);
             let metrics = Metrics::default();
-            let term = Term::closed();
-            term.extend_to(std::time::Instant::now() + Duration::from_millis(1000));
+            let term = Term::unbounded();
             let shared = shared_in(&settings, &metrics, &term);
             if expected == State::Closed {
                 half_open(&shared);
             }
-            let next = run_job(work(), &settings, &shared, "http://127.0.0.1:9");
+            let next = run_job_held(work(), &settings, &shared, "http://127.0.0.1:9", hold);
             assert!(matches!(next, Next::Done), "{}", outcome(&next));
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(state(&shared), expected);
