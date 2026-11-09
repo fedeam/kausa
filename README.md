@@ -1,15 +1,23 @@
 # kausa
 
-![repository: public](https://img.shields.io/badge/repository-public-bc4c00) ![internet: no](https://img.shields.io/badge/internet-no-0969da) ![status: in development](https://img.shields.io/badge/status-in%20development-9a6700)
+![repository: public](https://img.shields.io/badge/repository-public-bc4c00) ![internet: no](https://img.shields.io/badge/internet-no-0969da "kausa serves nothing on the internet") ![status: in development](https://img.shields.io/badge/status-in%20development-9a6700)
 
 ![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-0969da) ![rust: 1.99+](https://img.shields.io/badge/rust-1.99%2B-0969da) [![CI](https://github.com/fedeam/kausa/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fedeam/kausa/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/fedeam/kausa/badge)](https://scorecard.dev/viewer/?uri=github.com/fedeam/kausa) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16024/badge)](https://www.bestpractices.dev/projects/16024)
 
-A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects and, with `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease.
+> **What it does:** when a workload fails, kausa groups its failures into one incident and writes a
+> redacted, budgeted LLM explanation as a Kubernetes Event on the failing object.
+>
+> **Who it is for:** people who run Kubernetes and want a readable first answer in `kubectl
+> describe`, from a model of their choice, including one served inside the cluster.
+>
+> **Status: pre-alpha.** The latest release,
+> [v0.6.1](https://github.com/fedeam/kausa/releases/tag/v0.6.1), publishes a signed image for
+> linux/amd64 and linux/arm64 and the Helm chart; see [Limits / Known gaps](#limits--known-gaps).
+>
+> The `internet: no` badge means kausa serves nothing on the internet: it only calls the Kubernetes
+> API server, the model endpoint you configure and, if you set one, one webhook.
 
-> **Status: pre-alpha.** `kausa run` detects and groups failures, redacts their context, asks an
-> OpenAI-compatible model to explain them within a call budget, and writes the explanation as an
-> Event on the failing workload. The latest release, [v0.6.1](https://github.com/fedeam/kausa/releases/tag/v0.6.1),
-> publishes a signed image for linux/amd64 and linux/arm64 and the Helm chart.
+A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects and, with `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease.
 
 ## The problem
 
@@ -154,35 +162,65 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 ## Status
 
-Pre-alpha. v0.6.1 is released (2026-11-05): `kausa run` watches Pods, Warning events and
-Deployments, in the whole cluster or in a list of namespaces, groups failures by workload, builds a
-redacted context with the failed container's log, asks the model within a call budget (or logs the
-request with `--dry-run`), reuses explanations of repeated incidents, writes each explanation as an
-Event on the failing workload, and serves Prometheus metrics with `--metrics-address`, with alert
-rules for them in `deploy/prometheus/` ([Alerts](docs/reference/alerts.md)); with
-`--history` it keeps each incident's explanations in an Explanation object, and with
-`--notify-url-file` it posts each new explanation to one webhook, both off by default; with the
-chart's `replicaCount: 2`, off by default, a standby replica takes over through a Lease; it
-redacts the model's answer as it redacts the request, withholds an answer that holds a listed
-destructive command, holds its calls behind a breaker while the
-endpoint fails, and `kausa check-endpoint` (the chart's `helm test`) checks the endpoint on
-demand; its log lines are JSON ([Command line and log format](docs/reference/command-line.md)). The image is
-published at `ghcr.io/fedeam/kausa`, signed with cosign and with SLSA build provenance, and the
-chart is attached to each [GitHub release](https://github.com/fedeam/kausa/releases), next to its
-signed checksums; how to verify them is in the release notes. From v0.6.0 the chart is also
-published at `oci://ghcr.io/fedeam/charts/kausa`, signed and with provenance, and each image gets
-an attested CycloneDX SBOM of a binary built with `cargo auditable`, whose crate list scanners can
-read from the image.
+Pre-alpha. v0.6.1 is released (2026-11-05). What there is:
 
-What was measured, once each and on small setups: on five seeded failures with the same small
-local model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 calls and 5,128
-([Tokens per incident compared with
-k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)); on a Raspberry Pi 4 it used
-about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
-4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)). Explanations were tested with
-Ollama and small local models, and on 2026-10-30 with a hosted provider over HTTPS: the released
-v0.4.0 image against the OpenAI-compatible endpoint of Google's Gemini API
-(`gemini-3.5-flash-lite`). What has changed so far is in the [Changelog](CHANGELOG.md).
+- **Detection and explanation:** `kausa run` watches Pods, Warning events and Deployments, in the
+  whole cluster or in a list of namespaces, groups failures by workload, builds a redacted context
+  with the failed container's log, asks the model within a call budget (or logs the request with
+  `--dry-run`), reuses explanations of repeated incidents and writes each explanation as an Event
+  on the failing workload.
+- **Metrics:** Prometheus metrics with `--metrics-address`, with alert rules for them in
+  `deploy/prometheus/` ([Alerts](docs/reference/alerts.md)); the log lines are JSON ([Command line
+  and log format](docs/reference/command-line.md)).
+- **Optional, off by default:** with `--history`, each incident's explanations are kept in an
+  Explanation object; with `--notify-url-file`, each new explanation is posted to one webhook; with
+  the chart's `replicaCount: 2`, a standby replica takes over through a Lease.
+- **Safety of the answer:** it redacts the model's answer as it redacts the request, withholds an
+  answer that holds a listed destructive command, and holds its calls behind a breaker while the
+  endpoint fails; `kausa check-endpoint` (the chart's `helm test`) checks the endpoint on demand.
+- **Distribution:** the image is published at `ghcr.io/fedeam/kausa`, signed with cosign and with
+  SLSA build provenance, and the chart is attached to each [GitHub
+  release](https://github.com/fedeam/kausa/releases), next to its signed checksums; how to verify
+  them is in the release notes. From v0.6.0 the chart is also published at
+  `oci://ghcr.io/fedeam/charts/kausa`, signed and with provenance, and each image gets an attested
+  CycloneDX SBOM of a binary built with `cargo auditable`, whose crate list scanners can read from
+  the image.
+- **Measured, once each and on small setups:** on five seeded failures with the same small local
+  model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 calls and 5,128 ([Tokens
+  per incident compared with k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)); on
+  a Raspberry Pi 4 it used about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
+  4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)).
+- **Tested with:** Ollama and small local models, and on 2026-10-30 with a hosted provider over
+  HTTPS: the released v0.4.0 image against the OpenAI-compatible endpoint of Google's Gemini API
+  (`gemini-3.5-flash-lite`).
+
+What is missing is listed under [Limits / Known gaps](#limits--known-gaps). What has changed so
+far, release by release, is in the [Changelog](CHANGELOG.md).
+
+## Limits / Known gaps
+
+- **Small models explain in generic terms.** In the scored runs, the small local models missed
+  signatures a fixed rule could state from fields already sent, invented a Pod or a workload for
+  the incidents whose request has no Pod, and treated a Job's failure reason and its log as
+  competing causes ([Explanation quality of local models against known
+  causes](docs/research/2026-11-02-explanation-quality.md)). The wording is the model's; kausa
+  does not check that it is right.
+- **A fixed set of rules.** Only the failures the detection rules cover are explained; the list is
+  in [Detection and redaction rules](docs/reference/rules.md), and a new rule needs a change to
+  kausa ([Add a detection or redaction rule](docs/how-to/add-a-rule.md)).
+- **It does not look at metrics or traces.** It sends one tool-less request built from the
+  cluster's Pods, Events, Deployments and a capped log tail, so it sees only what it sends.
+  Reading metrics backends is out of scope ([0001. Build a small, read-only explainer that writes
+  one redacted explanation per incident](docs/adr/0001-scope-and-positioning.md)); for an
+  investigation that calls tools, see HolmesGPT above.
+- **The soak is still running.** A seven-day soak of memory and restarts on a small ARM cluster
+  has no result yet ([Run the soak](docs/how-to/run-the-soak.md)).
+- **Argo CD and the standby replica.** With `replicaCount: 2`, Argo CD's default
+  `resource.exclusions` skip `coordination.k8s.io/Lease`, so an Application of the chart never
+  creates the Lease and neither replica leads. The fix, in `Unreleased` in the
+  [Changelog](CHANGELOG.md), makes the error hint name this case; the Lease is created once by
+  hand, as [Install kausa with Helm](docs/how-to/install-with-helm.md) describes
+  ([#79](https://github.com/fedeam/kausa/issues/79)). kausa still never creates the Lease.
 
 ## Build from source
 
@@ -212,94 +250,6 @@ kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build
 (`docker build --target runtime -t <registry>/kausa:<tag> .`), push it, and install the chart with
 `--set rbac.scope=cluster --set image.repository=<registry>/kausa --set image.tag=<tag>`
 (`rbac.scope` is required; `namespaced` with `rbac.namespaces` limits kausa to those namespaces).
-
-## Roadmap
-
-- **v0.1** (released as v0.1.0 on 2026-10-28): the watches, eight detection rules, the settle
-  window, owner correlation and fingerprints; redaction with a test corpus, the untrusted-data
-  prompt, the OpenAI-compatible client and dry-run; the budget, deduplication, metrics and
-  Events; the image, the Helm chart and the kind test; a measurement on a Raspberry Pi 4 and a
-  token comparison with k8sgpt.
-- **v0.2** (released as v0.2.0 on 2026-10-28): a security fix for Events about objects in
-  another namespace, the detection rules `D009` (pod evicted) and `D010` (pod sandbox), and fixes
-  to `D001` and `D005`.
-- **v0.3** (released as v0.3.0 on 2026-10-29): a namespaced install mode: `kausa run
-  --namespace` and the chart's `rbac.scope=namespaced`, with a Role per listed namespace and
-  nothing cluster-wide ([0013. Offer a namespaced install mode: one watch pair and one Role per
-  listed namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)); the
-  chart's `rbac.scope` is now required. The history of explanations, off by default: `kausa run
-  --history` and the chart's `history.enabled=true` keep each incident's whole explanations in an
-  Explanation object in its namespace for up to 30 days ([Explanation
-  resource](docs/reference/explanation-resource.md)). Notifications to one webhook, off by
-  default: `kausa run --notify-url-file` and the chart's `notifications.enabled=true` post each
-  new explanation as JSON, to Slack or to Telegram ([Send notifications to Slack, Telegram or a
-  webhook](docs/how-to/send-notifications.md); Telegram posted to for real on 2026-10-29, Slack
-  on 2026-10-30, where a plain `@here` still notified the channel; fixed in v0.4.1).
-- **v0.4** (released as v0.4.0 on 2026-10-30): the detection rules `D011` (workload
-  cannot create Pods), `D012` (volume claim cannot be provisioned), `D013` (autoscaler cannot get
-  metrics) and `D014` (rollout does not progress: a Deployment past its progress deadline, from a
-  watch on Deployments that is on by default; `kausa run --no-rollouts` and the chart's
-  `rollouts=false` turn it off, and with it the chart's `list` and `watch` on Deployments)
-  ([0018. Explain a Deployment past its progress deadline (`D014`) from a Deployment watch that is
-  on by default, and add nothing for StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)).
-  A richer context for the model: resource requests, probe handlers, image pull settings and an
-  unschedulable Pod's scheduling keys, reduced and redacted ([0017. Send the model resource
-  requests, probe handlers, image pull settings and an unschedulable Pod's scheduling keys, reduced
-  and redacted](docs/adr/0017-richer-context-for-the-model.md)). An optional standby replica, off
-  by default: the chart's `replicaCount=2` runs a second Pod that waits and takes over through a
-  Lease when the one that acts stops (`kausa run --leader-lease`), with `get` and `patch` on that
-  one Lease as its only new permission ([0019. Offer an optional standby replica that takes over
-  through a chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md));
-  in kind, a frozen leader was replaced 30 to 35 seconds after its last renewal, within the
-  documented 40 seconds ([Standby and failover](docs/research/2026-10-29-standby-and-failover.md)).
-  Upgrade the image and the chart together; the chart's default memory limit is now `192Mi`.
-- **v0.4.1** (2026-10-30): the Slack fix, a word joiner after every `@` of the text, since a
-  real post showed a plain `@here` or `@channel` in v0.4.0's Slack text notifying the channel; and
-  the redaction rule `R014`, which drops the query and fragment of URLs in event text and logs.
-- **v0.5.0** (2026-11-03): the model's answer passes the pattern redaction rules `R003`–`R014`
-  before it is logged, written or posted ([0022. Pass the model's answer through the pattern
-  redaction rules before it is written anywhere, and redact the query of an HTTP request
-  line](docs/adr/0022-redact-the-answer.md)); the hourly call budget refills at a steady rate from
-  a start burst of three, and incidents wait for it in the queue ([0021. Refill the hourly call
-  budget at a steady rate from a start burst of three, and let incidents wait for it in the queue,
-  so that a restart does not refill it](docs/adr/0021-refill-the-call-budget.md)); `kausa
-  check-endpoint`, the chart's `helm test`, and a breaker that holds calls while the endpoint
-  fails ([0020. Check the model endpoint on demand with `kausa check-endpoint` and `helm test`, and
-  hold calls behind a breaker while it fails](docs/adr/0020-check-the-endpoint.md)); and `D002`,
-  `D004`, `D008` and `D011` explain more failures, scored against known causes ([Explanation
-  quality of local models against known
-  causes](docs/research/2026-11-02-explanation-quality.md)). Upgrade the image and the chart
-  together.
-- **v0.5.1** (2026-11-03): a wrong or missing key for Google's Gemini API, which its
-  OpenAI-compatible endpoint answers with a `400`, is a key error that opens the breaker, and the
-  endpoint check names the key instead of `--no-json-schema`.
-- **v0.5.2** (2026-11-03): a security fix of redaction: the name of a Secret or ConfigMap that a
-  Pod cannot mount no longer reaches the request in clear when the volume is named like a secret
-  key (`credentials`, `password`…).
-- **v0.6.0** (2026-11-04): the chart is published at `oci://ghcr.io/fedeam/charts/kausa`, signed
-  and with provenance, and each image gets an attested CycloneDX SBOM of a binary built with
-  `cargo auditable` ([0023. Publish the chart as a signed OCI artifact at
-  `oci://ghcr.io/fedeam/charts/kausa`, list it on Artifact Hub, and attest a CycloneDX SBOM of an
-  auditable binary to each image](docs/adr/0023-oci-chart-and-sbom.md)); kausa's own
-  observability: alert rules checked and unit-tested with `promtool`
-  ([Alerts](docs/reference/alerts.md)) and seven new metrics, among them the build, the model call latency and the watch relists; an
-  upgrade test from the latest release and the scripts of a seven-day soak ([Run the
-  soak](docs/how-to/run-the-soak.md)); and a system message chosen by detection: the requests
-  that carry no Pod (`D011` to `D014`) get one of two new fixed messages, as prompt version `3`,
-  and the others, a failed Job (`D008`) included, keep version 2's ([0024. Send one of four fixed
-  system messages, chosen by detection, that say when a request carries no Pod and how a failed
-  Job's event and log combine, as `PROMPT_VERSION` 3, only if a before-and-after run passes bars
-  fixed now](docs/adr/0024-system-message-by-detection.md);
-  [The system message by detection,
-  measured](docs/research/2026-11-04-system-message-by-detection-measured.md)). The counters with
-  a fixed set of labels start at `0` for each label, and their unlabelled `0` line is gone.
-- **v0.6.1** (2026-11-05): an answer that holds one of six listed destructive command shapes
-  (deleting every namespace, `helm uninstall`, `rm -rf`…) reaches no sink: a fixed notice replaces
-  it at `low` confidence ([0025. Replace the model's text that holds one of six listed destructive
-  command shapes with a fixed notice, show the notice first, and give that answer `low`
-  confidence](docs/adr/0025-withhold-destructive-commands.md); [Destructive commands withheld,
-  measured](docs/research/2026-11-05-destructive-commands-measured.md)), with the alert
-  `KausaAnswerWithheld`; and the chart is listed on Artifact Hub.
 
 ## Documentation
 
