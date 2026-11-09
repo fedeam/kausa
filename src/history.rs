@@ -428,6 +428,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::leader::Term;
+    use crate::leader::hold;
     use crate::leader::pure::WRITE_BOUND;
 
     fn is_time(time: &str) -> bool {
@@ -1260,9 +1261,10 @@ mod tests {
         assert_eq!(write_counts(&metrics), ["kausa_history_writes_total 0"]);
     }
 
-    /// A fake API server that answers its first request after `wait`.
+    /// A fake API server that answers its first request once `wait` has returned, and never
+    /// answers the others.
     fn slow_api_server(
-        wait: Duration,
+        wait: impl FnOnce() + Send + 'static,
         status: &'static str,
         body: Value,
     ) -> (String, mpsc::Receiver<Sent>) {
@@ -1271,6 +1273,7 @@ mod tests {
         let (sent, received) = mpsc::channel();
         std::thread::spawn(move || {
             let mut open = Vec::new();
+            let mut wait = Some(wait);
             while let Ok((mut stream, _)) = listener.accept() {
                 let mut buffer = vec![0; 65536];
                 let n = stream.read(&mut buffer).unwrap_or(0);
@@ -1281,8 +1284,8 @@ mod tests {
                     head: String::new(),
                     body: String::new(),
                 });
-                if open.is_empty() {
-                    std::thread::sleep(wait);
+                if let Some(wait) = wait.take() {
+                    wait();
                     let body = body.to_string();
                     let answer = format!(
                         "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: \
@@ -1299,18 +1302,15 @@ mod tests {
 
     #[test]
     fn a_term_that_ends_during_the_list_makes_no_create() {
-        // A term long enough for the list to start on a loaded CI runner, and an answer slower
-        // than the term.
-        let (url, requests) =
-            slow_api_server(Duration::from_millis(3000), "200 OK", page(vec![], ""));
+        let (held, hold) = hold::new();
+        let (url, requests) = slow_api_server(|| held.wait(), "200 OK", page(vec![], ""));
         let metrics = Metrics::default();
-        let term = Term::closed();
+        let term = Term::unbounded();
         block_on(async {
-            term.extend_to(std::time::Instant::now() + Duration::from_millis(1000));
-            history(&url)
-                .write(&incident(), &explanation(), "m", &metrics, &term)
-                .await
-                .expect("a log");
+            let (history, incident, explanation) = (history(&url), incident(), explanation());
+            let write = history.write(&incident, &explanation, "m", &metrics, &term);
+            let (written, ()) = futures::join!(write, hold.end(&term));
+            written.expect("a log");
         });
         let first = requests
             .recv_timeout(Duration::from_secs(1))
@@ -1348,20 +1348,19 @@ mod tests {
     #[test]
     fn a_term_that_ends_during_a_sweep_list_makes_no_delete() {
         // The page lists an old object, but it arrives after the term has ended.
+        let (held, hold) = hold::new();
         let (url, requests) = slow_api_server(
-            Duration::from_millis(300),
+            || held.wait(),
             "200 OK",
             page(vec![old("shop", "0123456789abcdef", "10")], ""),
         );
         let metrics = Metrics::default();
-        let term = Term::closed();
+        let term = Term::unbounded();
         block_on(async {
-            term.extend_to(std::time::Instant::now() + Duration::from_millis(100));
             let config = kube::Config::new(url.parse().expect("a URL"));
-            History::new(Client::try_from(config).expect("a client"), 7)
-                .sweep(&[], &metrics, &term)
-                .await
-                .expect("a log");
+            let history = History::new(Client::try_from(config).expect("a client"), 7);
+            let (swept, ()) = futures::join!(history.sweep(&[], &metrics, &term), hold.end(&term));
+            swept.expect("a log");
         });
         let first = requests
             .recv_timeout(Duration::from_secs(1))
@@ -1388,8 +1387,11 @@ mod tests {
     fn each_sweep_call_ends_within_the_write_bound() {
         // A list that is never answered ends at WRITE_BOUND, before the sweep's own SWEEP_TIME.
         assert!(WRITE_BOUND < SWEEP_TIME);
-        let (url, _requests) =
-            slow_api_server(Duration::from_secs(120), "200 OK", page(vec![], ""));
+        let (url, _requests) = slow_api_server(
+            || std::thread::sleep(Duration::from_secs(120)),
+            "200 OK",
+            page(vec![], ""),
+        );
         let metrics = Metrics::default();
         let started = std::time::Instant::now();
         block_on(async {

@@ -211,6 +211,69 @@ impl Term {
     }
 }
 
+/// For the tests that end a term during a call: a fake server holds the call it has read, the
+/// test ends the term, and only then the server answers. The term ends after the call has started
+/// and before its answer arrives, however slow the machine, with no wall-clock race.
+#[cfg(test)]
+pub mod hold {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use futures::channel::oneshot;
+
+    use super::Term;
+
+    /// The fake server's side.
+    pub struct Held {
+        read: oneshot::Sender<()>,
+        ended: mpsc::Receiver<()>,
+    }
+
+    /// The test's side.
+    pub struct Hold {
+        read: oneshot::Receiver<()>,
+        ended: mpsc::Sender<()>,
+    }
+
+    pub fn new() -> (Held, Hold) {
+        let (read, read_rx) = oneshot::channel();
+        let (ended, ended_rx) = mpsc::channel();
+        (
+            Held {
+                read,
+                ended: ended_rx,
+            },
+            Hold {
+                read: read_rx,
+                ended,
+            },
+        )
+    }
+
+    impl Held {
+        /// Tells the test that the request has been read, and waits until the term has ended (or
+        /// the test is over).
+        pub fn wait(self) {
+            let _ = self.read.send(());
+            let _ = self.ended.recv();
+        }
+    }
+
+    impl Hold {
+        /// Ends `term` once the server has read the request, then lets the server answer. Run it
+        /// alongside the code under test, on the same runtime.
+        pub async fn end(self, term: &Term) {
+            // Not a term: only how long a test waits for a call that never comes.
+            tokio::time::timeout(Duration::from_secs(30), self.read)
+                .await
+                .expect("the call within 30 seconds")
+                .expect("a server that holds the call");
+            term.close();
+            let _ = self.ended.send(());
+        }
+    }
+}
+
 /// The `lease error` log of one Lease: every error is counted in
 /// `kausa_lease_errors_total{call}`, and logged when it starts, when its text changes, and once
 /// per `period` while it lasts. A success of the same call ends it.
