@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An expired resource version (`410` in a watch) is no longer a watch error: it gives no
+  `pod watch error`, `event watch error` or `deployment watch error` line and is not counted in
+  `kausa_watch_errors_total`, since the watcher lists again and `kausa_watch_relists_total`
+  counts that. On k3s, which serves the Event watch without a watch cache, it came every few
+  minutes and made more than half of that counter (142 of 239 Event watch errors in a day).
+
 - With `replicaCount: 2`, the `lease error` hint on a `404` also names the deploy tools that skip
   Leases: `the chart creates this Lease: run helm upgrade, or create it once if your deploy tool
   skips Leases (Argo CD does)`. Argo CD's default `resource.exclusions` skip
