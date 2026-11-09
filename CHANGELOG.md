@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A watch error whose text changes no longer loses the repeats folded of the previous text: the
+  `pod watch error`, `event watch error` or `deployment watch error` line of the new text is
+  preceded by a line of the old text with its `folded` count. Errors whose text carries a key,
+  such as k3s's `etcd event received with PrevKv=nil (key=...)`, change text every time.
+
 ## [0.6.2] - 2026-11-09
 
 ### Fixed
