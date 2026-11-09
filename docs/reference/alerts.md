@@ -319,7 +319,8 @@ cluster.
 **Why 20:** a watch that fails without a break retries every 30 seconds once its backoff has grown:
 about 30 errors in 15 minutes. The only benign rate measured, 17 restarts of the Event watch in a
 22-minute run on k3s ([Memory and CPU on a Raspberry Pi
-4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)), is about 12 in 15 minutes. 20 sits
+4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md)), is about 12 in 15 minutes; since
+an expired resource version (`410`) is no longer counted, the same run would give about 10. 20 sits
 between them; on other clusters it is a hypothesis. `increase` extrapolates to the edges of its
 window, so a steady 1.35 errors a minute reads 20.25 and fires once held for 15 minutes, while 1.3
 a minute (19.5) never does.

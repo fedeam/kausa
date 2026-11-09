@@ -148,6 +148,14 @@ fn forbidden(error: &watcher::Error) -> bool {
     }
 }
 
+/// Whether a watch error is an expired resource version (`410` in the watch): the watcher lists
+/// again, which `kausa_watch_relists_total` counts, so it is not a watch error. On a cluster that
+/// serves the Event watch without a watch cache, such as k3s, it comes every few minutes
+/// (docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md).
+fn expired(error: &watcher::Error) -> bool {
+    matches!(error, watcher::Error::WatchError(status) if status.code == 410)
+}
+
 /// Which watches have sent `InitDone` at least once. kausa is ready once every watch has: 3 on
 /// the whole cluster, or 3 per namespace, and 2 for each with `--no-rollouts`
 /// (docs/adr/0013-namespaced-install-mode.md, docs/adr/0018-stuck-rollouts.md).
@@ -1004,6 +1012,7 @@ async fn lead<C: Cluster>(
                         metrics.set_ready();
                     }
                 }
+                Some((_, Some(Err(e)))) if expired(&e) => {}
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "pods")]);
                     if forbidden(&e) {
@@ -1030,6 +1039,7 @@ async fn lead<C: Cluster>(
                         metrics.set_ready();
                     }
                 }
+                Some((_, Some(Err(e)))) if expired(&e) => {}
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "events")]);
                     if forbidden(&e) {
@@ -1057,6 +1067,7 @@ async fn lead<C: Cluster>(
                         metrics.set_ready();
                     }
                 }
+                Some((_, Some(Err(e)))) if expired(&e) => {}
                 Some((watch, Some(Err(e)))) => {
                     metrics.inc("kausa_watch_errors_total", &[("watch", "deployments")]);
                     if forbidden(&e) {
@@ -5709,10 +5720,55 @@ mod tests {
     }
 
     #[test]
+    fn an_expired_watch_counts_a_relist_and_no_error() {
+        fn gone<K>() -> (WatchKey, Result<watcher::Event<K>, watcher::Error>) {
+            (
+                CLUSTER,
+                Err(watcher::Error::WatchError(status(410, "Expired"))),
+            )
+        }
+        // Each watch lists, its resource version expires, and it lists again.
+        let cluster = ScriptedCluster::new(
+            chain(vec![
+                list(&CLUSTER, vec![]),
+                vec![gone()],
+                list(&CLUSTER, vec![]),
+            ]),
+            chain(vec![
+                list(&CLUSTER, vec![]),
+                vec![gone()],
+                list(&CLUSTER, vec![]),
+            ]),
+            chain(vec![
+                list(&CLUSTER, vec![]),
+                vec![gone()],
+                list(&CLUSTER, vec![]),
+            ]),
+        );
+        let metrics = Metrics::default();
+        lead_through(&watching(&[], true), &cluster, &metrics);
+        for watch in ["pods", "events", "deployments"] {
+            assert_eq!(watch_errors(&metrics, watch), 0, "{watch}");
+            assert_eq!(relists(&metrics, watch), 1, "{watch}");
+            assert_eq!(restarts(&metrics, watch), 0, "{watch}");
+        }
+        // Any other status in the watch, and a refusal in any shape, is still an error.
+        for code in [0, 403, 500] {
+            assert!(
+                !expired(&watcher::Error::WatchError(status(code, "Other"))),
+                "{code}"
+            );
+        }
+        for error in forbidden_errors() {
+            assert!(!expired(&error), "{error}");
+        }
+    }
+
+    #[test]
     fn a_refused_watch_counts_a_restart_beside_its_error() {
         // A case: its name, the error and the restarts it counts.
         type Case = (&'static str, fn() -> watcher::Error, u64);
-        let cases: [Case; 5] = [
+        let cases: [Case; 4] = [
             (
                 "list refused",
                 || watcher::Error::InitialListFailed(api_error(403)),
@@ -5727,11 +5783,6 @@ mod tests {
                 "watch refused",
                 || watcher::Error::WatchError(status(403, "Forbidden")),
                 1,
-            ),
-            (
-                "expired",
-                || watcher::Error::WatchError(status(410, "Expired")),
-                0,
             ),
             (
                 "server error",
