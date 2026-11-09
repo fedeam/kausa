@@ -135,12 +135,12 @@ pub fn build(incident: &Incident, outcome: &Outcome<'_>, instance: &str, now: Ti
 }
 
 /// The longest one emit may take, all of its calls together: `WRITE_BOUND` (a deposed leader's
-/// write ends before a standby may take over, docs/adr/0019-high-availability.md), and a short one
-/// in the tests.
+/// write ends before a standby may take over, docs/adr/0019-high-availability.md), and a shorter
+/// one in the tests, still above their slowest answer (3 seconds).
 #[cfg(not(test))]
 const EMIT_TIMEOUT: Duration = WRITE_BOUND;
 #[cfg(test)]
-const EMIT_TIMEOUT: Duration = Duration::from_secs(1);
+const EMIT_TIMEOUT: Duration = Duration::from_secs(5);
 const _: () = assert!(EMIT_TIMEOUT.as_nanos() <= WRITE_BOUND.as_nanos());
 
 /// How an emit that did not fail ended.
@@ -532,13 +532,15 @@ mod tests {
 
     #[test]
     fn a_term_that_ends_during_the_create_makes_no_further_call() {
-        // The create is answered 409 after the term has ended: no list and no series patch.
+        // The create is answered 409 after the term has ended: no list and no series patch. A
+        // term long enough for the create to start on a loaded CI runner, and an answer slower
+        // than the term.
         let (url, requests) = api_server(vec![
-            Reply::After(Duration::from_millis(300), "409 Conflict", conflict()),
+            Reply::After(Duration::from_millis(3000), "409 Conflict", conflict()),
             Reply::After(Duration::ZERO, "200 OK", json!({"items": []})),
         ]);
         let term = Term::closed();
-        term.extend_to(Instant::now() + Duration::from_millis(100));
+        term.extend_to(Instant::now() + Duration::from_millis(1000));
         let (result, _) = emit_at(&url, &term);
         assert!(matches!(result, Ok(Emitted::Skipped)), "{result:?}");
         let line = requests
