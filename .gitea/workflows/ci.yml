@@ -27,8 +27,8 @@ on:
   workflow_dispatch:
 
 # One run at a time, whatever the ref or event: two runs side by side on the one runner pushed the
-# ci job past the runner's 30-minute job timeout. A run in progress is never cancelled; a run still
-# waiting is replaced by a newer one.
+# ci job past the runner's job timeout, then 30 minutes. A run in progress is never cancelled; a run
+# still waiting is replaced by a newer one.
 concurrency:
   group: ${{ gitea.workflow }}
   cancel-in-progress: false
@@ -90,8 +90,8 @@ jobs:
           docker build --force-rm --target ci .
 
   # The arm64 controller image (docs/adr/0010-packaging.md), in a job of its own: the runner stops
-  # a job after 30 minutes, and the checks and the release build together take longer on the
-  # runner's hardware. Not tagged, not pushed.
+  # a job after 45 minutes, and the checks and the release build together take about that long on
+  # the runner's hardware (41 minutes on 9 November 2026). Not tagged, not pushed.
   image:
     needs: ci
     runs-on: native
