@@ -371,6 +371,7 @@ mod tests {
     use crate::explain::Shared;
     use crate::incident::{Incident, IncidentKey, Signal};
     use crate::leader::Term;
+    use crate::leader::hold::{self, Held};
     use crate::metrics::Metrics;
     use crate::notification::{self, ChatId, Notice, parse_chat_id};
     use crate::prompt::{self, Explanation};
@@ -518,6 +519,8 @@ mod tests {
         Redirect(String),
         /// Reads the request and answers nothing for this long.
         Hang(Duration),
+        /// Holds the request until the test's term has ended, then answers this status line.
+        Held(Held, &'static str),
     }
 
     /// A fake webhook on localhost: one connection per answer, in order. Each request is sent
@@ -572,6 +575,12 @@ mod tests {
                     Answer::Hang(time) => {
                         std::thread::sleep(time);
                         continue;
+                    }
+                    Answer::Held(held, status) => {
+                        held.wait();
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
                     }
                 };
                 let _ = stream.write_all(response.as_bytes());
@@ -1466,17 +1475,21 @@ mod tests {
 
     #[test]
     fn a_term_that_ends_before_the_retry_drops_the_item() {
-        // The first attempt hangs until the client's timeout, long after the term has ended: the
+        // The first attempt is answered with a transient failure after the term has ended: the
         // retry is not sent.
-        let (base, requests) = webhook(vec![Answer::Hang(TIMEOUT + Duration::from_secs(1))]);
+        let (held, hold) = hold::new();
+        let (base, requests) = webhook(vec![
+            Answer::Held(held, "503 Service Unavailable"),
+            Answer::Status("200 OK"),
+        ]);
         let n = notifier(&base, Format::Json, None);
         let metrics = Metrics::default();
-        let term = Term::closed();
+        let term = Term::unbounded();
         {
             let shared = shared_in(&metrics, TTL, &term);
             block_on(async {
-                term.extend_to(Instant::now() + Duration::from_millis(300));
-                deliver(&n, item(), &shared).await
+                let (delivered, ()) = futures::join!(deliver(&n, item(), &shared), hold.end(&term));
+                delivered
             })
             .expect("the log");
         }
