@@ -189,7 +189,9 @@ Pre-alpha. v0.6.1 is released (2026-11-05). What there is:
   model, kausa used 5 model calls and 2,948 tokens where k8sgpt used 12 calls and 5,128 ([Tokens
   per incident compared with k8sgpt](docs/research/2026-10-26-tokens-compared-with-k8sgpt.md)); on
   a Raspberry Pi 4 it used about 2 MiB of memory ([Memory and CPU on a Raspberry Pi
-  4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)).
+  4](docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md)), and 4.4 MiB while explaining
+  21 incidents ([Memory and CPU with
+  explanations](docs/research/2026-11-09-resource-use-with-explanations.md)).
 - **Tested with:** Ollama and small local models, and on 2026-10-30 with a hosted provider over
   HTTPS: the released v0.4.0 image against the OpenAI-compatible endpoint of Google's Gemini API
   (`gemini-3.5-flash-lite`).
