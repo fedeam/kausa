@@ -26,6 +26,13 @@ on:
   # A manual run from the Actions tab, e.g. after changing the repository variable.
   workflow_dispatch:
 
+# One run at a time, whatever the ref or event: two runs side by side on the one runner pushed the
+# ci job past the runner's 30-minute job timeout. A run in progress is never cancelled; a run still
+# waiting is replaced by a newer one.
+concurrency:
+  group: ${{ gitea.workflow }}
+  cancel-in-progress: false
+
 jobs:
   ci:
     runs-on: native
