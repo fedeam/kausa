@@ -193,11 +193,23 @@ impl Readiness {
 /// changed error is still logged at once, and the counter sees every one.
 const WATCH_ERROR_PERIOD: Duration = Duration::from_secs(300);
 
+/// What `WatchErrors::report` decides for one error.
+#[derive(Debug, PartialEq)]
+struct Reported {
+    /// The text this error replaced and the repeats of it that were folded and never reported,
+    /// present only when there were some.
+    superseded: Option<(String, u64)>,
+    /// How many repeats were folded since this error's last line; `None` folds the error.
+    line: Option<u64>,
+}
+
 /// The watch error lines of one term: every error is counted in `kausa_watch_errors_total`, and
 /// logged the first time, when its text changes, and at most once per `WATCH_ERROR_PERIOD` while
-/// it repeats, with how many repeats were folded since the last line. A watch that works in
-/// between does not end the error: a `PrevKv=nil` error comes back after each relist
-/// (docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md).
+/// it repeats, with how many repeats were folded since the last line. When the text changes, the
+/// repeats folded of the old text get a line of their own first, so no folded repeat goes
+/// unreported. A watch that works in between does not end the error: a `PrevKv=nil` error comes
+/// back after each relist (docs/research/2026-10-26-resource-use-on-a-raspberry-pi.md). Memory
+/// is bounded: one entry per watch, since texts that carry a key never repeat.
 #[derive(Default)]
 struct WatchErrors {
     /// Per watch, the text last logged, when, and the repeats folded since.
@@ -205,27 +217,38 @@ struct WatchErrors {
 }
 
 impl WatchErrors {
-    /// Says whether an error of `watch` with `text` at `now` is logged and, if so, how many
-    /// repeats were folded since its last line; `None` folds it.
-    fn report(&mut self, kind: Kind, watch: &WatchKey, text: &str, now: Instant) -> Option<u64> {
+    /// Decides what to log for an error of `watch` with `text` at `now`.
+    fn report(&mut self, kind: Kind, watch: &WatchKey, text: &str, now: Instant) -> Reported {
         let key = (kind, watch.clone());
         if let Some((last, at, folded)) = self.logged.get_mut(&key)
             && last == text
         {
             if now.duration_since(*at) < WATCH_ERROR_PERIOD {
                 *folded += 1;
-                return None;
+                return Reported {
+                    superseded: None,
+                    line: None,
+                };
             }
             let count = *folded;
             (*at, *folded) = (now, 0);
-            return Some(count);
+            return Reported {
+                superseded: None,
+                line: Some(count),
+            };
         }
-        self.logged.insert(key, (text.to_owned(), now, 0));
-        Some(0)
+        let superseded = self
+            .logged
+            .insert(key, (text.to_owned(), now, 0))
+            .and_then(|(old, _, folded)| (folded > 0).then_some((old, folded)));
+        Reported {
+            superseded,
+            line: Some(0),
+        }
     }
 
     /// Logs `msg` for an error of `watch` at `now`, unless it is folded; `folded` is present only
-    /// when repeats were.
+    /// when repeats were. A changed text first logs the old one with the repeats folded of it.
     fn log(
         &mut self,
         msg: &str,
@@ -235,7 +258,14 @@ impl WatchErrors {
         now: Instant,
     ) -> io::Result<()> {
         let text = error.to_string();
-        let Some(folded) = self.report(kind, watch, &text, now) else {
+        let reported = self.report(kind, watch, &text, now);
+        if let Some((old, folded)) = reported.superseded {
+            log::warn(
+                msg,
+                json!({"namespace": watch, "error": old, "folded": folded}),
+            )?;
+        }
+        let Some(folded) = reported.line else {
             return Ok(());
         };
         let mut fields = json!({"namespace": watch, "error": text});
@@ -2499,8 +2529,9 @@ mod tests {
         let mut errors = WatchErrors::default();
         let start = Instant::now();
         let at = |seconds| start + Duration::from_secs(seconds);
-        let mut report =
-            |kind, watch: &WatchKey, text, seconds| errors.report(kind, watch, text, at(seconds));
+        let mut report = |kind, watch: &WatchKey, text, seconds| {
+            errors.report(kind, watch, text, at(seconds)).line
+        };
         // The first is logged, and a repeat is folded.
         assert_eq!(report(Kind::Pods, &None, "a", 0), Some(0));
         assert_eq!(report(Kind::Pods, &None, "a", 30), None);
@@ -2520,6 +2551,35 @@ mod tests {
         assert_eq!(report(Kind::Pods, &None, "a", 641), Some(0));
         // A repeat that comes after a quiet period has nothing folded.
         assert_eq!(report(Kind::Pods, &None, "a", 1300), Some(0));
+    }
+
+    #[test]
+    fn the_repeats_folded_of_a_replaced_watch_error_are_reported() {
+        let mut errors = WatchErrors::default();
+        let start = Instant::now();
+        let mut report = |text, seconds| {
+            errors.report(
+                Kind::Events,
+                &None,
+                text,
+                start + Duration::from_secs(seconds),
+            )
+        };
+        let reported = |superseded: Option<(&str, u64)>, line| Reported {
+            superseded: superseded.map(|(text, folded)| (text.to_owned(), folded)),
+            line,
+        };
+        assert_eq!(report("a", 0), reported(None, Some(0)));
+        assert_eq!(report("a", 30), reported(None, None));
+        assert_eq!(report("a", 60), reported(None, None));
+        // A new text reports the two repeats of "a" that no line carried.
+        assert_eq!(report("b", 90), reported(Some(("a", 2)), Some(0)));
+        // A text that replaces one with nothing folded reports nothing before it.
+        assert_eq!(report("c", 120), reported(None, Some(0)));
+        // A line that carried the folded repeats leaves none to report when the text changes.
+        assert_eq!(report("c", 150), reported(None, None));
+        assert_eq!(report("c", 420), reported(None, Some(1)));
+        assert_eq!(report("d", 450), reported(None, Some(0)));
     }
 
     #[test]
