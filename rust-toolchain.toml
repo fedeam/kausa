@@ -3,6 +3,6 @@
 # and a mismatch fails the CI build instead of downloading another toolchain (RUSTUP_AUTO_INSTALL=0
 # in the Dockerfile).
 [toolchain]
-channel = "1.99.1"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]
 profile = "minimal"
