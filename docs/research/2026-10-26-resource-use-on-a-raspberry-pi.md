@@ -55,6 +55,11 @@ Measured on 2026-10-26, once, on one cluster: a first data point, not a benchmar
   an error other than `410` and does not re-list (only the two `Expired` errors re-listed), and
   the lost deletion only leaves a stale Event record until kausa prunes it, 10 minutes after it
   last happened.
+- **Corrected on 2026-11-18:** it costs more than a log line. Because the watcher keeps its
+  resource version, every retry fails on the same deletion until that version expires, and the
+  Event watch brings nothing meanwhile: up to 6 minutes at a time, 9% of the time over 60 hours
+  of a later run. kausa now lists again after such an error ([2026-11-18 — The soak sampler on
+  macOS](../journal/2026-11-18-the-soak-sampler-on-macos.md), "The stalls of the Event watch").
 
 ## Limits
 

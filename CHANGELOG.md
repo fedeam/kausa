@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`kubectl get --raw /api/v1/namespaces/<ns>/pods/<pod>:9090/proxy/metrics`) can reach the Pod
   with its first byte on its own: on k3s, about one such read in 170 failed with
   `MethodNotAllowed`. kausa now reads the request line to its end, for up to 2 seconds.
+- A watch that the API server ends with an error lists again instead of asking for the same
+  resource version until it expires. On k3s the Event watch stalled that way for up to 6 minutes
+  at a time, 9% of the time over 60 hours: resuming it failed with `etcd event received with
+  PrevKv=nil` on every retry, and a Warning that came meanwhile reached kausa only after the next
+  relist. kausa now starts a new watcher after any error inside an open watch, as it did after a
+  `403`; the error is still counted in `kausa_watch_errors_total` and the list in
+  `kausa_watch_relists_total`, and `kausa_watch_restarts_total` still counts refusals only. The
+  delay between tries goes back to its shortest once a watch brings an object, or after 2 minutes
+  without an error, and no longer when a list works, so a watch that fails after every list is
+  not listed again at the shortest delay.
 
 ## [0.6.2] - 2026-11-09
 

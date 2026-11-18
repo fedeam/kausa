@@ -202,6 +202,16 @@ starts a new watcher after any `403`, which lists again, and keeps the default b
 seconds) across those watchers: the `Init` of each new one does not reset the delay. No new crate;
 `Restarting` in `src/run.rs`, with unit tests over scripted watchers.
 
+Update 2026-11-18: `Restarting` starts a new watcher after any error inside an open watch
+(`WatchError`), not only after a `403`: kube-runtime 4.2.0 resumes such a watch from the same
+resource version, and on k3s the Event watch failed the same way on every retry until that
+version expired ([2026-11-18 — The soak sampler on
+macOS](../journal/2026-11-18-the-soak-sampler-on-macos.md)). The records are dropped on a `403`
+only, as before, and `kausa_watch_restarts_total` counts refusals only. The delay is now reset by
+an object the watch brings (`Apply`, `Delete`) and no longer by a list that works, so that a
+watch that fails after every list backs off as a refused one does; kube-runtime's default backoff
+also goes back to its shortest delay after 2 minutes without an error.
+
 Update 2026-10-29: [0018. Explain a Deployment past its progress deadline (`D014`) from a
 Deployment watch that is on by default, and add nothing for StatefulSets or
 DaemonSets](0018-stuck-rollouts.md) adds a third watch, on Deployments, unless `--no-rollouts`:

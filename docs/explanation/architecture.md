@@ -103,6 +103,15 @@ produces the same incident, the same fingerprint and the same request bytes.
   that did not change meanwhile: kube-rs itself would resume a refused watch from where it was,
   sending only the changes. The delay between tries still grows to 30 seconds across new
   watchers.
+- **A watch the API server ends with an error lists again.** An error inside an open watch means
+  the API server could not go on from the watch's resource version, and kube-rs would ask for
+  that same version again until it expires: on k3s that stalled the Event watch for minutes at a
+  time ([2026-11-18 — The soak sampler on
+  macOS](../journal/2026-11-18-the-soak-sampler-on-macos.md)). kausa starts a new watcher
+  instead, which lists again, as client-go's reflector does by default after an internal error
+  in a watch. The records stay, and the list corrects them. Only an object a watch brings resets
+  the delay between tries, not a list, so a watch that fails after every list is listed again
+  about every 30 seconds once the delay has grown.
 - **Only within the namespace an Event is in.** An Event whose `regarding` object is in another
   namespace, or that has none, is ignored, so an incident's namespace is always that of a watched
   Pod or Event, and its owner lookups, log read and Event write stay there.

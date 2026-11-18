@@ -156,6 +156,15 @@ fn expired(error: &watcher::Error) -> bool {
     matches!(error, watcher::Error::WatchError(status) if status.code == 410)
 }
 
+/// Whether a watch error came inside an open watch (`WatchError`): the API server could not go on
+/// from the watch's resource version. kube-runtime 4.2.0 lists again only after a `410` and
+/// resumes after any other from the same resource version, where the API server can fail the same
+/// way until that version expires. k3s does, for minutes at a time, on the Event watch
+/// (docs/journal/2026-11-18-the-soak-sampler-on-macos.md), so `Restarting` lists again instead.
+fn interrupted(error: &watcher::Error) -> bool {
+    matches!(error, watcher::Error::WatchError(_))
+}
+
 /// Which watches have sent `InitDone` at least once. kausa is ready once every watch has: 3 on
 /// the whole cluster, or 3 per namespace, and 2 for each with `--no-rollouts`
 /// (docs/adr/0013-namespaced-install-mode.md, docs/adr/0018-stuck-rollouts.md).
@@ -300,9 +309,12 @@ type Watches<K> = SelectAll<BoxStream<'static, Tagged<K>>>;
 /// access is back: kube-runtime 4.2.0 relists only after a failed list, and resumes a refused
 /// watch (`WatchStartFailed`, or an error in the open stream) from its resource version, which
 /// would never bring back the objects that did not change while `State` had dropped them
-/// (docs/adr/0013-namespaced-install-mode.md). After every error it waits for `backoff` before
-/// the next poll, as `StreamBackoff` does, but `Init` does not reset the delay: every fresh
-/// watcher sends `Init` before it lists, so a refused namespace still backs off to the longest
+/// (docs/adr/0013-namespaced-install-mode.md). It starts over the same way after any error
+/// inside an open watch (`interrupted`), so that a watch the API server cannot resume lists
+/// again instead of asking for the same resource version until it expires. After every error it
+/// waits for `backoff` before the next poll, as `StreamBackoff` does, but only an object the
+/// watch brings resets the delay, not a list: every fresh watcher sends `Init` and lists, so a
+/// refused namespace, or a watch that fails after every list, still backs off to the longest
 /// delay instead of being retried at the shortest one.
 struct Restarting<S, F, B> {
     start: F,
@@ -340,7 +352,7 @@ where
         let item = ready!(watch.poll_next_unpin(cx));
         match &item {
             Some(Err(error)) => {
-                if forbidden(error) {
+                if forbidden(error) || interrupted(error) {
                     this.watch = None;
                 }
                 // The default backoff never runs out; one that did would retry without a delay.
@@ -348,8 +360,10 @@ where
                     this.delay = Some(Box::pin(tokio::time::sleep(delay)));
                 }
             }
-            Some(Ok(watcher::Event::Init)) | None => {}
-            Some(Ok(_)) => this.backoff.reset(),
+            Some(Ok(watcher::Event::Apply(_) | watcher::Event::Delete(_))) => {
+                this.backoff.reset();
+            }
+            Some(Ok(_)) | None => {}
         }
         Poll::Ready(item)
     }
@@ -361,9 +375,10 @@ fn watcher_config() -> watcher::Config {
 }
 
 /// Starts one watch of `K` per namespace, or one on the whole cluster when `namespaces` is empty,
-/// each with `config` and kube-runtime's default backoff (0.8 to 30 seconds), started over after
-/// a `403` (`Restarting`). Each watch ends with a `(watch, None)` item, so the loop knows which
-/// one ended.
+/// each with `config` and kube-runtime's default backoff (0.8 to 30 seconds, and back to the
+/// shortest after 2 minutes without an error), started over after a `403` or an error inside an
+/// open watch (`Restarting`). Each watch ends with a `(watch, None)` item, so the loop knows
+/// which one ended.
 fn watches<K>(client: &Client, namespaces: &[String], config: &watcher::Config) -> Watches<K>
 where
     K: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Debug + Send + 'static,
@@ -1496,7 +1511,7 @@ impl State {
     /// Forgets what a watch had shown when the API server refuses it (`403`): that kind's records
     /// inside the watch and its open relist, so that a revoked namespace stops giving signals.
     /// `Restarting` then starts a new watcher, whose relist brings them back once access is.
-    /// Any other error keeps the records, and the watcher retries.
+    /// Any other error keeps the records: the watcher retries, or a new one lists again.
     fn on_watch_error(&mut self, kind: Kind, watch: &WatchKey, error: &watcher::Error) {
         if !forbidden(error) {
             return;
@@ -2250,16 +2265,116 @@ mod tests {
     }
 
     #[test]
+    fn an_error_inside_an_open_watch_lists_again() {
+        // The API server ends the open watch with an error, and would answer the same to every
+        // resume from that resource version (the two errors left in the first script) until the
+        // version expires. Restarting starts a new watcher instead, whose list brings p2.
+        let failed = || Err(watcher::Error::WatchError(status(500, "InternalError")));
+        let scripts = vec![
+            vec![
+                Ok(watcher::Event::Init),
+                Ok(watcher::Event::InitApply(pod("a", "p1"))),
+                Ok(watcher::Event::InitDone),
+                failed(),
+                failed(),
+                failed(),
+            ],
+            vec![
+                Ok(watcher::Event::Init),
+                Ok(watcher::Event::InitApply(pod("a", "p1"))),
+                Ok(watcher::Event::InitApply(pod("a", "p2"))),
+                Ok(watcher::Event::InitDone),
+            ],
+        ];
+        let (items, started) = restarting(scripts, Recorded::default());
+        assert_eq!(started, 2);
+        assert_eq!(
+            items.iter().map(label).collect::<Vec<_>>(),
+            [
+                "Init",
+                "InitApply p1",
+                "InitDone",
+                "error",
+                "Init",
+                "InitApply p1",
+                "InitApply p2",
+                "InitDone",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_status_inside_an_open_watch_starts_a_new_watcher() {
+        // The code does not matter: kube-runtime lists again by itself only after a 410.
+        for (code, reason) in [
+            (0, "Forbidden"),
+            (410, "Expired"),
+            (429, "TooManyRequests"),
+            (500, "InternalError"),
+            (504, "Timeout"),
+        ] {
+            let error = watcher::Error::WatchError(status(code, reason));
+            assert!(interrupted(&error), "{code}");
+            let scripts = vec![
+                vec![
+                    Ok(watcher::Event::InitDone),
+                    Err(error),
+                    Ok(watcher::Event::Apply(pod("a", "p3"))),
+                ],
+                vec![Ok(watcher::Event::Init), Ok(watcher::Event::InitDone)],
+            ];
+            let (items, started) = restarting(scripts, Recorded::default());
+            assert_eq!(started, 2, "{code}");
+            assert_eq!(items.len(), 4, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_watch_that_fails_after_every_list_backs_off_across_new_watchers() {
+        // Every new watcher lists before its watch fails; the list must not reset the delay, or
+        // the API server would be listed again at the shortest delay for as long as it fails.
+        let failing = || {
+            vec![
+                Ok(watcher::Event::Init),
+                Ok(watcher::Event::InitApply(pod("a", "p1"))),
+                Ok(watcher::Event::InitDone),
+                Err(watcher::Error::WatchError(status(500, "InternalError"))),
+            ]
+        };
+        let scripts = vec![
+            failing(),
+            failing(),
+            failing(),
+            vec![
+                Ok(watcher::Event::Init),
+                Ok(watcher::Event::InitApply(pod("a", "p1"))),
+                Ok(watcher::Event::InitDone),
+                Ok(watcher::Event::Apply(pod("a", "p2"))),
+            ],
+        ];
+        let backoff = Recorded::default();
+        let (items, started) = restarting(scripts, backoff.clone());
+        assert_eq!(started, 4);
+        assert_eq!(items.len(), 16);
+        assert_eq!(
+            backoff.calls(),
+            ["next", "next", "next", "reset"],
+            "one growing delay per failed watch, reset only once the watch brought an object"
+        );
+    }
+
+    #[test]
     fn other_watch_errors_keep_the_watcher() {
         let errors = vec![
             watcher::Error::InitialListFailed(api_error(500)),
             watcher::Error::WatchStartFailed(api_error(401)),
-            watcher::Error::WatchError(status(410, "Expired")),
-            watcher::Error::WatchError(status(0, "Forbidden")),
+            watcher::Error::WatchStartFailed(api_error(500)),
+            watcher::Error::WatchFailed(kube::Error::LinesCodecMaxLineLengthExceeded),
             watcher::Error::NoResourceVersion,
         ];
         for error in errors {
             let text = error.to_string();
+            assert!(!interrupted(&error), "{text}");
             let scripts = vec![
                 vec![
                     Ok(watcher::Event::InitDone),
@@ -2276,14 +2391,15 @@ mod tests {
                 ["InitDone", "error", "Apply p3"],
                 "{text}"
             );
-            assert_eq!(backoff.calls(), ["reset", "next", "reset"], "{text}");
+            assert_eq!(backoff.calls(), ["next", "reset"], "{text}");
         }
     }
 
     #[test]
     fn a_namespace_that_keeps_refusing_backs_off_across_new_watchers() {
         // Every new watcher sends Init before its list is refused; Init must not reset the
-        // delay, or a revoked namespace would be retried at the shortest delay forever.
+        // delay, or a revoked namespace would be retried at the shortest delay forever. The list
+        // that works does not reset it either: the first object the watch brings does.
         let refused = || {
             vec![
                 Ok(watcher::Event::Init),
@@ -2298,16 +2414,17 @@ mod tests {
                 Ok(watcher::Event::Init),
                 Ok(watcher::Event::InitApply(pod("a", "p1"))),
                 Ok(watcher::Event::InitDone),
+                Ok(watcher::Event::Apply(pod("a", "p2"))),
             ],
         ];
         let backoff = Recorded::default();
         let (items, started) = restarting(scripts, backoff.clone());
         assert_eq!(started, 4);
-        assert_eq!(items.len(), 9);
+        assert_eq!(items.len(), 10);
         assert_eq!(
             backoff.calls(),
-            ["next", "next", "next", "reset", "reset"],
-            "one growing delay per refusal, reset only once the list worked"
+            ["next", "next", "next", "reset"],
+            "one growing delay per refusal, reset only once the watch brought an object"
         );
     }
 
