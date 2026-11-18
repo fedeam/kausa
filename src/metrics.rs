@@ -3,10 +3,11 @@
 //! Counters, gauges and one histogram in memory, rendered in the text exposition format, and a
 //! minimal HTTP/1.1 responder for `GET /metrics`, `/healthz` and `/readyz`: kausa serves nothing
 //! else, so it needs no HTTP framework. Each connection is answered and closed, with a short
-//! timeout.
+//! timeout. The request line is read to its end first: a request may arrive in pieces.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::io;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -368,10 +369,14 @@ fn escape(value: &str) -> String {
         .replace('\n', "\\n")
 }
 
-/// Answers one connection: the first line of the request decides the response.
+/// How long a client has to send its request line, and how long kausa waits to write the answer.
+const IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Answers one connection: the first line of the request decides the response. A client that
+/// does not end that line within `IO_TIMEOUT` gets no answer.
 pub async fn answer(mut stream: TcpStream, metrics: &Metrics) {
     let mut buffer = [0u8; 1024];
-    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buffer)).await;
+    let read = tokio::time::timeout(IO_TIMEOUT, request_line(&mut stream, &mut buffer)).await;
     let Ok(Ok(n)) = read else {
         return;
     };
@@ -382,12 +387,24 @@ pub async fn answer(mut stream: TcpStream, metrics: &Metrics) {
         "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
-    let _ = tokio::time::timeout(
-        Duration::from_secs(2),
-        stream.write_all(response.as_bytes()),
-    )
-    .await;
+    let _ = tokio::time::timeout(IO_TIMEOUT, stream.write_all(response.as_bytes())).await;
     let _ = stream.shutdown().await;
+}
+
+/// Reads into `buffer` until the request line has its end, the client stops sending or the
+/// buffer is full, and returns how many bytes it read. One read is not enough: the line may
+/// arrive in pieces, and a proxy that takes over an HTTP `CONNECT` can pass on the first byte of
+/// a request on its own, which would read as the method `G`.
+async fn request_line(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        let n = stream.read(&mut buffer[filled..]).await?;
+        filled += n;
+        if n == 0 || buffer[filled - n..filled].contains(&b'\n') {
+            break;
+        }
+    }
+    Ok(filled)
 }
 
 /// The status, content type and body for a request line.
@@ -1696,5 +1713,100 @@ mod tests {
             !text.contains(&format!("\n{name} 0\n")),
             "a zero series is left"
         );
+    }
+
+    // --- The connection: `answer` reads the request line to its end before it answers. A proxy
+    // between the client and kausa may pass on a request in pieces, the first byte on its own.
+
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
+    use std::time::Instant;
+
+    /// Answers the one connection of `client`, which runs in a thread, and returns what the
+    /// client read until kausa closed the connection.
+    fn answered(client: impl FnOnce(&mut std::net::TcpStream) + Send + 'static) -> String {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("a port");
+            let address = listener.local_addr().expect("an address");
+            let thread = std::thread::spawn(move || {
+                let mut stream = std::net::TcpStream::connect(address).expect("a connection");
+                // Each write leaves at once, as its own piece.
+                stream.set_nodelay(true).expect("no delay");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .expect("a read timeout");
+                client(&mut stream);
+                let mut answer = Vec::new();
+                let _ = stream.read_to_end(&mut answer);
+                String::from_utf8(answer).expect("UTF-8")
+            });
+            let (stream, _) = listener.accept().await.expect("a connection");
+            answer(stream, &Metrics::default()).await;
+            thread.join().expect("the client")
+        })
+    }
+
+    /// Writes each piece on its own, with a pause long enough for kausa to read it first.
+    fn pieces(stream: &mut std::net::TcpStream, pieces: &[&str]) {
+        for piece in pieces {
+            stream.write_all(piece.as_bytes()).expect("a piece");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn a_request_whose_first_byte_arrives_alone_is_answered_whole() {
+        let answer = answered(|stream| pieces(stream, &["G", "ET /metrics HTTP/1.1\r\n\r\n"]));
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+        assert!(answer.contains("\nkausa_leader 1\n"), "{answer}");
+    }
+
+    #[test]
+    fn a_request_line_in_pieces_is_answered_once_it_ends() {
+        let answer = answered(|stream| pieces(stream, &["GET /hea", "lthz HTT", "P/1.1\r", "\n"]));
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+        assert!(answer.ends_with("\r\n\r\nok\n"), "{answer}");
+        // The method still decides: one that only begins like `GET` is not `GET`.
+        let answer = answered(|stream| pieces(stream, &["G", " /metrics HTTP/1.1\r\n\r\n"]));
+        assert!(
+            answer.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+            "{answer}"
+        );
+    }
+
+    #[test]
+    fn a_request_line_without_its_end_is_answered_when_the_client_stops_sending() {
+        let answer = answered(|stream| {
+            pieces(stream, &["GET /hea", "lthz"]);
+            stream.shutdown(Shutdown::Write).expect("a shutdown");
+        });
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+    }
+
+    #[test]
+    fn a_request_line_longer_than_the_buffer_is_answered_by_what_fits() {
+        let started = Instant::now();
+        let answer = answered(|stream| {
+            let line = format!("GET /{}", "a".repeat(1024 - "GET /".len()));
+            stream.write_all(line.as_bytes()).expect("the line");
+        });
+        assert!(answer.starts_with("HTTP/1.1 404 Not Found\r\n"), "{answer}");
+        assert!(started.elapsed() < IO_TIMEOUT, "it waited for more");
+    }
+
+    #[test]
+    fn a_client_that_never_ends_its_request_line_gets_no_answer() {
+        let started = Instant::now();
+        let answer = answered(|stream| pieces(stream, &["GET /metrics"]));
+        assert_eq!(answer, "", "an answer to half a line");
+        let waited = started.elapsed();
+        assert!(waited >= IO_TIMEOUT, "closed after {waited:?}");
+        assert!(waited < IO_TIMEOUT * 3, "closed after {waited:?}");
     }
 }
