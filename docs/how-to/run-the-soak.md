@@ -4,10 +4,13 @@ Run the pinned latest release for seven days on a small cluster, sample its memo
 metrics every 30 seconds, and decide with a rule fixed in advance whether the chart's memory limit
 may go back from `192Mi` to `128Mi`.
 
-Status as of 2026-11-04: the scripts in `tests/soak/` were run once, for nine minutes, in a
+Status as of 2026-11-18: the scripts in `tests/soak/` were run once, for nine minutes, in a
 throwaway kind cluster; a dry-run soak of v0.5.1 started on 2026-11-03 ([A dry-run
-soak](#a-dry-run-soak)) and has no result yet. `install.sh` installs the release pinned in
-`tests/e2e/upgrade-from.txt`, v0.6.2 since 2026-11-09.
+soak](#a-dry-run-soak)) and has no result yet: its first two windows are invalid, because the
+sampler stopped reading the cluster two days and one day after it started, and a third started
+on 2026-11-16 ([2026-11-18 — The soak sampler on
+macOS](../journal/2026-11-18-the-soak-sampler-on-macos.md)). `install.sh` installs the release
+pinned in `tests/e2e/upgrade-from.txt`, v0.6.2 since 2026-11-09.
 
 ## What the soak answers, and what it cannot
 
@@ -65,16 +68,18 @@ once, with `spec: {}`, or neither replica leads.
   about 100 MiB of memory free on a node for kausa, the endpoint and the seeded failures.
 - An always-on machine with `kubectl`, `helm`, `curl` and `python3`, a kube context for the
   cluster, and network access to github.com; the cluster pulls kausa's image from ghcr.io and
-  python's from Docker Hub. On macOS, run the sampler under `caffeinate -i`, so that idle sleep
-  does not pause it.
+  python's from Docker Hub. On macOS, start the sampler with `tests/soak/launch.py` (step 3): a
+  sampler left running from a terminal loses the local network when that terminal quits.
 - A directory outside the repository for the output, for example `~/kausa-soak/<date>/`.
 
 **The kube context is always an explicit argument.** Every script refuses a missing or empty
 context, or one that starts with `-`, and one that is not a whole name of
 `kubectl config get-contexts -o name`; then every `kubectl` call passes `--context` and every
 `helm` call `--kube-context`. The scripts never change the current context and never read it,
-never print the cluster's server address, and write node indexes instead of node names. Below,
-`<kube-context>` is the name of the test cluster's context.
+never print the cluster's server address, and write node indexes instead of node names. The one
+exception is the sampler's standard error, which quotes the last line of `kubectl`'s own error
+when a read fails, and that line may name a node or the server. Below, `<kube-context>` is the
+name of the test cluster's context.
 
 ## Steps
 
@@ -102,12 +107,48 @@ never print the cluster's server address, and write node indexes instead of node
    allowed up to the coverage rule below:
 
    ```sh
-   caffeinate -i python3 -I tests/soak/sample.py --context <kube-context> --out <out> --days 7
+   python3 -I tests/soak/sample.py --context <kube-context> --out <out> --days 7
    ```
 
-   `--interval` sets the seconds between samples (30 by default).
+   `--interval` sets the seconds between samples (30 by default). When a read fails, the sampler
+   also writes one line to its standard error with `kubectl`'s exit code and the last line of
+   its error: at once the first time, then every 600 seconds while the same call fails for the
+   same reason.
 
-4. **Open the breaker once a day** on days 2 to 6, at different hours, at least 2 hours apart.
+   **On macOS, start it with the launcher instead**, with the same options:
+
+   ```sh
+   python3 -I tests/soak/launch.py --context <kube-context> --out <out> --days 7
+   ```
+
+   macOS decides the access to the local network by the application responsible for a process,
+   which is the terminal or the editor the sampler was started from. When that application
+   quits, the sampler keeps running, every `kubectl` call fails at once with `no route to host`,
+   and it does not recover: it writes `"errors": ["pods"]` every 30 seconds until it is stopped.
+   `launch.py` starts `sample.py` as a process responsible for itself, in a session of its own,
+   with `HOME`, `USER`, `LOGNAME`, `LANG`, `PATH` and `KUBECONFIG` of the environment and nothing
+   else, its standard output and error in `<out>/sampler.log`, and a `caffeinate -i` that lasts
+   as long as the sampler, so that idle sleep does not pause it. macOS then decides the access
+   for the Python that runs the launcher: the first time it may ask to allow it, and while it is
+   not allowed (System Settings > Privacy & Security > Local Network) the reads fail with
+   `no route to host`. The launcher waits two seconds and says whether the sampler still runs;
+   stop the sampler with `kill <PID>`.
+
+4. **Check the coverage** every few hours while the soak runs. A sampler that lost the cluster
+   is still a running process, so look at the samples, not at the process:
+
+   ```sh
+   python3 -I tests/soak/coverage.py <out>
+   ```
+
+   It reads only the files and prints, for the window so far, each Pod's part of the 30-second
+   slots, counted as `summarize.py` counts it, its `restartCount`, the reads that failed and the
+   age of the last sample. It exits 1, with a line that starts with `PROBLEM:`, when a Pod has
+   under 95% of the slots so far (S1 asks for 90% of the whole window, so 16.8 of the 168 hours
+   may be lost) or when, with the window still running, the last sample of a Pod is more than
+   180 seconds old. `--hours` and `--from` set the window as in step 6.
+
+5. **Open the breaker once a day** on days 2 to 6, at different hours, at least 2 hours apart.
    `summarize.py` counts episodes, not days: open samples less than 2 hours apart are one
    episode, so one run of `exercise.sh` counts once whatever the breaker does inside it, and two
    runs closer than that count once together. `exercise.sh` makes the
@@ -122,7 +163,7 @@ never print the cluster's server address, and write node indexes instead of node
    Do nothing else to kausa during the soak: no restart, rollout or takeover, which would reset
    the process the growth test follows.
 
-5. **Summarize** after 168 hours. `summarize.py` reads only the files: per Pod, the coverage,
+6. **Summarize** after 168 hours. `summarize.py` reads only the files: per Pod, the coverage,
    restarts, working set, cAdvisor's highest usage, the growth slope and CPU; per day, the
    increase of kausa's counters; the queue, the budget and the minutes with the breaker open; and
    then the three verdict lines of the rule below (`--hours` is 168 by default; 336 when the
@@ -145,7 +186,7 @@ never print the cluster's server address, and write node indexes instead of node
    `python3 -I tests/soak/summarize.py --self-test` checks the verdicts on synthetic samples
    without any file.
 
-6. **Uninstall** the release and the namespace:
+7. **Uninstall** the release and the namespace:
 
    ```sh
    tests/soak/uninstall.sh <kube-context>
@@ -159,7 +200,8 @@ never print the cluster's server address, and write node indexes instead of node
    kubectl --context <kube-context> delete runtimeclass kausa-test-no-handler
    ```
 
-**The output stays out of the repository.** It holds Pod names and the cluster's object counts.
+**The output stays out of the repository.** It holds Pod names and the cluster's object counts,
+and the sampler's log may name a node or the server.
 Only the aggregates (the summary's numbers and the verdicts) go into a research page in
 `docs/research/`.
 
@@ -218,7 +260,7 @@ constants with these values. It does not run the scale gate.
 
 How `summarize.py` reads two terms of S1, set on 2026-11-03 before any measurement: `restarts` 0
 means that no Pod's `restartCount` rises inside the window over its value at the Pod's first
-sample there (the clock starts again with `--from`, step 5); "4 of the 5 exercise days" means at
+sample there (the clock starts again with `--from`, step 6); "4 of the 5 exercise days" means at
 least 4 episodes of the breaker open, an episode being the open samples less than 2 hours apart,
 because the window's days are 24-hour periods from its first sample and not calendar days, so
 five exercises run on five calendar days can fall on three of them.

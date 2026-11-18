@@ -23,6 +23,10 @@ counts only. It only reads, through the API server, and writes no node name, no 
 nothing about a namespace other than kausa-soak. The output holds Pod names and the cluster's
 counts: keep it out of the repository.
 
+A read that fails also leaves one line on standard error with kubectl's exit code and its last
+line of standard error, which may name a node or the server: keep that log out of the repository
+too.
+
 The context is never the current one: it must be named, it must be a context of the kubeconfig,
 and every call names it. Needs kubectl and python3 (stdlib only); run it with python3 -I.
 """
@@ -51,17 +55,49 @@ CADVISOR_SERIES = {
 }
 
 
+_reported = {}
+
+
+def report_failure(what, reason):
+    """One line on the sampler's standard error saying why the call WHAT failed: at once the first
+    time it fails for that reason, then once every HEAVY_SECONDS while it repeats."""
+    now = time.time()
+    last = _reported.get((what, reason))
+    if last is not None and now - last < HEAVY_SECONDS:
+        return
+    if len(_reported) >= 64:
+        # Reasons that change every time: keep only those that could still silence a repeat.
+        for key in [k for k, at in _reported.items() if now - at >= HEAVY_SECONDS]:
+            del _reported[key]
+        if len(_reported) >= 64:
+            _reported.clear()
+    _reported[(what, reason)] = now
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    print(
+        "sample.py: %s kubectl %s failed: %s" % (stamp, what, reason), file=sys.stderr, flush=True
+    )
+
+
 def kubectl(ctx, *args):
-    """The standard output of a call in the context CTX with ARGS, or None when the call fails. Its
-    standard error is dropped: it may name a node or the server."""
+    """The standard output of a call in the context CTX with ARGS, or None when the call fails. Why
+    it failed goes to the sampler's standard error, never to the output: kubectl's own standard
+    error may name a node or the server."""
     command = ["kubectl", "--context", ctx] + list(args)
+    what = " ".join(args[:2])
     try:
         done = subprocess.run(
             command, capture_output=True, timeout=CALL_TIMEOUT_SECONDS, check=False
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        report_failure(what, "no answer in %d s" % CALL_TIMEOUT_SECONDS)
+        return None
+    except OSError as error:
+        report_failure(what, "could not run kubectl: %s" % error)
         return None
     if done.returncode != 0:
+        lines = done.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        reason = "exit %d: %s" % (done.returncode, lines[-1][:300] if lines else "no message")
+        report_failure(what, reason)
         return None
     return done.stdout.decode("utf-8", errors="replace")
 
