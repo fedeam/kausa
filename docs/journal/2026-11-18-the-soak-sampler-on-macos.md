@@ -101,7 +101,52 @@ Looked into later the same day. The `405` is kausa's own answer, not the API ser
   counts it. The Pods of the window run v0.5.1 and keep failing about one read in 170 until it
   ends.
 
+## The stalls of the Event watch
+
+Looked into the same day, because `kausa_watch_errors_total{watch="events"}` kept rising in the
+third window: about 25 an hour, and up to 70 in some hours.
+
+- **What the log shows:** 60 hours of the leader's log (v0.5.1) have 590 `event watch error`
+  lines: 358 with an expired resource version and 232 with `etcd event received with PrevKv=nil`,
+  every one about a deletion. They come in a fixed order: 230 times an expired version follows
+  the `PrevKv=nil` lines, a median of 19 seconds after the first of them, 232 seconds or more in
+  a quarter of the cases and 350 at most. v0.5.1 folds repeats, so the log has about half of
+  what the counter counts.
+- **Why:** kausa watches only Warnings (`type=Warning`), which are rare, so its resource version
+  hardly moves, and no bookmark moves it either: the API server serves Events without a watch
+  cache. Every watch ends at its timeout of 290 seconds and is resumed from that old version. The
+  API server then replays what happened since, and fails with `PrevKv=nil` on a deletion in
+  between, of any Event, before it applies the selector. kube-runtime 4.2.0 keeps its resource
+  version after that error, so each retry fails on the same deletion until the version expires
+  and the `410` makes the watcher list again.
+- **What it cost:** between the first `PrevKv=nil` and the relist the Event watch brings
+  nothing: 9% of those 60 hours, and about 44% of each of three hours on 2026-11-18. The relist
+  brings the Warnings that still exist, so they arrive late, by up to 6 minutes, and are not
+  lost. That an incident was explained late because of it is inferred, not measured.
+- **Reproduced:** with `kubectl get --raw` doing what the watcher does (a list, then watches of
+  290 seconds, each from the last resource version seen). With the selector, the first watch
+  brought nothing, and the resume failed 27 times in 139 seconds with the same error about the
+  same deletion, then got a `410`. Without the selector, eight watches in a row brought 48
+  additions and 48 deletions and never failed.
+- **Where the error comes from, a hypothesis:** this k3s (v1.36.5+k3s1) ships kine v0.16.5,
+  which, when it replays for a watch that starts at a revision, drops the previous value of an
+  event if that value is older than the compacted revision. An Event deleted by its one-hour TTL
+  always is. The API server refuses a deletion without its previous value. This comes from
+  reading both sources: it was not confirmed with kine's maintainers, and not tried with etcd.
+- **This corrects** the issue "Event watch restarts with PrevKv=nil on k3s" and [Memory and CPU
+  on a Raspberry Pi 4](../research/2026-10-26-resource-use-on-a-raspberry-pi.md), which said the
+  error costs kausa a log line only.
+- **What was done:** `Restarting` starts a new watcher, which lists again, after any error
+  inside an open watch, as it did after a `403` ([0013. Offer a namespaced install mode: one
+  watch pair and one Role per listed namespace, and nothing
+  cluster-wide](../adr/0013-namespaced-install-mode.md), update of 2026-11-18).
+  client-go's reflector does the same by default: it lists again after an internal error in a
+  watch. So that a watch that fails after every list is not listed again at the shortest delay,
+  only an object the watch brings resets the delay, no longer a list that works.
+- **Not verified:** the fix has not run on a cluster. Expected from the mechanism: one error and
+  one relist per watch timeout with a deletion in it, instead of a stall.
+
 ## Next steps
 
-
+- Measure the Event watch errors and relists on k3s with the release that carries the fix.
 - Summarize the third window from 2026-11-23 at 16:13 UTC, with `summarize.py --dry-run`.

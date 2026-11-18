@@ -204,5 +204,5 @@ checks](how-to/develop.md).
   and the release of v0.6.1;
   [2026-11-09 — Release v0.6.2](journal/2026-11-09-release-v0-6-2.md);
   [2026-11-18 — The soak sampler on macOS](journal/2026-11-18-the-soak-sampler-on-macos.md): two
-  windows of the dry-run soak lost to macOS's local network privacy, and the launcher and the
-  coverage check that came of it.
+  windows of the dry-run soak lost to macOS's local network privacy, the launcher and the
+  coverage check that came of it, and the stalls of the Event watch on k3s.
