@@ -3682,8 +3682,9 @@ passed "$since" "e2e/run.sh: the new series are asserted, the refused Pod's rest
 # this one, the soak endpoint's manifest, the workflow's jobs and its warning step (against a stub
 # gh), the scripts' syntax, and the soak scripts against stub kubectl, helm, curl and sleep that log
 # their arguments: each refuses a missing, empty or option-like context before any call, names the
-# context first in every call, and writes what the spec says; summarize.py's verdicts on
-# synthetic samples; and the pages that document both. tests/upgrade_and_soak.rs checks the
+# context first in every call, and writes what the spec says; summarize.py's verdicts and
+# coverage.py's problems on synthetic samples; launch.py's refusals and, on macOS, the sampler it
+# starts; and the pages that document both. tests/upgrade_and_soak.rs checks the
 # scripts' text under cargo test.
 if ! command -v python3 >/dev/null 2>&1; then
   fail "python3 is needed for the upgrade and soak checks"
@@ -4105,7 +4106,8 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
   echo "skipped: shellcheck is not installed; bash -n only"
 fi
-for script in tests/soak/sample.py tests/soak/summarize.py; do
+for script in tests/soak/sample.py tests/soak/summarize.py tests/soak/coverage.py \
+  tests/soak/launch.py; do
   if [ ! -f "$ROOT/$script" ]; then
     fail "$script is missing"
   elif ! python3 -I -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' \
@@ -4554,9 +4556,210 @@ elif (counts[0]["pods"], counts[0]["warning_events"], counts[0]["nodes"]) != (3,
     --out "$RELIABILITY/samples-failing" --interval 1 --days 0.00002
   [ "$status" = 0 ] || fail "sample-summary-fails: exits $status when the kubelet summary fails"
   json_check sample-summary-fails "$SAMPLE_CHECK" "$RELIABILITY/samples-failing" summary-fails
-  passed "$since" "soak sample.py: one line per Pod per sample, node indexes, null for a failed read"
+  # Why a read failed goes to standard error, once per call and reason, and never to the samples.
+  reasons=$(sed -n 's/^sample\.py: [0-9T:Z-]* kubectl \(.*\)$/\1/p' "$STUB_LOG.err")
+  for reason in 'get --raw failed: exit 1: Error from server (ServiceUnavailable)' \
+    'get --raw failed: exit 1: Error from server (NotFound): the server could not find the requested resource'; do
+    [ "$(printf '%s\n' "$reasons" | grep -cxF -- "$reason")" = 1 ] ||
+      fail "sample-summary-fails: standard error does not say once '$reason'"
+  done
+  grep -rqF 'Error from server' "$RELIABILITY/samples-failing" &&
+    fail "sample-summary-fails: kubectl's error is in the samples"
+  passed "$since" "soak sample.py: one line per Pod per sample, node indexes, null for a failed read and its reason on standard error"
+
+  # coverage.py on what sample.py just wrote: both Pods, every slot, top among the failed reads.
+  since=$FAILURES
+  COVERAGE=(python3 -I tests/soak/coverage.py)
+  stub_run coverage-sampled 20 "$ROOT" "${COVERAGE[@]}" "$SAMPLES"
+  [ "$status" = 0 ] || fail "coverage-sampled: exits $status on fresh samples: $(tail -n 3 "$STUB_LOG.out")"
+  for pod in kausa-soak-stub-1 kausa-soak-stub-2; do
+    grep -qE "^$pod: coverage 100\.0% \([0-9]+ samples\), restartCount 0\$" "$STUB_LOG.out" ||
+      fail "coverage-sampled: no full coverage line for $pod"
+  done
+  grep -qE '^failed reads: top [0-9]+$' "$STUB_LOG.out" || fail "coverage-sampled: the failed reads are not top alone"
+  [ ! -s "$STUB_LOG" ] || fail "coverage-sampled: calls $(head -n 1 "$STUB_LOG" | cut -d' ' -f1-2)"
+  passed "$since" "soak coverage.py: the samples sample.py wrote cover every slot"
 else
   fail "tests/soak/sample.py is missing"
+fi
+
+# coverage.py on synthetic samples that end now: the usage refusals, a full window, a Pod with a
+# gap, a sampler that lost the cluster, one that stopped, a window that ended, and --from.
+if [ -f "$SOAK/coverage.py" ]; then
+  since=$FAILURES
+  COVERAGE=(python3 -I tests/soak/coverage.py)
+  refused coverage-none argparse "${COVERAGE[@]}"
+  refused coverage-hours argparse "${COVERAGE[@]}" "$RELIABILITY/never" --hours 0
+  refused coverage-from argparse "${COVERAGE[@]}" "$RELIABILITY/never" --from yesterday
+  mkdir -p "$RELIABILITY/coverage-empty"
+  stub_run coverage-empty 20 "$ROOT" "${COVERAGE[@]}" "$RELIABILITY/coverage-empty"
+  [ "$status" = 1 ] || fail "coverage-empty: exits $status, not 1, without samples"
+  # The synthetic samples of a case: two hours of both Pods every 30 seconds, the last one now.
+  # Prints the time of the sample one hour in, for --from.
+  # shellcheck disable=SC2016 # Python, not shell
+  COVERAGE_CASE='
+import json, os, sys, time
+directory, case, now = sys.argv[1], sys.argv[2], time.time()
+start = now - 7200
+def pod(ts, name, restarts=0, errors=()):
+    return {"ts": ts, "pod": name, "restarts": restarts, "errors": list(errors)}
+def both(ts, **more):
+    return [pod(ts, "cov-1", **more), pod(ts, "cov-2", **more)]
+def lost(ts):
+    return [{"ts": ts, "pod": None, "errors": ["pods"]}]
+lines = []
+for i in range(241):
+    ts = start + 30 * i
+    if case == "full":
+        lines += both(ts)
+    elif case == "gap":
+        lines += [l for l in both(ts) if l["pod"] == "cov-1" or not 60 <= i < 120]
+    elif case == "lost":
+        lines += both(ts) if i < 120 else lost(ts)
+    elif case == "stopped":
+        lines += both(ts) if i < 220 else []
+    elif case == "late":
+        lines += both(ts) if i >= 120 else lost(ts)
+    elif case == "restart":
+        lines += both(ts, restarts=1 if i > 20 else 0, errors=["metrics"])
+    else:
+        sys.exit("no case %s" % case)
+os.makedirs(directory)
+with open(os.path.join(directory, "samples-2026-01-01.jsonl"), "w") as out:
+    for line in lines:
+        out.write(json.dumps(line) + "\n")
+    out.write("not a sample\n")
+print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start + 3600)))
+'
+  # covered CASE STATUS ARGS... -- PATTERNS...: coverage.py on the synthetic CASE, written just
+  # before, exits STATUS, prints a line matching each extended regular expression, and calls
+  # nothing. The argument @from is the time of the case's sample one hour in.
+  covered() {
+    local case=$1 want=$2 dir="$RELIABILITY/coverage-$1" from pattern
+    shift 2
+    rm -rf "$dir"
+    if ! from=$(python3 -I -c "$COVERAGE_CASE" "$dir" "$case" 2>"$RELIABILITY/coverage.err"); then
+      fail "coverage/$case: the synthetic samples cannot be written: $(cat "$RELIABILITY/coverage.err")"
+      return
+    fi
+    local args=()
+    while [ "$1" != -- ]; do
+      if [ "$1" = @from ]; then args+=("$from"); else args+=("$1"); fi
+      shift
+    done
+    shift
+    stub_run "coverage-$case" 20 "$ROOT" "${COVERAGE[@]}" "$dir" ${args[@]+"${args[@]}"}
+    [ "$status" = "$want" ] || fail "coverage/$case: exits $status, not $want"
+    for pattern in "$@"; do
+      grep -qE -- "$pattern" "$STUB_LOG.out" ||
+        fail "coverage/$case: no line matching '$pattern' in: $(tr '\n' '|' <"$STUB_LOG.out")"
+    done
+    [ ! -s "$STUB_LOG" ] || fail "coverage/$case: calls $(head -n 1 "$STUB_LOG" | cut -d' ' -f1-2)"
+  }
+  covered full 0 -- '^window: .* \(168 hours\), running$' '^slots of 30 s so far: 240$' \
+    '^cov-1: coverage 100\.0% \(241 samples\), restartCount 0$' '^cov-2: coverage 100\.0% ' \
+    '^failed reads: none$' '^last sample: [0-9]+ s ago; last line: [0-9]+ s ago$' \
+    '^unreadable lines skipped: 1$'
+  grep -q '^PROBLEM' "$STUB_LOG.out" && fail "coverage/full: reports a problem"
+  covered gap 1 -- '^cov-1: coverage 100\.0% ' '^cov-2: coverage 75\.4% \(181 samples\)' \
+    '^PROBLEM: cov-2 has 75\.4% of the slots so far, under 95%$'
+  [ "$(grep -c '^PROBLEM' "$STUB_LOG.out")" = 1 ] || fail "coverage/gap: not one problem"
+  covered lost 1 -- '^failed reads: pods 121$' '^PROBLEM: cov-1 has 50\.0% of the slots so far' \
+    '^PROBLEM: no sample of a Pod for [0-9]+ s: the sampler runs and its reads fail$'
+  covered stopped 1 -- '^PROBLEM: no line for [0-9]+ s: the sampler does not run, or its calls hang$'
+  covered late 1 -- '^PROBLEM: cov-1 has 50\.[0-9]% of the slots so far'
+  covered late 0 --from @from -- '^slots of 30 s so far: 120$' '^cov-1: coverage 100\.0% ' \
+    '^failed reads: none$'
+  # A window that ended is not asked for a fresh sample: the first hour of "lost" is whole.
+  covered lost 0 --hours 1 -- '^window: .* \(1 hours\), ended$' '^slots of 30 s so far: 120$' \
+    '^cov-2: coverage 100\.0% \(120 samples\)'
+  covered restart 0 -- '^cov-1: coverage 100\.0% \(241 samples\), restartCount 0 at its first sample, 1 at most$' \
+    '^failed reads: metrics 482$'
+  covered full 1 --from 2999-01-01T00:00:00Z --
+  passed "$since" "soak coverage.py: the refusals, and a full, broken, lost, stopped, ended and restarted window"
+else
+  fail "tests/soak/coverage.py is missing"
+fi
+
+# launch.py: the usage refusals before anything is written; off macOS it refuses to start; on
+# macOS it starts sample.py, against a kubectl that answers the guard and refuses every read, in a
+# session of its own, with six variables of the environment and its reasons in <out>/sampler.log.
+if [ -f "$SOAK/launch.py" ]; then
+  since=$FAILURES
+  LAUNCH=(python3 -I tests/soak/launch.py)
+  LAUNCHED="$RELIABILITY/launched"
+  refused launch-none argparse "${LAUNCH[@]}"
+  refused launch-no-out argparse "${LAUNCH[@]}" --context stub-ctx
+  refused launch-empty argparse "${LAUNCH[@]}" --context '' --out "$LAUNCHED"
+  refused launch-option argparse "${LAUNCH[@]}" --context -x --out "$LAUNCHED"
+  refused launch-no-dir argparse "${LAUNCH[@]}" --context stub-ctx --out ''
+  [ ! -e "$LAUNCHED" ] || fail "launch: writes output for a refused context"
+  if [ "$(uname -s)" != Darwin ]; then
+    stub_run launch-elsewhere 20 "$ROOT" "${LAUNCH[@]}" --context stub-ctx --out "$LAUNCHED"
+    [ "$status" = 1 ] || fail "launch-elsewhere: exits $status, not 1, off macOS"
+    grep -q '^launch\.py: macOS only' "$STUB_LOG.err" || fail "launch-elsewhere: does not say macOS only"
+    [ ! -e "$LAUNCHED" ] || fail "launch-elsewhere: writes output off macOS"
+    [ ! -s "$STUB_LOG" ] || fail "launch-elsewhere: calls $(head -n 1 "$STUB_LOG" | cut -d' ' -f1-2)"
+    passed "$since" "soak launch.py: the refusals, and macOS only"
+  else
+    mkdir -p "$RELIABILITY/launch-bin"
+    cat >"$RELIABILITY/launch-bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+# Keeps the names of its environment and its session next to itself, answers the guard and
+# refuses every read.
+here=$(dirname "$0")
+env | cut -d= -f1 | sort >"$here/env"
+python3 -I -c 'import os; print(os.getsid(0))' >"$here/session"
+printf '%s\n' "$*" >>"$here/calls"
+if [ "$*" = 'config get-contexts -o name' ]; then echo stub-ctx; exit 0; fi
+echo 'stub kubectl: refused' >&2
+exit 1
+STUB
+    chmod 755 "$RELIABILITY/launch-bin/kubectl"
+    if (cd "$ROOT" && PATH="$RELIABILITY/launch-bin:$PATH" KAUSA_LAUNCH_NOT_KEPT=1 \
+      "${LAUNCH[@]}" --context stub-ctx --out "$LAUNCHED" --interval 1 --days 0.00006) \
+      >"$RELIABILITY/launch.out" 2>"$RELIABILITY/launch.err" </dev/null; then
+      sampler=$(sed -n 's/^launch\.py: the sampler runs, PID \([0-9]*\);.*/\1/p' "$RELIABILITY/launch.out")
+      [ -n "$sampler" ] || fail "launch: does not print the sampler's PID"
+      for _ in $(seq 1 60); do
+        kill -0 "${sampler:-0}" 2>/dev/null || break
+        command sleep 0.5
+      done
+      kill -0 "${sampler:-0}" 2>/dev/null && fail "launch: the sampler outlives --days"
+      ls "$LAUNCHED"/samples-*.jsonl >/dev/null 2>&1 || fail "launch: the sampler wrote no samples"
+      grep -q '^sample\.py: every 1 s until ' "$LAUNCHED/sampler.log" ||
+        fail "launch: sampler.log lacks the sampler's first line"
+      grep -qE '^sample\.py: [0-9T:Z-]+ kubectl get pods failed: exit 1: stub kubectl: refused$' \
+        "$LAUNCHED/sampler.log" || fail "launch: sampler.log lacks the reason of the failed read"
+      [ "$(stat -f %Lp "$LAUNCHED/sampler.log")" = 600 ] || fail "launch: sampler.log is not mode 0600"
+      [ "$(head -n 1 "$RELIABILITY/launch-bin/calls")" = 'config get-contexts -o name' ] ||
+        fail "launch: the sampler's first call is not the guard's"
+      grep -v '^config get-contexts -o name$' "$RELIABILITY/launch-bin/calls" |
+        grep -qv '^--context stub-ctx ' && fail "launch: a call of the sampler does not name the context first"
+      kept=$(grep -vxE 'PWD|SHLVL|_|OLDPWD|__CF_USER_TEXT_ENCODING' "$RELIABILITY/launch-bin/env" | tr '\n' ' ')
+      for name in $kept; do
+        case "$name" in
+          HOME | USER | LOGNAME | LANG | PATH | KUBECONFIG) ;;
+          *) fail "launch: the sampler's environment holds $name" ;;
+        esac
+      done
+      case " $kept" in *' PATH '*) ;; *) fail "launch: the sampler's environment lacks PATH" ;; esac
+      [ "$(cat "$RELIABILITY/launch-bin/session")" = "$sampler" ] ||
+        fail "launch: the sampler does not lead a session of its own"
+    else
+      fail "launch: exits $? on macOS: $(head -n 3 "$RELIABILITY/launch.err")"
+    fi
+    # A context the kubeconfig lacks: the sampler ends at once, and the launcher says so.
+    if (cd "$ROOT" && PATH="$RELIABILITY/launch-bin:$PATH" "${LAUNCH[@]}" --context stub \
+      --out "$RELIABILITY/launched-unknown") >"$RELIABILITY/launch.out" 2>"$RELIABILITY/launch.err" </dev/null; then
+      fail "launch-unknown: exits 0 for a context the kubeconfig lacks"
+    fi
+    grep -q '^launch\.py: the sampler ended at once, with 1: see ' "$RELIABILITY/launch.err" ||
+      fail "launch-unknown: does not say the sampler ended at once"
+    passed "$since" "soak launch.py: the refusals, and on macOS a sampler of its own session, six variables and its log"
+  fi
+else
+  fail "tests/soak/launch.py is missing"
 fi
 
 # summarize.py: its self-test, the dry run's few minutes, and the decision rule of spec B7 on
@@ -4702,8 +4905,8 @@ for words in tests/e2e/upgrade-from.txt 'gh release download' SHA256SUMS \
 done
 # shellcheck disable=SC2016 # Markdown backquotes
 case "$(joined ARCHITECTURE.md)" in
-  *'| `tests/soak/` |'*) ;;
-  *) fail "ARCHITECTURE.md has no tests/soak/ row" ;;
+  *'| `tests/soak/` |'*'`launch.py`'*'`coverage.py`'*) ;;
+  *) fail "ARCHITECTURE.md has no tests/soak/ row with launch.py and coverage.py" ;;
 esac
 grep -q 'how-to/run-the-soak\.md' "$ROOT/docs/index.md" || fail "docs/index.md does not link run-the-soak.md"
 if [ ! -f "$ROOT/docs/how-to/run-the-soak.md" ]; then
@@ -4713,7 +4916,8 @@ else
   head -n 1 "$ROOT/docs/how-to/run-the-soak.md" | grep -q '^# ' || fail "run-the-soak.md has no H1 first"
   for words in 'set on 2026-11-03, before any measurement' 'tests/soak/install.sh' \
     'tests/soak/exercise.sh' 'tests/soak/uninstall.sh' 'tests/soak/sample.py --context' \
-    'tests/soak/summarize.py' tests/bench/seeded-failures.yaml consent '90%' '32 MiB' '64 MiB' \
+    'tests/soak/summarize.py' 'tests/soak/launch.py --context' 'tests/soak/coverage.py' \
+    'Local Network' tests/bench/seeded-failures.yaml consent '90%' '32 MiB' '64 MiB' \
     '0.1 MiB' '0.5 MiB' '14 days' '96 MiB' '128 MiB'; do
     case "$soak" in *"$words"*) ;; *) fail "run-the-soak.md does not say '$words'" ;; esac
   done

@@ -647,8 +647,13 @@ const SOAK_SHELL: [&str; 3] = [
     "tests/soak/exercise.sh",
     "tests/soak/uninstall.sh",
 ];
-const SOAK_PYTHON: [&str; 2] = ["tests/soak/sample.py", "tests/soak/summarize.py"];
-const SOAK_ALL: [&str; 7] = [
+const SOAK_PYTHON: [&str; 4] = [
+    "tests/soak/sample.py",
+    "tests/soak/summarize.py",
+    "tests/soak/coverage.py",
+    "tests/soak/launch.py",
+];
+const SOAK_ALL: [&str; 9] = [
     "tests/soak/values.yaml",
     "tests/soak/endpoint.yaml",
     "tests/soak/install.sh",
@@ -656,6 +661,8 @@ const SOAK_ALL: [&str; 7] = [
     "tests/soak/uninstall.sh",
     "tests/soak/sample.py",
     "tests/soak/summarize.py",
+    "tests/soak/coverage.py",
+    "tests/soak/launch.py",
 ];
 
 #[test]
@@ -751,28 +758,32 @@ fn the_soak_python_scripts_call_kubectl_through_one_helper_or_not_at_all() {
         "{}: not one kubectl helper with --context and at most one guard",
         SOAK_PYTHON[0]
     );
-    // summarize.py reads the sample files only: it imports nothing that runs a process or opens
-    // a connection.
+    // summarize.py and coverage.py read the sample files only: they import nothing that runs a
+    // process or opens a connection.
     let summarize = read(SOAK_PYTHON[1]);
-    for line in summarize.lines().map(str::trim) {
-        if line.starts_with("import ") || line.starts_with("from ") {
-            for module in ["subprocess", "urllib", "http", "socket", "shutil"] {
-                assert!(
-                    !line
-                        .split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .any(|w| w == module),
-                    "{}: imports {module}",
-                    SOAK_PYTHON[1]
-                );
+    for path in [SOAK_PYTHON[1], SOAK_PYTHON[2]] {
+        let script = read(path);
+        for line in script.lines().map(str::trim) {
+            if line.starts_with("import ") || line.starts_with("from ") {
+                for module in ["subprocess", "urllib", "http", "socket", "shutil", "ctypes"] {
+                    assert!(
+                        !line
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .any(|w| w == module),
+                        "{path}: imports {module}"
+                    );
+                }
             }
         }
-    }
-    for words in ["os.system", "os.popen", "os.exec", "os.spawn"] {
-        assert!(
-            !summarize.contains(words),
-            "{}: calls {words}",
-            SOAK_PYTHON[1]
-        );
+        for words in [
+            "os.system",
+            "os.popen",
+            "os.exec",
+            "os.spawn",
+            "os.posix_spawn",
+        ] {
+            assert!(!script.contains(words), "{path}: calls {words}");
+        }
     }
     assert!(
         summarize.contains("--self-test"),
@@ -781,6 +792,43 @@ fn the_soak_python_scripts_call_kubectl_through_one_helper_or_not_at_all() {
     );
     for path in SOAK_PYTHON {
         assert!(!read(path).contains("shell=True"), "{path}: runs a shell");
+    }
+}
+
+#[test]
+fn the_soak_launcher_starts_the_sampler_alone_and_names_no_machine() {
+    // launch.py calls no cluster: the two processes it starts are sample.py, with the Python that
+    // runs the launcher, and caffeinate.
+    let path = SOAK_PYTHON[3];
+    let launch = read(path).replace('\'', "\"");
+    assert!(
+        !launch.contains("\"kubectl\"") && !launch.contains("\"helm\""),
+        "{path}: runs kubectl or helm itself"
+    );
+    for words in [
+        "sys.executable, \"-I\", os.path.join(HERE, \"sample.py\")",
+        "\"--context\", args.context, \"--out\", out",
+        "responsibility_spawnattrs_setdisclaim",
+        "POSIX_SPAWN_SETSID",
+        "sys.platform != \"darwin\"",
+    ] {
+        assert!(launch.contains(words), "{path}: no `{words}`");
+    }
+    // The sampler gets the named variables of the launcher's environment and nothing else.
+    assert!(
+        launch.contains(
+            "KEPT = (\"HOME\", \"USER\", \"LOGNAME\", \"LANG\", \"PATH\", \"KUBECONFIG\")"
+        ) && launch.contains("{name: os.environ[name] for name in KEPT if name in os.environ}"),
+        "{path}: the sampler's environment is not the six kept variables"
+    );
+    assert_eq!(
+        launch.matches("os.environ").count(),
+        2,
+        "{path}: reads the environment elsewhere"
+    );
+    // No path of one machine: no home directory, no package manager's prefix.
+    for words in ["/Users/", "/home/", "/opt/"] {
+        assert!(!launch.contains(words), "{path}: holds the path `{words}`");
     }
 }
 
