@@ -479,7 +479,9 @@ Lease at its first read is Ready only once its watches have listed. It never goe
 not even while a promoted standby lists; a watch refused before its first list keeps kausa not
 ready. No path,
 label or body names a namespace. Any other path answers `404`,
-and any other method `405`. The counters live in memory and start over when kausa restarts.
+and any other method `405`. kausa reads the first line of a request to its end before it answers,
+so a request that arrives in pieces gets the same answer; a client that does not end that line
+within 2 seconds gets none. The counters live in memory and start over when kausa restarts.
 
 | Counter | Labels | Counts |
 |---|---|---|

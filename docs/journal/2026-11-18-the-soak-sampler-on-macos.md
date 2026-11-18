@@ -75,6 +75,33 @@ Not verified:
   repository ran once against that cluster, for 100 seconds: three samples of each Pod in three
   slots.
 
+## The failed reads of the metrics
+
+Looked into later the same day. The `405` is kausa's own answer, not the API server's.
+
+- **How often:** in the third window, 72 of 12050 reads of the metrics failed, all with
+  `MethodNotAllowed` and none with another status: 64 on the standby, which runs on the node of
+  the API server, and 8 on the leader, on another node.
+- **Who answers:** 1000 reads through the API server's proxy gave four `405`, each with the body
+  `method not allowed`, which is the text of `respond` in `src/metrics.rs`. 1000 reads of the same
+  Pod through `kubectl port-forward`, which does not use that proxy, gave none.
+- **Why:** `answer` decided on its first read of the connection. k3s's API server reaches a Pod
+  through a tunnel that takes an HTTP `CONNECT`, answers `200`, takes the connection over and
+  copies its bytes. Go's HTTP server reads one byte in the background while a handler runs, and
+  after the takeover that byte is passed on alone. kausa then read `G` as the whole request and
+  answered `405`. A small proxy in Go that does the same gave its target a first read of
+  one byte in 6 of 20000 requests, and the whole request in the others.
+- **Not verified:** no capture was taken on the node, so the lone `G` was not seen arriving at
+  kausa. The mode of k3s's tunnel was not read from the server's configuration: its arguments do
+  not set it, so the default is assumed.
+- **What was done:** `answer` reads the request line to its end, the client's end of sending or
+  1024 bytes, within the 2 seconds it already allowed. Five tests in `src/metrics.rs` send a
+  request in pieces over a local connection; four of them fail with a single read.
+- **The soak is not affected:** `summarize.py` skips a sample without metrics, and the coverage
+  counts it. The Pods of the window run v0.5.1 and keep failing about one read in 170 until it
+  ends.
+
 ## Next steps
+
 
 - Summarize the third window from 2026-11-23 at 16:13 UTC, with `summarize.py --dry-run`.

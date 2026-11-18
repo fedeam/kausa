@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pod watch error`, `event watch error` or `deployment watch error` line of the new text is
   preceded by a line of the old text with its `folded` count. Errors whose text carries a key,
   such as k3s's `etcd event received with PrevKv=nil (key=...)`, change text every time.
+- `/metrics`, `/healthz` and `/readyz` no longer answer `405` to a `GET` that arrives in pieces.
+  kausa decided on its first read of the connection, and a read through the API server's proxy
+  (`kubectl get --raw /api/v1/namespaces/<ns>/pods/<pod>:9090/proxy/metrics`) can reach the Pod
+  with its first byte on its own: on k3s, about one such read in 170 failed with
+  `MethodNotAllowed`. kausa now reads the request line to its end, for up to 2 seconds.
 
 ## [0.6.2] - 2026-11-09
 
