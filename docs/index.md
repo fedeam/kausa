@@ -189,6 +189,9 @@ checks](how-to/develop.md).
   whose stages each need their own ADR: [0026. Report every incident as facts without a model,
   keep the explanation optional, and widen coverage one bounded source at a
   time](adr/0026-facts-before-the-model.md).
+  Proposed on 2026-11-19, not accepted, as its stage 1: [0027. Report each settled incident as a
+  fact statement in its own `Detected` Event and webhook message, with or without a model, and mark
+  the model's text as a model's](adr/0027-fact-statement-for-the-detections.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
