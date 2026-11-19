@@ -125,7 +125,7 @@ fn duration_len(s: &str) -> Option<usize> {
 
 /// The length of a UUID (8-4-4-4-12 hexadecimal digits) at the start of `s`, if there is one that
 /// is not part of a longer hexadecimal word.
-pub fn uuid_len(s: &str) -> Option<usize> {
+fn uuid_len(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     if bytes.len() < 36 {
         return None;

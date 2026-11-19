@@ -14,8 +14,6 @@ use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 
-use crate::fingerprint::uuid_len;
-
 /// Registries whose names are public, so image references from them are sent as they are.
 const PUBLIC_REGISTRIES: [&str; 9] = [
     "docker.io",
@@ -678,13 +676,23 @@ fn is_marker(text: &str) -> bool {
         })
 }
 
+/// Whether `run` is exactly a UUID: 8-4-4-4-12 hexadecimal digits, in any case. This file stands
+/// alone as a fuzz target (fuzz/fuzz_targets/redact.rs), so it does not borrow the fingerprint's.
+fn is_uuid(run: &str) -> bool {
+    run.len() == 36
+        && run.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
 /// Whether a run of token characters looks like a secret: a letter and a digit, and a Shannon
 /// entropy of at least 4 bits per character, or 3 for a hexadecimal run (whose ceiling is 4). A
 /// run that is a UUID is a hexadecimal run: its hyphens would otherwise keep a random one under 4.
 fn looks_secret(run: &str) -> bool {
     let has_digit = run.bytes().any(|b| b.is_ascii_digit());
     let has_letter = run.bytes().any(|b| b.is_ascii_alphabetic());
-    let hex = run.bytes().all(|b| b.is_ascii_hexdigit()) || uuid_len(run) == Some(run.len());
+    let hex = run.bytes().all(|b| b.is_ascii_hexdigit()) || is_uuid(run);
     let threshold = if hex { 3.0 } else { 4.0 };
     has_digit && has_letter && shannon_entropy(run) >= threshold
 }
