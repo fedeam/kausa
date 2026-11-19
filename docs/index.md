@@ -185,7 +185,9 @@ checks](how-to/develop.md).
   measured](research/2026-11-04-system-message-by-detection-measured.md)). Accepted for v0.6.x:
   [0025. Replace the model's text that holds one of six listed destructive command shapes with a
   fixed notice, show the notice first, and give that answer `low`
-  confidence](adr/0025-withhold-destructive-commands.md).
+  confidence](adr/0025-withhold-destructive-commands.md). Proposed on 2026-11-19, not accepted:
+  [0026. Report every incident as facts without a model, keep the explanation optional, and widen
+  coverage one bounded source at a time](adr/0026-facts-before-the-model.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
