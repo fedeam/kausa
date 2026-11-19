@@ -130,3 +130,11 @@ chart-created Lease, elected by kausa's own code](0019-high-availability.md) ame
 Explanation objects, and, with `--leader-lease`, a merge patch of the `spec` of kausa's own Lease".
 That Lease, created by the chart only with `replicaCount: 2`, decides which of two replicas acts;
 kausa still changes no workload, patches nothing else and never remediates.
+
+Update 2026-11-19: [0026. Report every incident as facts without a model, keep the explanation
+optional, and widen coverage one bounded source at a time](0026-facts-before-the-model.md) amends
+what kausa is: a reporter of incidents, as fact statements built without a model, whose
+explanation by a language model is a feature the user turns on. The explanation, its redaction and
+its budget stay as decided here and in the ADRs since. A dashboard or chat interface stays out of
+scope, and kausa still never acts on the cluster. Nothing of 0026 is implemented yet: each of its
+stages needs its own ADR, and the description changes with the release that ships the first.

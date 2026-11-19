@@ -1,6 +1,6 @@
 # 0026. Report every incident as facts without a model, keep the explanation optional, and widen coverage one bounded source at a time
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-19
 - Amends, when accepted: [0001. Build a small, read-only explainer that writes one redacted
   explanation per incident](0001-scope-and-positioning.md) (what kausa is: a reporter of incidents
@@ -195,3 +195,10 @@ Proposed to FedeAM on 2026-11-19; not accepted yet.
   provider](../reference/data-sent-to-the-provider.md), [Data sent in
   notifications](../reference/data-sent-in-notifications.md), [Security
   policy](../../SECURITY.md), [ARCHITECTURE.md](../../ARCHITECTURE.md)).
+
+Update 2026-11-19: FedeAM accepted this ADR on 2026-11-19, after the pull request that proposed it
+([#115](https://github.com/fedeam/kausa/pull/115)); the sentence that opens the Decision is from
+before. Nothing is implemented yet, so the description (the README, the documentation front page,
+the chart's description and the Artifact Hub entry) changes with the release that ships stage 1,
+not now: until then kausa reports nothing without a model, and the new description would say what
+it does not do. 0001 gets its `Update` paragraph with this acceptance.
