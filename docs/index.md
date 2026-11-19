@@ -185,9 +185,13 @@ checks](how-to/develop.md).
   measured](research/2026-11-04-system-message-by-detection-measured.md)). Accepted for v0.6.x:
   [0025. Replace the model's text that holds one of six listed destructive command shapes with a
   fixed notice, show the notice first, and give that answer `low`
-  confidence](adr/0025-withhold-destructive-commands.md). Proposed on 2026-11-19, not accepted:
-  [0026. Report every incident as facts without a model, keep the explanation optional, and widen
-  coverage one bounded source at a time](adr/0026-facts-before-the-model.md).
+  confidence](adr/0025-withhold-destructive-commands.md). Accepted on 2026-11-19, as a direction
+  whose stages each need their own ADR: [0026. Report every incident as facts without a model,
+  keep the explanation optional, and widen coverage one bounded source at a
+  time](adr/0026-facts-before-the-model.md).
+  Proposed on 2026-11-19, not accepted, as its stage 1: [0027. Report each settled incident as a
+  fact statement in its own `Detected` Event and webhook message, with or without a model, and mark
+  the model's text as a model's](adr/0027-fact-statement-for-the-detections.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
@@ -207,4 +211,6 @@ checks](how-to/develop.md).
   [2026-11-09 — Release v0.6.2](journal/2026-11-09-release-v0-6-2.md);
   [2026-11-18 — The soak sampler on macOS](journal/2026-11-18-the-soak-sampler-on-macos.md): two
   windows of the dry-run soak lost to macOS's local network privacy, the launcher and the
-  coverage check that came of it, and the stalls of the Event watch on k3s.
+  coverage check that came of it, and the stalls of the Event watch on k3s;
+  [2026-11-19 — Facts before the model](journal/2026-11-19-facts-before-the-model.md): 0026
+  proposed and accepted.
