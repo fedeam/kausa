@@ -215,7 +215,8 @@ token counts, never the answer's text. No call budget counts it, and the provide
   registry hosts.
 - Anything a redaction rule matched: IP addresses, email addresses, credentials in URLs,
   authorization values, JSON Web Tokens, PEM blocks, values of secret-named keys, known token
-  formats, high-entropy strings, hostnames, and the query and fragment of URLs and, since v0.5.0,
+  formats, high-entropy strings (since 2026-11-19, UUIDs among them, such as the Pod's UID in the
+  kubelet's back-off message), hostnames, and the query and fragment of URLs and, since v0.5.0,
   of HTTP request lines without a scheme (`GET /orders?<redacted:query> HTTP/1.1`).
 - The cluster's name, its API server address and kausa's configuration.
 

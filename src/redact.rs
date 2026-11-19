@@ -676,12 +676,23 @@ fn is_marker(text: &str) -> bool {
         })
 }
 
+/// Whether `run` is exactly a UUID: 8-4-4-4-12 hexadecimal digits, in any case. This file stands
+/// alone as a fuzz target (fuzz/fuzz_targets/redact.rs), so it does not borrow the fingerprint's.
+fn is_uuid(run: &str) -> bool {
+    run.len() == 36
+        && run.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
 /// Whether a run of token characters looks like a secret: a letter and a digit, and a Shannon
-/// entropy of at least 4 bits per character, or 3 for a hexadecimal run (whose ceiling is 4).
+/// entropy of at least 4 bits per character, or 3 for a hexadecimal run (whose ceiling is 4). A
+/// run that is a UUID is a hexadecimal run: its hyphens would otherwise keep a random one under 4.
 fn looks_secret(run: &str) -> bool {
     let has_digit = run.bytes().any(|b| b.is_ascii_digit());
     let has_letter = run.bytes().any(|b| b.is_ascii_alphabetic());
-    let hex = run.bytes().all(|b| b.is_ascii_hexdigit());
+    let hex = run.bytes().all(|b| b.is_ascii_hexdigit()) || is_uuid(run);
     let threshold = if hex { 3.0 } else { 4.0 };
     has_digit && has_letter && shannon_entropy(run) >= threshold
 }
@@ -1259,6 +1270,69 @@ mod tests {
             redact("dd 3d1e2a4b5c6d7e8f9a0b1c2d3e4f5a6b"),
             "dd <redacted:secret>"
         );
+    }
+
+    #[test]
+    fn uuids_are_hexadecimal_runs() {
+        // A run shaped as a UUID (8-4-4-4-12 hexadecimal digits) is judged as a hexadecimal run:
+        // its hyphens kept a random one (about 3.9 bits per character) under the threshold of 4,
+        // while the same digits without hyphens were redacted. The kubelet writes the Pod's UID
+        // into its back-off message and into the note of its `BackOff` event.
+        let uid = "3f2a9c1e-7b4d-4e8a-9c6f-1d2e3f4a5b6c";
+        let mut r = Redactor::new();
+        r.name(NameKind::Namespace, "shop");
+        r.name(NameKind::Pod, "web-5f7d8c9b6d-x2kqp");
+        r.name(NameKind::Container, "app");
+        assert_eq!(
+            r.text(&format!(
+                "back-off 1m20s restarting failed container=app pod=web-5f7d8c9b6d-x2kqp_shop({uid})"
+            )),
+            "back-off 1m20s restarting failed container=container-1 pod=pod-1_namespace-1(<redacted:secret>)"
+        );
+        assert_eq!(
+            r.text(&format!(
+                "Back-off restarting failed container app in pod web-5f7d8c9b6d-x2kqp_shop({uid})"
+            )),
+            "Back-off restarting failed container container-1 in pod pod-1_namespace-1(<redacted:secret>)"
+        );
+        assert_eq!(r.counts().get("R012"), Some(&2));
+        let cases = [
+            (
+                "request_id=3F2A9C1E-7B4D-4E8A-9C6F-1D2E3F4A5B6C done",
+                "request_id=<redacted:secret> done",
+            ),
+            (
+                r#"{"trace":"3f2a9c1e-7b4d-4e8a-9c6f-1d2e3f4a5b6c"}"#,
+                r#"{"trace":"<redacted:secret>"}"#,
+            ),
+            (
+                "mount /var/lib/kubelet/pods/3f2a9c1e-7b4d-4e8a-9c6f-1d2e3f4a5b6c/volumes failed",
+                "mount /var/lib/kubelet/pods/<redacted:secret>/volumes failed",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact(input), expected, "{input}");
+        }
+        // The closest runs that stay: a UUID with no letter (the nil UUID), the same characters
+        // grouped otherwise, a letter that is not hexadecimal, and a UUID joined to other token
+        // characters, which is judged as the whole run (a limit in docs/reference/rules.md).
+        let stay = [
+            "uid 00000000-0000-0000-0000-000000000000 and 11111111-2222-4333-8444-555555555555",
+            "id 3f2a9c1e7b4d-4e8a-9c6f-1d2e-3f4a5b6c",
+            "id 3f2a9c1e-7b4d-4e8a-9c6f-1d2e3f4a5b6g",
+            "id trace-3f2a9c1e-7b4d-4e8a-9c6f-1d2e3f4a5b6c",
+        ];
+        for line in stay {
+            assert_eq!(redact(line), line, "{line}");
+        }
+        // The answer pass runs `R012` too, counted apart from the request.
+        let mut r = Redactor::new();
+        assert_eq!(
+            r.answer(&format!("check pod uid {uid}")),
+            "check pod uid <redacted:secret>"
+        );
+        assert_eq!(r.answer_counts().get("R012"), Some(&1));
+        assert!(r.counts().is_empty());
     }
 
     #[test]
