@@ -219,8 +219,8 @@ far, release by release, is in the [Changelog](CHANGELOG.md).
   has no result yet ([Run the soak](docs/how-to/run-the-soak.md)).
 - **Argo CD and the standby replica.** With `replicaCount: 2`, Argo CD's default
   `resource.exclusions` skip `coordination.k8s.io/Lease`, so an Application of the chart never
-  creates the Lease and neither replica leads. The fix, in `Unreleased` in the
-  [Changelog](CHANGELOG.md), makes the error hint name this case; the Lease is created once by
+  creates the Lease and neither replica leads. The fix, released in v0.6.2
+  ([Changelog](CHANGELOG.md)), makes the error hint name this case; the Lease is created once by
   hand, as [Install kausa with Helm](docs/how-to/install-with-helm.md) describes
   ([#79](https://github.com/fedeam/kausa/issues/79)). kausa still never creates the Lease.
 
