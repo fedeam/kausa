@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Pod's UID no longer reaches the model. The kubelet writes it into the back-off message of a
+  waiting container and into the note of its `BackOff` event
+  (`pod=<name>_<namespace>(<uid>)`), and `R012` let it through: the hyphens of a UUID kept its
+  entropy under the threshold of 4 bits per character, while the same digits without hyphens
+  were redacted. A run shaped as a UUID now counts as a hexadecimal run, in requests and in the
+  model's answer, so request ids and trace ids shaped as UUIDs in logs and event messages also
+  become `<redacted:secret>`.
 - A watch error whose text changes no longer loses the repeats folded of the previous text: the
   `pod watch error`, `event watch error` or `deployment watch error` line of the new text is
   preceded by a line of the old text with its `folded` count. Errors whose text carries a key,
