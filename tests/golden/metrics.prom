@@ -92,6 +92,12 @@ kausa_watch_restarts_total{watch="pods"} 1
 # HELP kausa_answers_withheld_total Model answers in which kausa replaced text with its withheld-command notice.
 # TYPE kausa_answers_withheld_total counter
 kausa_answers_withheld_total 0
+# HELP kausa_facts_dropped_total Facts dropped because the fact queue was full.
+# TYPE kausa_facts_dropped_total counter
+kausa_facts_dropped_total 0
+# HELP kausa_fact_reasons_omitted_total Fact statements that left out a reason outside the list of known reasons.
+# TYPE kausa_fact_reasons_omitted_total counter
+kausa_fact_reasons_omitted_total 0
 # HELP kausa_leader 1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a standby.
 # TYPE kausa_leader gauge
 kausa_leader 1

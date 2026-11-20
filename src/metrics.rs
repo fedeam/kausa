@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// The counters kausa exports, with their help text.
-pub const COUNTERS: [(&str, &str); 23] = [
+pub const COUNTERS: [(&str, &str); 25] = [
     (
         "kausa_incidents_total",
         "Incidents that settled, by detection.",
@@ -108,6 +108,15 @@ pub const COUNTERS: [(&str, &str); 23] = [
     (
         "kausa_answers_withheld_total",
         "Model answers in which kausa replaced text with its withheld-command notice.",
+    ),
+    // docs/adr/0027-fact-statement-for-the-detections.md, point 8 (prototype).
+    (
+        "kausa_facts_dropped_total",
+        "Facts dropped because the fact queue was full.",
+    ),
+    (
+        "kausa_fact_reasons_omitted_total",
+        "Fact statements that left out a reason outside the list of known reasons.",
     ),
 ];
 
@@ -521,7 +530,7 @@ mod tests {
         // docs/adr/0022-redact-the-answer.md, the two watch counters of v0.6's
         // self-observability and the withheld answers of
         // docs/adr/0025-withhold-destructive-commands.md come after these.
-        assert_eq!(COUNTERS.len(), 23);
+        assert_eq!(COUNTERS.len(), 25);
         assert_eq!(
             COUNTERS[15],
             (
@@ -605,7 +614,7 @@ mod tests {
         // redactions (docs/adr/0022-redact-the-answer.md), the watch relists and restarts of
         // v0.6's self-observability and the withheld answers of
         // docs/adr/0025-withhold-destructive-commands.md came later.
-        assert_eq!(COUNTERS.len(), 23, "a counter was added");
+        assert_eq!(COUNTERS.len(), 25, "a counter was added");
         assert!(COUNTERS.contains(&(
             "kausa_watch_errors_total",
             "Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch."
@@ -636,7 +645,7 @@ mod tests {
         // The counter of docs/adr/0022-redact-the-answer.md, the two watch counters of v0.6's
         // self-observability and the withheld answers of
         // docs/adr/0025-withhold-destructive-commands.md come after these.
-        assert_eq!(COUNTERS.len(), 23);
+        assert_eq!(COUNTERS.len(), 25);
         assert_eq!(
             COUNTERS[17],
             (
@@ -932,7 +941,7 @@ mod tests {
         // By position: the build, record and cache gauges of v0.6's self-observability follow
         // these, and the watch counters came with them; the withheld answers of
         // docs/adr/0025-withhold-destructive-commands.md came later (23 counters).
-        assert_eq!(COUNTERS.len(), 23, "a counter was added");
+        assert_eq!(COUNTERS.len(), 25, "a counter was added");
         assert_eq!(
             GAUGES[..5],
             [
@@ -1056,10 +1065,10 @@ mod tests {
     #[test]
     fn the_watch_relist_and_restart_counters_come_last_with_their_help() {
         // The withheld answers of docs/adr/0025-withhold-destructive-commands.md come after
-        // these.
-        assert_eq!(COUNTERS.len(), 23);
+        // these, and the two counters of docs/adr/0027-fact-statement-for-the-detections.md.
+        assert_eq!(COUNTERS.len(), 25);
         assert_eq!(
-            COUNTERS[COUNTERS.len() - 3..COUNTERS.len() - 1],
+            COUNTERS[20..22],
             [
                 ("kausa_watch_relists_total", RELISTS_HELP),
                 ("kausa_watch_restarts_total", RESTARTS_HELP),
@@ -1683,10 +1692,10 @@ mod tests {
 
     #[test]
     fn the_withheld_counter_comes_last_with_its_help() {
-        assert_eq!(COUNTERS.len(), 23);
+        assert_eq!(COUNTERS.len(), 25);
         assert_eq!(
-            COUNTERS.last(),
-            Some(&("kausa_answers_withheld_total", WITHHELD_HELP))
+            COUNTERS[22],
+            ("kausa_answers_withheld_total", WITHHELD_HELP)
         );
         assert_eq!(
             counter_at("kausa_answers_withheld_total"),

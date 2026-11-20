@@ -14,6 +14,7 @@ mod context;
 mod detect;
 mod events;
 mod explain;
+mod fact;
 mod fingerprint;
 mod history;
 mod incident;
@@ -27,6 +28,7 @@ mod owner;
 mod prompt;
 mod record;
 mod redact;
+mod report;
 mod run;
 
 use std::ffi::OsString;
@@ -375,6 +377,14 @@ fn run_command(args: &[OsString]) -> ExitCode {
         namespaces,
         rollouts: !no_rollouts,
         leader_lease,
+        // Prototype of docs/adr/0027-fact-statement-for-the-detections.md: the `Detected` Event
+        // is written unless --no-events, and never in a dry run.
+        detected: (!no_events && !dry_run).then(|| {
+            std::env::var("POD_NAME")
+                .ok()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "kausa".to_owned())
+        }),
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,

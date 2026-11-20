@@ -52,6 +52,7 @@ use crate::context::Gathered;
 use crate::detect::{Detection, detect_event, detect_rollout};
 use crate::events::Writer;
 use crate::explain::{self, LogSource, Next, QUEUE_LIMIT, Settings, Shared, Work};
+use crate::fact;
 use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals, rollout_signals};
 use crate::leader::pure::{TIMINGS, Timings};
@@ -62,6 +63,8 @@ use crate::notify::{self, Notifier};
 use crate::owner::{Hop, OwnerLookup, top_owner};
 use crate::prompt;
 use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
+use crate::report::harness::{self, Harness};
+use crate::report::{self, Fact, Notified, Reporter};
 
 /// The reporting controller of the Events kausa writes, excluded from its own watch.
 pub const REPORTING_CONTROLLER: &str = "kausa";
@@ -102,6 +105,9 @@ pub struct Options {
     /// With `--leader-lease`, the Lease this replica acts under: it acts only while it holds it,
     /// and waits as a standby otherwise (docs/adr/0019-high-availability.md).
     pub leader_lease: Option<LeaderLease>,
+    /// Whether to write a `Detected` Event for each settled incident, and the reporting instance
+    /// it is written with (prototype of docs/adr/0027-fact-statement-for-the-detections.md).
+    pub detected: Option<String>,
 }
 
 /// The Lease of `--leader-lease` and this replica's identity in it.
@@ -529,6 +535,12 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         notifications: RefCell::new(VecDeque::new()),
         term: &term,
     });
+    let reporter = options.detected.as_ref().map(|instance| Reporter {
+        writer: Writer::new(client.clone(), instance.clone()),
+        notified: RefCell::new(Notified::default()),
+        metrics: &metrics,
+        term: &term,
+    });
     show_start(&metrics, &options, shared.as_ref(), Instant::now());
     let lease = options
         .leader_lease
@@ -548,6 +560,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         lease: lease.as_ref(),
         cluster: &cluster,
         shared: shared.as_ref(),
+        reporter: reporter.as_ref(),
         metrics: &metrics,
         term: &term,
         listener: listener.as_ref(),
@@ -639,6 +652,9 @@ struct Serving<'a, L, C> {
     lease: Option<&'a L>,
     cluster: &'a C,
     shared: Option<&'a Shared<'a>>,
+    /// The fact path's writer and its notified table
+    /// (docs/adr/0027-fact-statement-for-the-detections.md).
+    reporter: Option<&'a Reporter<'a>>,
     metrics: &'a Metrics,
     term: &'a Term,
     listener: Option<&'a TcpListener>,
@@ -768,6 +784,7 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
                     self.options,
                     self.cluster,
                     self.shared,
+                    self.reporter,
                     self.metrics,
                     self.tick
                 ));
@@ -919,6 +936,7 @@ async fn lead<C: Cluster>(
     options: &Options,
     cluster: &C,
     shared: Option<&Shared<'_>>,
+    reporter: Option<&Reporter<'_>>,
     metrics: &Metrics,
     tick: Duration,
 ) -> Result<Infallible, RunError> {
@@ -950,7 +968,26 @@ async fn lead<C: Cluster>(
     let mut waiting = false;
     let mut announced = false;
 
+    // The facts of this term's settled incidents, and the `Detected` Event being written: a slot
+    // of its own, which no model call and no webhook holds
+    // (docs/adr/0027-fact-statement-for-the-detections.md).
+    let mut facts = report::Queue::default();
+    let mut reporting: Option<Notifying<'_>> = None;
+    // The prototype's measurement harness (`report::harness`): not a product feature.
+    let harness = harness::from_environment();
+    let term_started = Instant::now();
+    let mut harness_pending = harness.is_some();
+    let mut harness_holds = false;
+    let mut harness_draining: Option<Instant> = None;
+
     loop {
+        if let Some(reporter) = reporter
+            && reporting.is_none()
+            && !harness_holds
+            && let Some(fact) = facts.pop()
+        {
+            reporting = Some(Box::pin(reporter.report(fact)));
+        }
         if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
             let now = Instant::now();
             let queue_empty = queue.is_empty();
@@ -1042,6 +1079,20 @@ async fn lead<C: Cluster>(
                 notifying = None;
                 // A failed send is only logged and counted; the error is kausa's own log.
                 result?;
+            }
+            result = async { reporting.as_mut().expect("guarded by the condition").await },
+                if reporting.is_some() => {
+                reporting = None;
+                // A failed write is only logged and counted; the error is kausa's own log.
+                result?;
+                if facts.is_empty()
+                    && let Some(since) = harness_draining.take()
+                {
+                    log::info(
+                        "prototype harness: fact queue drained",
+                        json!({"milliseconds": since.elapsed().as_millis() as u64}),
+                    )?;
+                }
             }
             item = pods.next() => match item {
                 Some((watch, Some(Ok(event)))) => {
@@ -1137,9 +1188,39 @@ async fn lead<C: Cluster>(
                 }
                 for incident in state.tick(&mut tracker, now) {
                     metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
-                    log_incident(&incident, state.pods_of(&incident.owner))?;
+                    let pods_total = state.pods_of(&incident.owner);
+                    let statement = fact::statement(&incident, pods_total);
+                    if statement.reason_omitted {
+                        metrics.inc("kausa_fact_reasons_omitted_total", &[]);
+                    }
+                    log_incident(&incident, pods_total, &statement.text)?;
+                    if reporter.is_some() {
+                        report::enqueue(&mut facts, Fact::new(&incident, statement.text), metrics)?;
+                    }
                     if options.explain.is_some() {
                         enqueue(&mut queue, state.job(incident), metrics, waiting)?;
+                    }
+                }
+                if let Some(harness) = harness.as_ref()
+                    && harness_pending
+                    && term_started.elapsed() >= harness.after()
+                {
+                    harness_pending = false;
+                    match harness {
+                        Harness::Fill { .. } => {
+                            harness_holds = true;
+                            fill_for_the_harness(&mut facts, reporter)?;
+                        }
+                        Harness::Events { namespace, .. } => {
+                            for i in 0..report::FACT_QUEUE_CAPACITY {
+                                report::enqueue(&mut facts, harness::synthetic(i, namespace), metrics)?;
+                            }
+                            harness_draining = Some(Instant::now());
+                            log::info(
+                                "prototype harness: facts queued",
+                                json!({"entries": facts.len(), "namespace": namespace}),
+                            )?;
+                        }
                     }
                 }
                 let records = [state.pods.len(), state.events.len(), state.deployments.len()];
@@ -1152,6 +1233,39 @@ async fn lead<C: Cluster>(
             }
         }
     }
+}
+
+/// The prototype's harness, `fill`: fills the fact queue and the notified table with the longest
+/// entries, and logs what they hold and the resident memory before and after.
+fn fill_for_the_harness(
+    facts: &mut report::Queue,
+    reporter: Option<&Reporter<'_>>,
+) -> io::Result<()> {
+    let before = harness::resident_kb();
+    for i in 0..report::FACT_QUEUE_CAPACITY {
+        facts.push(harness::longest(i));
+    }
+    let after_queue = harness::resident_kb();
+    if let Some(reporter) = reporter {
+        let mut notified = reporter.notified.borrow_mut();
+        for i in 0..report::NOTIFIED_CAPACITY {
+            notified.mark(&format!("{i:016x}"));
+        }
+    }
+    let after = harness::resident_kb();
+    log::info(
+        "prototype harness: fact queue filled",
+        json!({
+            "entries": facts.len(),
+            "entry_bytes": harness::longest(0).bytes(),
+            "queue_bytes": facts.bytes(),
+            "notified": reporter.map(|r| r.notified.borrow().len()),
+            "notified_bytes": reporter.map(|r| r.notified.borrow().bytes()),
+            "resident_kb_before": before,
+            "resident_kb_after_queue": after_queue,
+            "resident_kb_after": after,
+        }),
+    )
 }
 
 /// The gauge of the incidents waiting for an explanation (docs/adr/0021-refill-the-call-budget.md).
@@ -1200,7 +1314,7 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
         &["pods", "events"]
     };
     let settings = options.explain.as_ref();
-    let counters: [(&'static str, &str, &[&str], bool); 7] = [
+    let counters: [(&'static str, &str, &[&str], bool); 8] = [
         ("kausa_watch_errors_total", "watch", watches, true),
         ("kausa_watch_relists_total", "watch", watches, true),
         ("kausa_watch_restarts_total", "watch", watches, true),
@@ -1227,6 +1341,12 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
             "to",
             &["leader", "standby"],
             options.leader_lease.is_some(),
+        ),
+        (
+            "kausa_events_written_total",
+            "reason",
+            &["Detected"],
+            options.detected.is_some(),
         ),
     ];
     for (name, label, values, shown) in counters {
@@ -1280,7 +1400,7 @@ fn show_budget(metrics: &Metrics, budget: &Budget, now: Instant) {
     metrics.set_gauge(name, &[("window", "day")], day);
 }
 
-fn log_incident(incident: &Incident, pods_total: usize) -> io::Result<()> {
+fn log_incident(incident: &Incident, pods_total: usize, statement: &str) -> io::Result<()> {
     let sample = &incident.sample;
     log::info(
         "incident",
@@ -1304,6 +1424,7 @@ fn log_incident(incident: &Incident, pods_total: usize) -> io::Result<()> {
                 "message": sample.message,
                 "exit_code": sample.exit_code,
             },
+            "statement": statement,
         }),
     )
 }
@@ -3992,6 +4113,7 @@ mod tests {
                 name: "kausa-leader".into(),
                 identity: ME.into(),
             }),
+            detected: None,
         }
     }
 
@@ -4034,6 +4156,7 @@ mod tests {
             lease: Some(lease),
             cluster,
             shared: Some(shared),
+            reporter: None,
             metrics: shared.metrics,
             term: shared.term,
             listener,
@@ -5778,7 +5901,7 @@ mod tests {
         let total = cluster.items();
         runtime().block_on(async {
             tokio::select! {
-                result = lead(options, cluster, None, metrics, TEST_TICK) => {
+                result = lead(options, cluster, None, None, metrics, TEST_TICK) => {
                     let Err(error) = result;
                     match error {
                         RunError::Failure(error) => panic!("the term ended: {error}"),

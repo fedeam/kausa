@@ -22,6 +22,7 @@ use crate::incident::Incident;
 use crate::leader::Term;
 use crate::leader::pure::WRITE_BOUND;
 use crate::prompt::{Explanation, WITHHELD};
+use crate::report::Fact;
 use crate::run::REPORTING_CONTROLLER;
 
 /// The longest note an Event may carry, in bytes (`NoteLengthLimit` in Kubernetes'
@@ -134,6 +135,50 @@ pub fn build(incident: &Incident, outcome: &Outcome<'_>, instance: &str, now: Ti
     }
 }
 
+/// The name of a `Detected` Event: the incident fingerprint and eight hexadecimal digits of a hash
+/// of the statement (docs/adr/0027-fact-statement-for-the-detections.md, point 2).
+pub fn detected_name(incident_fingerprint: &str, statement: &str) -> String {
+    let statement_hash = &fingerprint("", "", "", "", statement)[..8];
+    format!("kausa.detected.{incident_fingerprint}.{statement_hash}")
+}
+
+/// The `Detected` Event of a fact: a Warning whose note is the statement and nothing else,
+/// `regarding` the top-level owner and `related` the sample Pod when there is one.
+pub fn detected(fact: &Fact, instance: &str, now: Timestamp) -> Event {
+    let regarding = ObjectReference {
+        api_version: Some(fact.owner.api_version.clone()),
+        kind: Some(fact.owner.kind.clone()),
+        name: Some(fact.owner.name.clone()),
+        namespace: Some(fact.namespace.clone()),
+        uid: Some(fact.owner.uid.clone()).filter(|uid| !uid.is_empty()),
+        ..ObjectReference::default()
+    };
+    let related = fact.pod.as_ref().map(|pod| ObjectReference {
+        api_version: Some("v1".into()),
+        kind: Some("Pod".into()),
+        name: Some(pod.clone()),
+        namespace: Some(fact.namespace.clone()),
+        ..ObjectReference::default()
+    });
+    Event {
+        metadata: ObjectMeta {
+            name: Some(detected_name(&fact.fingerprint, &fact.statement)),
+            namespace: Some(fact.namespace.clone()),
+            ..ObjectMeta::default()
+        },
+        event_time: Some(MicroTime(now)),
+        action: Some("Detect".into()),
+        reason: Some("Detected".into()),
+        note: Some(fact.statement.clone()),
+        type_: Some("Warning".into()),
+        regarding: Some(regarding),
+        related,
+        reporting_controller: Some(REPORTING_CONTROLLER.into()),
+        reporting_instance: Some(instance.chars().take(128).collect()),
+        ..Event::default()
+    }
+}
+
 /// The longest one emit may take, all of its calls together: `WRITE_BOUND` (a deposed leader's
 /// write ends before a standby may take over, docs/adr/0019-high-availability.md), and a short one
 /// in the tests.
@@ -173,12 +218,23 @@ impl Writer {
         now: Timestamp,
         term: &Term,
     ) -> Result<Emitted, String> {
-        match tokio::time::timeout(
-            EMIT_TIMEOUT,
-            self.create_or_patch(incident, outcome, now, term),
-        )
-        .await
-        {
+        let event = build(incident, outcome, &self.instance, now);
+        self.bounded(event, now, term).await
+    }
+
+    /// The same for the `Detected` Event of a fact.
+    pub async fn emit_detected(
+        &self,
+        fact: &Fact,
+        now: Timestamp,
+        term: &Term,
+    ) -> Result<Emitted, String> {
+        let event = detected(fact, &self.instance, now);
+        self.bounded(event, now, term).await
+    }
+
+    async fn bounded(&self, event: Event, now: Timestamp, term: &Term) -> Result<Emitted, String> {
+        match tokio::time::timeout(EMIT_TIMEOUT, self.create_or_patch(event, now, term)).await {
             Ok(result) => result,
             Err(_) => Err(format!(
                 "no answer within {} seconds",
@@ -189,13 +245,11 @@ impl Writer {
 
     async fn create_or_patch(
         &self,
-        incident: &Incident,
-        outcome: &Outcome<'_>,
+        event: Event,
         now: Timestamp,
         term: &Term,
     ) -> Result<Emitted, String> {
-        let event = build(incident, outcome, &self.instance, now);
-        let namespace = incident.key.namespace.clone();
+        let namespace = event.metadata.namespace.clone().unwrap_or_default();
         let name = event.metadata.name.clone().unwrap_or_default();
         let api = Api::<Event>::namespaced(self.client.clone(), &namespace);
         if !term.holds() {
@@ -357,6 +411,47 @@ mod tests {
             last_observed_time: MicroTime(now),
         });
         assert_eq!(repeat_patch(&seen, now)["series"]["count"], 8);
+    }
+
+    // docs/adr/0027-fact-statement-for-the-detections.md, point 2 (prototype).
+    #[test]
+    fn a_detected_event_carries_the_statement_and_nothing_else() {
+        let incident = incident();
+        let statement = crate::fact::statement(&incident, 3).text;
+        let fact = Fact::new(&incident, statement.clone());
+        let event = detected(&fact, "kausa-0", Timestamp::UNIX_EPOCH);
+        assert_eq!(event.type_.as_deref(), Some("Warning"));
+        assert_eq!(event.reason.as_deref(), Some("Detected"));
+        assert_eq!(event.action.as_deref(), Some("Detect"));
+        assert_eq!(event.note.as_deref(), Some(statement.as_str()));
+        assert_eq!(event.reporting_controller.as_deref(), Some("kausa"));
+        assert_eq!(event.reporting_instance.as_deref(), Some("kausa-0"));
+        let regarding = event.regarding.expect("the owner");
+        assert_eq!(
+            regarding.kind.as_deref(),
+            Some(incident.owner.kind.as_str())
+        );
+        assert_eq!(
+            regarding.name.as_deref(),
+            Some(incident.owner.name.as_str())
+        );
+        assert_eq!(
+            event.related.and_then(|pod| pod.name),
+            incident.sample.pod.clone()
+        );
+        let name = event.metadata.name.expect("a name");
+        assert_eq!(name, detected_name(&incident.fingerprint, &statement));
+        let prefix = format!("kausa.detected.{}.", incident.fingerprint);
+        let hash = name
+            .strip_prefix(&prefix)
+            .expect("the prefix and the fingerprint");
+        assert_eq!(hash.len(), 8);
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        // Another statement of the same incident is another Event.
+        assert_ne!(
+            name,
+            detected_name(&incident.fingerprint, "job failed (D008).")
+        );
     }
 
     #[test]
