@@ -47,9 +47,10 @@ format](../reference/command-line.md)).
 - `sample.message` is a container's waiting message, a Pod's status message, an event's note or,
   for `D014`, the `revision <n>` kausa wrote itself. All but the last are text that whoever can
   run a Pod shapes.
-- `sample.image` is a string of the Pod's spec. Hypothesis, not checked in the API server's code
-  for this ADR: the API server does not check its syntax. The kubelet's `InvalidImageName` reason
-  (`D002`) exists because a malformed one reaches a node.
+- `sample.image` is a string of the Pod's spec. The API server does not check its syntax: on
+  Kubernetes v1.36.4 it refused only an empty one and one with leading or trailing whitespace
+  (point 10); not read in the API server's code. The kubelet's `InvalidImageName` reason (`D002`)
+  exists because a malformed one reaches a node.
 - `sample.reason` is one of the reasons [Detection and redaction rules](../reference/rules.md)
   lists, by construction of `detect_container`, `detect_event` and `rollout_signals`, with one
   exception found for this ADR in `collect_signals`: a crash loop detected by its restart count
@@ -162,7 +163,7 @@ rollout does not progress (D014). Sample: reason ProgressDeadlineExceeded. Revis
   line: one signal of the incident, the first in a fixed order, not all of them.
 - **Its bytes are letters, digits, spaces and `.,:()-`** and nothing else, so no part of it can
   be a mention, a link, markup or a command. The longest possible statement is under 512 bytes
-  (about 310 by hand count, every part at its longest); a unit test pins the number.
+  (286 in the prototype of point 10, every part at its longest); a unit test pins the number.
 - **A rule's name is a label, not a claim.** One says more than its reasons: `D013`, "autoscaler
   cannot get metrics", also covers `FailedGetScale`. The implementation pull request corrects a
   name that the reasons do not bear out, with a changelog line.
@@ -187,9 +188,9 @@ and counted in `kausa_event_write_errors_total`, and not retried, as today.
 
 - At the check where an incident settles, its statement is built and pushed on a **fact queue of
   1024 entries** in memory; nothing is written to the cluster there. An entry is the statement
-  and what the Event needs (namespace, owner, sample Pod, fingerprint, first seen): about 1.3 KiB
-  at the longest names Kubernetes allows, so about 1.3 MiB for a full queue. Computed, not
-  measured (point 10).
+  and what the Event needs (namespace, owner, sample Pod, fingerprint, first seen): 1,583 bytes
+  at the longest names Kubernetes allows, so 1.55 MiB for a full queue, computed. Measured in
+  the prototype, the process grew by 1.74 MiB resident when the queue filled (point 10).
 - A full queue drops its oldest entry, which is logged (`fact dropped`) and counted
   (`kausa_facts_dropped_total`). The `incident` line was already written.
 - **One fact slot** beside the explanation slot and the notification slot writes one Event at a
@@ -345,8 +346,11 @@ two bounded structures, so the same holds for it:
 
 | Structure | `N` | `B` | At most |
 |---|---|---|---|
-| Fact queue (point 3) | 1024 entries | About 1.3 KiB | About 1.3 MiB |
+| Fact queue (point 3) | 1024 entries | 1,583 bytes | 1.55 MiB |
 | Fingerprints already notified (point 5) | 1024 entries | Under 64 bytes | Under 64 KiB |
+
+Both rows are computed. The prototype measured 1.74 MiB resident for the full queue, and 40 bytes
+an entry for the table.
 
 - **Neither `N` is a flag.** 0026 makes `N` a setting for a source's table, where a larger table
   is wider coverage. A queue that empties in seconds and a table of what was already sent widen
@@ -358,6 +362,17 @@ two bounded structures, so the same holds for it:
   run-to-run spread of v0.6.2 in the same setup; a full fact queue adds at most 2 MiB; writing 1024
   `Detected` Events in a row causes no watch error and no relist. If a bar fails, the numbers above
   change before acceptance, in this text.
+- **Idle memory is read as the anonymous memory of the container's control group**, which is the
+  process's own. This was not said when the bars were fixed; it is named after the measurement
+  in kind, because the `docker stats` figure cannot resolve the bar: between two readings of one
+  idle container it moved by -1.34 to +0.41 MiB, and the anonymous memory by -0.04 to +0.08 MiB.
+  The note reports both figures.
+- **Measured in kind on 2026-11-20**, with the prototype of the unmerged branch
+  `proto/0027-fact-statement`: [The fact statement prototype,
+  measured](../research/2026-11-20-fact-statement-prototype.md). The three bars hold there; the
+  numbers of points 1 and 3 and the hypothesis about the image were corrected in this text from
+  it. The measurement on a Raspberry Pi 4 is **pending**, and this ADR stays `proposed` until
+  the note has it.
 
 With the implementation, before the release that ships it:
 
@@ -369,10 +384,13 @@ With the implementation, before the release that ships it:
   fake endpoint, `Detected` and then `Explained`, whose note starts with the mark; with a spent
   budget, `Detected` and `ExplanationSkipped`.
 - **Hypotheses to check**, each with an `Update` if it fails: the API server refuses a container
-  name that is not a DNS label, and accepts any image string; `events.k8s.io` accepts the reason
-  `Detected` and the action `Detect`; an API server with default admission does not refuse 1024
-  Event creates sent one at a time; which terminated reasons other than `Error` the
-  restart-count path of `D001` meets, read in the kubelet's and containerd's code.
+  name that is not a DNS label, and accepts any image string but an empty one and one with
+  leading or trailing whitespace; `events.k8s.io` accepts the reason `Detected` and the action
+  `Detect`; an API server with default admission does not refuse 1024 Event creates sent one at
+  a time; which terminated reasons other than `Error` the restart-count path of `D001` meets,
+  read in the kubelet's and containerd's code. The first three were checked by behaviour on
+  Kubernetes v1.36.4 in the note above, where "any image string" turned out false as first
+  worded; the last one is still open.
 
 ## Consequences
 
@@ -397,10 +415,10 @@ With the implementation, before the release that ships it:
   the README, the documentation front page, the chart's description and the Artifact Hub entry.
 - **This ADR cannot be accepted on reading alone.** Point 10 needs a prototype and a research
   note first, as 0026 decided for every stage.
-- **Not verified:** nothing here is implemented or measured. The sizes of points 3 and 10 are
-  computed by hand, the defaults of point 5 (30 an hour, 1024 fingerprints) are chosen by analogy
-  with the call budget and the deduplication cache, and the hypotheses are listed in the Context
-  and in point 10.
+- **Not verified:** nothing here is merged, and nothing is measured on a Raspberry Pi 4. The
+  prototype of point 10 has no webhook message, so the cost of that path is in no figure. The
+  defaults of point 5 (30 an hour, 1024 fingerprints) are chosen by analogy with the call budget
+  and the deduplication cache, and the hypotheses still open are listed in point 10.
 - **When accepted:** `Update` paragraphs in 0015 and 0008. With the implementation: [Command line
   and log format](../reference/command-line.md), [Detection and redaction
   rules](../reference/rules.md) (the statement of each detection, and what kausa watches and
