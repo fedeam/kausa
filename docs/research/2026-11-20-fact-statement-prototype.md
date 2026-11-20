@@ -52,9 +52,9 @@ Idle memory with 10,000 Pods, 20 seconds after start, ten runs of each image, in
 What the numbers ask of the record before acceptance:
 
 - Point 1: 286 bytes for the longest statement.
-- Points 3 and 10: about 1.6 KiB an entry and about 1.6 MiB for the full queue, computed, and
-  1.74 MiB resident; the bar of 2 MiB stays. The table of point 5 is 40 bytes an entry, inside
-  its "under 64 bytes".
+- Points 3 and 10: 1,583 bytes an entry and 1.55 MiB for the full queue, computed, and 1.74 MiB
+  resident; the bar of 2 MiB stays. The table of point 5 is 40 bytes an entry, inside its "under
+  64 bytes".
 - Point 10, the first bar: name the figure. The process's own memory separates the images to
   0.02 MiB; `docker stats` moves by more than that between two readings of one idle container.
 - Point 10, the hypotheses: the API server does not accept any image string (see below).
