@@ -9,7 +9,7 @@ ConfigMaps, never changes a workload, and writes nothing but its own Events (non
 `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease. With
 `--notify-url-file` (off by default) it also posts each new explanation to one webhook.
 
-Status as of 2026-11-09: **in development** (pre-alpha). The four implementation weekends of v0.1
+Status as of 2026-11-20: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
@@ -34,7 +34,10 @@ commands from the model's answer ([2026-11-05 — Artifact
 Hub](journal/2026-11-05-artifact-hub.md), "Release v0.6.1"), and on 2026-11-09 by
 [v0.6.2](https://github.com/fedeam/kausa/releases/tag/v0.6.2), which no longer counts an expired
 resource version as a watch error and names Argo CD in the hint of a missing Lease ([2026-11-09 —
-Release v0.6.2](journal/2026-11-09-release-v0-6-2.md)). The
+Release v0.6.2](journal/2026-11-09-release-v0-6-2.md)), and on 2026-11-20 by
+[v0.6.3](https://github.com/fedeam/kausa/releases/tag/v0.6.3), which redacts the Pod's UID and
+lists again after an error in an open watch ([2026-11-20 — Release
+v0.6.3](journal/2026-11-20-release-v0-6-3.md)). The
 repository is public on GitHub, with a private copy on the maintainer's Gitea instance, and
 contributions and merges happen on GitHub ([0007. Take contributions and merge pull requests on
 GitHub](adr/0007-contributions-and-merges-on-github.md)). The CI on Gitea passes since 2026-10-26
@@ -214,4 +217,5 @@ checks](how-to/develop.md).
   windows of the dry-run soak lost to macOS's local network privacy, the launcher and the
   coverage check that came of it, and the stalls of the Event watch on k3s;
   [2026-11-19 — Facts before the model](journal/2026-11-19-facts-before-the-model.md): 0026
-  proposed and accepted.
+  proposed and accepted;
+  [2026-11-20 — Release v0.6.3](journal/2026-11-20-release-v0-6-3.md).

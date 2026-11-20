@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-11-20
+
+Four fixes. One is a fix of redaction: the Pod's UID could reach the model in the kubelet's
+back-off message. Nothing to change in values or permissions.
+
 ### Fixed
 
 - The Pod's UID no longer reaches the model. The kubelet writes it into the back-off message of a
@@ -542,7 +547,8 @@ signed with cosign), and the chart is attached to the GitHub release.
   v0.1, how to build from source and run the checks, a security policy with a threat model, a
   contributing guide, and the decision records in `docs/adr/`.
 
-[unreleased]: https://github.com/fedeam/kausa/compare/v0.6.2...HEAD
+[unreleased]: https://github.com/fedeam/kausa/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/fedeam/kausa/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/fedeam/kausa/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/fedeam/kausa/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/fedeam/kausa/compare/v0.5.2...v0.6.0

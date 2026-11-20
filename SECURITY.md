@@ -7,7 +7,7 @@ and where secrets live.
 
 ## Supported versions
 
-Status as of 2026-11-09: the latest release is v0.6.2. Until 1.0, only the latest release will
+Status as of 2026-11-20: the latest release is v0.6.3. Until 1.0, only the latest release will
 receive security fixes.
 
 ## Reporting a vulnerability
@@ -65,7 +65,8 @@ date with you. There is no bug bounty and no guaranteed time to a fix.
 
 ## Threat model
 
-Status as of 2026-11-09: v0.6.2 is released, with two fixes (watch errors and a hint), on top of
+Status as of 2026-11-20: v0.6.3 is released, with four fixes (the Pod's UID is redacted, and three
+in the watches and the metrics endpoint), on top of v0.6.2's two fixes (watch errors and a hint),
 v0.6.1's answers that hold a listed destructive command withheld from every sink, and v0.6.0's chart
 on GHCR as a signed OCI artifact, an
 attested SBOM for each image, alert rules and new metrics on kausa itself, and a system message
