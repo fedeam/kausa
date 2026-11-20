@@ -1,5 +1,5 @@
 # The release tests/e2e/upgrade.sh upgrades from: the latest one, pinned. Bumped by a pull request
 # after each release (docs/how-to/maintain.md, "Cut a release"). Read with sed, never sourced.
-KAUSA_UPGRADE_FROM_VERSION=0.6.2
-KAUSA_UPGRADE_FROM_CHART_SHA256=fb4c1d7f5a26adbf8f368c5c2d2583d12e9cf22e4a469ce0a4ea71ecc02ea0b3
-KAUSA_UPGRADE_FROM_IMAGE_DIGEST=sha256:bb2329800d9e81d2d1fbfb0e9a0aa5e2efc41a1effed7aff77b19a2a14f93eef
+KAUSA_UPGRADE_FROM_VERSION=0.6.3
+KAUSA_UPGRADE_FROM_CHART_SHA256=c7107f974b0efe49f8fd86fc682cc5a5c5ac8a99cdb3620c32fbd4ac7f4978d1
+KAUSA_UPGRADE_FROM_IMAGE_DIGEST=sha256:6f812c35c7514db9f56bfbc971739bf765deb30e4f876143dfb5257928176eb6

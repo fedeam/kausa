@@ -10,7 +10,7 @@ soak](#a-dry-run-soak)) and has no result yet: its first two windows are invalid
 sampler stopped reading the cluster two days and one day after it started, and a third started
 on 2026-11-16 ([2026-11-18 — The soak sampler on
 macOS](../journal/2026-11-18-the-soak-sampler-on-macos.md)). `install.sh` installs the release
-pinned in `tests/e2e/upgrade-from.txt`, v0.6.2 since 2026-11-09.
+pinned in `tests/e2e/upgrade-from.txt`, v0.6.3 since 2026-11-20.
 
 ## What the soak answers, and what it cannot
 
