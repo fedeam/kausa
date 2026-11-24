@@ -96,11 +96,12 @@
 # failing workload but refused (crasher, failing-job, policy-job, stranded and stalled): a Warning
 # with the action Detect, named after the logged incident, whose note is the statement the log
 # gives (crasher's, byte for byte) and holds only letters, digits, spaces and .,:()- and no
-# namespace, owner, Pod or image. The Explained notes start with the mark (after the notice, when
-# withheld), and each was created after the Detected Event of its incident, in the order one watch
-# of TARGET's Events delivered them. The webhook receives, for each failing workload, one v2
-# detected body (the facts, no explanation) and one explained one (the facts and the explanation),
-# the facts agreeing with the statement; no series of the capped and dropped facts is over 0.
+# namespace, owner, Pod or image. Each Explained Event is named after the fingerprint of a Detected
+# Event about the same workload, and its note starts with the mark (after the notice, when
+# withheld); which of the two was written first is not checked, since point 3 of 0027 lets either
+# be. The webhook receives, for each failing workload, one v2 detected body (the facts, no
+# explanation) and one explained one (the facts and the explanation), the facts agreeing with the
+# statement; no series of the capped and dropped facts is over 0.
 # With one replica, both then upgrade to an empty model.endpoint and no history, and check that kausa
 # writes Detected Events and nothing else (no other reason, no model request, no explanation line),
 # that the Role or ClusterRole grants Events create and patch, and that the receiver gets only
@@ -188,11 +189,6 @@ else
     --set rbac.scope=cluster
 fi
 
-# The name and resourceVersion of each Event in TARGET as one watch delivers it, from before the
-# failures, for the order of the Detected and Explained Events (check_detected_first).
-k -n "$TARGET" get events.events.k8s.io --watch \
-  -o jsonpath='{.metadata.name} {.metadata.resourceVersion}{"\n"}' > "$WORK/event-watch.txt" &
-WATCH_PID=$!
 k apply -f tests/e2e/failures.yaml
 if [ "$SCOPE" = namespaced ]; then
   # The same failures where kausa is granted nothing.
@@ -667,11 +663,6 @@ no_injected_values
 # The Detected Event of each failing workload (docs/adr/0027-fact-statement-for-the-detections.md)
 # and the mark on its Explained Event's note.
 check_detected model
-# And each Explained Event after the Detected Event of its incident; the watch is no longer needed.
-check_detected_first
-kill "$WATCH_PID" 2>/dev/null || true
-wait "$WATCH_PID" 2>/dev/null || true
-WATCH_PID=""
 # The withheld answer (docs/adr/0025-withhold-destructive-commands.md): the destructive step of
 # failing-job's answer reached no sink (kausa's Event notes in TARGET, the Explanations' entries,
 # the webhook's bodies and kausa's explanation log lines), each of which holds something to look
@@ -1751,10 +1742,12 @@ print(len(found))
 
   # A spent budget (docs/adr/0027-fact-statement-for-the-detections.md, point 10), in both scopes:
   # with budget.callsPerDay=0 the budget refuses every call as spent (src/budget.rs: the daily call
-  # budget is spent), and a new failing Job, budget-spent, gets a Detected Event and an
-  # ExplanationSkipped Event of the same incident, from the one Pod, whose skip is logged with that
-  # reason and counted as budget; the Pod makes no model call and no request reaches the endpoint.
-  # The next upgrade sets the daily budget back.
+  # budget is spent), by the same path as a daily budget spent by calls (Budget::check returns
+  # Never with that reason for a cap of 0 and for a day's calls at the cap alike), without the
+  # calls, whose count the restarts of the upgrades would make uncertain. A new failing Job,
+  # budget-spent, gets a Detected Event and an ExplanationSkipped Event of the same incident, from
+  # the one Pod, whose skip is logged with that reason and counted as budget; the Pod makes no
+  # model call and no request reaches the endpoint. The next upgrade sets the daily budget back.
   h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
     --set budget.callsPerDay=0
   # Recreate stopped the Pod before: every request from here on would be the new Pod's.
