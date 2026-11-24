@@ -217,8 +217,8 @@ queue was empty and 60 seconds after that.
 watching and read the counters after the harness had started. In it the prototype showed
 `kausa_watch_errors_total{watch="events"}` 2 and `kausa_watch_relists_total{watch="events"}` 2.
 Both errors came 20 seconds before the harness queued anything, and their text was the API
-server's answer to the deletion: `etcd event received with PrevKv=nil` for a `DELETE` of an
-Event, an `InternalError`. On k3s with kine, deleting Events while a watch on Events is open gives
+server's answer to the deletion: an `InternalError` whose message said that the store had sent
+the watch the deletion of an Event without the Event's previous state. On k3s with kine, deleting Events while a watch on Events is open gives
 that error to any client that watches them, v0.6.2 included; writing Events did not cause it.
 The three runs above delete, wait and restart before they read.
 
