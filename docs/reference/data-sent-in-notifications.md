@@ -47,23 +47,33 @@ There are three messages:
   `2xx`, and then with the same text. So `explained` notifications acknowledged with a `2xx` are
   at most the model calls, which `--max-calls-per-hour` and `--max-calls-per-day` bound (30 and
   200 by default). An explained incident is therefore two messages.
-- **`capped`**: at most `--notify-max-per-hour` `detected` messages start in any 60 minutes (the
+- **`capped`**: says that messages were not sent, so that the channel never reads as the whole
+  picture. At most `--notify-max-per-hour` `detected` messages start in any 60 minutes (the
   chart's `notifications.maxPerHour`; 30 by default, 1 to 3600). Over it, a `detected` message is
   not sent, is counted as `capped` and logged (`notification capped`), and its Event and log line
-  stand; at most once in 60 minutes kausa then posts the fixed `capped` message instead, so that
-  the channel never reads as the whole picture. `explained` messages are bounded by the call
-  budget, not by this cap, so a release with both sends at most the sum.
+  stand. A message dropped by a full queue (below) and an incident whose fact was dropped from the
+  fact queue (`fact dropped`, so it has no `Detected` Event and no `detected` message) are not
+  sent either. Any of the three owes the fixed `capped` message, which kausa posts before the
+  messages still queued, at most once in 60 minutes; a message not sent after it owes the next
+  one. Its `limit` is the cap in force, whichever bound it was. Every incident keeps its
+  `incident` line in kausa's log. `explained` messages are bounded by the call budget, not by
+  this cap, so a release with both sends at most the sum.
 
 Never in `--dry-run` (a usage error with notifications), and never at start (there is no test
 message). Both tables live in memory and hold per process: after a restart or a takeover, each
 incident that still fails is posted once more, within the cap. A receiver that answers after the
 10-second timeout can get duplicates: see [Compatibility](#compatibility).
 
-kausa sends one notification at a time, from an in-memory queue of 16 that drops its oldest when
-full, and starts each send at least 1 second after the previous one (3 seconds with `telegram`,
+kausa sends one notification at a time, from an in-memory queue of 16 that both kinds share. When
+it is full, one more drops the oldest `detected` message; a `detected` message never drops an
+`explained` one, so with 16 `explained` messages queued the new `detected` one is dropped; an
+`explained` message drops the oldest `explained` one only when no `detected` message is queued.
+Each drop is counted as `dropped`, logged (`notification dropped`) and owes the `capped` message.
+kausa starts each send at least 1 second after the previous one (3 seconds with `telegram`,
 which allows a bot 20 messages a minute in a group). A send that times out, cannot connect, or is
 answered `429` or `5xx` is tried once more 30 seconds later; any other failure is final.
-Notifications still queued are dropped when kausa stops. The log lines and counters are in
+Notifications still queued are dropped when kausa stops or its lease term ends, and those owe
+no `capped` message: the process that would post it is no longer the one that notifies. The log lines and counters are in
 [Command line and log format](command-line.md#notifications).
 
 ## The `json` body
@@ -170,7 +180,7 @@ fingerprint 5d0c2b7e9a1f4c38
 And the `capped` one, fixed but for the limit:
 
 ```text
-kausa: more than 30 incidents in the last hour; the others are in Events and in kausa's log, not here
+kausa: not every incident is posted here (more than 30 in an hour, or more at once than kausa queues); kausa's log has every one
 ```
 
 - The lines are joined with a newline, with none at the end. The `Facts:` line is the fact

@@ -165,11 +165,12 @@ pub fn capped_json_body(limit: usize, kausa_version: &str) -> Value {
     })
 }
 
-/// The text of the message sent over the cap: fixed but for the limit.
+/// The text of the message that says some messages were not sent, over the cap or dropped by a
+/// bound: fixed but for the limit. Each incident has its `incident` line in kausa's log.
 pub fn capped_text(limit: usize) -> String {
     format!(
-        "kausa: more than {limit} incidents in the last hour; the others are in Events and in \
-         kausa's log, not here"
+        "kausa: not every incident is posted here (more than {limit} in an hour, or more at once \
+         than kausa queues); kausa's log has every one"
     )
 }
 
@@ -699,8 +700,8 @@ mod tests {
         let t = capped_text(30);
         assert_eq!(
             t,
-            "kausa: more than 30 incidents in the last hour; the others are in Events and in \
-             kausa's log, not here"
+            "kausa: not every incident is posted here (more than 30 in an hour, or more at once \
+             than kausa queues); kausa's log has every one"
         );
         // Nothing in it that Slack escapes or that either receiver could turn into a mention, a
         // command or a link.

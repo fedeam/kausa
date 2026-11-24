@@ -31,7 +31,9 @@ use crate::notification::{self, ChatId, Message, Notice};
 use crate::prompt::Explanation;
 use crate::report::Fact;
 
-/// How many notifications may wait for the webhook; the oldest is dropped when one more arrives.
+/// How many notifications may wait for the webhook. When one more arrives, the oldest `detected`
+/// message is dropped, or the new one if it is `detected` and every queued one is `explained`, or
+/// else the oldest `explained` one.
 pub const QUEUE_LIMIT: usize = 16;
 /// The least time between the starts of two sends, so that one burst stays within the rate a chat
 /// service takes: one message per second for Slack's incoming webhooks, and for `json`.
@@ -365,12 +367,13 @@ impl Sent {
     }
 }
 
-/// The starts of `detected` messages in the last `CAP_WINDOW`, and when the last `capped` message
-/// was started.
+/// The starts of `detected` messages in the last `CAP_WINDOW`, when the last `capped` message was
+/// started, and whether one is owed: a message was not sent since then.
 pub struct Cap {
     limit: usize,
     starts: VecDeque<Instant>,
     last_capped: Option<Instant>,
+    owed: bool,
 }
 
 impl Cap {
@@ -379,6 +382,7 @@ impl Cap {
             limit,
             starts: VecDeque::new(),
             last_capped: None,
+            owed: false,
         }
     }
 
@@ -402,13 +406,21 @@ impl Cap {
         true
     }
 
-    /// Whether the `capped` message is due at `now`: never sent, or started `CAP_WINDOW` ago or
-    /// more. If it is, its start is counted.
+    /// Notes that a message was not sent, over the cap or dropped by a bound: the `capped`
+    /// message is owed.
+    pub fn owe(&mut self) {
+        self.owed = true;
+    }
+
+    /// Whether the `capped` message is due at `now`: owed, and never sent or started `CAP_WINDOW`
+    /// ago or more. If it is, it is no longer owed and its start is counted.
     pub fn capped_due(&mut self, now: Instant) -> bool {
-        let due = self
-            .last_capped
-            .is_none_or(|at| now.saturating_duration_since(at) >= CAP_WINDOW);
+        let due = self.owed
+            && self
+                .last_capped
+                .is_none_or(|at| now.saturating_duration_since(at) >= CAP_WINDOW);
         if due {
+            self.owed = false;
             self.last_capped = Some(now);
         }
         due
@@ -454,7 +466,10 @@ impl<'a> Outbox<'a> {
     }
 
     /// Queues `item`; a `detected` message already sent in its window is not queued. When the
-    /// queue is full, its oldest message is dropped, counted and logged.
+    /// queue is full, one message is dropped as [`QUEUE_LIMIT`] says, counted and logged, and the
+    /// `capped` message is owed: a `detected` message never evicts an `explained` one, which
+    /// stands for a model call already spent and is sent once, while a `detected` message's facts
+    /// stay in its Event and the log (docs/adr/0027-fact-statement-for-the-detections.md).
     pub fn enqueue(&self, item: Queued) -> io::Result<()> {
         if item.explanation.is_none() && self.sent.borrow().holds(&item.fingerprint, Instant::now())
         {
@@ -462,15 +477,23 @@ impl<'a> Outbox<'a> {
         }
         let dropped = {
             let mut queue = self.queue.borrow_mut();
-            let dropped = if queue.len() >= QUEUE_LIMIT {
-                queue.pop_front()
-            } else {
+            if queue.len() < QUEUE_LIMIT {
+                queue.push_back(item);
                 None
-            };
-            queue.push_back(item);
-            dropped
+            } else if let Some(at) = queue.iter().position(|q| q.explanation.is_none()) {
+                let dropped = queue.remove(at);
+                queue.push_back(item);
+                dropped
+            } else if item.explanation.is_none() {
+                Some(item)
+            } else {
+                let dropped = queue.pop_front();
+                queue.push_back(item);
+                dropped
+            }
         };
         if let Some(dropped) = dropped {
+            self.cap.borrow_mut().owe();
             self.metrics
                 .inc("kausa_notifications_total", &[("outcome", "dropped")]);
             log::warn(
@@ -481,18 +504,28 @@ impl<'a> Outbox<'a> {
         Ok(())
     }
 
+    /// Notes a message that never reached the queue, dropped by another bound (the fact queue's):
+    /// the `capped` message is owed.
+    pub fn owe_capped(&self) {
+        self.cap.borrow_mut().owe();
+    }
+
     /// Empties the queue when a term ends; returns how many messages it held.
     pub fn clear(&self) -> usize {
         self.queue.borrow_mut().drain(..).count()
     }
 
-    /// The dequeue rule. Pops and drops, without counting or logging them, the `explained`
-    /// messages whose `Dedup` entry (expired or not) stores the same text and is notified, and
-    /// the `detected` ones sent in their window. A `detected` message over the cap is counted as
-    /// `capped` and logged, and in its place the `capped` message is returned when it is due.
-    /// Returns the first message to send. An evicted or replaced `Dedup` entry does not stop one.
+    /// The dequeue rule. The `capped` message first, when it is owed and due. Then pops and
+    /// drops, without counting or logging them, the `explained` messages whose `Dedup` entry
+    /// (expired or not) stores the same text and is notified, and the `detected` ones sent in
+    /// their window. A `detected` message over the cap is counted as `capped` and logged, and owes
+    /// the `capped` message, which is returned in its place when it is due. Returns the first
+    /// message to send. An evicted or replaced `Dedup` entry does not stop one.
     pub fn take_next(&self, dedup: Option<&Dedup>, now: Instant) -> io::Result<Option<Outgoing>> {
         loop {
+            if self.cap.borrow_mut().capped_due(now) {
+                return Ok(Some(Outgoing::Capped));
+            }
             let Some(item) = self.queue.borrow_mut().pop_front() else {
                 return Ok(None);
             };
@@ -509,7 +542,7 @@ impl<'a> Outbox<'a> {
                     let mut cap = self.cap.borrow_mut();
                     if !cap.admit(now) {
                         let limit = cap.limit();
-                        let due = cap.capped_due(now);
+                        cap.owe();
                         drop(cap);
                         self.metrics
                             .inc("kausa_notifications_total", &[("outcome", "capped")]);
@@ -517,9 +550,6 @@ impl<'a> Outbox<'a> {
                             "notification capped",
                             json!({"fingerprint": item.fingerprint, "limit": limit}),
                         )?;
-                        if due {
-                            return Ok(Some(Outgoing::Capped));
-                        }
                         continue;
                     }
                 }
@@ -1481,6 +1511,101 @@ mod tests {
     }
 
     #[test]
+    fn detected_messages_dropped_by_a_full_queue_owe_the_capped_message() {
+        // More incidents settle at once than the queue holds, far below the hourly cap.
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        for i in 0..25 {
+            outbox
+                .enqueue(detected_for(&format!("fp-{i}")))
+                .expect("the log");
+        }
+        assert_eq!(outbox.queue().len(), QUEUE_LIMIT);
+        assert_eq!(outcomes(&metrics), (0, 0, 9, 0));
+        let now = Instant::now();
+        let mut taken = Vec::new();
+        while let Some(next) = outbox.take_next(None, now).expect("the log") {
+            taken.push(next);
+        }
+        // The receiver is told first that messages were not sent, then gets the newest 16.
+        assert_eq!(taken.len(), 1 + QUEUE_LIMIT);
+        assert_eq!(taken[0], Outgoing::Capped);
+        assert_eq!(
+            taken[1],
+            Outgoing::Message(Box::new(detected_for("fp-9"))),
+            "the oldest left first"
+        );
+        assert_eq!(capped(&metrics), 0, "none was over the cap");
+        // Owed once: nothing more was dropped, and the next message is a queued one.
+        outbox.enqueue(detected_for("fp-25")).expect("the log");
+        assert_eq!(
+            outbox.take_next(None, now).expect("the log"),
+            Some(Outgoing::Message(Box::new(detected_for("fp-25"))))
+        );
+    }
+
+    #[test]
+    fn a_detected_message_never_evicts_an_explained_one() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        // A full queue of one explained message and detected ones: a new one drops the oldest
+        // detected, not the explained message ahead of it.
+        outbox
+            .enqueue(item_for("explained-0", "s"))
+            .expect("the log");
+        for i in 1..QUEUE_LIMIT {
+            outbox
+                .enqueue(detected_for(&format!("fp-{i}")))
+                .expect("the log");
+        }
+        outbox.enqueue(detected_for("fp-new")).expect("the log");
+        {
+            let queue = outbox.queue();
+            assert_eq!(queue.len(), QUEUE_LIMIT);
+            assert_eq!(queue[0].fingerprint, "explained-0");
+            assert_eq!(queue[1].fingerprint, "fp-2");
+            assert_eq!(queue[QUEUE_LIMIT - 1].fingerprint, "fp-new");
+        }
+        // A new explained message drops the oldest detected one too.
+        outbox
+            .enqueue(item_for("explained-1", "s"))
+            .expect("the log");
+        {
+            let queue = outbox.queue();
+            assert_eq!(queue[0].fingerprint, "explained-0");
+            assert_eq!(queue[1].fingerprint, "fp-3");
+            assert_eq!(queue[QUEUE_LIMIT - 1].fingerprint, "explained-1");
+        }
+        // A queue of explained messages only: a new detected message is the one dropped.
+        let only = Metrics::default();
+        let explained = outbox_with(&only);
+        for i in 0..QUEUE_LIMIT {
+            explained
+                .enqueue(item_for(&format!("explained-{i}"), "s"))
+                .expect("the log");
+        }
+        explained.enqueue(detected_for("fp-late")).expect("the log");
+        assert!(
+            explained
+                .queue()
+                .iter()
+                .all(|q| q.fingerprint.starts_with("explained-"))
+        );
+        assert_eq!(outcomes(&only), (0, 0, 1, 0));
+        // Each drop owes the capped message.
+        assert_eq!(
+            explained.take_next(None, Instant::now()).expect("the log"),
+            Some(Outgoing::Capped)
+        );
+        assert_eq!(outcomes(&metrics), (0, 0, 2, 0));
+    }
+
+    /// The outbox of a notifier that reaches nothing, at the default cap.
+    fn outbox_with(metrics: &Metrics) -> Outbox<'_> {
+        outbox(nowhere(), metrics, TTL)
+    }
+
+    #[test]
     fn the_dequeue_rule_skips_only_what_was_sent() {
         let metrics = Metrics::default();
         let outbox = outbox(nowhere(), &metrics, TTL);
@@ -1625,8 +1750,12 @@ mod tests {
         assert!(cap.admit(now + CAP_WINDOW));
         assert!(!cap.admit(now + CAP_WINDOW + Duration::from_secs(1)));
         assert!(cap.admit(now + CAP_WINDOW + Duration::from_secs(60)));
-        // The capped message is due once, then once 60 minutes later.
+        // The capped message is due only when owed: once, then once 60 minutes later.
+        assert!(!cap.capped_due(now));
+        cap.owe();
         assert!(cap.capped_due(now));
+        assert!(!cap.capped_due(now), "no longer owed");
+        cap.owe();
         assert!(!cap.capped_due(now + CAP_WINDOW - Duration::from_secs(1)));
         assert!(cap.capped_due(now + CAP_WINDOW));
     }
@@ -1664,8 +1793,13 @@ mod tests {
             outbox.take_next(None, now).expect("the log"),
             Some(Outgoing::Message(Box::new(item())))
         );
-        // An hour later, the cap admits again.
+        // An hour later the fourth and the fifth, capped after the capped message, owe another
+        // one, which goes first; and the cap admits again.
         outbox.enqueue(detected_for("fp-5")).expect("the log");
+        assert_eq!(
+            outbox.take_next(None, now + CAP_WINDOW).expect("the log"),
+            Some(Outgoing::Capped)
+        );
         assert_eq!(
             outbox.take_next(None, now + CAP_WINDOW).expect("the log"),
             Some(Outgoing::Message(Box::new(detected_for("fp-5"))))

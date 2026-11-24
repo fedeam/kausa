@@ -32,8 +32,10 @@ model provider does not change: the statement is not in the request.
   `--dry-run`.
 - `--notify-max-per-hour` (the chart's `notifications.maxPerHour`; 30 by default, 1 to 3600): at
   most that many `detected` messages start in any 60 minutes. Over it a message is not sent and
-  is counted, and at most once an hour kausa posts one fixed `capped` message that says the
-  others are in Events and in its log. `explained` messages keep the call budget as their bound.
+  is counted, and at most once an hour kausa posts one fixed `capped` message that says not every
+  incident is posted and that its log has every one; a message dropped by the full queue of 16
+  or the fact queue owes it too. A `detected` message never pushes an `explained` one out of the
+  queue. `explained` messages keep the call budget as their bound.
 - Metrics: `kausa_events_written_total{reason="Detected"}`,
   `kausa_notifications_total{outcome="capped"}`, `kausa_facts_dropped_total` (a fact dropped from
   the full queue of 1024) and `kausa_fact_reasons_omitted_total` (a reason outside kausa's list,

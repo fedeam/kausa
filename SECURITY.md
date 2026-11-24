@@ -362,7 +362,11 @@ kausa must:
   an enumerated reason, an exit code, two counts and a revision. The container's name is in the
   `Detected` Event and the log, never in a notification. The messages are bounded by once per
   fingerprint per `--dedup-hours` and `--notify-max-per-hour` (30 by default); over the cap a
-  message is not sent, and at most once an hour a fixed `capped` message says so. Whoever can
+  message is not sent, and at most once an hour a fixed `capped` message says so. The same
+  message is owed when the queue of 16, which `detected` and `explained` messages share, or the
+  fact queue of 1024 drops one in a burst; a `detected` message never pushes an `explained` one
+  out of the queue, so a burst of failing Pods in one namespace cannot evict the explanations
+  of others. Messages dropped when kausa stops or its lease term ends owe nothing. Whoever can
   create Pods in a watched namespace still decides which incidents there are, so the cap bounds
   the channel, not who fills it.
 - **Facts and the model's text are told apart by a mark.** The `Explained` Event, the Slack and

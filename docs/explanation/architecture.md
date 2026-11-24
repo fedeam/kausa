@@ -335,8 +335,9 @@ and without any model:
   fact. It runs with or without `--endpoint`, unless `--no-events` (no Event; the message is
   queued at once), and never in dry-run.
 - **A bound on the webhook.** A `detected` message goes once per fingerprint per `--dedup-hours`
-  and at most `--notify-max-per-hour` an hour; over the cap kausa posts one fixed `capped`
-  message at most once an hour, and the Event and the log line stand.
+  and at most `--notify-max-per-hour` an hour; over the cap, or when the queue of 16 or the fact
+  queue drops a message, kausa posts one fixed `capped` message at most once an hour, and the log
+  line stands. A `detected` message never pushes an `explained` one out of the queue.
 - **The model's text is marked.** An `Explained` Event, a Slack or Telegram text and the `json`
   body's `explanation` start with or sit under `Model's explanation, not verified:` or its key,
   so a reader can tell what kausa read from what a model wrote. What goes to the model does not

@@ -1212,7 +1212,12 @@ async fn lead<C: Cluster>(
                     }
                     log_incident(&incident, pods_total, &statement.text)?;
                     if reporter.is_some() {
-                        report::enqueue(&mut facts, Fact::new(&incident, statement.facts), metrics)?;
+                        report::enqueue(
+                            &mut facts,
+                            Fact::new(&incident, statement.facts),
+                            metrics,
+                            reporter.as_ref().and_then(|r| r.outbox),
+                        )?;
                     }
                     if options.explain.is_some() {
                         enqueue(&mut queue, state.job(incident), metrics, waiting)?;

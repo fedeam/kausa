@@ -66,7 +66,7 @@ Options of `kausa run`:
 | `--notify-telegram-chat-id <ID>` | With `telegram` only, and required with it: the chat, an integer that is not `0` (a leading `-`, no `+`) or `@` and a channel's username (a letter, then 4 to 31 letters, digits or `_`). Not a secret |
 | `--notify-token-file <PATH>` | With `json` only, optional: a file whose content (trimmed) is sent as `Authorization: Bearer <token>` |
 | `--notify-allow-http` | Allow an `http://` webhook, for one in the cluster or the same private network; separate from `--allow-http` |
-| `--notify-max-per-hour <N>` | `detected` messages started in any 60 minutes, a whole number from `1` to `3600`; `30` by default. Over it a `detected` message is not sent, and one fixed `capped` message is posted at most once an hour ([Notifications](#notifications)). `explained` messages are bounded by the call budget instead |
+| `--notify-max-per-hour <N>` | `detected` messages started in any 60 minutes, a whole number from `1` to `3600`; `30` by default. Over it a `detected` message is not sent, and one fixed `capped` message, also owed when a queue drops a message, is posted at most once an hour ([Notifications](#notifications)). `explained` messages are bounded by the call budget instead |
 | `--max-calls-per-hour <N>` | Model calls allowed in any hour, `30` by default; `0` allows none. Each start allows 3 at once (`N` if fewer), then one every `3600/N` seconds, up to `N` saved; with `--leader-lease`, each takeover also starts with at most 3 ([0021](../adr/0021-refill-the-call-budget.md)). Help: `Model calls allowed in any hour (default 30); each start allows 3 at once, then one every 3600/N seconds` |
 | `--max-calls-per-day <N>` | Model calls allowed in any 24 hours, per process, `200` by default. A restart starts a new process: for the daily cap to hold across restarts, up to the bursts of 3, set `--max-calls-per-hour` to at most a 24th of it |
 | `--max-input-tokens <N>` | Cap on a request's estimated input tokens (a quarter of its bytes), `6000` by default: the context is cut to fit, and an incident that still does not fit is skipped |
@@ -606,11 +606,14 @@ process and never changes the exit code.
 With `--notify-url-file`, each settled incident's `detected` message is queued after its
 `Detected` Event, and each new explanation's `explained` message after its Event (both at once
 with `--no-events`); they are sent by their own task, one at a time, at least 1 second apart (3
-seconds with `telegram`), from a queue of 16 that drops its oldest. A cached repeat is queued again
+seconds with `telegram`), from a queue of 16 that drops its oldest `detected` message first and
+never drops an `explained` one for a `detected` one. A cached repeat is queued again
 only while the webhook has not acknowledged that explanation with a `2xx`. A `detected` message is
 sent once per fingerprint per `--dedup-hours`, and at most `--notify-max-per-hour` of them start in
-any 60 minutes; over it each one is counted as `capped` and logged (`notification capped`), and
-the fixed `capped` message is posted instead at most once an hour. A send never delays a fact, an
+any 60 minutes; over it each one is counted as `capped` and logged (`notification capped`). A
+message over the cap, one dropped by the full queue and an incident whose fact was dropped
+(`fact dropped`) owe the fixed `capped` message, posted before the queued ones at most once an
+hour. A send never delays a fact, an
 explanation or an Event, never stops kausa and never changes its exit code; queued notifications
 are dropped at `SIGTERM` and, with `--leader-lease`, when the leader steps down (counted as
 `dropped`). What is sent: [Data sent in

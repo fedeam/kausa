@@ -166,8 +166,9 @@ A repeat of the same incident within `budget.dedupHours` is not posted again onc
 acknowledged it. With a model, an incident is two messages: `detected` at once, `explained` when
 the model has answered. At most `notifications.maxPerHour` `detected` messages go out in any 60
 minutes (30 by default, 1 to 3600): over it, a message is not sent, `kausa_notifications_total{outcome="capped"}`
-counts it, and at most once an hour kausa posts one fixed `capped` message that says the others
-are in Events and in its log. Set the value with `--set notifications.maxPerHour=<n>`.
+counts it, and at most once an hour kausa posts one fixed `capped` message that says not every
+incident is posted and that its log has every one. A burst that fills the queue of 16 owes the
+same message. Set the value with `--set notifications.maxPerHour=<n>`.
 
 ## Upgrade from `v1` bodies
 
@@ -191,7 +192,8 @@ alerting rules of [Alerts](../reference/alerts.md), which fires for about an hou
 notification.
 
 `kausa_notifications_total{outcome="dropped"}` counts notifications pushed out of the queue of 16
-by a burst, `kausa_notifications_total{outcome="capped"}` counts `detected` messages over the cap,
+by a burst (a `detected` one first; a `detected` one never pushes out an `explained` one),
+`kausa_notifications_total{outcome="capped"}` counts `detected` messages over the cap,
 and `kausa_notifications_retried_total` counts second attempts.
 
 ## Turn it off

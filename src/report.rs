@@ -108,9 +108,18 @@ impl Queue {
     }
 }
 
-/// Adds `fact` to `queue`; a fact dropped to make room is logged and counted.
-pub fn enqueue(queue: &mut Queue, fact: Fact, metrics: &Metrics) -> io::Result<()> {
+/// Adds `fact` to `queue`; a fact dropped to make room is logged and counted, and owes the
+/// webhook's `capped` message, since its `detected` message is never queued.
+pub fn enqueue(
+    queue: &mut Queue,
+    fact: Fact,
+    metrics: &Metrics,
+    outbox: Option<&Outbox<'_>>,
+) -> io::Result<()> {
     if let Some(dropped) = queue.push(fact) {
+        if let Some(outbox) = outbox {
+            outbox.owe_capped();
+        }
         metrics.inc("kausa_facts_dropped_total", &[]);
         log::warn(
             "fact dropped",
@@ -242,14 +251,39 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_fact_is_counted() {
+    fn a_dropped_fact_is_counted_and_owes_the_capped_message() {
         let metrics = Metrics::default();
+        // A webhook that is never reached: the test only queues.
+        let notifier = notify::Notifier::new(
+            "http://192.0.2.1/hook".parse().expect("a URL"),
+            notify::Format::Json,
+            None,
+            true,
+        )
+        .expect("a notifier");
+        let term = Term::unbounded();
+        let outbox = Outbox::new(&notifier, std::time::Duration::ZERO, 30, &metrics, &term);
         let mut queue = Queue::default();
-        for i in 0..FACT_QUEUE_CAPACITY + 3 {
-            enqueue(&mut queue, fact(i), &metrics).expect("the log is written");
+        for i in 0..FACT_QUEUE_CAPACITY {
+            enqueue(&mut queue, fact(i), &metrics, Some(&outbox)).expect("the log is written");
+        }
+        let now = tokio::time::Instant::now();
+        assert_eq!(outbox.take_next(None, now).expect("the log"), None);
+        for i in FACT_QUEUE_CAPACITY..FACT_QUEUE_CAPACITY + 3 {
+            enqueue(&mut queue, fact(i), &metrics, Some(&outbox)).expect("the log is written");
         }
         assert_eq!(queue.len(), FACT_QUEUE_CAPACITY);
         assert!(metrics.render().contains("\nkausa_facts_dropped_total 3\n"));
+        assert_eq!(
+            outbox.take_next(None, now).expect("the log"),
+            Some(notify::Outgoing::Capped)
+        );
+        // Without a webhook, a dropped fact is only counted.
+        let mut queue = Queue::default();
+        for i in 0..=FACT_QUEUE_CAPACITY {
+            enqueue(&mut queue, fact(i), &metrics, None).expect("the log is written");
+        }
+        assert!(metrics.render().contains("\nkausa_facts_dropped_total 4\n"));
     }
 
     #[test]
