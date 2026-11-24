@@ -4,8 +4,10 @@ What a prototype of [0027. Report each settled incident as a fact statement in i
 Event and webhook message, with or without a model, and mark the model's text as a
 model's](../adr/0027-fact-statement-for-the-detections.md) costs against the three bars of that
 record's point 10, and what its hypotheses about the API server turned out to be. The three bars
-hold in kind and on a Raspberry Pi 4; two of the record's numbers and one of its hypotheses do
-not.
+hold in kind. On a Raspberry Pi 4, with about 100 Pods, the second and the third hold, and the
+first holds if the kubelet's `rssBytes` is the anonymous memory of the control group, which is a
+hypothesis there ([On a Raspberry Pi 4](#on-a-raspberry-pi-4)). Two of the record's numbers and
+one of its hypotheses do not hold.
 
 Measured on 2026-11-20 in a kind cluster on the maintainer's machine, and on 2026-11-24 in a k3s
 cluster of Raspberry Pi 4 ([On a Raspberry Pi 4](#on-a-raspberry-pi-4)), each figure from two to
@@ -18,7 +20,7 @@ ten runs: a data point, not a benchmark.
 | Idle memory within the run-to-run spread of v0.6.2, 10,000 Pods | The process's own memory in all ten runs; the `docker stats` figure in nine of ten | Yes, with the note below |
 | A full fact queue adds at most 2 MiB | 1.73 to 1.74 MiB resident (1.55 MiB computed) | Yes, by 13% |
 | 1024 `Detected` Events in a row cause no watch error and no relist | 0 errors, 0 relists, 0 restarts on the three watches, twice | Yes |
-| The same three on a Raspberry Pi 4, about 100 Pods | Within the spread; 1.80 MiB; 0 errors, 0 relists, three runs | Yes |
+| The same three on a Raspberry Pi 4, about 100 Pods | Within the spread of the kubelet's `rssBytes`; 1.80 MiB (`VmRSS`); 0 errors, 0 relists, three runs | The second and the third, yes; the first if `rssBytes` is the anonymous memory, a hypothesis |
 
 Idle memory with 10,000 Pods, 20 seconds after start, ten runs of each image, in MiB:
 
@@ -147,7 +149,9 @@ What the numbers ask of the record before acceptance:
 
 ## On a Raspberry Pi 4
 
-Measured on 2026-11-24. The three bars hold there as well.
+Measured on 2026-11-24. The second and the third bars hold there; the first holds if the
+kubelet's `rssBytes` is the anonymous memory of the control group, a hypothesis
+([Setup](#setup-1)).
 
 Point 10 of the record repeats 0026's "on a Raspberry Pi 4 and with 10,000 Pods". This note reads
 it as two measurements: 10,000 Pods in kind, above, and a real cluster of Raspberry Pi 4 with the
@@ -165,7 +169,13 @@ Pods it runs, here. That reading is an interpretation, not something the record 
   Role and RoleBinding of `create` and `patch` on Events in that namespace only.
 - Memory: the container's `rssBytes` and `workingSetBytes` from the kubelet's summary API. That
   `rssBytes` is the anonymous memory of the control group, the figure point 10 names, is a
-  hypothesis: it was not checked on these nodes. The kubelet's timestamp for a reading was 11 to
+  hypothesis: it was not checked on these nodes. The source supports it: in cAdvisor v0.49.2
+  (`container/libcontainer/handler.go`) a container's `RSS` is the control group's `anon` on
+  cgroup v2 and its `total_rss` or `rss` on cgroup v1, and the kubelet's summary copies that
+  figure into `rssBytes`; whether the kubelet of these nodes takes its container stats from
+  cAdvisor, and which cgroup version the nodes run, was not checked. When the queue filled,
+  `rssBytes` grew by about what `VmRSS` grew (Bar 2), as anonymous memory would: consistent with
+  the hypothesis, not a proof of it. The kubelet's timestamp for a reading was 11 to
   19 seconds behind the clock, so a reading "at 60 seconds" is from 41 to 49 seconds after start.
   For the queue, also `VmRSS` of `/proc/self/status`, logged by the process, as in kind.
 - Counters: `/metrics` of each Pod, through the API server's proxy.
@@ -231,7 +241,8 @@ The three runs above delete, wait and restart before they read.
 - **The two measurements are not one.** The 10,000 Pods were measured in kind only; the Raspberry
   Pi 4 ran about 100 Pods. Reading point 10 as two measurements is this note's interpretation.
 - On the Raspberry Pi 4 the figures are the kubelet's, read 11 to 19 seconds late, and
-  `VmRSS`; the anonymous memory of the control group was not read there directly.
+  `VmRSS`; the anonymous memory of the control group was not read there directly, so the first
+  bar there rests on the hypothesis that `rssBytes` is that memory.
 - Chart 0.6.2 and an extra Role, not the chart that ships with the implementation.
 - One machine, a local API server, and a virtual machine shared with other containers. The
   outliers of `docker stats` were not explained.
