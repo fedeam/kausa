@@ -1,6 +1,6 @@
 # 0027. Report each settled incident as a fact statement in its own `Detected` Event and webhook message, with or without a model, and mark the model's text as a model's
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-19
 - Stage 1 of: [0026. Report every incident as facts without a model, keep the explanation
   optional, and widen coverage one bounded source at a time](0026-facts-before-the-model.md)
@@ -371,8 +371,11 @@ an entry for the table.
   `proto/0027-fact-statement`: [The fact statement prototype,
   measured](../research/2026-11-20-fact-statement-prototype.md). The three bars hold there; the
   numbers of points 1 and 3 and the hypothesis about the image were corrected in this text from
-  it. The measurement on a Raspberry Pi 4 is **pending**, and this ADR stays `proposed` until
-  the note has it.
+  it.
+- **Measured on a Raspberry Pi 4 on 2026-11-24**, in a k3s cluster of three with about 100 Pods,
+  the published v0.6.2 and the prototype side by side on one node, in the same note: the three
+  bars hold there too. The 10,000 Pods were measured in kind only; reading 0026's "on a
+  Raspberry Pi 4 and with 10,000 Pods" as two measurements is the note's interpretation.
 
 With the implementation, before the release that ships it:
 
@@ -415,8 +418,7 @@ With the implementation, before the release that ships it:
   the README, the documentation front page, the chart's description and the Artifact Hub entry.
 - **This ADR cannot be accepted on reading alone.** Point 10 needs a prototype and a research
   note first, as 0026 decided for every stage.
-- **Not verified:** nothing here is merged, and nothing is measured on a Raspberry Pi 4. The
-  prototype of point 10 has no webhook message, so the cost of that path is in no figure. The
+- **Not verified:** the prototype of point 10 has no webhook message, so the cost of that path is in no figure. The
   defaults of point 5 (30 an hour, 1024 fingerprints) are chosen by analogy with the call budget
   and the deduplication cache, and the hypotheses still open are listed in point 10.
 - **When accepted:** `Update` paragraphs in 0015 and 0008. With the implementation: [Command line
@@ -430,3 +432,10 @@ With the implementation, before the release that ships it:
   [ARCHITECTURE.md](../../ARCHITECTURE.md): invariant 6 gains "a fact never waits for the model,
   the budget, the breaker or an explanation", and a new invariant 12 says what a fact statement
   may hold (point 1) and that changing it needs an ADR.
+
+Update 2026-11-24: accepted on 2026-11-24, after the measurement on a Raspberry Pi 4 of point 10,
+under a plan that FedeAM approved that day and that delegates the acceptance of ADRs within the
+limits it sets. It is implemented in the same pull request as this acceptance, which also renames
+`D013` to "autoscaler cannot read metrics or target scale", as point 1 asks; its id stays `D013`.
+0015 and 0008 get their `Update` paragraphs, and invariant 6 of
+[ARCHITECTURE.md](../../ARCHITECTURE.md) and its new invariant 12 change, with this acceptance.
