@@ -1,25 +1,35 @@
-//! Notifications (docs/adr/0015-notifications.md): the webhook's URL check, its client, the queue
-//! of notifications and their delivery, one at a time, outside the explanation path. The bodies
-//! are built by `notification.rs`.
+//! Notifications (docs/adr/0015-notifications.md, docs/adr/0027-fact-statement-for-the-detections.md):
+//! the webhook's URL check, its client, the queue of messages and their delivery, one at a time,
+//! outside the explanation path and the fact path. The bodies are built by `notification.rs`.
+//!
+//! A `detected` message is queued by the fact path, an `explained` one by the explanation path.
+//! The `detected` ones have their own bounds: once per fingerprint per `--dedup-hours`, and at most
+//! `--notify-max-per-hour` started in any 60 minutes, over which one fixed `capped` message is
+//! posted at most once an hour.
 //!
 //! The webhook URL and the bearer token are secrets: they are never logged, and no error, reason
 //! or `Debug` output carries them. Only the status code of an answer is read, never its body.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
 use reqwest::Url;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use crate::budget::Dedup;
-use crate::explain::{self, Shared};
+use crate::explain;
+use crate::fact;
 use crate::incident::Incident;
+use crate::leader::Term;
 use crate::log;
+use crate::metrics::Metrics;
 use crate::model::without_url;
-use crate::notification::{self, ChatId, Notice};
+use crate::notification::{self, ChatId, Message, Notice};
 use crate::prompt::Explanation;
+use crate::report::Fact;
 
 /// How many notifications may wait for the webhook; the oldest is dropped when one more arrives.
 pub const QUEUE_LIMIT: usize = 16;
@@ -28,6 +38,15 @@ pub const QUEUE_LIMIT: usize = 16;
 pub const MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// The same for `telegram`: Telegram lets a bot send 20 messages a minute to a group.
 pub const TELEGRAM_MIN_INTERVAL: Duration = Duration::from_secs(3);
+
+/// The most fingerprints whose `detected` message is remembered as sent; one more drops the
+/// oldest.
+pub const SENT_CAPACITY: usize = 1024;
+/// The window of `--notify-max-per-hour`, and the least time between two `capped` messages.
+pub const CAP_WINDOW: Duration = Duration::from_secs(3600);
+/// `--notify-max-per-hour` without the flag, and the values it takes.
+pub const DEFAULT_MAX_PER_HOUR: usize = 30;
+pub const MAX_PER_HOUR: std::ops::RangeInclusive<usize> = 1..=3600;
 
 /// The time to connect, and the time for a whole request, before it fails as transient.
 #[cfg(not(test))]
@@ -171,6 +190,20 @@ impl Notifier {
             Format::Slack => notification::slack_body(notice),
             Format::Telegram(chat) => notification::telegram_body(notice, chat),
         };
+        self.post(body).await
+    }
+
+    /// The same for the fixed `capped` message, with `limit` `detected` messages an hour.
+    pub async fn send_capped(&self, limit: usize) -> Result<u16, Failure> {
+        let body = match &self.format {
+            Format::Json => notification::capped_json_body(limit, env!("CARGO_PKG_VERSION")),
+            Format::Slack => notification::capped_slack_body(limit),
+            Format::Telegram(chat) => notification::capped_telegram_body(limit, chat),
+        };
+        self.post(body).await
+    }
+
+    async fn post(&self, body: Value) -> Result<u16, Failure> {
         let mut request = self
             .client
             .post(self.url.clone())
@@ -201,22 +234,40 @@ impl Notifier {
     }
 }
 
-/// One notification waiting for the webhook.
+/// One message waiting for the webhook.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Queued {
-    /// The incident's fingerprint, the key of its `Dedup` entry.
+    /// The incident's fingerprint: the key of its `Dedup` entry, or of the table of `detected`
+    /// messages sent.
     pub fingerprint: String,
-    /// The explanation as the notification restores it (only the namespace and the top-level
-    /// owner), which the `Dedup` entry stores as its `notice`.
-    pub explanation: Explanation,
+    /// For an `explained` message, the explanation as the message restores it (only the namespace
+    /// and the top-level owner), which the `Dedup` entry stores as its `notice`; `None` for a
+    /// `detected` one.
+    pub explanation: Option<Explanation>,
     pub notice: Notice,
 }
 
-/// The notification of `incident` with `narrow`, the explanation restored by
-/// `Redactor::restore_only` for the namespace and the top-level owner.
-pub fn queued(incident: &Incident, narrow: Explanation) -> Queued {
+/// The facts of a statement as a message carries them: without the detection, which the message
+/// names apart, and without the container, whose name never leaves in a notification
+/// (docs/adr/0027-fact-statement-for-the-detections.md, point 5).
+pub fn facts(facts: &fact::Facts) -> notification::Facts {
+    notification::Facts {
+        reason: facts.reason.map(str::to_owned),
+        exit_code: facts.exit_code,
+        pods_seen: facts.pods_seen,
+        pods_seen_is_minimum: facts.pods_seen_is_minimum,
+        pods_now: facts.pods_now,
+        revision: facts.revision,
+    }
+}
+
+/// The `explained` message of `incident` with `narrow`, the explanation restored by
+/// `Redactor::restore_only` for the namespace and the top-level owner, and with the facts of its
+/// statement (`pods_total` Pods held for its owner).
+pub fn queued(incident: &Incident, pods_total: usize, narrow: Explanation) -> Queued {
     let detection = incident.key.detection;
     let notice = Notice {
+        message: Message::Explained,
         detection_id: detection.id().to_owned(),
         detection_name: detection.name().to_owned(),
         api_version: incident.owner.api_version.clone(),
@@ -226,6 +277,7 @@ pub fn queued(incident: &Incident, narrow: Explanation) -> Queued {
         fingerprint: incident.fingerprint.clone(),
         // The same string as the incident's log line.
         first_seen: incident.first_seen.to_string(),
+        facts: facts(&fact::statement(incident, pods_total).facts),
         summary: narrow.summary.clone(),
         cause: narrow.cause.clone(),
         steps: narrow.steps.clone(),
@@ -233,147 +285,374 @@ pub fn queued(incident: &Incident, narrow: Explanation) -> Queued {
     };
     Queued {
         fingerprint: incident.fingerprint.clone(),
-        explanation: narrow,
+        explanation: Some(narrow),
         notice,
     }
 }
 
-/// Queues `item`; when the queue is full, its oldest notification is dropped, counted and logged.
-pub fn enqueue(shared: &Shared<'_>, item: Queued) -> io::Result<()> {
-    let dropped = {
-        let mut queue = shared.notifications.borrow_mut();
-        let dropped = if queue.len() >= QUEUE_LIMIT {
-            queue.pop_front()
-        } else {
-            None
-        };
-        queue.push_back(item);
-        dropped
+/// The `detected` message of `fact`.
+pub fn detected(fact: &Fact) -> Queued {
+    let detection = fact.facts.detection;
+    let notice = Notice {
+        message: Message::Detected,
+        detection_id: detection.id().to_owned(),
+        detection_name: detection.name().to_owned(),
+        api_version: fact.owner.api_version.clone(),
+        kind: fact.owner.kind.clone(),
+        namespace: fact.namespace.clone(),
+        name: fact.owner.name.clone(),
+        fingerprint: fact.fingerprint.clone(),
+        // The same string as the incident's log line.
+        first_seen: fact.first_seen.to_string(),
+        facts: facts(&fact.facts),
+        summary: String::new(),
+        cause: String::new(),
+        steps: Vec::new(),
+        confidence: String::new(),
     };
-    if let Some(dropped) = dropped {
-        shared
-            .metrics
-            .inc("kausa_notifications_total", &[("outcome", "dropped")]);
-        log::warn(
-            "notification dropped",
-            json!({"fingerprint": dropped.fingerprint, "reason": "the queue is full"}),
-        )?;
+    Queued {
+        fingerprint: fact.fingerprint.clone(),
+        explanation: None,
+        notice,
     }
-    Ok(())
 }
 
-/// The dequeue rule: pops and drops, without counting or logging them, the notifications whose
-/// `Dedup` entry (expired or not) stores the same text and is notified, and returns the first
-/// one that is not. An evicted or replaced entry does not stop a notification.
-pub fn take_next(queue: &mut VecDeque<Queued>, dedup: &Dedup) -> Option<Queued> {
-    while let Some(item) = queue.pop_front() {
-        if !dedup.already_sent(&item.fingerprint, &item.explanation) {
-            return Some(item);
+/// What the notification slot sends next: a queued message, or the fixed `capped` one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outgoing {
+    Message(Box<Queued>),
+    Capped,
+}
+
+/// The fingerprints whose `detected` message the webhook acknowledged, and when, oldest first, at
+/// most `SENT_CAPACITY`. A fingerprint is sent again once `ttl` has passed; with a `ttl` of zero,
+/// every occurrence is.
+pub struct Sent {
+    ttl: Duration,
+    entries: VecDeque<(String, Instant)>,
+}
+
+impl Sent {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            entries: VecDeque::new(),
         }
     }
-    None
+
+    /// Whether the `detected` message of `fingerprint` was acknowledged less than `ttl` ago.
+    pub fn holds(&self, fingerprint: &str, now: Instant) -> bool {
+        self.entries.iter().any(|(known, at)| {
+            known == fingerprint && now.saturating_duration_since(*at) < self.ttl
+        })
+    }
+
+    /// Marks `fingerprint` acknowledged at `now`, as the newest entry.
+    pub fn mark(&mut self, fingerprint: &str, now: Instant) {
+        if self.ttl.is_zero() {
+            return;
+        }
+        self.entries.retain(|(known, _)| known != fingerprint);
+        if self.entries.len() >= SENT_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((fingerprint.to_owned(), now));
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
-/// Sends one notification: one attempt and, after a transient failure, one more after
-/// `RETRY_DELAY`. Counts and logs the outcome, marks the `Dedup` entry notified after a success
-/// (only if it still stores this text), then waits until the format's least interval
-/// ([`Format::min_interval`]) has passed since the last attempt began. A failure is only logged and counted; the error is the log's.
-/// Each attempt is made only while the lease term holds; past its end the item is dropped, counted
-/// as `dropped` and not logged.
-pub async fn deliver(notifier: &Notifier, item: Queued, shared: &Shared<'_>) -> io::Result<()> {
-    let mut attempt: u8 = 1;
-    loop {
-        if !shared.term.holds() {
-            count_dropped(shared);
+/// The starts of `detected` messages in the last `CAP_WINDOW`, and when the last `capped` message
+/// was started.
+pub struct Cap {
+    limit: usize,
+    starts: VecDeque<Instant>,
+    last_capped: Option<Instant>,
+}
+
+impl Cap {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            starts: VecDeque::new(),
+            last_capped: None,
+        }
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Whether one more `detected` message may start at `now`; if it may, its start is counted.
+    pub fn admit(&mut self, now: Instant) -> bool {
+        while self
+            .starts
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= CAP_WINDOW)
+        {
+            self.starts.pop_front();
+        }
+        if self.starts.len() >= self.limit {
+            return false;
+        }
+        self.starts.push_back(now);
+        true
+    }
+
+    /// Whether the `capped` message is due at `now`: never sent, or started `CAP_WINDOW` ago or
+    /// more. If it is, its start is counted.
+    pub fn capped_due(&mut self, now: Instant) -> bool {
+        let due = self
+            .last_capped
+            .is_none_or(|at| now.saturating_duration_since(at) >= CAP_WINDOW);
+        if due {
+            self.last_capped = Some(now);
+        }
+        due
+    }
+}
+
+/// The webhook and what its messages share across terms: the queue (emptied when a term ends),
+/// the table of `detected` messages sent and the cap, which live as long as the process.
+pub struct Outbox<'a> {
+    notifier: &'a Notifier,
+    queue: RefCell<VecDeque<Queued>>,
+    sent: RefCell<Sent>,
+    cap: RefCell<Cap>,
+    pub metrics: &'a Metrics,
+    /// The lease term: kausa notifies only while it holds (docs/adr/0019-high-availability.md).
+    pub term: &'a Term,
+}
+
+impl<'a> Outbox<'a> {
+    /// The outbox of `notifier`: a `detected` message is sent once per fingerprint per `ttl`, and
+    /// at most `max_per_hour` start in any 60 minutes.
+    pub fn new(
+        notifier: &'a Notifier,
+        ttl: Duration,
+        max_per_hour: usize,
+        metrics: &'a Metrics,
+        term: &'a Term,
+    ) -> Self {
+        Self {
+            notifier,
+            queue: RefCell::new(VecDeque::new()),
+            sent: RefCell::new(Sent::new(ttl)),
+            cap: RefCell::new(Cap::new(max_per_hour)),
+            metrics,
+            term,
+        }
+    }
+
+    /// The messages waiting, oldest first.
+    #[cfg(test)]
+    pub fn queue(&self) -> std::cell::Ref<'_, VecDeque<Queued>> {
+        self.queue.borrow()
+    }
+
+    /// Queues `item`; a `detected` message already sent in its window is not queued. When the
+    /// queue is full, its oldest message is dropped, counted and logged.
+    pub fn enqueue(&self, item: Queued) -> io::Result<()> {
+        if item.explanation.is_none() && self.sent.borrow().holds(&item.fingerprint, Instant::now())
+        {
             return Ok(());
         }
-        let started = Instant::now();
-        let result = notifier.send(&item.notice).await;
-        match result {
-            Ok(status) => {
-                shared
-                    .metrics
-                    .inc("kausa_notifications_total", &[("outcome", "sent")]);
-                shared
-                    .dedup
-                    .borrow_mut()
-                    .mark_notified(&item.fingerprint, &item.explanation);
-                log::info(
-                    "notification sent",
-                    json!({
-                        "fingerprint": item.fingerprint,
-                        "namespace": item.notice.namespace,
-                        "owner": {"kind": item.notice.kind, "name": item.notice.name},
-                        "format": notifier.format().name(),
-                        "status": status,
-                        "attempt": attempt,
-                    }),
-                )?;
-            }
-            Err(failure) if failure.transient && attempt == 1 => {
-                // The term ended during the attempt: no retry.
-                if !shared.term.holds() {
-                    count_dropped(shared);
-                    return Ok(());
-                }
-                shared.metrics.inc("kausa_notifications_retried_total", &[]);
-                log::warn(
-                    "notification retried",
-                    json!({
-                        "fingerprint": item.fingerprint,
-                        "reason": failure.reason,
-                        "retry_in_seconds": explain::RETRY_DELAY.as_secs(),
-                    }),
-                )?;
-                tokio::time::sleep(RETRY_WAIT).await;
-                attempt = 2;
-                continue;
-            }
-            Err(failure) => {
-                shared
-                    .metrics
-                    .inc("kausa_notifications_total", &[("outcome", "failed")]);
-                log::warn(
-                    "notification failed",
-                    json!({"fingerprint": item.fingerprint, "reason": failure.reason}),
-                )?;
-            }
+        let dropped = {
+            let mut queue = self.queue.borrow_mut();
+            let dropped = if queue.len() >= QUEUE_LIMIT {
+                queue.pop_front()
+            } else {
+                None
+            };
+            queue.push_back(item);
+            dropped
+        };
+        if let Some(dropped) = dropped {
+            self.metrics
+                .inc("kausa_notifications_total", &[("outcome", "dropped")]);
+            log::warn(
+                "notification dropped",
+                json!({"fingerprint": dropped.fingerprint, "reason": "the queue is full"}),
+            )?;
         }
-        tokio::time::sleep_until(started + notifier.format().min_interval()).await;
-        return Ok(());
+        Ok(())
     }
-}
 
-/// An item dropped because the lease term ended: counted, not logged.
-fn count_dropped(shared: &Shared<'_>) {
-    shared
-        .metrics
-        .inc("kausa_notifications_total", &[("outcome", "dropped")]);
+    /// Empties the queue when a term ends; returns how many messages it held.
+    pub fn clear(&self) -> usize {
+        self.queue.borrow_mut().drain(..).count()
+    }
+
+    /// The dequeue rule. Pops and drops, without counting or logging them, the `explained`
+    /// messages whose `Dedup` entry (expired or not) stores the same text and is notified, and
+    /// the `detected` ones sent in their window. A `detected` message over the cap is counted as
+    /// `capped` and logged, and in its place the `capped` message is returned when it is due.
+    /// Returns the first message to send. An evicted or replaced `Dedup` entry does not stop one.
+    pub fn take_next(&self, dedup: Option<&Dedup>, now: Instant) -> io::Result<Option<Outgoing>> {
+        loop {
+            let Some(item) = self.queue.borrow_mut().pop_front() else {
+                return Ok(None);
+            };
+            match &item.explanation {
+                Some(explanation) => {
+                    if dedup.is_some_and(|d| d.already_sent(&item.fingerprint, explanation)) {
+                        continue;
+                    }
+                }
+                None => {
+                    if self.sent.borrow().holds(&item.fingerprint, now) {
+                        continue;
+                    }
+                    let mut cap = self.cap.borrow_mut();
+                    if !cap.admit(now) {
+                        let limit = cap.limit();
+                        let due = cap.capped_due(now);
+                        drop(cap);
+                        self.metrics
+                            .inc("kausa_notifications_total", &[("outcome", "capped")]);
+                        log::warn(
+                            "notification capped",
+                            json!({"fingerprint": item.fingerprint, "limit": limit}),
+                        )?;
+                        if due {
+                            return Ok(Some(Outgoing::Capped));
+                        }
+                        continue;
+                    }
+                }
+            }
+            return Ok(Some(Outgoing::Message(Box::new(item))));
+        }
+    }
+
+    /// Sends one message: one attempt and, after a transient failure, one more after
+    /// `RETRY_DELAY`. Counts and logs the outcome; after a success, marks an `explained` message's
+    /// `Dedup` entry notified (only if it still stores this text) and a `detected` one sent. Then
+    /// waits until the format's least interval ([`Format::min_interval`]) has passed since the
+    /// last attempt began. A failure is only logged and counted; the error is the log's. Each
+    /// attempt is made only while the lease term holds; past its end the message is dropped,
+    /// counted as `dropped` and not logged.
+    pub async fn deliver(&self, item: Outgoing, dedup: Option<&RefCell<Dedup>>) -> io::Result<()> {
+        let notifier = self.notifier;
+        let limit = self.cap.borrow().limit();
+        let fingerprint = match &item {
+            Outgoing::Message(queued) => Some(queued.fingerprint.as_str()),
+            Outgoing::Capped => None,
+        };
+        let mut attempt: u8 = 1;
+        loop {
+            if !self.term.holds() {
+                self.count_dropped();
+                return Ok(());
+            }
+            let started = Instant::now();
+            let result = match &item {
+                Outgoing::Message(queued) => notifier.send(&queued.notice).await,
+                Outgoing::Capped => notifier.send_capped(limit).await,
+            };
+            match result {
+                Ok(status) => {
+                    self.metrics
+                        .inc("kausa_notifications_total", &[("outcome", "sent")]);
+                    let (namespace, owner) = match &item {
+                        Outgoing::Message(queued) => {
+                            match (&queued.explanation, dedup) {
+                                (Some(explanation), Some(dedup)) => {
+                                    dedup
+                                        .borrow_mut()
+                                        .mark_notified(&queued.fingerprint, explanation);
+                                }
+                                (Some(_), None) => {}
+                                (None, _) => {
+                                    self.sent
+                                        .borrow_mut()
+                                        .mark(&queued.fingerprint, Instant::now());
+                                }
+                            }
+                            let n = &queued.notice;
+                            (json!(n.namespace), json!({"kind": n.kind, "name": n.name}))
+                        }
+                        Outgoing::Capped => (Value::Null, Value::Null),
+                    };
+                    log::info(
+                        "notification sent",
+                        json!({
+                            "fingerprint": fingerprint,
+                            "namespace": namespace,
+                            "owner": owner,
+                            "format": notifier.format().name(),
+                            "status": status,
+                            "attempt": attempt,
+                        }),
+                    )?;
+                }
+                Err(failure) if failure.transient && attempt == 1 => {
+                    // The term ended during the attempt: no retry.
+                    if !self.term.holds() {
+                        self.count_dropped();
+                        return Ok(());
+                    }
+                    self.metrics.inc("kausa_notifications_retried_total", &[]);
+                    log::warn(
+                        "notification retried",
+                        json!({
+                            "fingerprint": fingerprint,
+                            "reason": failure.reason,
+                            "retry_in_seconds": explain::RETRY_DELAY.as_secs(),
+                        }),
+                    )?;
+                    tokio::time::sleep(RETRY_WAIT).await;
+                    attempt = 2;
+                    continue;
+                }
+                Err(failure) => {
+                    self.metrics
+                        .inc("kausa_notifications_total", &[("outcome", "failed")]);
+                    log::warn(
+                        "notification failed",
+                        json!({"fingerprint": fingerprint, "reason": failure.reason}),
+                    )?;
+                }
+            }
+            tokio::time::sleep_until(started + notifier.format().min_interval()).await;
+            return Ok(());
+        }
+    }
+
+    /// A message dropped because the lease term ended: counted, not logged.
+    fn count_dropped(&self) {
+        self.metrics
+            .inc("kausa_notifications_total", &[("outcome", "dropped")]);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::collections::{BTreeSet, VecDeque};
+    use std::collections::BTreeSet;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+
+    use tokio::time::Instant;
 
     use k8s_openapi::jiff::Timestamp;
     use reqwest::Url;
     use serde_json::Value;
 
-    use crate::budget::{Budget, Dedup};
+    use crate::budget::Dedup;
     use crate::context::{self, Gathered};
     use crate::detect::Detection;
-    use crate::explain::Shared;
     use crate::incident::{Incident, IncidentKey, Signal};
     use crate::leader::Term;
     use crate::leader::hold::{self, Held};
     use crate::metrics::Metrics;
-    use crate::notification::{self, ChatId, Notice, parse_chat_id};
+    use crate::notification::{self, ChatId, Facts, Message, Notice, parse_chat_id};
     use crate::prompt::{self, Explanation};
     use crate::record::{ContainerRecord, EventRecord, OwnerRef, PodRecord, Regarding};
 
@@ -441,30 +720,49 @@ mod tests {
     }
 
     fn item() -> Queued {
-        queued(&incident(), narrow())
+        queued(&incident(), 1, narrow())
     }
 
     fn item_for(fingerprint: &str, summary: &str) -> Queued {
         let mut incident = incident();
         incident.fingerprint = fingerprint.into();
-        queued(&incident, explanation(summary))
+        queued(&incident, 1, explanation(summary))
     }
 
-    fn shared(metrics: &Metrics, ttl: Duration) -> Shared<'_> {
-        // Without --leader-lease the term never ends.
-        shared_in(metrics, ttl, Box::leak(Box::new(Term::unbounded())))
+    /// The `detected` message of the incident with `fingerprint`.
+    fn detected_for(fingerprint: &str) -> Queued {
+        let mut incident = incident();
+        incident.fingerprint = fingerprint.into();
+        detected(&Fact::new(&incident, fact::statement(&incident, 1).facts))
     }
 
-    fn shared_in<'a>(metrics: &'a Metrics, ttl: Duration, term: &'a Term) -> Shared<'a> {
-        Shared {
-            budget: RefCell::new(Budget::new(30, 200, std::time::Instant::now())),
-            dedup: RefCell::new(Dedup::new(ttl, 1024)),
-            breaker: RefCell::new(crate::breaker::Breaker::new()),
-            writer: None,
-            history: None,
-            metrics,
-            notifications: RefCell::new(VecDeque::new()),
-            term,
+    /// The explanation path's deduplication cache, with `ttl`.
+    fn dedup(ttl: Duration) -> RefCell<Dedup> {
+        RefCell::new(Dedup::new(ttl, 1024))
+    }
+
+    /// The outbox of `notifier`, at the default cap. Without --leader-lease the term never ends.
+    fn outbox<'a>(notifier: &'a Notifier, metrics: &'a Metrics, ttl: Duration) -> Outbox<'a> {
+        let term = Box::leak(Box::new(Term::unbounded()));
+        Outbox::new(notifier, ttl, DEFAULT_MAX_PER_HOUR, metrics, term)
+    }
+
+    /// A notifier that never reaches anything, for the tests that only queue.
+    fn nowhere() -> &'static Notifier {
+        let hook = format!("http://127.0.0.1:{}/hook/x", closed_port());
+        Box::leak(Box::new(notifier_at(&hook, Format::Json)))
+    }
+
+    fn notifier_at(hook: &str, format: Format) -> Notifier {
+        Notifier::new(url(hook), format, None, true).expect("a notifier")
+    }
+
+    /// The next message the dequeue rule gives, which must not be the `capped` one.
+    fn next(outbox: &Outbox<'_>, dedup: Option<&Dedup>) -> Option<Queued> {
+        match outbox.take_next(dedup, Instant::now()).expect("the log") {
+            Some(Outgoing::Message(queued)) => Some(*queued),
+            Some(Outgoing::Capped) => panic!("the capped message"),
+            None => None,
         }
     }
 
@@ -478,6 +776,10 @@ mod tests {
         text.lines()
             .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
             .map_or(0, |value| value.parse().expect("a count"))
+    }
+
+    fn capped(metrics: &Metrics) -> u64 {
+        counter(metrics, "kausa_notifications_total{outcome=\"capped\"}")
     }
 
     fn outcomes(metrics: &Metrics) -> (u64, u64, u64, u64) {
@@ -499,13 +801,13 @@ mod tests {
 
     /// One request the fake webhook received: the request line, the head in lowercase and the
     /// body.
-    struct Sent {
+    struct Received {
         line: String,
         head: String,
         body: String,
     }
 
-    impl Sent {
+    impl Received {
         fn json(&self) -> Value {
             serde_json::from_str(&self.body).expect("a JSON body")
         }
@@ -525,7 +827,7 @@ mod tests {
 
     /// A fake webhook on localhost: one connection per answer, in order. Each request is sent
     /// back on the channel. Returns `http://127.0.0.1:<port>`.
-    fn webhook(answers: Vec<Answer>) -> (String, mpsc::Receiver<Sent>) {
+    fn webhook(answers: Vec<Answer>) -> (String, mpsc::Receiver<Received>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
         let base = format!("http://{}", listener.local_addr().expect("an address"));
         let (sent, received) = mpsc::channel();
@@ -552,7 +854,7 @@ mod tests {
                             .unwrap_or(0);
                         if request.len() >= end + 4 + length || n == 0 {
                             let (line, head) = text[..end].split_once("\r\n").unwrap_or_default();
-                            let _ = sent.send(Sent {
+                            let _ = sent.send(Received {
                                 line: line.to_owned(),
                                 head: head.to_ascii_lowercase(),
                                 body: text[end + 4..].to_owned(),
@@ -992,10 +1294,11 @@ mod tests {
     fn a_queued_notification_names_the_rule_the_object_and_its_first_sighting() {
         let item = item();
         assert_eq!(item.fingerprint, FINGERPRINT);
-        assert_eq!(item.explanation, narrow());
+        assert_eq!(item.explanation, Some(narrow()));
         assert_eq!(
             item.notice,
             Notice {
+                message: Message::Explained,
                 detection_id: "D001".into(),
                 detection_name: "crash loop".into(),
                 api_version: "apps/v1".into(),
@@ -1005,6 +1308,15 @@ mod tests {
                 fingerprint: FINGERPRINT.into(),
                 // The same string as the incident's log line.
                 first_seen: incident().first_seen.to_string(),
+                // The facts of its statement, without the container.
+                facts: Facts {
+                    reason: Some("CrashLoopBackOff".into()),
+                    exit_code: Some(1),
+                    pods_seen: 1,
+                    pods_seen_is_minimum: false,
+                    pods_now: 1,
+                    revision: None,
+                },
                 summary: "The container exits right after it starts.".into(),
                 cause: "It is started with a flag it does not know.".into(),
                 steps: vec!["Check the container's args in the Deployment.".into()],
@@ -1099,17 +1411,18 @@ mod tests {
             incident.owner.name.as_str(),
         ];
         let narrow = explanation.map_clean(|t| redactor.restore_only(t, &names));
-        let item = queued(incident, narrow);
+        let item = queued(incident, gathered.pods_total, narrow);
+        let explained = item.explanation.as_ref().expect("an explanation");
         assert_eq!(
-            item.explanation.summary,
+            explained.summary,
             "web in shop crashes: pod-1 on node-1 exits."
         );
         assert_eq!(
-            item.explanation.cause,
+            explained.cause,
             "container-1 of registry-1/image-1:1.4.2 runs as serviceaccount-1 and reaches \
              <redacted:ip>."
         );
-        assert_eq!(item.explanation.steps, ["Check web's args in shop."]);
+        assert_eq!(explained.steps, ["Check web's args in shop."]);
         let bodies = [
             notification::json_body(&item.notice, VERSION).to_string(),
             notification::slack_body(&item.notice).to_string(),
@@ -1129,8 +1442,6 @@ mod tests {
                 "namespace-1",
                 "deployment-1",
                 "Deployment-1",
-                "CrashLoopBackOff",
-                "BackOff",
                 "an-invented-uid",
                 "uid-pod",
             ]) {
@@ -1138,6 +1449,8 @@ mod tests {
             }
             assert!(body.contains("shop") && body.contains("web"), "{body}");
             assert!(body.contains("pod-1") && body.contains("node-1"), "{body}");
+            // The sample's reason goes only as a typed fact, from its list.
+            assert!(body.contains("CrashLoopBackOff"), "{body}");
         }
         // The request to the model is what carried the context, redacted.
         let request = request.to_string();
@@ -1149,14 +1462,18 @@ mod tests {
     #[test]
     fn a_full_queue_drops_its_oldest_notification_and_counts_it() {
         let metrics = Metrics::default();
-        let shared = shared(&metrics, TTL);
+        let outbox = outbox(nowhere(), &metrics, TTL);
         for i in 0..QUEUE_LIMIT {
-            enqueue(&shared, item_for(&format!("fp-{i}"), "s")).expect("the log");
+            outbox
+                .enqueue(item_for(&format!("fp-{i}"), "s"))
+                .expect("the log");
         }
-        assert_eq!(shared.notifications.borrow().len(), QUEUE_LIMIT);
+        assert_eq!(outbox.queue().len(), QUEUE_LIMIT);
         assert_eq!(outcomes(&metrics), (0, 0, 0, 0));
-        enqueue(&shared, item_for(&format!("fp-{QUEUE_LIMIT}"), "s")).expect("the log");
-        let queue = shared.notifications.borrow();
+        outbox
+            .enqueue(item_for(&format!("fp-{QUEUE_LIMIT}"), "s"))
+            .expect("the log");
+        let queue = outbox.queue();
         assert_eq!(queue.len(), QUEUE_LIMIT);
         assert_eq!(queue.front().map(|q| q.fingerprint.as_str()), Some("fp-1"));
         assert_eq!(queue.back().map(|q| q.fingerprint.as_str()), Some("fp-16"));
@@ -1165,48 +1482,281 @@ mod tests {
 
     #[test]
     fn the_dequeue_rule_skips_only_what_was_sent() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
         let mut dedup = Dedup::new(TTL, 1024);
-        let mut queue: VecDeque<Queued> = VecDeque::new();
-        assert!(take_next(&mut queue, &dedup).is_none());
+        assert!(next(&outbox, Some(&dedup)).is_none());
 
         // Not notified yet: sent.
         dedup.put(
             FINGERPRINT,
             explanation("full"),
             Some(narrow()),
-            Instant::now(),
+            std::time::Instant::now(),
         );
-        queue.push_back(item());
-        let next = take_next(&mut queue, &dedup).expect("an item");
-        assert_eq!(next.fingerprint, FINGERPRINT);
-        assert!(queue.is_empty());
+        outbox.enqueue(item()).expect("the log");
+        let taken = next(&outbox, Some(&dedup)).expect("an item");
+        assert_eq!(taken.fingerprint, FINGERPRINT);
+        assert!(outbox.queue().is_empty());
 
         // Notified with the same text: two queued copies give nothing more, and the queue is
         // emptied of them.
         assert!(dedup.mark_notified(FINGERPRINT, &narrow()));
-        queue.push_back(item());
-        queue.push_back(item());
-        assert!(take_next(&mut queue, &dedup).is_none());
-        assert!(queue.is_empty());
+        outbox.enqueue(item()).expect("the log");
+        outbox.enqueue(item()).expect("the log");
+        assert!(next(&outbox, Some(&dedup)).is_none());
+        assert!(outbox.queue().is_empty());
 
         // Duplicates in front of another notification are dropped on the way to it.
-        queue.push_back(item());
-        queue.push_back(item_for("other", "s"));
-        queue.push_back(item());
-        let next = take_next(&mut queue, &dedup).expect("an item");
-        assert_eq!(next.fingerprint, "other");
-        assert_eq!(queue.len(), 1);
-        assert!(take_next(&mut queue, &dedup).is_none());
+        outbox.enqueue(item()).expect("the log");
+        outbox.enqueue(item_for("other", "s")).expect("the log");
+        outbox.enqueue(item()).expect("the log");
+        let taken = next(&outbox, Some(&dedup)).expect("an item");
+        assert_eq!(taken.fingerprint, "other");
+        assert_eq!(outbox.queue().len(), 1);
+        assert!(next(&outbox, Some(&dedup)).is_none());
 
         // An entry that stores another text, even notified, does not stop it.
-        queue.push_back(queued(&incident(), explanation("an older text")));
-        let next = take_next(&mut queue, &dedup).expect("an item");
-        assert_eq!(next.explanation, explanation("an older text"));
+        outbox
+            .enqueue(queued(&incident(), 1, explanation("an older text")))
+            .expect("the log");
+        let taken = next(&outbox, Some(&dedup)).expect("an item");
+        assert_eq!(taken.explanation, Some(explanation("an older text")));
 
-        // An evicted or expired entry does not stop it either.
+        // An evicted or expired entry does not stop it either, nor does the lack of a model.
         let empty = Dedup::new(TTL, 1024);
-        queue.push_back(item());
-        assert!(take_next(&mut queue, &empty).is_some());
+        outbox.enqueue(item()).expect("the log");
+        assert!(next(&outbox, Some(&empty)).is_some());
+        outbox.enqueue(item()).expect("the log");
+        assert!(next(&outbox, None).is_some());
+        // Nothing was counted.
+        assert_eq!((outcomes(&metrics), capped(&metrics)), ((0, 0, 0, 0), 0));
+    }
+
+    // --- Detected messages: their facts, their table and their cap -------------------------------
+
+    #[test]
+    fn a_detected_message_carries_the_facts_and_no_text_of_a_model() {
+        let item = detected_for(FINGERPRINT);
+        assert_eq!(item.fingerprint, FINGERPRINT);
+        assert_eq!(item.explanation, None);
+        assert_eq!(
+            item.notice,
+            Notice {
+                message: Message::Detected,
+                detection_id: "D001".into(),
+                detection_name: "crash loop".into(),
+                api_version: "apps/v1".into(),
+                kind: "Deployment".into(),
+                namespace: "shop".into(),
+                name: "web".into(),
+                fingerprint: FINGERPRINT.into(),
+                first_seen: "2026-10-28T11:59:00Z".into(),
+                facts: Facts {
+                    reason: Some("CrashLoopBackOff".into()),
+                    exit_code: Some(1),
+                    pods_seen: 1,
+                    pods_seen_is_minimum: false,
+                    pods_now: 1,
+                    revision: None,
+                },
+                summary: String::new(),
+                cause: String::new(),
+                steps: Vec::new(),
+                confidence: String::new(),
+            }
+        );
+        // The container, which the Event's statement names, never goes in a message, and neither
+        // does the sample's message.
+        let bodies = [
+            notification::json_body(&item.notice, VERSION).to_string(),
+            notification::slack_body(&item.notice).to_string(),
+            notification::telegram_body(&item.notice, &ChatId::Id(-1)).to_string(),
+        ];
+        for body in &bodies {
+            for leaked in [
+                "server",
+                "SAMPLE-CANARY",
+                "web-7d9c8b6f4d",
+                "an-invented-uid",
+            ] {
+                assert!(!body.contains(leaked), "{leaked} in {body}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_table_of_sent_messages_holds_each_fingerprint_for_its_window() {
+        let now = Instant::now();
+        let mut sent = super::Sent::new(TTL);
+        assert!(!sent.holds("a", now));
+        sent.mark("a", now);
+        assert!(sent.holds("a", now + TTL - Duration::from_secs(1)));
+        assert!(!sent.holds("a", now + TTL));
+        assert!(!sent.holds("b", now));
+        // Marking again moves it to the newest, with its new time.
+        sent.mark("a", now + TTL);
+        assert!(sent.holds("a", now + TTL));
+        assert_eq!(sent.len(), 1);
+        // At most SENT_CAPACITY fingerprints: one more drops the oldest.
+        let mut full = super::Sent::new(TTL);
+        for i in 0..=SENT_CAPACITY {
+            full.mark(&format!("fp-{i}"), now);
+        }
+        assert_eq!(full.len(), SENT_CAPACITY);
+        assert!(!full.holds("fp-0", now));
+        assert!(full.holds(&format!("fp-{SENT_CAPACITY}"), now));
+        // With a ttl of zero, nothing is held: every occurrence is sent.
+        let mut zero = super::Sent::new(Duration::ZERO);
+        zero.mark("a", now);
+        assert!(!zero.holds("a", now));
+        assert_eq!(zero.len(), 0);
+    }
+
+    #[test]
+    fn the_cap_admits_its_limit_in_any_sixty_minutes() {
+        let now = Instant::now();
+        let mut cap = Cap::new(2);
+        assert_eq!(cap.limit(), 2);
+        assert!(cap.admit(now));
+        assert!(cap.admit(now + Duration::from_secs(60)));
+        assert!(!cap.admit(now + Duration::from_secs(120)));
+        // The first start leaves the window after 60 minutes, the second a minute later.
+        assert!(cap.admit(now + CAP_WINDOW));
+        assert!(!cap.admit(now + CAP_WINDOW + Duration::from_secs(1)));
+        assert!(cap.admit(now + CAP_WINDOW + Duration::from_secs(60)));
+        // The capped message is due once, then once 60 minutes later.
+        assert!(cap.capped_due(now));
+        assert!(!cap.capped_due(now + CAP_WINDOW - Duration::from_secs(1)));
+        assert!(cap.capped_due(now + CAP_WINDOW));
+    }
+
+    #[test]
+    fn over_the_cap_a_detected_message_is_counted_and_the_capped_one_is_due_once() {
+        let metrics = Metrics::default();
+        let term = Term::unbounded();
+        let outbox = Outbox::new(nowhere(), TTL, 2, &metrics, &term);
+        for i in 0..5 {
+            outbox
+                .enqueue(detected_for(&format!("fp-{i}")))
+                .expect("the log");
+        }
+        let now = Instant::now();
+        let mut taken = Vec::new();
+        while let Some(next) = outbox.take_next(None, now).expect("the log") {
+            taken.push(next);
+        }
+        // Two within the cap; the third is capped and gives the capped message; the fourth and the
+        // fifth are capped, and the capped message is not due again.
+        assert_eq!(
+            taken,
+            [
+                Outgoing::Message(Box::new(detected_for("fp-0"))),
+                Outgoing::Message(Box::new(detected_for("fp-1"))),
+                Outgoing::Capped,
+            ]
+        );
+        assert_eq!(capped(&metrics), 3);
+        assert!(outbox.queue().is_empty());
+        // An explained message is not capped: it keeps the call budget's bound.
+        outbox.enqueue(item()).expect("the log");
+        assert_eq!(
+            outbox.take_next(None, now).expect("the log"),
+            Some(Outgoing::Message(Box::new(item())))
+        );
+        // An hour later, the cap admits again.
+        outbox.enqueue(detected_for("fp-5")).expect("the log");
+        assert_eq!(
+            outbox.take_next(None, now + CAP_WINDOW).expect("the log"),
+            Some(Outgoing::Message(Box::new(detected_for("fp-5"))))
+        );
+        assert_eq!(capped(&metrics), 3);
+    }
+
+    #[test]
+    fn a_detected_message_is_sent_once_per_window_and_only_after_a_2xx() {
+        let (base, requests) = webhook(vec![
+            Answer::Status("500 Internal Server Error"),
+            Answer::Status("500 Internal Server Error"),
+            Answer::Status("200 OK"),
+            Answer::Status("200 OK"),
+        ]);
+        let n = notifier(&base, Format::Json, None);
+        let metrics = Metrics::default();
+        let outbox = outbox(&n, &metrics, TTL);
+        let send_one = |outbox: &Outbox<'_>| {
+            outbox.enqueue(detected_for(FINGERPRINT)).expect("the log");
+            match outbox.take_next(None, Instant::now()).expect("the log") {
+                Some(item) => {
+                    block_on(outbox.deliver(item, None)).expect("the log");
+                    true
+                }
+                None => false,
+            }
+        };
+        // A failure (after its retry) marks nothing: the next occurrence is sent.
+        assert!(send_one(&outbox));
+        assert_eq!(outcomes(&metrics), (0, 1, 0, 1));
+        assert!(send_one(&outbox));
+        assert_eq!(outcomes(&metrics), (1, 1, 0, 1));
+        // Sent: neither queued nor sent again within the window.
+        assert!(!send_one(&outbox));
+        assert!(outbox.queue().is_empty());
+        assert_eq!(outcomes(&metrics), (1, 1, 0, 1));
+        assert_eq!(requests.try_iter().count(), 3);
+    }
+
+    #[test]
+    fn with_a_ttl_of_zero_every_detected_message_is_sent() {
+        let (base, requests) = webhook(vec![
+            Answer::Status("200 OK"),
+            Answer::Status("200 OK"),
+            Answer::Status("200 OK"),
+        ]);
+        let n = notifier(&base, Format::Json, None);
+        let metrics = Metrics::default();
+        let outbox = outbox(&n, &metrics, Duration::ZERO);
+        block_on(async {
+            for _ in 0..3 {
+                outbox.enqueue(detected_for(FINGERPRINT)).expect("the log");
+                let item = outbox.take_next(None, Instant::now()).expect("the log");
+                outbox
+                    .deliver(item.expect("not skipped"), None)
+                    .await
+                    .expect("the log");
+            }
+        });
+        assert_eq!(outcomes(&metrics), (3, 0, 0, 0));
+        assert_eq!(requests.try_iter().count(), 3);
+    }
+
+    #[test]
+    fn the_capped_message_posts_its_fixed_body() {
+        for format in ["json", "slack", "telegram"] {
+            let (base, requests) = webhook(vec![Answer::Status("200 OK")]);
+            let n = match format {
+                "telegram" => notifier_at(
+                    &format!("{base}/bot{}/sendMessage", fake_telegram_token()),
+                    telegram("-1001234567890"),
+                ),
+                "slack" => notifier(&base, Format::Slack, None),
+                _ => notifier(&base, Format::Json, None),
+            };
+            let metrics = Metrics::default();
+            let term = Term::unbounded();
+            let outbox = Outbox::new(&n, TTL, 7, &metrics, &term);
+            block_on(outbox.deliver(Outgoing::Capped, None)).expect("the log");
+            let body = requests
+                .recv_timeout(Duration::from_secs(1))
+                .expect("a request");
+            let expected = match format {
+                "telegram" => notification::capped_telegram_body(7, &ChatId::Id(-1001234567890)),
+                "slack" => notification::capped_slack_body(7),
+                _ => notification::capped_json_body(7, VERSION),
+            };
+            assert_eq!(body.json(), expected, "{format}");
+            assert_eq!(outcomes(&metrics), (1, 0, 0, 0), "{format}");
+        }
     }
 
     // --- Delivery ---------------------------------------------------------------------------------
@@ -1218,28 +1768,30 @@ mod tests {
         answers: Vec<Answer>,
         entry: Option<Explanation>,
         item: Queued,
-    ) -> (Metrics, Vec<Sent>, Option<bool>, Duration) {
+    ) -> (Metrics, Vec<Received>, Option<bool>, Duration) {
         let count = answers.len();
         let (base, requests) = webhook(answers);
         let n = notifier(&base, Format::Json, None);
         let metrics = Metrics::default();
         let (notified, elapsed) = {
-            let shared = shared(&metrics, TTL);
+            let outbox = outbox(&n, &metrics, TTL);
+            let dedup = dedup(TTL);
             if let Some(notice) = entry {
-                shared.dedup.borrow_mut().put(
+                dedup.borrow_mut().put(
                     FINGERPRINT,
                     explanation("full"),
                     Some(notice),
-                    Instant::now(),
+                    std::time::Instant::now(),
                 );
             }
             let started = Instant::now();
-            block_on(deliver(&n, item, &shared)).expect("the log");
+            block_on(outbox.deliver(Outgoing::Message(Box::new(item)), Some(&dedup)))
+                .expect("the log");
             let elapsed = started.elapsed();
-            let notified = shared.dedup.borrow().peek(FINGERPRINT).map(|c| c.notified);
+            let notified = dedup.borrow().peek(FINGERPRINT).map(|c| c.notified);
             (notified, elapsed)
         };
-        let sent: Vec<Sent> = (0..count)
+        let sent: Vec<Received> = (0..count)
             .filter_map(|_| requests.recv_timeout(Duration::from_millis(500)).ok())
             .collect();
         (metrics, sent, notified, elapsed)
@@ -1268,9 +1820,9 @@ mod tests {
                 _ => notifier(&base, Format::Slack, None),
             };
             let metrics = Metrics::default();
-            let shared = shared(&metrics, TTL);
+            let outbox = outbox(&n, &metrics, TTL);
             let started = Instant::now();
-            block_on(deliver(&n, item(), &shared)).expect("the log");
+            block_on(outbox.deliver(Outgoing::Message(Box::new(item())), None)).expect("the log");
             let elapsed = started.elapsed();
             assert!(requests.recv_timeout(Duration::from_millis(500)).is_ok());
             assert_eq!(outcomes(&metrics), (1, 0, 0, 0), "{format}");
@@ -1346,8 +1898,8 @@ mod tests {
         )
         .expect("a notifier");
         let metrics = Metrics::default();
-        let shared = shared(&metrics, TTL);
-        block_on(deliver(&n, item(), &shared)).expect("the log");
+        let outbox = outbox(&n, &metrics, TTL);
+        block_on(outbox.deliver(Outgoing::Message(Box::new(item())), None)).expect("the log");
         assert_eq!(outcomes(&metrics), (0, 1, 0, 1));
     }
 
@@ -1376,23 +1928,23 @@ mod tests {
         let (base, requests) = webhook(vec![Answer::Status("200 OK"), Answer::Status("200 OK")]);
         let n = notifier(&base, Format::Json, None);
         let metrics = Metrics::default();
-        let shared = shared(&metrics, TTL);
-        shared.dedup.borrow_mut().put(
+        let outbox = outbox(&n, &metrics, TTL);
+        let dedup = dedup(TTL);
+        dedup.borrow_mut().put(
             FINGERPRINT,
             explanation("full"),
             Some(narrow()),
-            Instant::now(),
+            std::time::Instant::now(),
         );
-        enqueue(&shared, item()).expect("the log");
-        enqueue(&shared, item()).expect("the log");
+        outbox.enqueue(item()).expect("the log");
+        outbox.enqueue(item()).expect("the log");
         block_on(async {
             loop {
-                let next = {
-                    let dedup = shared.dedup.borrow();
-                    take_next(&mut shared.notifications.borrow_mut(), &dedup)
-                };
+                let next = outbox
+                    .take_next(Some(&dedup.borrow()), Instant::now())
+                    .expect("the log");
                 let Some(next) = next else { break };
-                deliver(&n, next, &shared).await.expect("the log");
+                outbox.deliver(next, Some(&dedup)).await.expect("the log");
             }
         });
         assert_eq!(outcomes(&metrics), (1, 0, 0, 0));
@@ -1409,25 +1961,23 @@ mod tests {
         ]);
         let n = notifier(&base, Format::Json, None);
         let metrics = Metrics::default();
-        let shared = shared(&metrics, Duration::ZERO);
+        let outbox = outbox(&n, &metrics, Duration::ZERO);
+        let dedup = dedup(Duration::ZERO);
         block_on(async {
             for _ in 0..3 {
                 // What explain::run does with --dedup-hours 0: no fresh entry, a model call, a
                 // new entry and a queued notification.
-                let now = Instant::now();
-                assert!(shared.dedup.borrow_mut().get(FINGERPRINT, now).is_none());
-                shared.dedup.borrow_mut().put(
-                    FINGERPRINT,
-                    explanation("full"),
-                    Some(narrow()),
-                    now,
-                );
-                enqueue(&shared, item()).expect("the log");
-                let next = {
-                    let dedup = shared.dedup.borrow();
-                    take_next(&mut shared.notifications.borrow_mut(), &dedup)
-                };
-                deliver(&n, next.expect("not skipped"), &shared)
+                let now = std::time::Instant::now();
+                assert!(dedup.borrow_mut().get(FINGERPRINT, now).is_none());
+                dedup
+                    .borrow_mut()
+                    .put(FINGERPRINT, explanation("full"), Some(narrow()), now);
+                outbox.enqueue(item()).expect("the log");
+                let next = outbox
+                    .take_next(Some(&dedup.borrow()), Instant::now())
+                    .expect("the log");
+                outbox
+                    .deliver(next.expect("not skipped"), Some(&dedup))
                     .await
                     .expect("the log");
             }
@@ -1437,7 +1987,7 @@ mod tests {
     }
 
     // Acceptance tests for the standby replica (docs/adr/0019-high-availability.md), written before
-    // the code: `deliver` checks `shared.term` before each attempt, the first and the retry. Past
+    // the code: `deliver` checks the outbox's term before each attempt, the first and the retry. Past
     // the term's end it sends nothing and the item is dropped, counted as
     // `kausa_notifications_total{outcome="dropped"}`, never as sent or failed.
 
@@ -1454,15 +2004,17 @@ mod tests {
         let metrics = Metrics::default();
         let term = Term::closed();
         {
-            let shared = shared_in(&metrics, TTL, &term);
-            shared.dedup.borrow_mut().put(
+            let outbox = Outbox::new(&n, TTL, DEFAULT_MAX_PER_HOUR, &metrics, &term);
+            let dedup = dedup(TTL);
+            dedup.borrow_mut().put(
                 FINGERPRINT,
                 explanation("full"),
                 Some(narrow()),
-                Instant::now(),
+                std::time::Instant::now(),
             );
-            block_on(deliver(&n, item(), &shared)).expect("the log");
-            let notified = shared.dedup.borrow().peek(FINGERPRINT).map(|c| c.notified);
+            block_on(outbox.deliver(Outgoing::Message(Box::new(item())), Some(&dedup)))
+                .expect("the log");
+            let notified = dedup.borrow().peek(FINGERPRINT).map(|c| c.notified);
             assert_eq!(notified, Some(false), "a dropped item is not notified");
         }
         assert!(
@@ -1486,9 +2038,12 @@ mod tests {
         let metrics = Metrics::default();
         let term = Term::unbounded();
         {
-            let shared = shared_in(&metrics, TTL, &term);
+            let outbox = Outbox::new(&n, TTL, DEFAULT_MAX_PER_HOUR, &metrics, &term);
             block_on(async {
-                let (delivered, ()) = futures::join!(deliver(&n, item(), &shared), hold.end(&term));
+                let (delivered, ()) = futures::join!(
+                    outbox.deliver(Outgoing::Message(Box::new(item())), None),
+                    hold.end(&term)
+                );
                 delivered
             })
             .expect("the log");

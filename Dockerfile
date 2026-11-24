@@ -336,7 +336,7 @@ RUN set -euf; \
     args() { printf '%s\n' "$1" | sed -n '/^ *args:$/,/^ *env:$/p' | sed 's/^ *//'; }; \
     plus_notify() { awk '$0 == "- --metrics-address" { while ((getline l < "/tmp/notify-args") > 0) print l }; { print }'; }; \
     item() { doc "$1" Deployment | awk -v head="$2" -v ind="$3" '$0 == head { on = 1; print; next }; on && match($0, /^ */) && RLENGTH > ind { print; next }; { on = 0 }'; }; \
-    unnotified() { awk '/^ *- --notify-(url-file|format|telegram-chat-id|token-file)$/ { value = 1; next }; value { value = 0; next }; /^ *- --notify-allow-http$/ { next }; /^ *- name: notify$/ { match($0, /^ */); ind = RLENGTH; next }; ind && match($0, /^ */) && RLENGTH > ind { next }; { ind = 0; print }'; }; \
+    unnotified() { awk '/^ *- --notify-(url-file|format|telegram-chat-id|token-file|max-per-hour)$/ { value = 1; next }; value { value = 0; next }; /^ *- --notify-allow-http$/ { next }; /^ *- name: notify$/ { match($0, /^ */); ind = RLENGTH; next }; ind && match($0, /^ */) && RLENGTH > ind { next }; { ind = 0; print }'; }; \
     egress_rules() { doc "$1" NetworkPolicy | sed -n '/^  egress:$/,$p' | grep -c '^    - ' || true; }; \
     webhook_rule() { printf '%s\n' '    # The notification webhook.' '    - to:' '        - ipBlock:' '            cidr: 198.51.100.0/24' '      ports:'; for port in "$@"; do printf '%s\n' "        - port: $port" '          protocol: TCP'; done; }; \
     volume() { printf '%s\n' '        - name: notify' '          secret:' '            secretName: "hook"' '            defaultMode: 0440' '            items:' '              - key: "url"' '                path: url'; if [ "$1" = yes ]; then printf '%s\n' '              - key: "token"' '                path: token'; fi; }; \
@@ -364,7 +364,8 @@ RUN set -euf; \
         { printf '%s\n' '- --notify-url-file' "- $dir/url" '- --notify-format' "- \"$format\""; \
           if [ -n "$id" ]; then printf '%s\n' '- --notify-telegram-chat-id' "- \"$id\""; fi; \
           if [ "$token" = yes ]; then printf '%s\n' '- --notify-token-file' "- $dir/token"; fi; \
-          if [ "$http" = yes ]; then printf '%s\n' '- --notify-allow-http'; fi; } > /tmp/notify-args; \
+          if [ "$http" = yes ]; then printf '%s\n' '- --notify-allow-http'; fi; \
+          printf '%s\n' '- --notify-max-per-hour' '- "30"'; } > /tmp/notify-args; \
         for policy in without with; do \
           what="$case $policy the NetworkPolicy, $scope"; \
           if [ "$policy" = with ]; then base=$off_np; out=$(render $scope $endpoint $np $on $values $to); \
@@ -394,7 +395,8 @@ RUN set -euf; \
     cp -R charts/kausa /tmp/nonotify; \
     awk '{ match($0, /^ */); ind = RLENGTH; blank = ($0 ~ /^ *$/) }; skip && !blank && ind <= skip_ind { skip = 0 }; /^[^ #]/ { top = $0 }; !skip && /^notifications:/ { skip = 1; skip_ind = 0; next }; !skip && top ~ /^networkPolicy:/ && /^  notifications:/ { skip = 1; skip_ind = 2; next }; !skip' charts/kausa/values.yaml > /tmp/nonotify/values.yaml; \
     ! grep -qE '^ {0,2}notifications:' /tmp/nonotify/values.yaml || fail "the chart copy still has a notifications map"; \
-    for values in "" "$endpoint" "$endpoint $on" "$endpoint $on --set notifications.tokenKey=token" "$endpoint $np $on $to"; do \
+    max="--set notifications.maxPerHour=30"; \
+    for values in "" "$endpoint" "$endpoint $on $max" "$endpoint $on $max --set notifications.tokenKey=token" "$endpoint $np $on $max $to"; do \
       [ "$(render $cluster $values)" = "$(render_in /tmp/nonotify $cluster $values)" ] || fail "a chart without the notifications maps renders unlike the chart with $values"; \
     done; \
     for refusal in \
@@ -497,6 +499,53 @@ RUN set -euf; \
       done; \
       lint=$(helm lint --strict charts/kausa $rbac --set replicaCount=2 2>&1) || { printf '%s\n' "$lint" >&2; fail "helm lint --strict with rbac.scope=$scope fails with replicaCount=2"; }; \
     done
+# Events and notifications without an endpoint (docs/adr/0027-fact-statement-for-the-detections.md).
+# Without model.endpoint, and with events on and no dryRun, kausa's ClusterRole or each Role gets
+# create and patch on Events and the args have no --no-events: kausa writes the Detected Event.
+# events=false removes the write and adds one --no-events; dryRun writes nothing. Notifications
+# render without an endpoint (args, notify volume and, with the NetworkPolicy, the webhook's
+# egress rule without the model's), and notifications.maxPerHour is passed as
+# --notify-max-per-hour: a values map without that key (helm upgrade --reuse-values) renders
+# without the flag, so kausa's own default applies. tests/chart/render.sh checks the same renders
+# in more detail.
+RUN set -euf; \
+    cluster="--set rbac.scope=cluster"; \
+    namespaced="--set rbac.scope=namespaced --set rbac.namespaces={e2e-a,e2e-b}"; \
+    on="--set notifications.enabled=true --set notifications.existingSecret=hook"; \
+    np="--set networkPolicy.enabled=true --set networkPolicy.apiServer.cidrs[0]=192.0.2.1/32 --set networkPolicy.notifications.to[0].ipBlock.cidr=198.51.100.0/24"; \
+    fail() { echo "no endpoint: $*" >&2; exit 1; }; \
+    render() { helm template kausa charts/kausa --kube-version 1.36.0 --namespace kausa-system "$@" || fail "does not render with $*"; }; \
+    count() { printf '%s\n' "$1" | grep -cx -- "$2" || true; }; \
+    for scope in cluster namespaced; do \
+      if [ "$scope" = cluster ]; then rbac=$cluster; roles=1; else rbac=$namespaced; roles=2; fi; \
+      out=$(render $rbac); \
+      [ "$(count "$out" ' *verbs: \["create", "patch"\]')" -eq "$roles" ] || fail "$scope: not one create and patch rule on Events in the ClusterRole or in each Role"; \
+      [ "$(count "$out" ' *- --no-events')" -eq 0 ] || fail "$scope: passes --no-events"; \
+      off=$(render $rbac --set events=false); \
+      [ "$(count "$off" ' *verbs: \["create", "patch"\]')" -eq 0 ] || fail "$scope with events=false: an Event write"; \
+      [ "$(count "$off" ' *- --no-events')" -eq 1 ] || fail "$scope with events=false: not exactly one --no-events arg"; \
+      dry=$(render $rbac --set dryRun=true); \
+      [ "$(count "$dry" ' *verbs: \["create", "patch"\]')" -eq 0 ] || fail "$scope with dryRun: an Event write"; \
+      n=$(render $rbac $on); \
+      [ "$(count "$n" ' *- --notify-url-file')" -eq 1 ] && [ "$(count "$n" ' *- name: notify')" -eq 2 ] || fail "$scope: notifications without an endpoint do not render the flags and the volume"; \
+      [ "$(count "$n" ' *- --notify-max-per-hour')" -eq 1 ] && [ "$(count "$n" ' *- "30"')" -eq 1 ] || fail "$scope: not --notify-max-per-hour \"30\" by default"; \
+      [ "$(count "$(render $rbac $on --set notifications.maxPerHour=3600)" ' *- "3600"')" -eq 1 ] || fail "$scope: notifications.maxPerHour=3600 is not passed"; \
+      m=$(render $rbac $on --set notifications.maxPerHour=null); \
+      [ "$(count "$m" ' *- --notify-max-per-hour')" -eq 0 ] || fail "$scope: maxPerHour=null passes --notify-max-per-hour"; \
+    done; \
+    out=$(render $cluster $on $np); \
+    [ "$(count "$out" '    # The notification webhook.')" -eq 1 ] || fail "the webhook's egress rule is missing with networkPolicy.enabled"; \
+    [ "$(count "$out" '    # The model endpoint.')" -eq 0 ] || fail "the model endpoint's egress rule renders without an endpoint"; \
+    cp -R charts/kausa /tmp/nomax; \
+    grep -v '^  maxPerHour:' charts/kausa/values.yaml > /tmp/nomax/values.yaml; \
+    ! grep -q 'maxPerHour' /tmp/nomax/values.yaml || fail "the chart copy still has maxPerHour"; \
+    out=$(helm template kausa /tmp/nomax --kube-version 1.36.0 $cluster $on) || fail "a chart without maxPerHour does not render"; \
+    [ "$(count "$out" ' *- --notify-url-file')" -eq 1 ] && [ "$(count "$out" ' *- --notify-max-per-hour')" -eq 0 ] || fail "a chart without maxPerHour does not render the notify args without --notify-max-per-hour"; \
+    rm -rf /tmp/nomax; \
+    for scope in "$cluster" "$namespaced"; do \
+      helm lint --strict charts/kausa $scope $on $np > /tmp/lint 2>&1 || { cat /tmp/lint >&2; fail "helm lint --strict with $scope fails with notifications and no endpoint"; }; \
+    done; \
+    rm -f /tmp/lint
 # The refusals of kausa.validate: helm template fails with the exact message (helm lint does not
 # fail on a template's fail). The default values and rbac=null (a v0.1 release's stored values have
 # no rbac map) must reach the rbac.scope message, never a nil-pointer error. history.days comes
@@ -548,8 +597,11 @@ RUN set -eu; \
     refuse "notifications.telegramChatId is used only with notifications.format=telegram" --set rbac.scope=cluster $on --set notifications.format=slack --set notifications.telegramChatId=1 $later; \
     refuse "notifications.tokenKey is used only with notifications.format=json" --set rbac.scope=cluster $on --set notifications.format=slack $later; \
     refuse "notifications.tokenKey is used only with notifications.format=json" --set rbac.scope=cluster $on --set notifications.format=telegram --set-string notifications.telegramChatId=-1001234567890 $later; \
-    refuse "notifications.enabled needs model.endpoint" --set rbac.scope=cluster $on $later; \
-    refuse "notifications.enabled needs model.endpoint" --set rbac.scope=namespaced --set 'rbac.namespaces={a}' $on; \
+    for max in 0 3601 abc 1.5 -1; do \
+      refuse "notifications.maxPerHour must be a whole number from 1 to 3600, not '$max'" --set rbac.scope=cluster $on --set-string "notifications.maxPerHour=$max" $later; \
+    done; \
+    refuse "notifications.maxPerHour must be a whole number from 1 to 3600, not '0'" --set rbac.scope=namespaced --set 'rbac.namespaces={a}' $on --set notifications.maxPerHour=0; \
+    refuse "notifications.enabled is not used with dryRun: no explanation is written" --set rbac.scope=cluster $on $later; \
     refuse "notifications.enabled is not used with dryRun: no explanation is written" --set rbac.scope=cluster $endpoint $on $later; \
     refuse "networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook" --set rbac.scope=cluster $endpoint $on $np; \
     refuse "networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook" --set rbac.scope=cluster $endpoint $on $np --set-json 'networkPolicy.notifications.to=[]'; \
@@ -634,7 +686,7 @@ RUN set -eu; \
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99 AS runtime
 
 LABEL org.opencontainers.image.title="kausa" \
-      org.opencontainers.image.description="A tiny Kubernetes controller that explains failing workloads with an LLM" \
+      org.opencontainers.image.description="A tiny Kubernetes controller that reports failing workloads as facts, LLM optional" \
       org.opencontainers.image.source="https://github.com/fedeam/kausa" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 

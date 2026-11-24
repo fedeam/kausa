@@ -323,7 +323,7 @@ check_cluster() {
   passed "$since" "cluster/$name"
 }
 
-check_cluster default no no
+check_cluster default no yes
 check_cluster endpoint yes yes "${ENDPOINT[@]}"
 check_cluster dry-run-no-logs no no "${DRY_NO_LOGS[@]}"
 check_cluster dry-run yes no "${DRY[@]}"
@@ -332,7 +332,7 @@ check_cluster no-events yes no "${NO_EVENTS[@]}"
 # The same value sets with the Deployment watch off (docs/adr/0018-stuck-rollouts.md): no
 # deployments rule and one --no-rollouts arg, whatever else is on.
 ROLLOUTS_OFF=(--set rollouts=false)
-ROLLOUTS=no check_cluster default-no-rollouts no no "${ROLLOUTS_OFF[@]}"
+ROLLOUTS=no check_cluster default-no-rollouts no yes "${ROLLOUTS_OFF[@]}"
 ROLLOUTS=no check_cluster endpoint-no-rollouts yes yes "${ENDPOINT[@]}" "${ROLLOUTS_OFF[@]}"
 ROLLOUTS=no check_cluster dry-run-no-logs-no-rollouts no no "${DRY_NO_LOGS[@]}" \
   "${ROLLOUTS_OFF[@]}"
@@ -356,6 +356,17 @@ if git -C "$ROOT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; t
     out="$WORK/base-$name"
     if render "$out" "$RELEASE" "$WORK/base/charts/kausa" ${values[@]+"${values[@]}"}; then
       docs "$out" ClusterRole | section rules >"$out.rules"
+      # Since docs/adr/0027-fact-statement-for-the-detections.md the chart grants the Event
+      # writes without an endpoint too: v0.1's default render gets them right after the read.
+      if [ "$name" = default ]; then
+        rule_events_write >"$out.events-write-rows"
+        awk '
+          NR == FNR { rows = rows $0 "\n"; next }
+          { print }
+          after && /^verbs:/ { printf "%s", rows; after = 0 }
+          $0 == "resources:[\"events\"]" { after = 1 }
+        ' "$out.events-write-rows" "$out.rules" >"$out.rules.new" && mv "$out.rules.new" "$out.rules"
+      fi
       if [ -f "$WORK/cluster-$name-no-rollouts.rules" ] &&
         diff -u "$out.rules" "$WORK/cluster-$name-no-rollouts.rules" >"$out.diff"; then
         ok "cluster/$name with rollouts=false has the rules of $BASE"
@@ -484,16 +495,16 @@ check_namespaced endpoint yes yes e2e-a,e2e-b "${ENDPOINT[@]}"
 check_namespaced dry-run-no-logs no no e2e-a,e2e-b "${DRY_NO_LOGS[@]}"
 check_namespaced dry-run yes no e2e-a,e2e-b "${DRY[@]}"
 check_namespaced no-events yes no e2e-a "${NO_EVENTS[@]}"
-check_namespaced default no no e2e-a
+check_namespaced default no yes e2e-a
 # The listed order is kept, and the release namespace may be listed.
-check_namespaced order no no "zeta,alpha,$NAMESPACE"
-check_namespaced max no no "$NAMES32"
-check_namespaced long-name no no "$LONG63,0,a-1"
+check_namespaced order no yes "zeta,alpha,$NAMESPACE"
+check_namespaced max no yes "$NAMES32"
+check_namespaced long-name no yes "$LONG63,0,a-1"
 # --set reads 123 as a number: it is still a namespace name, passed as a string.
-check_namespaced number no no 123
+check_namespaced number no yes 123
 RELEASE_NAME=tenant FULLNAME=tenant-kausa SUBJECT=tenant-kausa \
-  check_namespaced release-name no no e2e-a
-FULLNAME=kausa SUBJECT=reader check_namespaced service-account no no e2e-a \
+  check_namespaced release-name no yes e2e-a
+FULLNAME=kausa SUBJECT=reader check_namespaced service-account no yes e2e-a \
   --set serviceAccount.name=reader
 # Comparing with the cluster scope: the Roles get exactly the ClusterRole's rules.
 for name in endpoint dry-run-no-logs dry-run no-events default; do
@@ -505,7 +516,7 @@ for name in endpoint dry-run-no-logs dry-run no-events default; do
 done
 
 # With the Deployment watch off, the Roles lose the deployments rule as the ClusterRole does.
-ROLLOUTS=no check_namespaced default-no-rollouts no no e2e-a "${ROLLOUTS_OFF[@]}"
+ROLLOUTS=no check_namespaced default-no-rollouts no yes e2e-a "${ROLLOUTS_OFF[@]}"
 ROLLOUTS=no check_namespaced endpoint-no-rollouts yes yes e2e-a,e2e-b "${ENDPOINT[@]}" \
   "${ROLLOUTS_OFF[@]}"
 ROLLOUTS=no check_namespaced dry-run-no-logs-no-rollouts no no e2e-a,e2e-b "${DRY_NO_LOGS[@]}" \
@@ -529,13 +540,13 @@ done
 # One value drives the grant and the watch: rollouts=false removes the rule and passes
 # --no-rollouts (checked above); any other value, the key missing included, is on and renders like
 # the default. There is no refusal.
-check_cluster rollouts-true no no --set rollouts=true
-check_cluster rollouts-null no no --set rollouts=null
-check_cluster rollouts-string no no --set rollouts=no
-ROLLOUTS=no check_cluster rollouts-string-false no no --set-string rollouts=false
-check_namespaced rollouts-true no no e2e-a --set rollouts=true
-check_namespaced rollouts-null no no e2e-a --set rollouts=null
-ROLLOUTS=no check_namespaced rollouts-string-false no no e2e-a --set-string rollouts=false
+check_cluster rollouts-true no yes --set rollouts=true
+check_cluster rollouts-null no yes --set rollouts=null
+check_cluster rollouts-string no yes --set rollouts=no
+ROLLOUTS=no check_cluster rollouts-string-false no yes --set-string rollouts=false
+check_namespaced rollouts-true no yes e2e-a --set rollouts=true
+check_namespaced rollouts-null no yes e2e-a --set rollouts=null
+ROLLOUTS=no check_namespaced rollouts-string-false no yes e2e-a --set-string rollouts=false
 for pair in cluster-rollouts-true:cluster-default cluster-rollouts-null:cluster-default \
   cluster-rollouts-string:cluster-default namespaced-rollouts-true:namespaced-default \
   namespaced-rollouts-null:namespaced-default; do
@@ -781,7 +792,7 @@ check_crd cluster/history-no-reader "$WORK/cluster-history-no-reader"
 # No history without an endpoint or in dry-run: no CRD, reader, rule or flag.
 check_cluster history-dry-run yes no "${ENDPOINT[@]}" "${HISTORY_ON[@]}" "${DRY[@]}"
 check_cluster history-dry-run-only yes no "${HISTORY_ON[@]}" "${DRY[@]}"
-check_cluster history-no-endpoint no no "${HISTORY_ON[@]}"
+check_cluster history-no-endpoint no yes "${HISTORY_ON[@]}"
 check_cluster history-off yes yes "${ENDPOINT[@]}" --set history.enabled=false \
   --set history.installCRD=true --set history.days=30
 # events=false: the history only, without the Event writes.
@@ -1157,12 +1168,13 @@ NOTIFY_DIR=/var/run/secrets/kausa-notify
 
 # notify_args FORMAT [CHAT] [TOKEN] [HTTP]: the args the chart passes for notifications, in
 # order: the chat id CHAT when given, the token file when TOKEN is yes, --notify-allow-http when
-# HTTP is yes.
+# HTTP is yes, and --notify-max-per-hour (30, the chart's default, or NOTIFY_MAX).
 notify_args() {
   printf '%s\n' '- --notify-url-file' "- $NOTIFY_DIR/url" '- --notify-format' "- \"$1\""
   if [ -n "${2-}" ]; then printf '%s\n' '- --notify-telegram-chat-id' "- \"$2\""; fi
   if [ "${3-}" = yes ]; then printf '%s\n' '- --notify-token-file' "- $NOTIFY_DIR/token"; fi
   if [ "${4-}" = yes ]; then echo '- --notify-allow-http'; fi
+  printf '%s\n' '- --notify-max-per-hour' "- \"${NOTIFY_MAX:-30}\""
 }
 
 # list_item FILE KEY NAME: the item named NAME of the Deployment's list KEY (volumes or
@@ -1361,6 +1373,59 @@ notify_namespaced notify-slack slack -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
 notify_namespaced notify-telegram telegram "$CHAT_ID" -- "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
   --set notifications.format=telegram --set-string "notifications.telegramChatId=$CHAT_ID"
 
+# Without model.endpoint (docs/adr/0027-fact-statement-for-the-detections.md): the notify args
+# (and the volume, the mount and the rules, which do not change), then the rate limit's value.
+LOGS=no notify_case notify-no-endpoint default json -- "${NOTIFY_ON[@]}"
+LOGS=no TOKENKEY=token notify_case notify-no-endpoint-token default json "" yes -- \
+  "${NOTIFY_ON[@]}" --set notifications.tokenKey=token
+LOGS=no notify_case notify-no-endpoint-slack default slack -- "${NOTIFY_ON[@]}" \
+  --set notifications.format=slack
+for value in 1 100 3600; do
+  NOTIFY_MAX=$value notify_case "notify-max-per-hour-$value" endpoint json -- "${ENDPOINT[@]}" \
+    "${NOTIFY_ON[@]}" --set "notifications.maxPerHour=$value"
+done
+NOTIFY_MAX=45 notify_case notify-max-per-hour-string endpoint json -- "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set-string notifications.maxPerHour=45
+# The same without an endpoint in the namespaced scope: the Roles of namespaced/default.
+check_namespaced notify-no-endpoint no yes e2e-a "${NOTIFY_ON[@]}"
+if [ -f "$WORK/namespaced-notify-no-endpoint" ] && [ -f "$WORK/namespaced-default" ]; then
+  notify_args json >"$WORK/namespaced-notify-no-endpoint.notify-args"
+  check_notify "namespaced/notify-no-endpoint" "$WORK/namespaced-notify-no-endpoint" \
+    "$WORK/namespaced-default" url
+fi
+
+# Events without an endpoint: --no-events is passed only with events=false or dryRun's own render
+# never passes it, and the Event writes follow (checked with the rules above).
+for name in cluster-default namespaced-default cluster-dry-run cluster-endpoint \
+  cluster-notify-no-endpoint; do
+  [ -f "$WORK/$name" ] || continue
+  args "$WORK/$name" | grep -qx -- '- --no-events' &&
+    fail "$name: passes --no-events with events on"
+done
+NO_ENDPOINT_NO_EVENTS=(--set events=false)
+check_cluster no-endpoint-no-events no no "${NO_ENDPOINT_NO_EVENTS[@]}"
+check_namespaced no-endpoint-no-events no no e2e-a "${NO_ENDPOINT_NO_EVENTS[@]}"
+for name in cluster-no-endpoint-no-events namespaced-no-endpoint-no-events cluster-no-events; do
+  [ -f "$WORK/$name" ] || continue
+  [ "$(args "$WORK/$name" | grep -cx -- '- --no-events' || true)" = 1 ] ||
+    fail "$name: not exactly one --no-events arg with events=false"
+  grep -q 'verbs: \["create", "patch"\]' "$WORK/$name" &&
+    fail "$name: kausa may write Events with events=false"
+done
+# dryRun: no Event writes and no --no-events, with or without notifications' values set.
+for scope in cluster namespaced; do
+  [ -f "$WORK/$scope-dry-run" ] || continue
+  grep -q 'verbs: \["create", "patch"\]' "$WORK/$scope-dry-run" &&
+    fail "$scope-dry-run: kausa may write Events with dryRun"
+done
+# Events on, no endpoint, both scopes: the rule is the one with an endpoint.
+for name in cluster-default namespaced-default; do
+  [ -f "$WORK/$name" ] || continue
+  grep -c 'verbs: \["create", "patch"\]' "$WORK/$name" >"$WORK/$name.writes" || true
+  [ "$(cat "$WORK/$name.writes")" -ge 1 ] || fail "$name: no create and patch on Events without an endpoint"
+done
+passed "$FAILURES" "events without an endpoint: the rule and --no-events"
+
 # With notifications off, nothing of them renders: no --notify arg, no notify volume, no fourth
 # egress rule. Checked on every render of the sections above.
 since=$FAILURES
@@ -1549,6 +1614,23 @@ render "$WORK/np-namespaced" "$RELEASE" "$CHART" --set rbac.scope=namespaced \
   --set 'rbac.namespaces={e2e-a}' "${ENDPOINT[@]}" "${NP_ON[@]}" "${NOTIFY_ON[@]}" \
   "${NP_NOTIFY_TO[@]}" || fail "np/namespaced does not render: $(cat "$WORK/np-namespaced.err")"
 check_egress np/namespaced "$WORK/np-namespaced" "$WORK/np-namespaced-base" "$WORK/rule4-443"
+# The notifications' webhook rule without the endpoint's: DNS, the API server and the webhook.
+np_render no-endpoint "${NP_ON[@]}" "${NOTIFY_ON[@]}" "${NP_NOTIFY_TO[@]}"
+if [ -f "$WORK/np-no-endpoint" ]; then
+  since=$FAILURES
+  [ "$(egress_count "$WORK/np-no-endpoint")" = 3 ] ||
+    fail "np/no-endpoint: $(egress_count "$WORK/np-no-endpoint") egress rules, not 3"
+  [ "$(egress_comment "$WORK/np-no-endpoint" 3)" = '# The notification webhook.' ] ||
+    fail "np/no-endpoint: the third egress rule is not commented '# The notification webhook.'"
+  egress_rule "$WORK/np-no-endpoint" 3 >"$WORK/np-no-endpoint.rule3"
+  diff -u "$WORK/rule4-443" "$WORK/np-no-endpoint.rule3" >"$WORK/np-no-endpoint.diff" ||
+    fail "np/no-endpoint: the webhook's egress rule: $(cat "$WORK/np-no-endpoint.diff")"
+  grep -q '192.0.2.2/32' "$WORK/np-no-endpoint" && fail "np/no-endpoint: the endpoint's rule renders"
+  grep -qx '    # The model endpoint.' "$WORK/np-no-endpoint" &&
+    fail "np/no-endpoint: the model endpoint's rule renders"
+  passed "$since" "np/no-endpoint: the webhook's egress rule without the endpoint's"
+fi
+
 
 # --- Values without the notifications maps (helm upgrade --reuse-values from an earlier release)
 
@@ -1570,7 +1652,7 @@ awk '/^networkPolicy:/ { on = 1; next } on && /^[^ ]/ { on = 0 } on && /^  notif
   fail "the chart copy still has networkPolicy.notifications"
 # Notifications given in full by --set: the same render as the chart's.
 NOTIFY_FULL=("${NOTIFY_ON[@]}" --set notifications.format=json --set notifications.urlKey=url
-  --set notifications.allowHttp=false)
+  --set notifications.allowHttp=false --set notifications.maxPerHour=30)
 for pair in default: endpoint:endpoint no-events:no-events history:endpoint,history \
   notify-json:endpoint,notify np-default-ports:endpoint,np,notify,to; do
   name=${pair%%:*} sets=${pair#*:}
@@ -1607,6 +1689,40 @@ for pair in default: endpoint:endpoint no-events:no-events history:endpoint,hist
     fail "no notifications map, $name: renders unlike the chart:" \
       "$(diff "$compare" "$out" | head -20)"
   fi
+done
+
+# A release made before notifications.maxPerHour (helm upgrade --reuse-values) has the map but not
+# the key: a copy of the chart without it renders the notify args without --notify-max-per-hour, so
+# kausa's own default applies, and the rest like the chart with --set notifications.maxPerHour=null.
+NOMAX_CHART="$WORK/nomax/kausa"
+mkdir -p "$WORK/nomax"
+cp -R "$CHART" "$NOMAX_CHART"
+grep -v '^  maxPerHour:' "$CHART/values.yaml" >"$NOMAX_CHART/values.yaml"
+grep -q '^  maxPerHour:' "$CHART/values.yaml" || fail "values.yaml has no notifications.maxPerHour key"
+grep -q 'maxPerHour:' "$NOMAX_CHART/values.yaml" && fail "the chart copy still has maxPerHour"
+for name in endpoint no-endpoint; do
+  set_values=(--set rbac.scope=cluster "${NOTIFY_ON[@]}")
+  if [ "$name" = endpoint ]; then set_values+=("${ENDPOINT[@]}"); fi
+  out="$WORK/nomax-$name"
+  if ! render "$out" "$RELEASE" "$NOMAX_CHART" "${set_values[@]}"; then
+    fail "no maxPerHour key, $name: does not render: $(cat "$out.err")"
+    continue
+  fi
+  render "$out.null" "$RELEASE" "$CHART" "${set_values[@]}" --set notifications.maxPerHour=null ||
+    fail "maxPerHour=null, $name: does not render: $(cat "$out.null.err")"
+  args "$out" | grep -q -- '--notify-max-per-hour' &&
+    fail "no maxPerHour key, $name: passes --notify-max-per-hour"
+  args "$out" | grep -qx -- '- --notify-url-file' ||
+    fail "no maxPerHour key, $name: no --notify-url-file"
+  if cmp -s "$out" "$out.null"; then
+    ok "no maxPerHour key, $name: renders the notify args without the flag, like maxPerHour=null"
+  else
+    fail "no maxPerHour key, $name: renders unlike maxPerHour=null: $(diff "$out" "$out.null" | head -20)"
+  fi
+  render "$out.default" "$RELEASE" "$CHART" "${set_values[@]}" ||
+    fail "the chart does not render with notifications, $name"
+  args "$out.default" | grep -A1 -x -- '- --notify-max-per-hour' | tail -n 1 | grep -qx -- '- "30"' ||
+    fail "$name: the chart's default is not --notify-max-per-hour \"30\""
 done
 
 # --- helm lint and NOTES.txt with notifications ---
@@ -1652,7 +1768,7 @@ notify_bad_format() { echo "notifications.format must be json, slack or telegram
 NOTIFY_NEEDS_CHAT='notifications.telegramChatId is required with notifications.format=telegram'
 NOTIFY_CHAT_ONLY='notifications.telegramChatId is used only with notifications.format=telegram'
 NOTIFY_TOKEN_ONLY='notifications.tokenKey is used only with notifications.format=json'
-NOTIFY_NEEDS_ENDPOINT='notifications.enabled needs model.endpoint'
+NOTIFY_MAX_PER_HOUR() { echo "notifications.maxPerHour must be a whole number from 1 to 3600, not '$1'"; }
 NOTIFY_NOT_DRY='notifications.enabled is not used with dryRun: no explanation is written'
 NOTIFY_NEEDS_TO='networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook'
 CL=(--set rbac.scope=cluster)
@@ -1682,8 +1798,19 @@ refuse notify-token-slack "$NOTIFY_TOKEN_ONLY" "${CL[@]}" "${ENDPOINT[@]}" "${NO
 refuse notify-token-telegram "$NOTIFY_TOKEN_ONLY" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
   "${TELEGRAM[@]}" --set-string "notifications.telegramChatId=$CHAT_ID" \
   --set notifications.tokenKey=token
-refuse notify-no-endpoint "$NOTIFY_NEEDS_ENDPOINT" "${CL[@]}" "${NOTIFY_ON[@]}"
-refuse notify-no-endpoint-namespaced "$NOTIFY_NEEDS_ENDPOINT" "${NS[@]}" "${NOTIFY_ON[@]}"
+# Notifications no longer need model.endpoint (docs/adr/0027-fact-statement-for-the-detections.md):
+# without one, dryRun is still refused, and so is a maxPerHour outside 1-3600.
+refuse notify-no-endpoint-dry-run "$NOTIFY_NOT_DRY" "${CL[@]}" "${NOTIFY_ON[@]}" "${DRY[@]}"
+for value in 0 3601 99999 -1 1.5 abc; do
+  refuse "notify-max-per-hour-$value" "$(NOTIFY_MAX_PER_HOUR "$value")" "${CL[@]}" \
+    "${NOTIFY_ON[@]}" --set-string "notifications.maxPerHour=$value"
+done
+refuse notify-max-per-hour-empty "$(NOTIFY_MAX_PER_HOUR '')" "${CL[@]}" "${NOTIFY_ON[@]}" \
+  --set-string notifications.maxPerHour=
+refuse notify-max-per-hour-zero-number "$(NOTIFY_MAX_PER_HOUR 0)" "${NS[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.maxPerHour=0
+refuse notify-max-per-hour-3601-number "$(NOTIFY_MAX_PER_HOUR 3601)" "${CL[@]}" "${ENDPOINT[@]}" \
+  "${NOTIFY_ON[@]}" --set notifications.maxPerHour=3601
 refuse notify-dry-run "$NOTIFY_NOT_DRY" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" "${DRY[@]}"
 refuse notify-np-no-to "$NOTIFY_NEEDS_TO" "${CL[@]}" "${ENDPOINT[@]}" "${NOTIFY_ON[@]}" \
   "${NP_ON[@]}"
@@ -1714,10 +1841,10 @@ refuse notify-order-chat-required-before-token "$NOTIFY_NEEDS_CHAT" "${CL[@]}" \
 refuse notify-order-chat-before-token "$NOTIFY_CHAT_ONLY" "${CL[@]}" "${ENDPOINT[@]}" \
   "${NOTIFY_ON[@]}" --set notifications.format=slack --set notifications.telegramChatId=1 \
   --set notifications.tokenKey=token
-refuse notify-order-token-before-endpoint "$NOTIFY_TOKEN_ONLY" "${CL[@]}" "${NOTIFY_ON[@]}" \
-  --set notifications.format=slack --set notifications.tokenKey=token
-refuse notify-order-endpoint-before-dry-run "$NOTIFY_NEEDS_ENDPOINT" "${CL[@]}" \
-  "${NOTIFY_ON[@]}" "${DRY[@]}"
+refuse notify-order-token-before-max "$NOTIFY_TOKEN_ONLY" "${CL[@]}" "${NOTIFY_ON[@]}" \
+  --set notifications.format=slack --set notifications.tokenKey=token --set notifications.maxPerHour=0
+refuse notify-order-max-before-dry-run "$(NOTIFY_MAX_PER_HOUR 0)" "${CL[@]}" "${NOTIFY_ON[@]}" \
+  "${DRY[@]}" --set notifications.maxPerHour=0
 refuse notify-order-dry-run-before-np "$NOTIFY_NOT_DRY" "${CL[@]}" "${ENDPOINT[@]}" \
   "${NOTIFY_ON[@]}" "${DRY[@]}" "${NP_ON[@]}"
 # Values without the notifications maps reach the same refusals, never a nil-pointer error.
@@ -2307,7 +2434,8 @@ passed "$since" "e2e/failures.yaml: policy-job fails by its podFailurePolicy, no
 
 # tests/e2e/run.sh: the Job is explained as D008, its incident's sample.reason is PodFailurePolicy,
 # its request carries the note without its real names, its names are in the leak loop, it is
-# notified once, and the notifications sent count it (one per failing workload, now six).
+# notified, and the notifications sent count it (a detected and an explained body per failing
+# workload, now twelve).
 since=$FAILURES
 RUN_SH="$E2E/run.sh"
 bash -n "$RUN_SH" || fail "e2e/run.sh: bash -n fails"
@@ -2315,7 +2443,7 @@ grep -Eq '^[[:space:]]*explanations_of Job policy-job D008 batch/v1[[:space:]]*$
   fail "e2e/run.sh: no 'explanations_of Job policy-job D008 batch/v1'"
 # shellcheck disable=SC2016 # the words are run.sh's own text, not to be expanded
 for words in PodFailurePolicy 'matching FailJob rule at index 0' \
-  '("Job", "policy-job", "D008", "batch/v1")' '{outcome=\"sent\"}" && $2 >= 6'; do
+  '("Job", "policy-job", "D008", "batch/v1")' '{outcome=\"sent\"}" && $2 >= 12'; do
   grep -qF -- "$words" "$RUN_SH" || fail "e2e/run.sh: no '$words'"
 done
 # shellcheck disable=SC2016 # the same

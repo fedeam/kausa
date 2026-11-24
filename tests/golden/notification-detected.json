@@ -1,0 +1,11 @@
+{
+  "schema": "kausa.fedeam.com/notification/v2",
+  "type": "detected",
+  "kausa_version": "0.7.0",
+  "detection": {"id": "D001", "name": "crash loop"},
+  "object": {"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "shop", "name": "web"},
+  "fingerprint": "5d0c2b7e9a1f4c38",
+  "first_seen": "2026-10-28T11:59:00Z",
+  "facts": {"reason": "CrashLoopBackOff", "exit_code": 1, "pods_seen": 2,
+            "pods_seen_is_minimum": false, "pods_now": 3, "revision": null}
+}

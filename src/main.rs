@@ -14,6 +14,7 @@ mod context;
 mod detect;
 mod events;
 mod explain;
+mod fact;
 mod fingerprint;
 mod history;
 mod incident;
@@ -27,6 +28,7 @@ mod owner;
 mod prompt;
 mod record;
 mod redact;
+mod report;
 mod run;
 
 use std::ffi::OsString;
@@ -57,7 +59,7 @@ const MODEL_TIMEOUTS: std::ops::RangeInclusive<u64> = 10..=600;
 
 /// The flags of `kausa run` that `kausa check-endpoint` refuses by name: every flag of `run` but
 /// the six model flags they share ([`ModelFlags`]).
-const RUN_ONLY_FLAGS: [&str; 19] = [
+const RUN_ONLY_FLAGS: [&str; 20] = [
     "--settle-seconds",
     "--namespace",
     "--no-rollouts",
@@ -71,6 +73,7 @@ const RUN_ONLY_FLAGS: [&str; 19] = [
     "--notify-telegram-chat-id",
     "--notify-token-file",
     "--notify-allow-http",
+    "--notify-max-per-hour",
     "--max-calls-per-hour",
     "--max-calls-per-day",
     "--max-input-tokens",
@@ -87,9 +90,11 @@ const HELP: &str = concat!(
     env!("CARGO_PKG_DESCRIPTION"),
     ".\n",
     "\n",
-    "Status: pre-alpha. `kausa run` detects and groups failures and logs them as\n",
-    "incidents; with --endpoint it explains each one with the model, within a call\n",
-    "budget, and writes the explanation as an Event on the failing workload.\n",
+    "Status: pre-alpha. `kausa run` detects and groups failures, logs each incident\n",
+    "with a statement of its facts and writes that statement as a Detected Event on\n",
+    "the failing workload; with --endpoint it also explains each one with the model,\n",
+    "within a call budget, and writes the explanation as an Event, marked as the\n",
+    "model's and not verified.\n",
     "\n",
     "Usage:\n",
     "  kausa run [OPTIONS]    Run the controller\n",
@@ -110,16 +115,18 @@ const HELP: &str = concat!(
     "  --no-logs              Do not read container logs\n",
     "  --no-json-schema       Do not ask for structured output (response_format)\n",
     "  --model-timeout <N>    A call's total timeout in seconds (10-600, default 120)\n",
-    "  --no-events            Do not write Events (log the explanations only)\n",
+    "  --no-events            Do not write Events (log the incidents and\n",
+    "                         explanations only)\n",
     "  --history              Keep each incident's explanations in an Explanation\n",
     "                         object in its namespace (needs the CRD)\n",
     "  --history-days <N>     Delete history older than N days (1-30, default 7)\n",
-    "  --notify-url-file <PATH>  Post each new explanation to the webhook whose URL is\n",
-    "                            in this file (needs --endpoint)\n",
+    "  --notify-url-file <PATH>  Post each detection and each new explanation to the\n",
+    "                            webhook whose URL is in this file\n",
     "  --notify-format <FORMAT>  json (default), slack or telegram\n",
     "  --notify-telegram-chat-id <ID>  telegram's chat: an integer or @channel\n",
     "  --notify-token-file <PATH>  json only: a bearer token for the webhook\n",
     "  --notify-allow-http       Allow a plain http:// webhook (local or in-cluster)\n",
+    "  --notify-max-per-hour <N>  Detections posted in any hour (1-3600, default 30)\n",
     "  --max-calls-per-hour <N>  Model calls allowed in any hour (default 30); each\n",
     "                            start allows 3 at once, then one every 3600/N seconds\n",
     "  --max-calls-per-day <N>   Model calls allowed in any day, per process\n",
@@ -154,8 +161,8 @@ const HELP: &str = concat!(
     "By design, kausa never reads Secrets or ConfigMaps, writes nothing but Events\n",
     "and, with --history, its own Explanation objects, and, with --leader-lease, the\n",
     "spec of its one Lease, and sends nothing unredacted to the model. With\n",
-    "--notify-url-file, only the documented fields of each new explanation go to\n",
-    "the webhook.\n",
+    "--notify-url-file, only the documented fields of each detection and each new\n",
+    "explanation go to the webhook.\n",
     "\n",
     "Exit status: 0 on success or a clean stop, 1 when it cannot start or a watch\n",
     "ends (watch errors are logged and retried), 2 on a usage error or when stdout\n",
@@ -204,6 +211,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let mut namespaces: Vec<String> = Vec::new();
     let mut leader_lease: Option<(String, String)> = None;
     let mut notify_flags = NotifyFlags::default();
+    let mut notify_max_per_hour: Option<usize> = None;
     let mut limits = Limits::default();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -312,6 +320,17 @@ fn run_command(args: &[OsString]) -> ExitCode {
                 Err(code) => return code,
             },
             "--notify-allow-http" => notify_flags.allow_http = true,
+            "--notify-max-per-hour" => match value() {
+                Ok(v) => match v.parse::<usize>() {
+                    Ok(n) if notify::MAX_PER_HOUR.contains(&n) => notify_max_per_hour = Some(n),
+                    _ => {
+                        return usage_error(&format!(
+                            "--notify-max-per-hour takes a whole number from 1 to 3600, not '{v}'"
+                        ));
+                    }
+                },
+                Err(code) => return code,
+            },
             "--history" => history = true,
             "--no-events" => no_events = true,
             "--no-rollouts" => no_rollouts = true,
@@ -339,7 +358,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
     if let Err(message) = check_history(history, history_days, dry_run, endpoint) {
         return usage_error(message);
     }
-    let notifier = match check_notify(notify_flags, dry_run, endpoint) {
+    let notifier = match check_notify(notify_flags, notify_max_per_hour.is_some(), dry_run) {
         Ok(notifier) => notifier,
         Err(message) => return usage_error(&message),
     };
@@ -350,7 +369,6 @@ fn run_command(args: &[OsString]) -> ExitCode {
         no_events,
         history.then(|| history_days.unwrap_or(DEFAULT_HISTORY_DAYS)),
         &limits,
-        notifier,
     ) {
         Ok(settings) => settings,
         Err(message) => return usage_error(&message),
@@ -368,6 +386,11 @@ fn run_command(args: &[OsString]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let notify = notifier.map(|notifier| run::Notify {
+        notifier,
+        max_per_hour: notify_max_per_hour.unwrap_or(notify::DEFAULT_MAX_PER_HOUR),
+        dedup_ttl: limits.dedup_ttl(),
+    });
     let options = run::Options {
         settle: SignedDuration::from_secs(i64::from(settle_seconds)),
         explain,
@@ -375,6 +398,15 @@ fn run_command(args: &[OsString]) -> ExitCode {
         namespaces,
         rollouts: !no_rollouts,
         leader_lease,
+        // docs/adr/0027-fact-statement-for-the-detections.md: the `Detected` Event is written
+        // unless --no-events, and never in a dry run, with or without --endpoint.
+        detected: (!no_events && !dry_run).then(|| {
+            std::env::var("POD_NAME")
+                .ok()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "kausa".to_owned())
+        }),
+        notify,
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -506,14 +538,14 @@ impl NotifyFormat {
 
 /// Checks the `--notify-*` flags and builds the webhook's client, in this order: every other
 /// notify flag needs `--notify-url-file` (the first one named in the order format, chat id, token
-/// file, allow-http), which is not used with `--dry-run` and needs `--endpoint`; the chat id is
+/// file, allow-http, max per hour), which is not used with `--dry-run`; the chat id is
 /// for `telegram` only and the token file for `json` only; `telegram` needs a well-formed chat
 /// id; then the URL file is read and its URL checked, and then the token file is read. `None`
 /// when notifications are off. No message carries what either file holds.
 fn check_notify(
     flags: NotifyFlags,
+    max_per_hour: bool,
     dry_run: bool,
-    endpoint: bool,
 ) -> Result<Option<notify::Notifier>, String> {
     let Some(url_file) = flags.url_file else {
         let given = [
@@ -521,6 +553,7 @@ fn check_notify(
             ("--notify-telegram-chat-id", flags.chat_id.is_some()),
             ("--notify-token-file", flags.token_file.is_some()),
             ("--notify-allow-http", flags.allow_http),
+            ("--notify-max-per-hour", max_per_hour),
         ];
         return match given.into_iter().find(|&(_, given)| given) {
             Some((flag, _)) => Err(format!("{flag} needs --notify-url-file")),
@@ -531,9 +564,6 @@ fn check_notify(
         return Err(
             "--notify-url-file is not used with --dry-run: no explanation is written".into(),
         );
-    }
-    if !endpoint {
-        return Err("--notify-url-file needs --endpoint".into());
     }
     let format = flags.format.unwrap_or(NotifyFormat::Json);
     if flags.chat_id.is_some() && format != NotifyFormat::Telegram {
@@ -622,6 +652,13 @@ struct Limits {
     dedup_hours: usize,
 }
 
+impl Limits {
+    /// `--dedup-hours` as a duration: the explanation cache's and the `detected` messages' window.
+    fn dedup_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.dedup_hours as u64 * 3600)
+    }
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -640,7 +677,6 @@ fn explain_settings(
     no_events: bool,
     history_days: Option<u32>,
     limits: &Limits,
-    notify: Option<notify::Notifier>,
 ) -> Result<Option<explain::Settings>, String> {
     if model_flags.endpoint.is_none() && !dry_run {
         if model_flags.any_but_endpoint() {
@@ -676,12 +712,11 @@ fn explain_settings(
         history_days,
         calls_per_hour: limits.per_hour,
         calls_per_day: limits.per_day,
-        dedup_ttl: std::time::Duration::from_secs(limits.dedup_hours as u64 * 3600),
+        dedup_ttl: limits.dedup_ttl(),
         instance: std::env::var("POD_NAME")
             .ok()
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "kausa".to_owned()),
-        notify,
     }))
 }
 

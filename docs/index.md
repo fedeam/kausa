@@ -2,14 +2,16 @@
 
 kausa is a Kubernetes controller for people who run small clusters and want to know why a workload
 fails: it watches Warning events, Pod status and Deployments, groups the failures of one workload
-into one incident, sends a redacted context to one OpenAI-compatible model endpoint within a call
-and token budget, and writes the explanation as an Event on the failing object. It never reads Secrets or
+into one incident and reports it as facts in a `Detected` Event on the failing object, with or
+without a model. With a model endpoint it also sends a redacted context to one OpenAI-compatible
+endpoint within a call and token budget and writes the explanation as a second Event, marked as the
+model's and not verified. It never reads Secrets or
 ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
 `--no-events`) and, with `--history` (off by default), its own Explanation objects and, with
 `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease. With
-`--notify-url-file` (off by default) it also posts each new explanation to one webhook.
+`--notify-url-file` (off by default) it also posts each settled incident and each new explanation to one webhook, with or without a model.
 
-Status as of 2026-11-20: **in development** (pre-alpha). The four implementation weekends of v0.1
+Status as of 2026-11-24: **in development** (pre-alpha). The four implementation weekends of v0.1
 are done: `kausa run` watches Pods and Warning events, groups failures by
 workload, redacts their context, explains them with an OpenAI-compatible model within a call
 budget (or logs the request with `--dry-run`) and writes each explanation as an Event on the
@@ -101,8 +103,8 @@ measured in kind on 2026-10-29 ([Standby and failover](research/2026-10-29-stand
 
 ## How to run it
 
-To build kausa, run it against the cluster of the kubeconfig's current context (read-only: it
-logs incidents), and run the same checks as CI:
+To build kausa, run it against the cluster of the kubeconfig's current context (it
+writes only its own Events; `--dry-run --no-events` writes nothing), and run the same checks as CI:
 
 ```sh
 cargo build --locked
@@ -195,9 +197,11 @@ checks](how-to/develop.md).
   whose stages each need their own ADR: [0026. Report every incident as facts without a model,
   keep the explanation optional, and widen coverage one bounded source at a
   time](adr/0026-facts-before-the-model.md).
-  Proposed on 2026-11-19, not accepted, as its stage 1: [0027. Report each settled incident as a
-  fact statement in its own `Detected` Event and webhook message, with or without a model, and mark
-  the model's text as a model's](adr/0027-fact-statement-for-the-detections.md).
+  Accepted on 2026-11-24, after its measurement in kind and on a Raspberry Pi 4 ([The fact statement
+  prototype, measured](research/2026-11-20-fact-statement-prototype.md)), and implemented in the
+  release after v0.6.3 as the stage 1 of 0026: [0027. Report each settled incident as a fact
+  statement in its own `Detected` Event and webhook message, with or without a model, and mark the
+  model's text as a model's](adr/0027-fact-statement-for-the-detections.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first

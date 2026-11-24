@@ -45,7 +45,7 @@ test` in CI.
 | Object | Name | Notes |
 |---|---|---|
 | ServiceAccount | the release's full name | `serviceAccount.name` to override |
-| ClusterRole and ClusterRoleBinding | the release's full name | Only with `rbac.scope=cluster`. The table in [Permissions](permissions.md); `pods/log` only when kausa explains (an endpoint or `dryRun`) and `logs` is true; `create` and `patch` on Events only with an endpoint, `events` true and no `dryRun`; `list` and `watch` on `deployments` only while `rollouts` is on |
+| ClusterRole and ClusterRoleBinding | the release's full name | Only with `rbac.scope=cluster`. The table in [Permissions](permissions.md); `pods/log` only when kausa explains (an endpoint or `dryRun`) and `logs` is true; `create` and `patch` on Events with `events` true and no `dryRun`, with or without an endpoint (the `Detected` Event of [0027](../adr/0027-fact-statement-for-the-detections.md)); `list` and `watch` on `deployments` only while `rollouts` is on |
 | Role and RoleBinding, in each namespace of `rbac.namespaces` | the release's full name | Only with `rbac.scope=namespaced`. The same rules, with the same conditions; the RoleBinding's subject is the ServiceAccount in the release namespace |
 | Deployment | the release's full name | `replicaCount` replicas (1 or 2), `Recreate`, the restricted Pod Security settings, a read-only root filesystem, `POD_NAME` from the downward API; with 2, `--leader-lease` and a default pod anti-affinity ([A standby replica](#a-standby-replica)) |
 | Lease | `<full name>-leader` | Only with `replicaCount: 2`, in the release namespace, with the chart's labels and `spec: {}`: Helm owns the object, kausa writes its `spec` |
@@ -86,7 +86,7 @@ but about kausa's own Lease, and is the same in both scopes.
 | `imagePullSecrets` | `[]` | |
 | `rbac.scope` | none: required | `cluster`: the ClusterRole and ClusterRoleBinding, and no `--namespace`, so kausa watches every namespace. `namespaced`: a Role and a RoleBinding in each namespace of `rbac.namespaces`, nothing cluster-scoped, and one `--namespace` per entry. Set it on every install and upgrade, in a values file or with `--reuse-values` |
 | `rbac.namespaces` | `[]` | With `namespaced`: the namespaces kausa watches and is granted, 1 to 32 distinct namespace names, in the order of the `--namespace` arguments. Each must exist before `helm install`. Must be empty with `cluster` |
-| `model.endpoint` | `""` | `--endpoint`. Empty, without `dryRun`: kausa only logs incidents |
+| `model.endpoint` | `""` | `--endpoint`. Empty, without `dryRun`: kausa writes no explanation; it logs each incident and, with `events`, writes its `Detected` Event |
 | `model.name` | `""` | `--model`; required with an endpoint |
 | `model.allowHttp` | `false` | `--allow-http`; required for an `http://` endpoint |
 | `model.jsonSchema` | `true` | `false` adds `--no-json-schema` |
@@ -96,19 +96,20 @@ but about kausa's own Lease, and is the same in both scopes.
 | `dryRun` | `false` | `--dry-run` |
 | `endpointCheck.enabled` | `true` | Render the `helm test` Pod and, with `networkPolicy.enabled`, its NetworkPolicy, only with `model.endpoint` and without `dryRun` ([The endpoint check](#the-endpoint-check)). `true` or `false`; a missing key or map (a v0.4.1 release reused with `--reuse-values`) or `null` means `true`, and `endpointCheck` itself set to anything else (`endpointCheck: false`) is refused |
 | `logs` | `true` | `false` adds `--no-logs` and removes `pods/log` |
-| `events` | `true` | `false` adds `--no-events` and removes the Event writes |
+| `events` | `true` | Write the `Detected` Event of each incident and, with an endpoint, its explanation. `false` adds `--no-events` and removes the Event writes, with or without an endpoint |
 | `rollouts` | `true` | Watch Deployments and explain rollouts past their progress deadline (`D014`). `false` adds `--no-rollouts` and removes `list` and `watch` on `deployments` from the ClusterRole or the Roles. Only the value `false` turns it off: a missing value (the values of a v0.3 release reused with `--reuse-values`) or `null` means on. Independent of the endpoint and `dryRun`. No refusal |
 | `history.enabled` | `false` | With an endpoint and without `dryRun`: `--history --history-days <days>`, the `explanations` rule, and (with `installCRD`) the CustomResourceDefinition and the reader role. Turning it off, removing the endpoint or setting `dryRun` deletes them, and every Explanation in the cluster |
 | `history.days` | `7` | `--history-days`: Explanations older than this many days are deleted, 1 to 30 |
 | `history.installCRD` | `true` | Whether this release installs the CustomResourceDefinition and the reader role. `false` when another release or a cluster administrator installs them |
 | `history.readers.aggregate` | `true` | The reader role, which lets `view`, `edit` and `admin` read Explanations; `false` leaves it out |
-| `notifications.enabled` | `false` | Post each new explanation to one webhook ([Notifications](#notifications)): `--notify-url-file /var/run/secrets/kausa-notify/url --notify-format <format>`, and the Secret volume. Needs `model.endpoint`, and not with `dryRun` |
+| `notifications.enabled` | `false` | Post each new detection and explanation to one webhook ([Notifications](#notifications)): `--notify-url-file /var/run/secrets/kausa-notify/url --notify-format <format>`, and the Secret volume. With or without `model.endpoint`; not with `dryRun` |
 | `notifications.format` | `json` | `--notify-format`: `json`, `slack` or `telegram` |
 | `notifications.existingSecret` | `""` | Required when enabled: a Secret of yours in the release namespace that holds the webhook URL, mounted read-only at `/var/run/secrets/kausa-notify/` (mode 0440, group 65532) |
 | `notifications.urlKey` | `url` | The key of that Secret that holds the whole URL, mounted as the file `url` |
 | `notifications.tokenKey` | `""` | `json` only, optional: the key that holds a bearer token, mounted as the file `token` and passed as `--notify-token-file` |
 | `notifications.telegramChatId` | `""` | Required with `telegram`, refused with the others: `--notify-telegram-chat-id`, an integer or `@` and a channel's username |
 | `notifications.allowHttp` | `false` | `--notify-allow-http`, for an `http://` webhook in the cluster or on the same private network |
+| `notifications.maxPerHour` | `30` | `--notify-max-per-hour`: the most messages sent in any hour, a whole number from 1 to 3600. A missing key (the values of an earlier release reused with `--reuse-values`) or `null` leaves the flag out, and kausa's default, 30, applies |
 | `settleSeconds` | `60` | `--settle-seconds` |
 | `budget.callsPerHour` | `30` | `--max-calls-per-hour`: model calls in any hour, per process. Each start (an install, upgrade, restart or takeover) allows 3 at once, then one every `3600/callsPerHour` seconds, up to `callsPerHour`; incidents wait in the queue for their call |
 | `budget.callsPerDay` | `200` | `--max-calls-per-day`: model calls in any 24 hours, per process. For it to hold across restarts, up to the bursts of 3, set `callsPerHour <= callsPerDay / 24` |
@@ -158,7 +159,7 @@ reason, and nothing is applied) in these cases, checked in this order, with thes
 | `telegram` without a chat id | `notifications.telegramChatId is required with notifications.format=telegram` |
 | A chat id with `json` or `slack` | `notifications.telegramChatId is used only with notifications.format=telegram` |
 | `tokenKey` with `slack` or `telegram` | `notifications.tokenKey is used only with notifications.format=json` |
-| Notifications without `model.endpoint` | `notifications.enabled needs model.endpoint` |
+| `notifications.maxPerHour` is not a whole number from 1 to 3600 (for example `0`, `3601`, `abc` or `1.5`) | `notifications.maxPerHour must be a whole number from 1 to 3600, not '<value>'` |
 | Notifications with `dryRun` | `notifications.enabled is not used with dryRun: no explanation is written` |
 | Notifications and the NetworkPolicy without the webhook's peers | `networkPolicy.notifications.to is required with networkPolicy.enabled and notifications.enabled: without it kausa cannot reach the webhook` |
 
@@ -221,8 +222,8 @@ With `notifications.enabled`, the helper `kausa.notifies` is `true`, and the cha
 - **The arguments**, after the history's and before `--metrics-address`, in this order:
   `--notify-url-file /var/run/secrets/kausa-notify/url`, `--notify-format "<format>"`, then
   `--notify-telegram-chat-id "<id>"` with `telegram`, `--notify-token-file
-  /var/run/secrets/kausa-notify/token` with a `tokenKey`, and `--notify-allow-http` with
-  `allowHttp`. The URL itself is never in the Pod spec.
+  /var/run/secrets/kausa-notify/token` with a `tokenKey`, `--notify-allow-http` with
+  `allowHttp`, and `--notify-max-per-hour "<n>"` with `maxPerHour`. The URL itself is never in the Pod spec.
 - **The volume `notify`**: the Secret `existingSecret`, `defaultMode: 0440`, with the item
   `urlKey` as `url` and, with a `tokenKey`, that item as `token`, mounted read-only at
   `/var/run/secrets/kausa-notify` (readable through the Pod's `fsGroup`, 65532). It is never
@@ -231,7 +232,7 @@ With `notifications.enabled`, the helper `kausa.notifies` is `true`, and the cha
   kausa that starts without notifications; once the Secret is fixed, the same Pod starts with no
   restart (seen in kind on 2026-10-29). It shares the `volumes` and `volumeMounts` lists with the
   API key's volume.
-- **A fourth egress rule** in the NetworkPolicy, after the model's, commented `# The notification
+- **An egress rule** in the NetworkPolicy, after the model's when there is one (a release without an endpoint has no model rule, and the webhook's is its third), commented `# The notification
   webhook.`: `to` from `networkPolicy.notifications.to`, and always `ports`, from
   `networkPolicy.notifications.ports`, or TCP 443 when they are missing or empty. Unlike
   `networkPolicy.endpoint.ports`, where an empty list leaves the rule without `ports` (every port
@@ -242,12 +243,14 @@ With `notifications.enabled`, the helper `kausa.notifies` is `true`, and the cha
   `notification failed` log line, with a `kubectl logs` command.
 
 No RBAC rule changes, in either scope: `kausa.rules` is the same with notifications on or off,
-and the ClusterRole and every Role render the same.
+and the ClusterRole and every Role render the same. Notifications need no endpoint: without
+one, kausa posts the detections alone.
 
 `notifications` and `networkPolicy.notifications` are read nil-safely (`default dict`): a release
 whose stored values have neither (one installed with an earlier chart and upgraded with
 `--reuse-values`) renders with notifications off, with no nil-pointer error, and `--reuse-values
---set notifications.enabled=true ...` turns them on. An unquoted `telegramChatId` in a values file
+--set notifications.enabled=true ...` turns them on, with kausa's own rate limit, because the
+stored values have no `maxPerHour`. An unquoted `telegramChatId` in a values file
 (`-1001234567890`) reaches the template as a floating-point number; the chart prints it as a whole
 number, `"-1001234567890"`, not in exponent notation. Quoting it is clearer.
 

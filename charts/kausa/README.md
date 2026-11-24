@@ -1,8 +1,6 @@
 # kausa
 
-A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted
-explanation per incident, written as an Event on the object itself. It sends only allowlisted,
-redacted context to one OpenAI-compatible endpoint you choose. Status: pre-alpha.
+A tiny Kubernetes controller that reports failing workloads and, optionally, explains them with an LLM: one `Detected` Event of facts per incident, with or without a model, and with a model endpoint one redacted, budgeted explanation, marked as the model's, written as an Event on the object itself. With an endpoint it sends only allowlisted, redacted context to the OpenAI-compatible endpoint you choose. Status: pre-alpha.
 
 `rbac.scope` has no default: set it on every install and upgrade, to `cluster`, or to `namespaced`
 with `rbac.namespaces`.

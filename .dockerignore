@@ -21,6 +21,8 @@
 # metrics, and the alerts reference, whose sections the same test compares with the rules.
 !deploy/
 !docs/reference/alerts.md
+# The notifications reference, whose examples src/notification.rs compares with the golden bodies.
+!docs/reference/data-sent-in-notifications.md
 # The fuzz targets and the image ClusterFuzzLite builds them in (.clusterfuzzlite/Dockerfile
 # uses this same context).
 !fuzz/

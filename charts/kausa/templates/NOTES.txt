@@ -39,7 +39,7 @@ by the next helm upgrade.
 {{- end }}
 {{- if include "kausa.writesEvents" . }}
 
-Its explanations are Events on the failing workloads, for example:
+Its Events on the failing workloads (a Detected Event for each incident, and the explanation with an endpoint), for example:
 
   kubectl describe deployment -n <namespace> <name>
 {{- if eq $scope "namespaced" }}
@@ -56,7 +56,7 @@ Dry-run: kausa logs the redacted request of each incident and sends nothing:
   kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "kausa.fullname" . }}
 {{- else }}
 
-kausa logs incidents (no endpoint is configured, or events is false):
+kausa logs incidents (events is false):
 
   kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "kausa.fullname" . }}
 {{- end }}
@@ -92,7 +92,7 @@ does not delete its Explanations.
 {{- if include "kausa.notifies" . }}
 {{- $notify := .Values.notifications | default dict }}
 
-kausa posts each new explanation to a webhook (notifications.format={{ include "kausa.notifyFormat" . }}). The webhook
+kausa posts each new detection and explanation to a webhook (notifications.format={{ include "kausa.notifyFormat" . }}). The webhook
 URL is in the key {{ $notify.urlKey | default "url" }} of the Secret {{ $notify.existingSecret }}{{ with $notify.tokenKey }}, and a bearer token in the key {{ . }}{{ end }}.
 A failed notification counts in kausa_notifications_total{outcome="failed"} and logs a
 "notification failed" line:

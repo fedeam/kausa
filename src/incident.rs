@@ -25,7 +25,7 @@ pub const STATE_GRACE: SignedDuration = SignedDuration::from_secs(330);
 /// The most Pod names a pending failure keeps. While a failure lasts, its Pods may keep being
 /// replaced; past this many, only the names first in sorted order are kept, whatever the order
 /// the Pods were seen in.
-const MAX_PODS: usize = 100;
+pub const MAX_PODS: usize = 100;
 
 /// What makes two failures the same incident: the namespace, the top-level owner and the
 /// detection.

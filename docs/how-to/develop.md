@@ -164,7 +164,10 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
 `fuzz/` holds fuzz targets for the code that parses untrusted text: `redact` (redaction of
 anything a cluster could produce), `validate` (validation of anything a model could answer) and
 `history` (merging an explanation into any stored Explanation, which also checks that what kausa
-writes survives its next read and that `prompt::clean` is idempotent). GitHub Actions run them
+writes survives its next read and that `prompt::clean` is idempotent), `notification` (the webhook
+bodies built from any text), `endpoint_error` (the endpoint's error and chat completion answers)
+and `fact` (the fact statement of any incident, which holds only its allowed bytes within its
+bound). GitHub Actions run them
 with ClusterFuzzLite on pull requests that change that code and every week
 (`.github/workflows/cflite.yml`). To run one locally you need a nightly toolchain and
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (`cargo install cargo-fuzz`):
@@ -175,8 +178,9 @@ cargo +nightly fuzz run redact -- -max_total_time=60
 ```
 
 A new target is a file in `fuzz/fuzz_targets/` and a `[[bin]]` entry in `fuzz/Cargo.toml`; kausa
-has no library, so a target includes the module it tests by path, which works for modules that
-use nothing else from the crate.
+has no library, so a target includes the module it tests by path, and the modules it uses with it
+(`fact` includes `record`, `detect`, `fingerprint` and `incident`, and so depends on `k8s-openapi`
+like kausa).
 
 ## Verify
 

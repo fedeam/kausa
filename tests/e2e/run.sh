@@ -92,6 +92,21 @@
 #   foreign label write that keeps the holder; a rollout that ends with one leader; and an uninstall
 #   that leaves no Lease, Role, RoleBinding or PodDisruptionBudget.
 #
+# Both check the Detected Event (docs/adr/0027-fact-statement-for-the-detections.md) of each
+# failing workload but refused (crasher, failing-job, policy-job, stranded and stalled): a Warning
+# with the action Detect, named after the logged incident, whose note is the statement the log
+# gives (crasher's, byte for byte) and holds only letters, digits, spaces and .,:()- and no
+# namespace, owner, Pod or image. The Explained notes start with the mark (after the notice, when
+# withheld). The webhook receives, for each failing workload, one v2 detected body (the facts, no
+# explanation) and one explained one (the facts and the explanation), the facts agreeing with the
+# statement; no series of the capped and dropped facts is over 0.
+# With one replica, both then upgrade to an empty model.endpoint and no history, and check that kausa
+# writes Detected Events and nothing else (no other reason, no model request, no explanation line),
+# that the Role or ClusterRole grants Events create and patch, and that the receiver gets only
+# detected bodies; then events=false, with no grant, no Event and the incidents still logged and
+# posted. The next upgrade gives the model and the history back. The cluster scope's breaker case
+# also checks that the incidents the breaker skipped have their Detected Event.
+#
 # Every run checks the endpoint check (docs/adr/0020-check-the-endpoint.md): helm test --logs
 # passes against the fake endpoint, its Pod admitted under the restricted Pod Security Standard,
 # with one endpoint check line and one request, the synthetic body of
@@ -413,8 +428,10 @@ for name, kept in (("crasher", "D001"), ("refused", "D011")):
                 or event["regarding"].get("kind") != "Deployment"
                 or event["regarding"].get("name") != name):
             continue
-        # src/events.rs: kausa.<fingerprint>.<hash>, or kausa.skipped.<fingerprint>.<hash>.
-        match = re.match(r"kausa\.(?:skipped\.)?([0-9a-f]{16})\.", event["metadata"]["name"])
+        # src/events.rs: kausa.<fingerprint>.<hash>, or kausa.skipped.<fingerprint>.<hash> or
+        # kausa.detected.<fingerprint>.<hash>.
+        match = re.match(r"kausa\.(?:skipped\.|detected\.)?([0-9a-f]{16})\.",
+                         event["metadata"]["name"])
         incident = incidents.get(match.group(1)) if match else None
         if incident is None or incident.get("detection") == "D014":
             fail("the Event %s about %s is no %s incident" % (
@@ -609,9 +626,11 @@ print("the D014 request: %d, a rollout of %d counts, no Pod and no log tail" % (
     len(contexts), len(KEYS)))
 ' "$WORK/requests.jsonl"
 
-# The notifications (docs/adr/0015-notifications.md). The fake receiver answered the first one 503,
-# which kausa sends again 30 seconds later, and one per failing workload is due: crasher,
-# failing-job, policy-job, stranded, stalled and refused.
+# The notifications (docs/adr/0015-notifications.md,
+# docs/adr/0027-fact-statement-for-the-detections.md).
+# The fake receiver answered the first one 503, which kausa sends again 30 seconds later, and two
+# per failing workload are due, a detected one and an explained one: crasher, failing-job,
+# policy-job, stranded, stalled and refused.
 hooks_answered() {
   python3 -c '
 import json, sys
@@ -627,15 +646,18 @@ print(count)
 answered=0
 for _ in $(seq 1 60); do
   answered=$(hooks_answered)
-  [ "$answered" -ge 6 ] && break
+  [ "$answered" -ge 12 ] && break
   sleep 2
 done
-[ "$answered" -ge 6 ] || fail "the webhook answered $answered notifications 200 in 120 seconds"
+[ "$answered" -ge 12 ] || fail "the webhook answered $answered notifications 200 in 120 seconds (12 due)"
 k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
 k -n "$TARGET" get "$EXPLANATIONS" -o json > "$WORK/explanations.json"
 kausa_log
 # First, so that no later message can print an injected value.
 no_injected_values
+# The Detected Event of each failing workload (docs/adr/0027-fact-statement-for-the-detections.md)
+# and the mark on its Explained Event's note.
+check_detected model
 # The withheld answer (docs/adr/0025-withhold-destructive-commands.md): the destructive step of
 # failing-job's answer reached no sink (kausa's Event notes in TARGET, the Explanations' entries,
 # the webhook's bodies and kausa's explanation log lines), each of which holds something to look
@@ -699,11 +721,12 @@ print("the withheld answer: the command in none of %d Event notes, %d Explanatio
       "and W002" % (len(notes), len(entries), len(hooks), len(texts), fresh, withheld))
 ' "$TARGET" "$WORK"
 # What reached the webhook: the first POST got 503, every one carried the bearer token and went to
-# the URL's path, and each body is a v1 notification with only the documented fields. Exactly one
+# the URL's path, and each body is a v2 notification with only the documented fields. Exactly one
+# detected body (the facts, no explanation) and one explained body (the facts and the explanation)
 # answered 200 for each failing workload, with the real namespace, the rule, and the fingerprint
-# and first_seen of the incident kausa logged and explained, and the fake endpoint's answer with
-# its second step redacted, after the notice and with confidence low for failing-job's withheld
-# answer. No body holds the context sent to the model, a log-tail line the model requests carried,
+# and first_seen of the incident kausa logged and explained, the facts agreeing with the logged
+# statement, and the fake endpoint's answer with its second step redacted, after the notice and
+# with confidence low for failing-job's withheld answer. No body holds the context sent to the model, a log-tail line the model requests carried,
 # a placeholder other than R013's host-N (never mapped back, by design) or the unlisted namespace,
 # and requests.jsonl holds no notification. The started line names the format
 # and the host, and kausa's log holds neither token.
@@ -727,9 +750,12 @@ def strings(value):
             yield key
             yield from strings(item)
 
-SCHEMA = "kausa.fedeam.com/notification/v1"
-FIELDS = ["detection", "explanation", "fingerprint", "first_seen", "kausa_version", "object",
-          "schema", "type"]
+SCHEMA = "kausa.fedeam.com/notification/v2"
+FIELDS = {"detected": ["detection", "facts", "fingerprint", "first_seen", "kausa_version",
+                       "object", "schema", "type"],
+          "explained": ["detection", "explanation", "facts", "fingerprint", "first_seen",
+                        "kausa_version", "object", "schema", "type"]}
+FACTS = ["exit_code", "pods_now", "pods_seen", "pods_seen_is_minimum", "reason", "revision"]
 PLACEHOLDER = re.compile(r"\b[a-z]+-[0-9]+\b", re.IGNORECASE)
 # The placeholders of R013, the only ones a notification may hold (src/redact.rs never restores
 # them).
@@ -800,11 +826,15 @@ for hook in hooks:
         body = json.loads(text)
     except ValueError:
         fail("a notification body is not JSON")
-    if not isinstance(body, dict) or sorted(body) != FIELDS or body["schema"] != SCHEMA:
-        fail("a notification body is not a v1 notification with only its fields: %s" % text)
+    if (not isinstance(body, dict) or body.get("type") not in FIELDS
+            or sorted(body) != FIELDS[body["type"]] or body["schema"] != SCHEMA):
+        fail("a notification body is not a v2 detected or explained one with only its fields: %s"
+             % text)
     if (sorted(body["detection"]) != ["id", "name"]
             or sorted(body["object"]) != ["apiVersion", "kind", "name", "namespace"]
-            or sorted(body["explanation"]) != ["cause", "confidence", "steps", "summary"]):
+            or sorted(body["facts"]) != FACTS
+            or ("explanation" in body
+                and sorted(body["explanation"]) != ["cause", "confidence", "steps", "summary"])):
         fail("a notification body has other fields: %s" % text)
     every = [text] + list(strings(body))
     for word in ["untrusted_cluster_data", "log_tail", other] + sorted(tails):
@@ -828,13 +858,38 @@ for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1
                                       ("Deployment", "stranded", "D005", "apps/v1"),
                                       ("Deployment", "stalled", "D014", "apps/v1")):
     mine = [b for b in bodies if (b["object"]["kind"], b["object"]["name"]) == (kind, name)]
-    if len(mine) != 1:
-        fail("%d notifications answered 200 about %s %s" % (len(mine), kind, name))
-    body = mine[0]
+    detected = [b for b in mine if b["type"] == "detected"]
+    explained_bodies = [b for b in mine if b["type"] == "explained"]
+    if len(detected) != 1 or len(explained_bodies) != 1 or len(mine) != 2:
+        fail("%d detected and %d explained notifications answered 200 about %s %s" % (
+            len(detected), len(explained_bodies), kind, name))
+    body = explained_bodies[0]
     owner = {"apiVersion": api_version, "kind": kind, "name": name}
-    if body["type"] != "explained" or body["kausa_version"] != version:
-        fail("%s %s: type %s, kausa_version %s" % (kind, name, body["type"],
-                                                   body["kausa_version"]))
+    if body["kausa_version"] != version or detected[0]["kausa_version"] != version:
+        fail("%s %s: kausa_version %s" % (kind, name, body["kausa_version"]))
+    # The detected message: the same incident, the facts the logged statement states, and no
+    # explanation (its keys were checked above).
+    for key in ("object", "fingerprint", "first_seen", "detection"):
+        if detected[0][key] != body[key]:
+            fail("%s %s: the detected and explained notifications differ in %s" % (
+                kind, name, key))
+    statement = (incidents.get(body["fingerprint"]) or {}).get("statement")
+    if not isinstance(statement, str):
+        fail("%s %s: the incident line has no statement" % (kind, name))
+    for message in (detected[0], body):
+        facts = message["facts"]
+        if (not isinstance(facts["pods_seen_is_minimum"], bool)
+                or not isinstance(facts["pods_seen"], int) or not isinstance(facts["pods_now"], int)
+                or isinstance(facts["pods_seen"], bool) or isinstance(facts["pods_now"], bool)):
+            fail("%s %s: facts %s have the wrong types" % (kind, name, json.dumps(facts)))
+        if facts["reason"] is not None and ("reason %s" % facts["reason"]) not in statement:
+            fail("%s %s: the facts name a reason the statement does not" % (kind, name))
+        if facts["exit_code"] is not None and ("exit code %d" % facts["exit_code"]) not in statement:
+            fail("%s %s: the facts name an exit code the statement does not" % (kind, name))
+        if facts["revision"] is not None and ("Revision: %s." % facts["revision"]) not in statement:
+            fail("%s %s: the facts name a revision the statement does not" % (kind, name))
+    if detected[0]["facts"]["revision"] is None and rule == "D014":
+        fail("%s %s: D014 facts without a revision" % (kind, name))
     if body["object"] != dict(owner, namespace=target):
         fail("%s %s: object %s" % (kind, name, json.dumps(body["object"])))
     incident = incidents.get(body["fingerprint"])
@@ -865,23 +920,30 @@ for kind, name, rule, api_version in (("Deployment", "crasher", "D001", "apps/v1
             or not isinstance(steps[-1], str) or not re.fullmatch(REDACTED_STEP, steps[-1])):
         fail("%s %s: the steps are not the answer'"'"'s, the second one redacted%s" % (
             kind, name, ", after the notice" if withheld else ""))
-print("notifications: %d POSTs, the first answered 503; one v1 body each for crasher, "
-      "failing-job, policy-job, stranded and stalled" % len(hooks))
+print("notifications: %d POSTs, the first answered 503; one v2 detected body and one explained "
+      "body each for crasher, failing-job, policy-job, stranded and stalled" % len(hooks))
 ' "$TARGET" "$OTHER" "$WORK" "$gateway" "$HOOK_PATH" "$FAKE_BEARER" "$FAKE_BOT"
 # The counters, once kausa has handled the answers the receiver logged.
 counted=""
 for _ in $(seq 1 10); do
   metrics=$(kausa_metrics)
-  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 6' |
+  if echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 12' |
     grep -q . && echo "$metrics" | grep -E '^kausa_notifications_retried_total [1-9]' >/dev/null
   then
     counted=yes && break
   fi
   sleep 2
 done
-[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 6, or" \
+[ -n "$counted" ] || fail "kausa_notifications_total{outcome=\"sent\"} is under 12, or" \
   "kausa_notifications_retried_total under 1"
-echo "notifications: at least 6 sent and 1 retried"
+# The series of docs/adr/0027-fact-statement-for-the-detections.md start at 0: nothing was capped
+# or dropped (30 detected messages an hour is far above six), and the facts all had their reasons.
+echo "$metrics" > "$WORK/metrics.txt"
+for series in 'kausa_notifications_total{outcome="capped"}' kausa_facts_dropped_total \
+  kausa_fact_reasons_omitted_total; do
+  [ "$(metric_of "$series" "$WORK/metrics.txt")" = 0 ] || fail "$series is not 0"
+done
+echo "notifications: at least 12 sent (detected and explained) and 1 retried, none capped"
 
 # The grant is the table in docs/reference/permissions.md.
 sa="system:serviceaccount:$NAMESPACE:kausa"
@@ -1018,6 +1080,8 @@ fi
 metrics=$(kausa_metrics)
 echo "$metrics" | grep -E '^kausa_events_written_total\{reason="Explained"\} [1-9]' >/dev/null ||
   fail "kausa_events_written_total does not count the Events"
+echo "$metrics" | grep -E '^kausa_events_written_total\{reason="Detected"\} [1-9]' >/dev/null ||
+  fail "kausa_events_written_total does not count the Detected Events"
 # The answer's injected step (docs/adr/0022-redact-the-answer.md): an address, a query and a host
 # replaced in the answers, and R002 never counted there.
 for rule in R004 R013 R014; do
@@ -1539,6 +1603,139 @@ print(late)
   echo "rollout: two new Ready Pods, one leader"
 fi
 
+# Without a model (docs/adr/0027-fact-statement-for-the-detections.md), in both scopes, with one
+# replica: the release without model.endpoint (and so without the history) grants Events create
+# and patch and writes a Detected Event for each seeded failure, whose note is the logged statement
+# (crasher's byte for byte); it writes no other Event, makes no model request and starts no
+# explanation, and posts one detected body (the facts, no explanation) for each of them to the
+# receiver and no explained one. Then events=false: no grant to create or patch Events, no Event,
+# and the incidents still logged and posted. The last upgrade gives the model back.
+if [ "$REPLICAS" = 1 ]; then
+  delete_kausa_events() {
+    k -n "$TARGET" get events.events.k8s.io -o json | python3 -I -c '
+import json, sys
+for e in json.load(sys.stdin)["items"]:
+    if e.get("reportingController") == "kausa":
+        print(e["metadata"]["name"])
+' | while read -r event; do
+      k -n "$TARGET" delete events.events.k8s.io "$event" >/dev/null
+    done
+  }
+  # Posts the receiver answered 200 after its first $1 lines: one detected body about each of the
+  # five workloads, none else of another type. Prints their number.
+  detected_bodies() {
+    tail -n +$(($1 + 1)) "$WORK/hooks.jsonl" | python3 -I -c '
+import json, sys
+SCHEMA = "kausa.fedeam.com/notification/v2"
+KEYS = ["detection", "facts", "fingerprint", "first_seen", "kausa_version", "object", "schema",
+        "type"]
+FACTS = ["exit_code", "pods_now", "pods_seen", "pods_seen_is_minimum", "reason", "revision"]
+WANT = {("Deployment", "crasher"), ("Job", "failing-job"), ("Job", "policy-job"),
+        ("Deployment", "stranded"), ("Deployment", "stalled")}
+
+def fail(message):
+    sys.exit("FAIL: without a model: " + message)
+
+found = []
+for line in sys.stdin:
+    hook = json.loads(line)
+    if hook["status"] != 200:
+        continue
+    body = json.loads(hook["body"])
+    if sorted(body) != KEYS or body["schema"] != SCHEMA or body["type"] != "detected":
+        fail("a notification is not a v2 detected body with only its keys")
+    if sorted(body["facts"]) != FACTS:
+        fail("a detected body has other facts")
+    found.append((body["object"]["kind"], body["object"]["name"]))
+if len(found) != len(set(found)):
+    fail("a workload has two detected bodies")
+if not WANT <= set(found):
+    fail("fewer detected bodies than failing workloads")
+print(len(found))
+'
+  }
+  delete_kausa_events
+  hooks_before=$(lines_of "$WORK/hooks.jsonl")
+  requests_before=$(lines_of "$WORK/requests.jsonl")
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+    --set model.endpoint="" --set history.enabled=false
+  HISTORY=off
+  pod=pod/$(kausa_pods | head -n 1)
+  args=$(kausa_args "$pod")
+  if printf '%s\n' "$args" | grep -qxF -- --endpoint; then
+    fail "the kausa Pod runs with --endpoint without model.endpoint"
+  fi
+  # The grant: Events create and patch with no endpoint, where the chart used to render none.
+  for verb in create patch; do
+    allowed "$verb" events.events.k8s.io -n "$TARGET" ||
+      fail "kausa cannot $verb events.events.k8s.io -n $TARGET without an endpoint"
+    [ "$SCOPE" = namespaced ] && continue
+    allowed "$verb" events.events.k8s.io -A ||
+      fail "kausa cannot $verb events.events.k8s.io -A without an endpoint"
+  done
+  detected_ok=""
+  for _ in $(seq 1 40); do
+    k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
+    kausa_log "$pod"
+    detection_report=$(check_detected nomodel "${pod#pod/}" 2>/dev/null) && detected_ok=yes && break
+    sleep 3
+  done
+  [ -n "$detected_ok" ] || detection_report=$(check_detected nomodel "${pod#pod/}") || exit 1
+  echo "without a model: $detection_report"
+  # No model request, no explanation line, and the metrics say the same.
+  [ "$(lines_of "$WORK/requests.jsonl")" = "$requests_before" ] ||
+    fail "the fake endpoint received a request from kausa without an endpoint"
+  [ "$(log_count explanation < "$WORK/kausa.log")" = 0 ] ||
+    fail "kausa logged an explanation without an endpoint"
+  # The webhook: one detected body for each workload.
+  bodies=0
+  for _ in $(seq 1 30); do
+    bodies=$(detected_bodies "$hooks_before" 2>/dev/null) && break
+    sleep 2
+  done
+  bodies=$(detected_bodies "$hooks_before") || exit 1
+  metrics=$(kausa_metrics)
+  echo "$metrics" | grep -E '^kausa_events_written_total\{reason="Detected"\} [1-9]' >/dev/null ||
+    fail "kausa_events_written_total does not count the Detected Events without an endpoint"
+  if echo "$metrics" | grep -E '^kausa_events_written_total\{reason="Explained"\} [1-9]' >/dev/null
+  then
+    fail "kausa counted an Explained Event without an endpoint"
+  fi
+  echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 5 { n++ }
+    END { exit !n }' || fail "kausa_notifications_total{outcome=\"sent\"} is under 5 without a model"
+  echo "without a model: $bodies detected bodies, no explained one, no model request, no explanation"
+  # events=false: the incidents are logged and posted, and nothing is written to the cluster.
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+    --set events=false
+  delete_kausa_events
+  hooks_before=$(lines_of "$WORK/hooks.jsonl")
+  pod=pod/$(kausa_pods | head -n 1)
+  for verb in create patch; do
+    if allowed "$verb" events.events.k8s.io -n "$TARGET"; then
+      fail "kausa can $verb events.events.k8s.io with events=false"
+    fi
+  done
+  logged=""
+  for _ in $(seq 1 30); do
+    kausa_log "$pod"
+    log_has incident "$TARGET" < "$WORK/kausa.log" && logged=yes && break
+    sleep 2
+  done
+  [ -n "$logged" ] || fail "kausa logged no incident with events=false and no endpoint"
+  for _ in $(seq 1 30); do
+    bodies=$(detected_bodies "$hooks_before" 2>/dev/null) && break
+    sleep 2
+  done
+  bodies=$(detected_bodies "$hooks_before") || exit 1
+  sleep "$SETTLE"
+  [ "$(kausa_events "$TARGET")" = 0 ] || fail "kausa wrote an Event with events=false"
+  echo "events=false and no endpoint: incidents logged, $bodies detected bodies, no Event, no grant"
+  # The model and the history back, for what follows.
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+    --set model.endpoint="http://$gateway:$PORT/v1" --set history.enabled=true --set events=true
+  HISTORY=on
+fi
+
 if [ "$SCOPE" = namespaced ]; then
   # Nothing of the release is left, the Lease, its Role and RoleBinding and the
   # PodDisruptionBudget of two replicas included.
@@ -2008,7 +2205,7 @@ if last is None or last <= opened_at:
     fail("kausa_model_last_success_timestamp_seconds is %s, not after the opening call"
          % json.dumps(last))
 
-noted, explained = [], 0
+noted, explained, detected = [], 0, set()
 for event in json.load(open(work + "/events.json"))["items"]:
     if event.get("reportingController") != "kausa" or event.get("reportingInstance") != pod:
         continue
@@ -2019,6 +2216,12 @@ for event in json.load(open(work + "/events.json"))["items"]:
     if (event.get("reason") == "Explained" and regarding.get("kind") == "Job"
             and (regarding.get("name") or "").startswith("breaker-")):
         explained += 1
+    # The Detected Event does not wait for the model (docs/adr/0027-fact-statement-for-the-
+    # detections.md): every Job breaker-NN has one, the skipped incidents included.
+    match = re.match(r"kausa\.detected\.([0-9a-f]{16})\.", event["metadata"]["name"])
+    if (event.get("reason") == "Detected" and match
+            and (regarding.get("name") or "").startswith("breaker-")):
+        detected.add(match.group(1))
 if sorted(noted, key=str) != sorted(skipped, key=str):
     fail("%d ExplanationSkipped Events with the fixed note for %d incidents skipped as "
          "endpoint_unavailable, or not one each" % (len(noted), len(skipped)))
@@ -2027,9 +2230,14 @@ if counter != len(noted):
     fail("the endpoint_unavailable counter is %s for %d Events" % (json.dumps(counter), len(noted)))
 if not explained:
     fail("no Job breaker-NN has an Explained Event after the probe")
+if len(detected) < 18:
+    fail("%d of the 18 Jobs breaker-NN have a Detected Event" % len(detected))
+if not set(skipped) <= detected:
+    fail("%d incidents skipped as endpoint_unavailable have no Detected Event" % len(
+        set(skipped) - detected))
 print("the breaker closed after %.0f s and %d failed calls; %d incidents skipped as "
-      "endpoint_unavailable, one Event each; %d Jobs breaker-NN explained"
-      % (seconds, calls, len(noted), explained))
+      "endpoint_unavailable, one ExplanationSkipped Event each and a Detected Event too; %d Jobs "
+      "breaker-NN explained" % (seconds, calls, len(noted), explained))
 EOF
   }
   drained=""

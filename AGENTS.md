@@ -14,15 +14,17 @@ clone and remotes are described apart, under [Remotes, merges and CI](#remotes-m
 
 kausa: a small Kubernetes controller in Rust (kube-rs), read-only except for its own Events,
 with `--history` its own Explanations and, with `--leader-lease`, the `spec` of its one Lease,
-that watches Warning events, Pod status and Deployments, groups the failures of one workload into one incident with deterministic rules, sends
+that watches Warning events, Pod status and Deployments, groups the failures of one workload into one incident with deterministic rules, reports each settled incident as a fact statement in a `Detected` Event, with or without a model, sends
 a redacted context to one OpenAI-compatible model endpoint within a call and token budget, and
 writes the explanation as a Kubernetes Event on the failing object and, optionally, posts it to one
 webhook. Open source,
-`MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents, redacts their
+`MIT OR Apache-2.0`. Pre-alpha: `kausa run` detects, groups and logs incidents, writes each one as a
+`Detected` Event of facts with no model needed, redacts their
 context, explains them with a model within a call budget (or logs the request with `--dry-run`),
 reuses explanations of repeated incidents, writes them as Events (and, with `--history`, keeps
-them in an Explanation object per incident, off by default), with `--notify-url-file` posts each new
-explanation to one webhook (JSON, Slack or Telegram, off by default) and serves metrics; with the
+them in an Explanation object per incident, off by default), with `--notify-url-file` posts each settled
+incident and each new explanation to one webhook (JSON, Slack or Telegram, off by default, no
+endpoint needed) and serves metrics; with the
 chart's `replicaCount: 2` (off by default) a second replica waits as a standby and takes over
 through a Lease. `kausa run` holds its calls behind a breaker while the endpoint fails, and `kausa
 check-endpoint` (and the chart's `helm test`) sends one synthetic request to the endpoint on
@@ -94,12 +96,12 @@ checkout. `kausa run` connects to the current context of the kubeconfig: before 
 read-only proxy that keeps it to its own reads. Tests never reach a cluster: `tests/cli.rs` runs
 the binary with a nonexistent kubeconfig, and a new test that starts `kausa run` must do the same.
 The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`,
-`src/record.rs`, `src/redact.rs`, `src/context.rs`, `src/prompt.rs`, `src/history/pure.rs`,
+`src/record.rs`, `src/fact.rs`, `src/redact.rs`, `src/context.rs`, `src/prompt.rs`, `src/history/pure.rs`,
 `src/notification.rs`, `src/leader/pure.rs`, `src/model/pure.rs`, `src/breaker.rs`) is pure and
 tested without a cluster, and so are `src/budget.rs`,
 `src/metrics.rs` (except its listener) and the building of Events in `src/events.rs`;
-`src/run.rs`, `src/explain.rs`, `src/events.rs`, `src/history.rs` and `src/leader.rs` talk to the
-API server,
+`src/run.rs`, `src/explain.rs`, `src/events.rs`, `src/report.rs` (whose fact queue is pure and
+tested without a cluster), `src/history.rs` and `src/leader.rs` talk to the API server,
 `src/model.rs` and `src/check.rs` to the model endpoint and `src/notify.rs` to the webhook.
 `kausa check-endpoint` needs no cluster: `tests/cli.rs` runs it against a local fake server.
 

@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Every settled incident is now reported as facts, with or without a model: a `Detected` Event, and
+with a webhook a `detected` message (0027, stage 1 of 0026). The model's text is marked as the
+model's. **Breaking for `json` receivers: the notification schema is `v2`. Upgrade note: a
+release without an endpoint starts writing `Detected` Events on upgrade, and its role gains
+`create` and `patch` on Events; set `events: false` to keep it silent.** What is sent to the
+model provider does not change: the statement is not in the request.
+
+### Added
+
+- The `Detected` Event: for each settled incident, unless `--no-events` and never in `--dry-run`,
+  a Warning Event (reason `Detected`, action `Detect`) on the top-level owner, with the sample Pod
+  as `related`, whose note is the incident's **fact statement**, one line of facts that kausa read
+  (the detection, the sample's container and reason, the exit code, the Pods seen failing and
+  now, the Deployment's revision), never text a tenant or a model wrote ([Fact
+  statements](docs/reference/rules.md#fact-statements)). It is written by a fact slot from a
+  queue of 1024 that never waits for the model, the budget, the breaker or an explanation, with
+  or without `--endpoint`. The `incident` log line gains `statement`, the same text. How kausa
+  names what it does not watch: [What kausa watches, and what it does
+  not](docs/reference/rules.md#what-kausa-watches-and-what-it-does-not).
+- `--notify-url-file` no longer needs `--endpoint`, and the chart's `notifications.enabled` no
+  longer needs `model.endpoint`: a release without a model posts one `detected` message per
+  settled incident, once per fingerprint per `--dedup-hours`. It is still a usage error with
+  `--dry-run`.
+- `--notify-max-per-hour` (the chart's `notifications.maxPerHour`; 30 by default, 1 to 3600): at
+  most that many `detected` messages start in any 60 minutes. Over it a message is not sent and
+  is counted, and at most once an hour kausa posts one fixed `capped` message that says the
+  others are in Events and in its log. `explained` messages keep the call budget as their bound.
+- Metrics: `kausa_events_written_total{reason="Detected"}`,
+  `kausa_notifications_total{outcome="capped"}`, `kausa_facts_dropped_total` (a fact dropped from
+  the full queue of 1024) and `kausa_fact_reasons_omitted_total` (a reason outside kausa's list,
+  left out of a statement). Log lines: `fact dropped` and `notification capped`.
+- The fuzz target `fact`, and `src/fact.rs` and `src/report.rs`.
+
+### Changed
+
+- **Breaking for `json` receivers: the notification schema is
+  `kausa.fedeam.com/notification/v2`.** `type` is `detected`, `explained` or `capped` (it was
+  always `explained`); the new object `facts` is in `detected` and `explained`; `explanation` is
+  only in `explained`; the `capped` body holds `schema`, `type`, `kausa_version` and `limit`. An
+  explained incident is now two messages. Change the receiver before upgrading ([Data sent in
+  notifications](docs/reference/data-sent-in-notifications.md)).
+- The Slack and Telegram texts gain a `Facts:` line after the header and the line `Model's
+  explanation, not verified:` before the model's text. The container's name is in the Event and
+  the log, not in a notification.
+- The `Explained` Event's note starts with `Model's explanation, not verified: `, 35 bytes fewer
+  for the model's text in the 1024 (after the notice of a withheld answer, when there is one).
+  `ExplanationSkipped` and the Explanation history do not change.
+- A release without an endpoint, with `events` true and no `dryRun`, gets `create` and `patch`
+  on Events in its role (both scopes) and starts writing `Detected` Events; `events: false` keeps
+  it silent ([Upgrade to the `Detected` Event](docs/how-to/install-with-helm.md#upgrade-to-the-detected-event)).
+  `history.enabled` still needs an endpoint.
+- The description of kausa (the README, the documentation front page, the chart and its Artifact
+  Hub page, the crate and the image) now puts the facts first and the model's explanation as
+  optional (0026).
+
 ## [0.6.3] - 2026-11-20
 
 Four fixes. One is a fix of redaction: the Pod's UID could reach the model in the kubelet's

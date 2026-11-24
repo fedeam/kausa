@@ -12,6 +12,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+k8s-openapi = { version = "0.28.0", default-features = false, features = ["v1_32"] }
 libfuzzer-sys = "0.4.13"
 regex = "1.13.1"
 serde_json = "1.0.154"
@@ -52,6 +53,13 @@ bench = false
 [[bin]]
 name = "endpoint_error"
 path = "fuzz_targets/endpoint_error.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fact"
+path = "fuzz_targets/fact.rs"
 test = false
 doc = false
 bench = false

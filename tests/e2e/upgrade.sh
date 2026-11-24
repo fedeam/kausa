@@ -244,8 +244,10 @@ echo "after the upgrade: one holds the Lease; kausa_leader 1 and 0, /readyz read
   "one leading line, version $TO_VERSION, leaseTransitions up, the old leader's settings"
 
 # 8. An incident after the upgrade: the new leader logs and explains it, nobody else writes about
-# it, and the webhook receives it. The receiver answered its first POST 503, before the upgrade, so
-# this one is answered 200. Only a count is read from the hook log, never a body.
+# it, and the webhook receives it twice (docs/adr/0027-fact-statement-for-the-detections.md): a
+# detected message and an explained one, of schema v2. The receiver answered its first POST 503,
+# before the upgrade, so these are answered 200. Only counts of the schema, the type and the object
+# are read from the hook log, never the rest of a body.
 seed_failure upgrade-after
 found=""
 for _ in $(seq 1 40); do
@@ -262,7 +264,8 @@ wait_explained Job upgrade-after
   fail "another Pod than the leader wrote about Job upgrade-after"
 kausa_log "pod/$standby"
 [ "$(log_count incident < "$WORK/kausa.log")" = 0 ] || fail "the standby logged an incident"
-# The notifications the receiver answered 200 about Job upgrade-after in TARGET.
+# The notifications of type $1 (detected or explained), of the v2 schema, that the receiver
+# answered 200 about Job upgrade-after in TARGET.
 hooks_about() {
   python3 -I -c '
 import json, sys
@@ -270,25 +273,31 @@ count = 0
 for line in open(sys.argv[1]):
     try:
         hook = json.loads(line)
-        about = json.loads(hook["body"])["object"]
+        body = json.loads(hook["body"])
+        about = body["object"]
     except (ValueError, KeyError, TypeError):
         continue
-    if hook.get("status") == 200 and isinstance(about, dict) and (
+    if body.get("schema") == "kausa.fedeam.com/notification/v2" and (
+            body.get("type") == sys.argv[3]) and hook.get("status") == 200 and (
+            isinstance(about, dict)) and (
             about.get("kind"), about.get("namespace"), about.get("name")) == (
             "Job", sys.argv[2], "upgrade-after"):
         count += 1
 print(count)
-' "$WORK/hooks.jsonl" "$TARGET"
+' "$WORK/hooks.jsonl" "$TARGET" "$1"
 }
-notified=0
-for _ in $(seq 1 30); do
-  notified=$(hooks_about)
-  [ "$notified" -ge 1 ] && break
-  sleep 2
+for type in detected explained; do
+  notified=0
+  for _ in $(seq 1 30); do
+    notified=$(hooks_about "$type")
+    [ "$notified" -ge 1 ] && break
+    sleep 2
+  done
+  [ "$notified" = 1 ] ||
+    fail "the webhook received $notified $type notifications about Job upgrade-after, not 1"
 done
-[ "$notified" = 1 ] ||
-  fail "the webhook received $notified notifications about Job upgrade-after, not 1"
-echo "Job upgrade-after: logged and explained by the new leader only, and notified once"
+echo "Job upgrade-after: logged and explained by the new leader only, and notified once as" \
+  "detected and once as explained"
 
 # 9. The endpoint check, rendered by this chart from the reused values.
 endpoint_check ok fake
