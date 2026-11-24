@@ -267,28 +267,27 @@ owner's namespace, in the fact statement, the request to the model (`pods_total`
 an owner whose UID a Pod of another namespace names, and it can ship ahead of the rest of this ADR,
 in its own change, since it depends on nothing else here.
 
-**Where a Pod's revision comes from.** The tick makes no request. A ReplicaSet's revision is held in
-the owner cache's entry for its metadata `get` (0028's point 3: keyed by hop, namespace and name,
-kept 600 seconds, `OWNER_CACHE_TTL`, `src/run.rs:82`), and the tick reads that entry by the name in
-the Pod's controller `ownerReference`; an entry that is absent, failed or older than 600 seconds is
-a revision kausa could not read. Today nothing reads a ReplicaSet again while its Pods live: a
-Pod's resolved owner is reused while its controller reference does not change and the lookup worked
-(`on_pod`, `src/run.rs:1448-1452`), and an expired entry is evicted at the next lookup
-(`src/run.rs:1950`). So, at acceptance before the baseline is taken and after each tick while a
-`rollout-undo` check is pending, the run loop calls the owner lookup (`controller_of`,
-`src/run.rs:1909-1953`) for each ReplicaSet named by the controller reference of a non-terminal Pod
-of the check's set whose entry is absent or expired. The lookup reads the cache, or does one
-metadata `get` within its 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `src/run.rs:89`) and stores the entry.
-Each such ReplicaSet then costs at most one `get` every 600 seconds, or every 30 seconds while its
-`get` fails (`OWNER_ERROR_TTL`, `src/run.rs:83`), with the existing verb; the lookups run in the run
-loop, as `on_pod`'s do today, so a slow `get` delays the loop as one does today. A revision is then
-at most 600 seconds, one tick and one lookup older than the live one.
+**Where a Pod's revision comes from.** As 0028 decides it (its point 3, "Where the revision comes
+from"): a ReplicaSet's revision is held in the owner cache's entry, kausa reads it only through the
+owner lookup (`controller_of`, `src/run.rs:1909-1953`) from async code, and the tick makes no
+request. 0028's reader is the fact slot; this ADR adds a second one, the run loop, since nothing
+else reads a ReplicaSet again while its Pods live (`on_pod` reuses a resolved owner,
+`src/run.rs:1448-1452`). At acceptance, before the baseline is taken, and right after each tick
+while a `rollout-undo` check is pending, the run loop calls the lookup for each ReplicaSet named by
+the controller reference of a non-terminal Pod of the check's set, and `C` is evaluated there, from
+the revisions the lookup answers; a failed lookup, or an answer without a whole-number revision, is
+a revision kausa could not read. A fresh entry costs no request; an absent or expired one, one
+metadata `get` within 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `src/run.rs:89`). Each such ReplicaSet then
+costs at most one `get` every 600 seconds (`OWNER_CACHE_TTL`, `:82`), or every 30 seconds while its
+`get` fails (`OWNER_ERROR_TTL`, `:83`), with the existing verb; the lookups run in the run loop, as
+`on_pod`'s do today, so a slow `get` delays the loop as one does today. A revision is then at most
+600 seconds and one lookup older than the live one.
 
 The baseline is taken at acceptance, at `t_a` on kausa's monotonic clock, from those Pods:
 
 | Detection | Action | Baseline `B` | Condition `C` at a tick |
 |---|---|---|---|
-| `D001` to `D005`, `D014` | `rollout-undo` | The revisions of the controller ReplicaSets of the non-terminal Pods, read through the owner cache (0028's point 3); at most 4 | At least one non-terminal Pod, and **every** one has a controller ReplicaSet with a known revision not in `B` |
+| `D001` to `D005`, `D014` | `rollout-undo` | The revisions of the controller ReplicaSets of the non-terminal Pods, read through the owner lookup after the tick (point 2, 0028's point 3); at most 4 | At least one non-terminal Pod, and **every** one has a controller ReplicaSet with a known revision not in `B` |
 | `D003` | `raise-memory-limit` | A keyed SipHash (a random key per process) of the `memory_limit` string of the container named by the fact statement, equal in every non-terminal Pod that has that container | At least one non-terminal Pod with that container, and **every** one has a limit whose hash differs: the limit "differs as written" |
 | `D002` | `set-image-pull-policy` | That container's policy is `Never` in every non-terminal Pod that has it | At least one such Pod, and **every** one has `Always` or `IfNotPresent` |
 | any other pair | none | none | No outcome: `none`, `needs-human` and `inspect` act on nothing, and 0028 allows `delete-evicted-pods` for no detection |
@@ -655,7 +654,7 @@ Each was read in source or documentation only, or not derived; the bar or test t
   `D001` and `D014`.
 - **That an in-place resize writes the Pod spec's limit, as the watch sees it.** Bar 7, row `D003`.
 - **How long the owner cache's stale revision delays `observed` after an undo,** at most 600
-  seconds, one tick and one lookup computed, through point 2's lookups. Bar 7, row `D001`, and a
+  seconds and one lookup computed, through point 2's lookups. Bar 7, row `D001`, and a
   kind test that changes the revision of a running Pod's ReplicaSet (an undo to the ReplicaSet of
   Pods still running) and measures when the check sees it, with the `get`s it made.
 - **That a write to `pods/status` cannot change a Pod's `metadata.ownerReferences` or its spec**
