@@ -603,11 +603,12 @@ process and never changes the exit code.
 
 ## Notifications
 
-With `--notify-url-file`, each settled incident's `detected` message is queued after its
-`Detected` Event, and each new explanation's `explained` message after its Event (both at once
-with `--no-events`); they are sent by their own task, one at a time, at least 1 second apart (3
-seconds with `telegram`), from a queue of 16 that drops its oldest `detected` message first and
-never drops an `explained` one for a `detected` one. A cached repeat is queued again
+With `--notify-url-file`, each settled incident's `detected` message is queued after its `Detected`
+Event, and each new explanation's `explained` message after its Event (both at once with
+`--no-events`), neither waiting for the other, so the two of one incident come in either order; they
+are sent by their own task, in the order queued, one at a time, at least 1 second apart (3 seconds
+with `telegram`), from a queue of 16 that drops its oldest `detected` message first and never drops
+an `explained` one for a `detected` one. A cached repeat is queued again
 only while the webhook has not acknowledged that explanation with a `2xx`. A `detected` message is
 sent once per fingerprint per `--dedup-hours`, and at most `--notify-max-per-hour` of them start in
 any 60 minutes; over it each one is counted as `capped` and logged (`notification capped`). A

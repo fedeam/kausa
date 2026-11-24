@@ -64,14 +64,18 @@ message). Both tables live in memory and hold per process: after a restart or a 
 incident that still fails is posted once more, within the cap. A receiver that answers after the
 10-second timeout can get duplicates: see [Compatibility](#compatibility).
 
-kausa sends one notification at a time, from an in-memory queue of 16 that both kinds share. When
-it is full, one more drops the oldest `detected` message; a `detected` message never drops an
+kausa sends one notification at a time, from an in-memory queue of 16 that both kinds share. When it
+is full, one more drops the oldest `detected` message; a `detected` message never drops an
 `explained` one, so with 16 `explained` messages queued the new `detected` one is dropped; an
-`explained` message drops the oldest `explained` one only when no `detected` message is queued.
-Each drop is counted as `dropped`, logged (`notification dropped`) and owes the `capped` message.
-kausa starts each send at least 1 second after the previous one (3 seconds with `telegram`,
-which allows a bot 20 messages a minute in a group). A send that times out, cannot connect, or is
-answered `429` or `5xx` is tried once more 30 seconds later; any other failure is final.
+`explained` message drops the oldest `explained` one only when no `detected` message is queued. Each
+drop is counted as `dropped`, logged (`notification dropped`) and owes the `capped` message. The
+queue is sent in the order it was filled, the `capped` message ahead of it when it is owed and due
+(`take_next` in `src/notify.rs`). A `detected` message is queued by the fact slot after its
+`Detected` Event, and an `explained` one by the explanation's path after its Event; neither waits
+for the other, so the two messages of one incident can be queued, and arrive, in either order. kausa
+starts each send at least 1 second after the previous one (3 seconds with `telegram`, which allows a
+bot 20 messages a minute in a group). A send that times out, cannot connect, or is answered `429` or
+`5xx` is tried once more 30 seconds later; any other failure is final.
 Notifications still queued are dropped when kausa stops or its lease term ends, and those owe
 no `capped` message: the process that would post it is no longer the one that notifies. The log lines and counters are in
 [Command line and log format](command-line.md#notifications).

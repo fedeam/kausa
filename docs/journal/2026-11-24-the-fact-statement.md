@@ -48,6 +48,12 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
     `D013` rename in the notes for receivers of `v1`, a quoted error from the measured cluster,
     the queue figures of the prototype against the code's, and the `rssBytes` caveat;
   - 0027's body back to the proposal's text, with what the acceptance adds in its `Update`.
+- **The kind test** checks, in both scopes, that each `Explained` Event is of the incident of a
+  `Detected` Event, and, with a spent budget, a `Detected` and an `ExplanationSkipped` Event of
+  one incident. A check of their order was tried and dropped: in kind an `Explained` Event was
+  written before its `Detected` Event when several incidents settled at once, as point 3 of 0027
+  allows; the `Update` of 0027 and the pages on Events and notifications say either can come
+  first.
 
 ## Decisions
 

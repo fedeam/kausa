@@ -163,12 +163,13 @@ Telegram](../adr/0015-notifications.md).
    ```
 
 A repeat of the same incident within `budget.dedupHours` is not posted again once the webhook has
-acknowledged it. With a model, an incident is two messages: `detected` at once, `explained` when
-the model has answered. At most `notifications.maxPerHour` `detected` messages go out in any 60
-minutes (30 by default, 1 to 3600): over it, a message is not sent, `kausa_notifications_total{outcome="capped"}`
-counts it, and at most once an hour kausa posts one fixed `capped` message that says not every
-incident is posted and that its log has every one. A burst that fills the queue of 16 owes the
-same message. Set the value with `--set notifications.maxPerHour=<n>`.
+acknowledged it. With a model, an incident is two messages, `detected` and `explained`, which
+neither waits for the other: either can arrive first. At most `notifications.maxPerHour` `detected`
+messages go out in any 60 minutes (30 by default, 1 to 3600): over it, a message is not sent,
+`kausa_notifications_total{outcome="capped"}` counts it, and at most once an hour kausa posts one
+fixed `capped` message that says not every incident is posted and that its log has every one. A
+burst that fills the queue of 16 owes the same message. Set the value with `--set
+notifications.maxPerHour=<n>`.
 
 ## Upgrade from `v1` bodies
 

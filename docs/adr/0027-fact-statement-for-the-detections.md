@@ -480,3 +480,12 @@ add to the text above:
   patches the series of point 2 kausa checks only the reporting controller, which whoever creates
   an Event sets, so whoever can create Events in a namespace can forge a `Detected` Event there; the `incident`
   line and the `detected` message carry the real statement ([Security policy](../../SECURITY.md)).
+- **The kind test asserts both Events of one incident, not their order.** Point 3 lets either be
+  written first: a fact never waits for an explanation, and an explanation never waits for a
+  fact. So point 10's "`Detected` and then `Explained`", and the "`Detected`, then `Explained`"
+  of the Consequences, name the two Events, not an order between them. The test checks that each
+  `Explained` Event is named after the fingerprint of a `Detected` Event about the same workload
+  and that its note starts with the mark. In kind, an `Explained` Event was created before its
+  incident's `Detected` Event when several incidents settled in the same tick. The `detected` and
+  `explained` messages are the same: the webhook sends its queue in order, but each message is
+  queued by its own path after its Event, so the two of one incident can arrive in either order.

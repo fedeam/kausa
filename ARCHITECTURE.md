@@ -44,7 +44,8 @@ API server ──watch──▶ run.rs ──▶ record.rs ──▶ detect.rs �
                    by redact::restore_only for the namespace and the owner only) ──▶ run.rs sends
                    it beside the watches, one at a time ──▶ notification.rs body ──▶ the webhook
 
-The fact path runs beside the explanation path and never waits for it:
+The fact path runs beside the explanation path, and neither waits for the other, so an
+incident's `Detected` and `Explained` Events, and its two messages, can come in either order:
 
   (settled incident) ──▶ fact.rs statement ──▶ report.rs fact queue (1024) ──▶ fact slot:
       the `Detected` Event (events.rs) ──▶ notify.rs queue: the `detected` message ──▶ the webhook

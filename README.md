@@ -46,8 +46,8 @@ failing Pods of one workload into one incident, takes the relevant status, event
 lines. It writes a `Detected` Event on the Deployment with the facts it read, such as the
 detection, the reason and the exit code, with or without a model. With `--endpoint` it also
 redacts the context and asks one OpenAI-compatible model endpoint for an explanation, within a
-call and token budget, and writes the answer as a second Event, marked `Model's explanation, not
-verified:`:
+call and token budget, and writes the answer as another Event, marked `Model's explanation, not
+verified:`. Neither Event waits for the other, so either can be written first:
 
 ```text
 $ kubectl describe deployment -n shop api

@@ -184,8 +184,9 @@ needs `model.endpoint`.
   nothing to the cluster before.
 - **To keep it silent**, set `events: false`: the role keeps its reads only and kausa logs
   incidents, as before. `dryRun` writes no Event either.
-- **A release with an endpoint** gets one more Event per incident, before its explanation, and the
-  explanation's note now starts with `Model's explanation, not verified: ` (35 of its 1024 bytes).
+- **A release with an endpoint** gets one more Event per incident beside its explanation, and
+  neither waits for the other, so either can be written first. The explanation's note now starts
+  with `Model's explanation, not verified: ` (35 of its 1024 bytes).
 
 ## Upgrade to the Deployment watch
 

@@ -48,9 +48,10 @@ the request to the model provider; the only change in that request is `D013`'s n
   `kausa.fedeam.com/notification/v2`.** `type` is `detected`, `explained` or `capped` (it was
   always `explained`); the new object `facts` is in `detected` and `explained`; `explanation` is
   only in `explained`; the `capped` body holds `schema`, `type`, `kausa_version` and `limit`. An
-  explained incident is now two messages. Within `v2` a later release may add a value of
-  `type`, and a receiver must ignore a message whose `type` it does not know. Change the receiver
-  before upgrading ([Data sent in notifications](docs/reference/data-sent-in-notifications.md)).
+  explained incident is now two messages, which can arrive in either order. Within `v2` a later
+  release may add a value of `type`, and a receiver must ignore a message whose `type` it does not
+  know. Change the receiver before upgrading ([Data sent in
+  notifications](docs/reference/data-sent-in-notifications.md)).
 - The Slack and Telegram texts gain a `Facts:` line after the header and the line `Model's
   explanation, not verified:` before the model's text. The container's name is in the Event and
   the log, not in a notification.
