@@ -444,10 +444,12 @@ add to the text above:
 - **The measurement on a Raspberry Pi 4**, on 2026-11-24, in a k3s cluster of three with about
   100 Pods, the published v0.6.2 and the prototype side by side on one node ([The fact statement
   prototype, measured](../research/2026-11-20-fact-statement-prototype.md#on-a-raspberry-pi-4)):
-  the second and the third bars hold. The first, idle memory, was read in the kubelet's
-  `rssBytes`, and it holds if that figure is the anonymous memory of the control group, which is
-  a hypothesis on those nodes: cAdvisor's code supports it, and it was not checked there. The
-  10,000 Pods were measured in kind only; reading 0026's "on a Raspberry Pi 4 and with 10,000
+  the three bars hold. The first, idle memory, was read in the kubelet's `rssBytes`, and the
+  note has the check, on those nodes the same day, that `rssBytes` is the anonymous memory of the
+  control group point 10 names, to within 20,480 bytes against a spread of v0.6.2 of more than
+  250 KiB ([`rssBytes` is the anonymous
+  memory](../research/2026-11-20-fact-statement-prototype.md#rssbytes-is-the-anonymous-memory)).
+  The 10,000 Pods were measured in kind only; reading 0026's "on a Raspberry Pi 4 and with 10,000
   Pods" as two measurements is the note's interpretation.
 - **The fact queue's entry** holds the facts the statement is rendered from, not the rendered
   statement. The 1,583 bytes an entry and 1.55 MiB of points 3 and 10 are the prototype's; a

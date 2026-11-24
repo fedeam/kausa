@@ -4,10 +4,10 @@ What a prototype of [0027. Report each settled incident as a fact statement in i
 Event and webhook message, with or without a model, and mark the model's text as a
 model's](../adr/0027-fact-statement-for-the-detections.md) costs against the three bars of that
 record's point 10, and what its hypotheses about the API server turned out to be. The three bars
-hold in kind. On a Raspberry Pi 4, with about 100 Pods, the second and the third hold, and the
-first holds if the kubelet's `rssBytes` is the anonymous memory of the control group, which is a
-hypothesis there ([On a Raspberry Pi 4](#on-a-raspberry-pi-4)). Two of the record's numbers and
-one of its hypotheses do not hold.
+hold in kind. On a Raspberry Pi 4, with about 100 Pods, they hold too: the first was read in the
+kubelet's `rssBytes`, which a check on the same nodes found to follow the anonymous memory of the
+control group to within 20,480 bytes ([On a Raspberry Pi 4](#on-a-raspberry-pi-4)). Two of the
+record's numbers and one of its hypotheses do not hold.
 
 Measured on 2026-11-20 in a kind cluster on the maintainer's machine, and on 2026-11-24 in a k3s
 cluster of Raspberry Pi 4 ([On a Raspberry Pi 4](#on-a-raspberry-pi-4)), each figure from two to
@@ -20,7 +20,7 @@ ten runs: a data point, not a benchmark.
 | Idle memory within the run-to-run spread of v0.6.2, 10,000 Pods | The process's own memory in all ten runs; the `docker stats` figure in nine of ten | Yes, with the note below |
 | A full fact queue adds at most 2 MiB | 1.73 to 1.74 MiB resident (1.55 MiB computed) | Yes, by 13% |
 | 1024 `Detected` Events in a row cause no watch error and no relist | 0 errors, 0 relists, 0 restarts on the three watches, twice | Yes |
-| The same three on a Raspberry Pi 4, about 100 Pods | Within the spread of the kubelet's `rssBytes`; 1.80 MiB (`VmRSS`); 0 errors, 0 relists, three runs | The second and the third, yes; the first if `rssBytes` is the anonymous memory, a hypothesis |
+| The same three on a Raspberry Pi 4, about 100 Pods | Within the spread of the kubelet's `rssBytes`; 1.80 MiB (`VmRSS`); 0 errors, 0 relists, three runs | Yes; the first in `rssBytes`, checked to follow the anonymous memory to within 20,480 bytes |
 
 Idle memory with 10,000 Pods, 20 seconds after start, ten runs of each image, in MiB:
 
@@ -149,9 +149,10 @@ What the numbers ask of the record before acceptance:
 
 ## On a Raspberry Pi 4
 
-Measured on 2026-11-24. The second and the third bars hold there; the first holds if the
-kubelet's `rssBytes` is the anonymous memory of the control group, a hypothesis
-([Setup](#setup-1)).
+Measured on 2026-11-24. The three bars hold there. The first was read in the kubelet's
+`rssBytes`, which a check on the same nodes, the same day, found to follow the anonymous memory of
+the control group to within 20,480 bytes ([`rssBytes` is the anonymous
+memory](#rssbytes-is-the-anonymous-memory)).
 
 Point 10 of the record repeats 0026's "on a Raspberry Pi 4 and with 10,000 Pods". This note reads
 it as two measurements: 10,000 Pods in kind, above, and a real cluster of Raspberry Pi 4 with the
@@ -167,19 +168,48 @@ Pods it runs, here. That reading is an interpretation, not something the record 
   `endpointCheck.enabled=false`, one replica, and no endpoint, no history and no notifications.
 - Chart 0.6.2 grants Event writes only with an endpoint, so for bars 2 and 3 the prototype got a
   Role and RoleBinding of `create` and `patch` on Events in that namespace only.
-- Memory: the container's `rssBytes` and `workingSetBytes` from the kubelet's summary API. That
-  `rssBytes` is the anonymous memory of the control group, the figure point 10 names, is a
-  hypothesis: it was not checked on these nodes. The source supports it: in cAdvisor v0.49.2
-  (`container/libcontainer/handler.go`) a container's `RSS` is the control group's `anon` on
-  cgroup v2 and its `total_rss` or `rss` on cgroup v1, and the kubelet's summary copies that
-  figure into `rssBytes`; whether the kubelet of these nodes takes its container stats from
-  cAdvisor, and which cgroup version the nodes run, was not checked. When the queue filled,
-  `rssBytes` grew by about what `VmRSS` grew (Bar 2), as anonymous memory would: consistent with
-  the hypothesis, not a proof of it. The kubelet's timestamp for a reading was 11 to
-  19 seconds behind the clock, so a reading "at 60 seconds" is from 41 to 49 seconds after start.
+- Memory: the container's `rssBytes` and `workingSetBytes` from the kubelet's summary API.
+  `rssBytes` was expected to be the anonymous memory of the control group, the figure point 10
+  names, from the source: in cAdvisor v0.49.2 (`container/libcontainer/handler.go`) a
+  container's `RSS` is the control group's `anon` on cgroup v2 and its `total_rss` or `rss` on
+  cgroup v1, and the kubelet's summary copies that figure into `rssBytes` when it takes its
+  container stats from cAdvisor. Which stats provider the kubelet of these nodes uses was not
+  read; the check below measured the figure itself ([`rssBytes` is the anonymous
+  memory](#rssbytes-is-the-anonymous-memory)). When the queue filled, `rssBytes` grew by about
+  what `VmRSS` grew (Bar 2), as anonymous memory would. The kubelet's timestamp for a reading was
+  11 to 19 seconds behind the clock, so a reading "at 60 seconds" is from 41 to 49 seconds after
+  start.
   For the queue, also `VmRSS` of `/proc/self/status`, logged by the process, as in kind.
 - Counters: `/metrics` of each Pod, through the API server's proxy.
 - The harness of the kind measurement: `fill` for bar 2, `events:120:<namespace>` for bar 3.
+
+### `rssBytes` is the anonymous memory
+
+Checked on 2026-11-24, after the runs below, on each of the three nodes of the same cluster. The
+nodes run control groups v2: the container reads `memory.stat` and `memory.current` at
+`/sys/fs/cgroup`.
+
+- On each node, one container with a memory limit of 96 MiB holds about 32.5 MiB of anonymous
+  memory in one process and reads a 20 MiB file it wrote, so its control group also holds 20 MiB
+  of page cache. Every 5 seconds it printed `anon`, `file`, `shmem` and `kernel` of its own
+  `memory.stat`, and its `memory.current`.
+- Three times, about 40 seconds apart, the kubelet's summary API was read for that container, and
+  each figure was paired with the line of the container's log nearest to the `time` of the
+  kubelet's figure, 0 to 2 seconds apart: nine pairs, three a node.
+- `rssBytes` was 34,054,144 to 34,066,432 bytes, and `anon` in the paired lines 34,070,528 to
+  34,078,720. `rssBytes` minus `anon` was -8,192 to -20,480 bytes in every pair: two to five
+  4 KiB pages below, never above.
+- `file` was 20,647,936 to 20,987,904 bytes and `shmem` 0 in every pair; `usageBytes` was
+  55,738,368 to 56,340,480 and `workingSetBytes` 35,090,432 to 35,352,576. Over each container's
+  log, `anon` moved between 34,066,432 and 34,078,720 (12,288 bytes).
+
+So on these nodes `rssBytes` follows the control group's `anon` to within 20,480 bytes with
+20 MiB of page cache present, as cAdvisor's source led one to expect; it is not `anon` plus
+`file`, nor the usage, nor the working set. What the check does not show: the pairs are not
+simultaneous, and the reader itself runs inside the measured control group (a shell and `grep`
+each 5 seconds), which is a likely reason `anon` reads a few pages above `rssBytes`; that is an
+explanation, not a measurement. The runs of the prototype were not repeated: their `rssBytes`
+figures stand, read now as the anonymous memory to within 20,480 bytes.
 
 ### Bar 1: idle memory, ten rounds
 
@@ -192,10 +222,14 @@ Both Pods restarted each round, read at 20 and 60 seconds; lowest, median and hi
 | `workingSetBytes` at 60 s | 1,617,920 / 1,734,656 / 2,404,352 | 1,556,480 / 1,728,512 / 1,998,848 |
 
 Every reading of the prototype is at or under the highest of v0.6.2; its lowest is under the
-lowest of v0.6.2, and its median at 60 seconds is 36,864 bytes over. In the ten rounds, in both
-Pods, `kausa_watch_errors_total`, `kausa_watch_relists_total` and `kausa_watch_restarts_total`
-read 0 for `pods`, `deployments` and `events`, and `kausa_event_write_errors_total` and
-`kausa_facts_dropped_total` read 0, with no restart.
+lowest of v0.6.2, and its median at 60 seconds is 36,864 bytes over. Read as the anonymous
+memory, each figure is within 20,480 bytes of it ([`rssBytes` is the anonymous
+memory](#rssbytes-is-the-anonymous-memory)), against a spread of v0.6.2 of 274,432 bytes at
+20 seconds and 262,144 at 60: the bar holds. The prototype's highest is 12,288 bytes under the
+highest of v0.6.2, less than that tolerance, which both images' readings carry. In the ten
+rounds, in both Pods, `kausa_watch_errors_total`, `kausa_watch_relists_total` and
+`kausa_watch_restarts_total` read 0 for `pods`, `deployments` and `events`, and
+`kausa_event_write_errors_total` and `kausa_facts_dropped_total` read 0, with no restart.
 
 ### Bar 2: a full fact queue, three runs
 
@@ -241,8 +275,11 @@ The three runs above delete, wait and restart before they read.
 - **The two measurements are not one.** The 10,000 Pods were measured in kind only; the Raspberry
   Pi 4 ran about 100 Pods. Reading point 10 as two measurements is this note's interpretation.
 - On the Raspberry Pi 4 the figures are the kubelet's, read 11 to 19 seconds late, and
-  `VmRSS`; the anonymous memory of the control group was not read there directly, so the first
-  bar there rests on the hypothesis that `rssBytes` is that memory.
+  `VmRSS`. The anonymous memory of the control group was read directly only in the check of
+  `rssBytes`, in another container, after the runs: its pairs are 0 to 2 seconds apart, not
+  simultaneous, and its reader runs inside the measured control group, a likely reason, not a
+  measured one, that `anon` reads a few pages above `rssBytes`. The runs of the prototype were
+  not repeated.
 - Chart 0.6.2 and an extra Role, not the chart that ships with the implementation.
 - One machine, a local API server, and a virtual machine shared with other containers. The
   outliers of `docker stats` were not explained.

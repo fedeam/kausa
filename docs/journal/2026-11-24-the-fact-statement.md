@@ -10,9 +10,9 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
 ## What was done
 
 - **The measurement on a Raspberry Pi 4**, in a k3s cluster of three with about 100 Pods, v0.6.2
-  and the prototype side by side on one node: the second and the third bars of point 10 hold, and
-  the first holds if the kubelet's `rssBytes` is the anonymous memory of the control group, a
-  hypothesis that cAdvisor's code supports but that was not checked on those nodes
+  and the prototype side by side on one node: the three bars of point 10 hold. The first was read
+  in the kubelet's `rssBytes`; a check on the same nodes, after the runs, found that figure
+  follows the anonymous memory of the control group to within 20,480 bytes
   ([The fact statement prototype,
   measured](../research/2026-11-20-fact-statement-prototype.md#on-a-raspberry-pi-4)). A first
   version of the Event bar was discarded: deleting Events while a watch on Events is open makes
@@ -71,7 +71,5 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
   kubelet's and containerd's code: still a hypothesis (point 10).
 - The fuzz target `fact` runs in ClusterFuzzLite, not on the maintainer's machine.
 - The cost of the webhook path is in no measured figure.
-- Whether the kubelet's `rssBytes` is the anonymous memory of the control group on the Raspberry
-  Pi 4 nodes: a hypothesis that cAdvisor's code supports.
 - The kind test checks that kausa sends no `type` outside the three of `v2`; a new type changes
   that check with it.
