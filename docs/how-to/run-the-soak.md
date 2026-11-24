@@ -10,8 +10,10 @@ soak](#a-dry-run-soak)). Its first two windows are invalid, because the sampler 
 the cluster two days and one day after it started ([2026-11-18 — The soak sampler on
 macOS](../journal/2026-11-18-the-soak-sampler-on-macos.md)); the third, from 2026-11-16 to
 2026-11-23, passed the soak gate in the terms a dry-run soak can check ([Seven days of v0.5.1 in
-dry-run](../research/2026-11-23-seven-days-in-dry-run.md)). The scale gate has not been run, so
-the chart's memory limit is still `192Mi`. `install.sh` installs the release pinned in
+dry-run](../research/2026-11-23-seven-days-in-dry-run.md)). The scale gate was run on 2026-11-24
+and C1 failed, with a peak of 119.6 MiB against 96 MiB ([The scale
+gate](../research/2026-11-24-the-scale-gate.md)), so the chart's memory limit stays at `192Mi`.
+`install.sh` installs the release pinned in
 `tests/e2e/upgrade-from.txt`, v0.6.3 since 2026-11-20.
 
 ## What the soak answers, and what it cannot
