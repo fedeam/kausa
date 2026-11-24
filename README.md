@@ -215,8 +215,12 @@ far, release by release, is in the [Changelog](CHANGELOG.md).
   Reading metrics backends is out of scope ([0001. Build a small, read-only explainer that writes
   one redacted explanation per incident](docs/adr/0001-scope-and-positioning.md)); for an
   investigation that calls tools, see HolmesGPT above.
-- **The soak is still running.** A seven-day soak of memory and restarts on a small ARM cluster
-  has no result yet ([Run the soak](docs/how-to/run-the-soak.md)).
+- **The soak ran in dry-run, on v0.5.1.** Over seven days on a small ARM cluster, two replicas
+  did not restart, stayed under 10 MiB of working set and did not grow ([Seven days of v0.5.1 in
+  dry-run](docs/research/2026-11-23-seven-days-in-dry-run.md)). They called no model, so how the
+  call budget, the queue and the breaker behave over days is not measured, and neither is a
+  later release. The peak at scale that decides the chart's memory limit has not been measured
+  either ([Run the soak](docs/how-to/run-the-soak.md)).
 - **Argo CD and the standby replica.** With `replicaCount: 2`, Argo CD's default
   `resource.exclusions` skip `coordination.k8s.io/Lease`, so an Application of the chart never
   creates the Lease and neither replica leads. The fix, released in v0.6.2
