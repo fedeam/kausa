@@ -36,14 +36,34 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
     upgrade from v0.6.3.
 - **`D013` renamed** to "autoscaler cannot read metrics or target scale", as point 1 of 0027
   asks, in its own commit; the id stays `D013`.
+- **A review of the branch** by a documentation reader and a security reader, closed in new
+  commits:
+  - a message dropped by the queue of 16 or by the fact queue now owes the `capped` message, as
+    one over the limit per hour did, with a unit test first;
+  - the Slack and Telegram texts keep an owner's kind and name on one line. In kind, with
+    Kubernetes v1.36.4, the API server accepted a Pod whose ownerReference had a line break in
+    its kind and name, and an Event whose `regarding` had one;
+  - the [Security policy](../../SECURITY.md) says a `Detected` Event's name can be taken first;
+  - texts made false by the fact statement (the chart's comments, the README, `AGENTS.md`), the
+    `D013` rename in the notes for receivers of `v1`, a quoted error from the measured cluster,
+    the queue figures of the prototype against the code's, and the `rssBytes` caveat;
+  - 0027's body back to the proposal's text, with what the acceptance adds in its `Update`.
 
 ## Decisions
 
-- The fact queue keeps the typed facts beside the statement, so the webhook's `facts` object is
-  built from them, not parsed back from the text.
+- The fact queue keeps the typed facts and renders the statement from them when it writes, so
+  the webhook's `facts` object is built from them, not parsed back from the text.
 - The `Facts:` line of a text notification is left out when it would be empty, and the notice of
   a withheld answer comes after the mark.
 - `D013`'s new name has no apostrophe, since a statement's bytes allow none.
+- A `detected` message never pushes an `explained` one out of the notification queue: the
+  explanation cost a model call and is sent once, and the facts stay in the Event and the log
+  ([0027](../adr/0027-fact-statement-for-the-detections.md), its `Update`).
+- An owner's kind and name are made one line where the text is rendered, not where they enter:
+  that covers ownerReferences and `regarding` alike, and the `json` body, the Events and the log
+  keep the value, escaped as JSON.
+- Within notification `v2` a value of `type` may be added, and receivers ignore one they do not
+  know.
 
 ## Follow-ups
 
@@ -51,3 +71,7 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
   kubelet's and containerd's code: still a hypothesis (point 10).
 - The fuzz target `fact` runs in ClusterFuzzLite, not on the maintainer's machine.
 - The cost of the webhook path is in no measured figure.
+- Whether the kubelet's `rssBytes` is the anonymous memory of the control group on the Raspberry
+  Pi 4 nodes: a hypothesis that cAdvisor's code supports.
+- The kind test checks that kausa sends no `type` outside the three of `v2`; a new type changes
+  that check with it.
