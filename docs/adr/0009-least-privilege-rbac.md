@@ -102,3 +102,15 @@ write there is a JSON merge patch of the Lease's `spec` under a `resourceVersion
 Never granted gains `create`, `update`, `list`, `watch`, `delete` and `deletecollection` on
 Leases, `get` and `patch` on any other Lease or namespace, and any cluster-scoped grant on Leases.
 Secrets and ConfigMaps stay out in every verb ([Permissions](../reference/permissions.md)).
+
+Update 2026-11-24: [0028. Publish each incident as an immutable Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by default](0028-incident-resource-and-remediation-report.md) is proposed, not accepted. It would amend "the only write is Events" and
+Never granted once more (its point 5): with the chart's `incidents.enabled`, kausa gets
+`create`, `list` and `delete` on `incidents` in `kausa.fedeam.com`, and, with
+`incidents.reportRemediations`, `list` and `watch` on `remediations` in
+`kurita.fedeam.com`, both through `kausa.rules`, so "any custom resource but kausa's own" no
+longer holds for that one resource of kurita's, which kausa reads and never writes. Never granted
+gains `get`, `watch`, `patch`, `update` and `deletecollection` on `incidents`,
+`incidents/status`, any write on `remediations` or `remediations/status`, and any verb on
+CustomResourceDefinitions. Secrets and ConfigMaps stay out in every verb. This takes effect only
+when 0028 is accepted, which needs its bars measured and kurita's ADR 0008 accepted; until then the
+text above holds.

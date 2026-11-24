@@ -138,3 +138,12 @@ explanation by a language model is a feature the user turns on. The explanation,
 its budget stay as decided here and in the ADRs since. A dashboard or chat interface stays out of
 scope, and kausa still never acts on the cluster. Nothing of 0026 is implemented yet: each of its
 stages needs its own ADR, and the description changes with the release that ships the first.
+
+Update 2026-11-24: [0028. Publish each incident as an immutable Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by default](0028-incident-resource-and-remediation-report.md) is proposed, not accepted. It would amend the out-of-scope line once more:
+"other than writing Events and, with `--history`, kausa's own Explanation objects, with
+`--leader-lease`, a merge patch of the `spec` of kausa's own Lease, and, with incidents on,
+kausa's own Incident objects", created once and deleted by retention. With its report on, kausa
+also reads one resource of another project, kurita's Remediations, and posts by webhook what kurita
+proposed. kausa still changes no workload, patches nothing else and never remediates. This takes
+effect only when 0028 is accepted, which needs its bars measured and kurita's ADR 0008 accepted;
+until then the text above holds.

@@ -489,3 +489,13 @@ add to the text above:
   incident's `Detected` Event when several incidents settled in the same tick. The `detected` and
   `explained` messages are the same: the webhook sends its queue in order, but each message is
   queued by its own path after its Event, so the two of one incident can arrive in either order.
+
+Update 2026-11-24: [0028. Publish each incident as an immutable Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by default](0028-incident-resource-and-remediation-report.md) is proposed, not accepted. It would amend three points of this ADR. Point 3:
+with incidents on, the fact slot also creates the incident's Incident, after its `Detected` Event
+(at once with `--no-events`), within the same time a write has there. Point 5: the webhook gains a
+`remediation` value of `type`, within `v2`. Point 10: each entry of the fact queue gains one
+optional pointer, 8 bytes with incidents off and, by an estimate bar 2 of 0028 measures, about 320
+bytes with them on, and a table of the Incidents kausa created, at most 500 entries, is a new
+bounded structure; the bar of 2 MiB for a full fact queue does not change. This takes effect only
+when 0028 is accepted, which needs its bars measured and kurita's ADR 0008 accepted; until then the
+text above holds.

@@ -248,3 +248,12 @@ bound. The body becomes `kausa.fedeam.com/notification/v2`, with a `facts` objec
 and no new free text, and the model's text in a notification follows the line `Model's explanation,
 not verified:`. [Data sent in notifications](../reference/data-sent-in-notifications.md) lists every
 field.
+
+Update 2026-11-24: [0028. Publish each incident as an immutable Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by default](0028-incident-resource-and-remediation-report.md) is proposed, not accepted. It would add a second kind of message to the
+webhook, within the `v2` of [0027](0027-fact-statement-for-the-detections.md): `type:
+remediation`, posted at most once per Incident kausa created, with `incidents.reportRemediations`
+on, when kurita records a proposal for it. Its action id and time come from kurita's Remediation
+after kausa's checks; its detection, object and fingerprint from kausa's own memory. It shares the
+receiver, the formats, the bound `--notify-max-per-hour` and the delivery rules decided here. This
+takes effect only when 0028 is accepted, which needs its bars measured and kurita's ADR 0008
+accepted; until then the text above holds.
