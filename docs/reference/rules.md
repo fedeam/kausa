@@ -66,7 +66,7 @@ Pods failing when it settles.
 | `D010` | Pod sandbox cannot be created | Warning event `FailedCreatePodSandBox` about a Pod | No |
 | `D011` | Workload cannot create Pods or Jobs | Warning event `FailedCreate` about a ReplicaSet, a Job, a StatefulSet, a DaemonSet or a CronJob (a quota, an admission webhook or Pod Security admission refused the Pod, or the CronJob's Job). About a CronJob itself (not a Job of a CronJob), it is an incident at once | No |
 | `D012` | Volume claim cannot be provisioned | Warning event `ProvisioningFailed` about a PersistentVolumeClaim | No |
-| `D013` | Autoscaler cannot get metrics | Warning event `FailedGetResourceMetric`, `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` about a HorizontalPodAutoscaler | No |
+| `D013` | Autoscaler cannot read metrics or target scale | Warning event `FailedGetResourceMetric`, `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` about a HorizontalPodAutoscaler | No |
 | `D014` | Rollout does not progress | A Deployment whose `Progressing` condition is `False` with reason `ProgressDeadlineExceeded` (exact case), that is not paused, and whose `status.observedGeneration` is at least `metadata.generation` (both present); a state, about the Deployment itself. Yields to an explained incident of the same Deployment (below). Off with `--no-rollouts` | No |
 
 For `D005`, the request carries the unschedulable Pod's node selector, required affinity and

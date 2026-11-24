@@ -58,6 +58,10 @@ model provider does not change: the statement is not in the request.
   on Events in its role (both scopes) and starts writing `Detected` Events; `events: false` keeps
   it silent ([Upgrade to the `Detected` Event](docs/how-to/install-with-helm.md#upgrade-to-the-detected-event)).
   `history.enabled` still needs an endpoint.
+- `D013` is now named "autoscaler cannot read metrics or target scale" (it was "autoscaler cannot
+  get metrics"), since its reasons include `FailedGetScale`, a failure to read the target's scale;
+  its id stays `D013`. The name is a visible value: in the webhook's `detection_name`, the request
+  to the model, the Events and their statement, and the `incident` log line.
 - The description of kausa (the README, the documentation front page, the chart and its Artifact
   Hub page, the crate and the image) now puts the facts first and the model's explanation as
   optional (0026).
