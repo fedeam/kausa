@@ -52,9 +52,10 @@ default, which would turn a 0 into 1. A number from a values file is a float64: 
 {{- if or .Values.model.endpoint .Values.dryRun }}true{{ end }}
 {{- end }}
 
-{{/* kausa writes Events with an endpoint, outside dry-run, unless events is false. */}}
+{{/* kausa writes Events, with or without an endpoint (the Detected Event,
+docs/adr/0027-fact-statement-for-the-detections.md), outside dry-run, unless events is false. */}}
 {{- define "kausa.writesEvents" -}}
-{{- if and .Values.model.endpoint .Values.events (not .Values.dryRun) }}true{{ end }}
+{{- if and .Values.events (not .Values.dryRun) }}true{{ end }}
 {{- end }}
 
 {{/* kausa watches Deployments for stalled rollouts (D014) unless rollouts is false. A missing
@@ -97,6 +98,14 @@ release made before them (helm upgrade --reuse-values) or --set notifications=nu
 {{- define "kausa.notifies" -}}
 {{- $n := .Values.notifications | default dict }}
 {{- if $n.enabled }}true{{ end }}
+{{- end }}
+
+{{/* notifications.maxPerHour as a string, empty when missing or null (kausa's default, 30,
+applies); kausa.validate allows 1-3600. A number from a values file is a float64: toString of
+30.0 is 30. */}}
+{{- define "kausa.notifyMaxPerHour" -}}
+{{- $n := .Values.notifications | default dict }}
+{{- if and (hasKey $n "maxPerHour") (not (kindIs "invalid" $n.maxPerHour)) }}{{ toString $n.maxPerHour }}{{ end }}
 {{- end }}
 
 {{/* notifications.format as a string, json when missing; kausa.validate checks it. */}}
@@ -296,8 +305,11 @@ notification checks last, only with notifications.enabled.
 {{- if and (ne $format "json") $n.tokenKey }}
 {{- fail "notifications.tokenKey is used only with notifications.format=json" }}
 {{- end }}
-{{- if not .Values.model.endpoint }}
-{{- fail "notifications.enabled needs model.endpoint" }}
+{{- if and (hasKey $n "maxPerHour") (not (kindIs "invalid" $n.maxPerHour)) }}
+{{- $perHour := toString $n.maxPerHour }}
+{{- if not (regexMatch "^([1-9][0-9]{0,2}|[12][0-9]{3}|3[0-5][0-9]{2}|3600)$" $perHour) }}
+{{- fail (printf "notifications.maxPerHour must be a whole number from 1 to 3600, not '%s'" $perHour) }}
+{{- end }}
 {{- end }}
 {{- if .Values.dryRun }}
 {{- fail "notifications.enabled is not used with dryRun: no explanation is written" }}

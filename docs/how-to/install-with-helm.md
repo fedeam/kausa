@@ -3,7 +3,7 @@
 Install the released chart, which runs the published image, first in dry-run and then pointed at
 a model.
 
-Status as of 2026-11-04: the v0.1.0 chart from the GitHub release was installed in dry-run in kind
+Status as of 2026-11-24: the v0.1.0 chart from the GitHub release was installed in dry-run in kind
 (Kubernetes v1.37) with the published image, on 2026-10-28. The chart in the repository was
 checked with a server-side dry run against Kubernetes v1.36, installed in dry-run on a Raspberry
 Pi 4 node, and installed with an endpoint by the kind test (`tests/e2e/run.sh`, passed on
@@ -30,7 +30,12 @@ CycloneDX SBOM of an auditable binary to each image](../adr/0023-oci-chart-and-s
 released on 2026-11-04, is the first; the v0.5.2 chart and earlier are only on their GitHub
 releases. On 2026-11-04 the v0.6.0 chart was pulled from GHCR without a login, matched the signed
 checksums, and installed in kind in both scopes and with two replicas; a release installed from the
-v0.5.2 chart URL was upgraded to it with `--reuse-values`.
+v0.5.2 chart URL was upgraded to it with `--reuse-values`. The chart of the release after v0.6.3
+writes a `Detected` Event for each settled incident, with or without a model endpoint ([Upgrade to
+the `Detected` Event](#upgrade-to-the-detected-event); [0027. Report each settled incident as a
+fact statement in its own `Detected` Event and webhook message, with or without a model, and mark
+the model's text as a
+model's](../adr/0027-fact-statement-for-the-detections.md)).
 
 ## Before you start
 
@@ -42,7 +47,9 @@ v0.5.2 chart URL was upgraded to it with `--reuse-values`.
   Helm (CI uses 4.3.1; the chart was also rendered and installed with 3.16; OCI charts need Helm
   3.8 or later) pointed at it: check `kubectl config current-context`.
 - Nodes on linux/amd64 or linux/arm64 that can pull from `ghcr.io` (or your own build, below).
-- A model endpoint: a hosted one with its API key, or one in the cluster (for example Ollama).
+- A model endpoint, if you want explanations: a hosted one with its API key, or one in the cluster
+  (for example Ollama). Without one, kausa still reports each incident as facts in a `Detected`
+  Event.
 
 ## Steps
 
@@ -86,7 +93,8 @@ v0.5.2 chart URL was upgraded to it with `--reuse-values`.
    and earlier ignore it. To grant less, see [Watch only some namespaces](#watch-only-some-namespaces).
 
    Each `request` line is the redacted body that would leave the cluster. In dry-run the chart
-   grants `pods/log` but no Event writes.
+   grants `pods/log` but no Event writes. Without `dryRun` and without an endpoint, kausa writes
+   one `Detected` Event per settled incident and explains nothing.
 
 4. **Point it at the model.** `--reuse-values` keeps the values of step 3, `rbac.scope` included:
 
@@ -164,6 +172,21 @@ helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set r
 `--reuse-values` carries the scope on. Without `--reuse-values`, pass the scope every time, best
 from a values file: `helm upgrade --reset-values`, or an upgrade with `--set` and neither
 `--reuse-values` nor a values file, renders the chart's defaults, which have no scope, and fails.
+
+## Upgrade to the `Detected` Event
+
+From the release after v0.6.3, kausa writes a `Detected` Event, a Warning with the facts it read,
+for each settled incident, with or without a model endpoint, and `notifications.enabled` no longer
+needs `model.endpoint`.
+
+- **A release without an endpoint starts writing Events on upgrade**, and its role gains `create`
+  and `patch` on Events in both scopes ([Permissions](../reference/permissions.md)). It wrote
+  nothing to the cluster before.
+- **To keep it silent**, set `events: false`: the role keeps its reads only and kausa logs
+  incidents, as before. `dryRun` writes no Event either.
+- **A release with an endpoint** gets one more Event per incident beside its explanation, and
+  neither waits for the other, so either can be written first. The explanation's note now starts
+  with `Model's explanation, not verified: ` (35 of its 1024 bytes).
 
 ## Upgrade to the Deployment watch
 

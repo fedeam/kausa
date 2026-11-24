@@ -235,3 +235,16 @@ plain `@here` and `@channel` became mentions that notified the channel, although
 webhooks. The `slack` text therefore gets the Telegram fix: a word joiner after every `@`, added
 after the cut, which the cut counts. A second post the same day, from a build with the joiner,
 showed `@here`, `@channel` and `@everyone` as plain text, not as mentions.
+
+Update 2026-11-24: [0027. Report each settled incident as a fact statement in its own `Detected`
+Event and webhook message, with or without a model, and mark the model's text as a
+model's](0027-fact-statement-for-the-detections.md) amends this decision. A message is sent for each
+settled incident (`detected`), after its `Detected` Event and with or without a model, as well as
+for each new explanation (`explained`); `--notify-url-file` no longer needs `--endpoint`, and is
+still a usage error with `--dry-run`. `detected` messages are sent once per fingerprint per
+`--dedup-hours` and bounded by `--notify-max-per-hour` (30 by default), over which one fixed
+`capped` message is posted at most once an hour; `explained` messages keep the call budget as their
+bound. The body becomes `kausa.fedeam.com/notification/v2`, with a `facts` object of typed fields
+and no new free text, and the model's text in a notification follows the line `Model's explanation,
+not verified:`. [Data sent in notifications](../reference/data-sent-in-notifications.md) lists every
+field.

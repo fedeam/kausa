@@ -1,10 +1,10 @@
 # Send notifications to Slack, Telegram or a webhook
 
-How to have kausa post each new explanation to one webhook (a receiver of your own, a Slack
+How to have kausa post each settled incident and each new explanation to one webhook (a receiver of your own, a Slack
 incoming webhook or a Telegram bot), check that it arrives, and turn it off.
 
-Status as of 2026-10-29: released in v0.3.0, off by default. The
-`json` format is checked by the kind test against a fake receiver, and the `telegram` format was
+Status as of 2026-11-24: released in v0.3.0, off by default; from the release after v0.6.3 it needs no model endpoint and sends `v2` bodies (see [Upgrade from `v1` bodies](#upgrade-from-v1-bodies)).
+The `json` format is checked by the kind test against a fake receiver, and the `telegram` format was
 posted to a real Telegram chat on 2026-10-29 (the joiners kept mentions and bot commands inert;
 URLs stay links). The `slack` format was posted to a real incoming webhook on 2026-10-30: a URL
 stayed plain text, but **a plain `@here` or `@channel` in v0.4.0's Slack text notifies the
@@ -16,15 +16,17 @@ Telegram](../adr/0015-notifications.md).
 
 ## Before you start
 
-- kausa installed with the chart in its namespace (`kausa` below) and explaining incidents with a
-  model: `model.endpoint` set and `dryRun` false ([Install kausa with
-  Helm](install-with-helm.md)). Notifications need both, and the chart refuses them otherwise.
+- kausa installed with the chart in its namespace (`kausa` below), with `dryRun` false ([Install
+  kausa with Helm](install-with-helm.md)). A model endpoint is optional: without one kausa posts
+  a `detected` message for each settled incident, with the facts and no model text, and with one
+  it posts an `explained` message too. The chart refuses notifications with `dryRun`.
   `CHART` and `VERSION` below are the chart and the release of that page's step 1: keep the
   version you run, as an upgrade from GHCR without `--version` takes the newest chart and its
   image.
 - Read [Data sent in notifications](../reference/data-sent-in-notifications.md) first: a
   notification leaves the cluster with the **real** names of the namespace and the failing
-  workload, and the model's text, which can repeat redacted log lines. The receiver keeps it under
+  workload, an enumerated reason, an exit code and counts, and, with a model, the model's text,
+  which can repeat redacted log lines. The receiver keeps it under
   its own retention.
 - The webhook URL is a secret in every format (Telegram puts the bot token in it, and a Slack
   webhook URL lets anyone post to the channel). It lives in a Secret of yours, which the kubelet
@@ -134,7 +136,8 @@ Telegram](../adr/0015-notifications.md).
    starts once the Secret is fixed, with no restart (seen in kind on 2026-10-29).
 
 2. Make a test workload fail in a watched namespace (`shop` here), and wait for the settle window
-   (60 seconds by default) and the explanation. It uses one model call of the budget:
+   (60 seconds by default). With a model endpoint, also wait for the explanation, which uses one
+   model call of the budget:
 
    ```sh
    kubectl -n shop create deployment kausa-notify-test --image=busybox:1.37 -- sh -c 'exit 1'
@@ -160,7 +163,33 @@ Telegram](../adr/0015-notifications.md).
    ```
 
 A repeat of the same incident within `budget.dedupHours` is not posted again once the webhook has
-acknowledged it.
+acknowledged it. With a model, an incident is two messages, `detected` and `explained`, which
+neither waits for the other: either can arrive first. At most `notifications.maxPerHour` `detected`
+messages go out in any 60 minutes (30 by default, 1 to 3600): over it, a message is not sent,
+`kausa_notifications_total{outcome="capped"}` counts it, and at most once an hour kausa posts one
+fixed `capped` message that says not every incident is posted and that its log has every one. A
+burst that fills the queue of 16 owes the same message. Set the value with `--set
+notifications.maxPerHour=<n>`.
+
+## Upgrade from `v1` bodies
+
+From the release after v0.6.3 a `json` body has the schema `kausa.fedeam.com/notification/v2`.
+This breaks a receiver written for `v1`: `type` is `detected`, `explained` or `capped`,
+`explanation` is only in `explained`, and the new object `facts` is in `detected` and
+`explained`. Change the receiver before you upgrade; the fields are in [The `json`
+body](../reference/data-sent-in-notifications.md#the-json-body). Within `v2` a later release may
+add a value of `type`, so a receiver must ignore a message whose `type` it does not know
+([Compatibility](../reference/data-sent-in-notifications.md#compatibility)). The Slack and
+Telegram texts gain a `Facts:` line and the line `Model's explanation, not verified:`, and need no
+change.
+
+`D013` is now named `autoscaler cannot read metrics or target scale` (it was `autoscaler cannot
+get metrics`), in `detection.name` and in the first line of the texts: change a receiver or a
+filter that matches the old name.
+
+A release without a model endpoint that has notifications on starts posting `detected` messages
+on upgrade, and, unless `events: false`, writing `Detected` Events ([Upgrade to the `Detected`
+Event](install-with-helm.md#upgrade-to-the-detected-event)).
 
 ## Alert on failures
 
@@ -171,7 +200,9 @@ alerting rules of [Alerts](../reference/alerts.md), which fires for about an hou
 notification.
 
 `kausa_notifications_total{outcome="dropped"}` counts notifications pushed out of the queue of 16
-by a burst; `kausa_notifications_retried_total` counts second attempts.
+by a burst (a `detected` one first; a `detected` one never pushes out an `explained` one),
+`kausa_notifications_total{outcome="capped"}` counts `detected` messages over the cap,
+and `kausa_notifications_retried_total` counts second attempts.
 
 ## Turn it off
 
@@ -186,7 +217,8 @@ it can post as kausa.
 
 ## Another way: forward the Events
 
-kausa's `Explained` Events carry the summary, the likely cause and the steps, cut to 1,024 bytes,
-for one hour by default. An event exporter you already run (Robusta, kwatch or another) can forward
+kausa's `Detected` Events carry the facts, and its `Explained` Events the summary, the likely cause
+and the steps behind the mark `Model's explanation, not verified:`, cut to 1,024 bytes, for one
+hour by default. An event exporter you already run (Robusta, kwatch or another) can forward
 them instead, with its own formats and destinations, and kausa then sends nothing but its model
 requests. It reads every Event, and must read them before they expire.

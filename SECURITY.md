@@ -36,6 +36,9 @@ These are vulnerabilities, not ordinary bugs:
   notifications](docs/reference/data-sent-in-notifications.md), a log line, an event message or
   any part of the request to the model as a field, or a real name other than the namespace's and
   the top-level owner's; or the webhook URL or token in a log line, an error, an Event or a metric;
+- a fact statement (the note of a `Detected` Event, the `statement` of a log line, the `Facts:` line
+  or `facts` of a notification) that holds a byte outside letters, digits, spaces and `.,:()-`, a
+  value that kausa did not fix or check, or any text a model or a tenant wrote;
 - kausa reading, or asking for permission to read, Secrets or ConfigMaps, or writing anything but
   Events, with `--history` its own Explanations and, with `--leader-lease`, the `spec` (and the
   `resourceVersion` precondition) of its one Lease; or asking for any verb on Leases but `get` and
@@ -79,14 +82,19 @@ ReplicaSets and Jobs and, unless `--no-rollouts`, Deployments; it
 redacts each incident's context and sends it only to the endpoint given with `--endpoint`, or
 logs it with `--dry-run`; it logs incidents and explanations with real names to its own stdout.
 Calls to the model are capped per hour and per day, explanations of repeated incidents are
-reused, and the queue in front of the model holds 16. It writes the explanation as an Event in the
-failing workload's namespace (`create` and `patch` on Events only), and serves metrics only with
+reused, and the queue in front of the model holds 16. It writes a `Detected` Event for each settled
+incident, with or without a model, and the explanation as an Event, in the failing workload's
+namespace (`create` and `patch` on Events only; the `Detected` Event is since the release after
+v0.6.3 ([0027. Report each settled incident as a fact statement in its own `Detected` Event and
+webhook message, with or without a model, and mark the model's text as a
+model's](docs/adr/0027-fact-statement-for-the-detections.md))), and serves metrics only with
 `--metrics-address`. With `--history` (off by default; the chart's `history.enabled`), it also
 keeps each explained incident's full explanations in an Explanation object in that namespace and
 deletes old ones ([0014. Keep each incident's full explanations in a namespaced Explanation
 resource, off by default](docs/adr/0014-explanation-history.md)), since v0.3.0. With
 `--notify-url-file` (off by default; the chart's `notifications.enabled`; since v0.3.0), it also
-posts each new explanation to one webhook, with the real names of the namespace and the top-level owner ([0015.
+posts each settled incident (`detected`, since the release after v0.6.3, with or without
+`--endpoint`) and each new explanation to one webhook, with the real names of the namespace and the top-level owner ([0015.
 Post each new explanation to one optional webhook, as JSON, Slack or
 Telegram](docs/adr/0015-notifications.md)). Each of these is implemented: the redaction, the prompt's validation, the
 budget, the Event writes and the metrics responder have unit tests, and the permissions are
@@ -173,7 +181,10 @@ kausa must:
   Nothing unredacted reaches the model. The webhook, when notifications are on, receives only
   the fields of [Data sent in notifications](docs/reference/data-sent-in-notifications.md), with
   the real names of the namespace and the top-level owner; every other name stays a placeholder,
-  and no field holds a log line, an event message or the request. The only destinations are the
+  and no field holds a log line, an event message or the request. A fact statement holds only
+  what kausa fixed or checked itself: an enumerated reason, an exit code, two counts, a revision
+  and a container name that is a DNS label, never the sample's message, the image or a model's
+  text (invariant 12 of [ARCHITECTURE.md](ARCHITECTURE.md)). The only destinations are the
   API server, the configured endpoint and the configured webhook: no telemetry, no update checks,
   no fallback provider, no proxy, no redirects to another host. HTTPS with certificate
   verification, unless plain HTTP is allowed explicitly (`--allow-http`, `--notify-allow-http`)
@@ -345,6 +356,23 @@ kausa must:
   end (that a bot cannot take part in a secret chat is a hypothesis: Telegram does not say). "Fully local" then also means notifications off or a receiver in the cluster. A
   wrong URL sends explanations to whoever owns it; a leaked one lets anyone post as kausa: rotate
   it at the provider.
+- **A release with a webhook and no endpoint now sends facts.** Since the release after v0.6.3
+  the webhook needs no model endpoint, so a release that used to send nothing can send, for each
+  settled incident, the namespace, the top-level owner, the detection, the fingerprint, the time,
+  an enumerated reason, an exit code, two counts and a revision. The container's name is in the
+  `Detected` Event and the log, never in a notification. The messages are bounded by once per
+  fingerprint per `--dedup-hours` and `--notify-max-per-hour` (30 by default); over the cap a
+  message is not sent, and at most once an hour a fixed `capped` message says so. The same
+  message is owed when the queue of 16, which `detected` and `explained` messages share, or the
+  fact queue of 1024 drops one in a burst; a `detected` message never pushes an `explained` one
+  out of the queue, so a burst of failing Pods in one namespace cannot evict the explanations
+  of others. Messages dropped when kausa stops or its lease term ends owe nothing. Whoever can
+  create Pods in a watched namespace still decides which incidents there are, so the cap bounds
+  the channel, not who fills it.
+- **Facts and the model's text are told apart by a mark.** The `Explained` Event, the Slack and
+  Telegram texts and the `json` body's `explanation` key are the model's, and the first two start
+  with `Model's explanation, not verified:`. The mark is a fixed string, not a guarantee: injected
+  text can still make an explanation misleading, as above.
 - **A notification can repeat redacted log text.** No field holds a log line, but the explanation
   is the model's text, which can quote the redacted context it was given (log and event text,
   probe paths, label keys), up to the explanation's caps. kausa cannot tell a quote from a summary.
@@ -362,6 +390,17 @@ kausa must:
   `github.com/<anyone>/…` stays) or no rule recognizes it: an uppercase host, a bare host under a
   suffix `R013` does not list (`name.test/x`), or a value split, encoded or written in fullwidth
   characters for the model to join. Those links stay links.
+- **An owner's kind and name cannot add lines to a notification's text.** The API server only
+  requires an ownerReference's `kind` and `name`, and an Event's `regarding`, to be non-empty. In
+  kind, with Kubernetes v1.36.4 on 2026-11-24, it accepted a Pod whose ownerReference had a line
+  break in its kind and in its name and the uid of no object, and an Event whose `regarding` had
+  one; three minutes later that Pod was still running and failing, while a Pod with the same
+  reference but the kind `Deployment` was gone. Whoever can create Pods or Events in a watched
+  namespace can so give kausa an owner whose name, rendered as it is, would forge a `Facts:` line,
+  the mark or the header of another incident. Since the release after v0.6.3, the Slack and
+  Telegram texts replace each control character and each line or paragraph separator in the kind
+  and the name with U+FFFD; the `json` body, the Events and the log escape the value as JSON and
+  keep it.
 - **The budget is shared.** The call budget and the queue are one per release, shared by every
   namespace it watches (the whole cluster, or the listed namespaces), so a tenant that makes
   many workloads fail can use up the budget and, by flooding the queue, push other namespaces'
@@ -444,14 +483,29 @@ kausa must:
 - **kausa's own log holds the full explanations**, with real names, from every watched namespace.
   Whoever can read kausa's Pod logs, and any log shipper that exports them, sees them: restrict
   access to kausa's namespace accordingly.
+- **A release without an endpoint writes Events since the release after v0.6.3.** Its role gains
+  `create` and `patch` on Events, and kausa writes a `Detected` Event, a Warning whose note is the
+  fact statement, for each settled incident. Another Warning on a workload can start alerts that
+  watch for Warnings. `events: false` removes the grant and the writes.
 - **Event writes cannot be limited to kausa's own Events.** `create` and `patch` on Events
   cannot be narrowed by RBAC to kausa's own, since RBAC has no filter on the reporting controller,
   so a compromised kausa could create or rewrite any Event in the namespaces it covers: every
   namespace with `rbac.scope=cluster`, the listed namespaces only with `rbac.scope=namespaced`. kausa names
-  its Events `kausa.<fingerprint>.<hash of the note>` (or `kausa.skipped.…`), patches one only
+  its Events `kausa.<fingerprint>.<hash of the note>` (or `kausa.skipped.…`, or
+  `kausa.detected.…` for a fact), patches one only
   when it already exists with that name and with reporting controller `kausa`, refuses the patch
   otherwise, and patches only its series (count and last time); it never changes another
   Event's note.
+- **A `Detected` Event can be forged in a namespace where one can create Events.** Its name,
+  `kausa.detected.<fingerprint>.<hash of the statement>`, follows from the incident's owner,
+  message and facts, which whoever runs the workload knows, and the reporting controller is a
+  field that whoever creates an Event sets. Whoever can create Events in a watched namespace can
+  create that name first, with reporting controller `kausa` and any note; kausa then takes it for
+  its own and patches only its series, so the forged note stays on the workload under kausa's
+  name. `kausa.skipped.…` names behave the same. The reach is that namespace, where that writer
+  could already create Events with any reporting controller, and the `incident` log line and the
+  `detected` message carry the real statement: read a `Detected` Event as something anyone who
+  can create Events in its namespace could have written.
 - **Tenants of a listed namespace can change kausa's access there** (`rbac.scope=namespaced`).
   kausa's Role and RoleBinding live in that namespace, so whoever administers it can:
   - **delete the RoleBinding.** kausa's watches there are refused (`403`); it drops what they had

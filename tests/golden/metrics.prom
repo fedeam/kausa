@@ -36,6 +36,7 @@ kausa_redactions_total{rule="R004"} 7
 kausa_redactions_total{rule="R010"} 2
 # HELP kausa_events_written_total Events created or updated, by reason.
 # TYPE kausa_events_written_total counter
+kausa_events_written_total{reason="Detected"} 6
 kausa_events_written_total{reason="Explained"} 5
 kausa_events_written_total{reason="ExplanationSkipped"} 4
 # HELP kausa_event_write_errors_total Events that could not be written.
@@ -60,8 +61,9 @@ kausa_history_deleted_total{reason="cap"} 1
 # HELP kausa_history_sweep_errors_total Failed list or delete calls of the history sweep.
 # TYPE kausa_history_sweep_errors_total counter
 kausa_history_sweep_errors_total 0
-# HELP kausa_notifications_total Notifications by final outcome (sent, failed, dropped).
+# HELP kausa_notifications_total Notifications by final outcome (sent, failed, dropped, capped).
 # TYPE kausa_notifications_total counter
+kausa_notifications_total{outcome="capped"} 3
 kausa_notifications_total{outcome="dropped"} 0
 kausa_notifications_total{outcome="failed"} 1
 kausa_notifications_total{outcome="sent"} 4
@@ -92,6 +94,12 @@ kausa_watch_restarts_total{watch="pods"} 1
 # HELP kausa_answers_withheld_total Model answers in which kausa replaced text with its withheld-command notice.
 # TYPE kausa_answers_withheld_total counter
 kausa_answers_withheld_total 0
+# HELP kausa_facts_dropped_total Facts dropped because the fact queue was full.
+# TYPE kausa_facts_dropped_total counter
+kausa_facts_dropped_total 0
+# HELP kausa_fact_reasons_omitted_total Fact statements that left out a reason outside the list of known reasons.
+# TYPE kausa_fact_reasons_omitted_total counter
+kausa_fact_reasons_omitted_total 0
 # HELP kausa_leader 1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a standby.
 # TYPE kausa_leader gauge
 kausa_leader 1

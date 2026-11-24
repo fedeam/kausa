@@ -439,12 +439,15 @@ increase(kausa_notifications_total{outcome="failed"}[1h]) > 0
 
 `for`: none.
 
-**What it means:** kausa could not post a notification to its webhook in the last hour. A failed
-notification is not tried again until its incident comes back, and it never shows in an Event.
+**What it means:** kausa could not post a notification to its webhook in the last hour: a `detected`,
+an `explained` or a `capped` message. A failed notification is not tried again until its incident
+comes back, and it never shows in an Event.
 
 **Why:** the counter's series start at `0` with `--notify-url-file`, so a lone first failure fires
 too. `kausa_notifications_total{outcome="dropped"}` counts notifications pushed out of the queue
-of 16 by a burst, and `kausa_notifications_retried_total` second attempts; neither has an alert.
+of 16 by a burst, `kausa_notifications_total{outcome="capped"}` the `detected` messages over
+`--notify-max-per-hour`, and `kausa_notifications_retried_total` second attempts; none has an
+alert.
 
 **When it does not fire:** without notifications; it resolves about an hour after the last
 failure.
@@ -463,7 +466,9 @@ failure.
 
 ## What has no alert
 
-The relists (`kausa_watch_relists_total`, normal after an expired resource version), the call
+The relists (`kausa_watch_relists_total`, normal after an expired resource version), the facts
+dropped from a full fact queue (`kausa_facts_dropped_total`) and the reasons left out of a
+statement (`kausa_fact_reasons_omitted_total`), whose rates nobody has measured, the call
 duration histogram (no latency objective exists), the record and cache gauges (no threshold has
 been measured) and `kausa_answer_redactions_total`, whose alert waits for a measured rate ([0022. Pass the model's
 answer through the pattern redaction rules before it is written anywhere, and redact the query of

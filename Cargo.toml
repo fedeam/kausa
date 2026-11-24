@@ -7,7 +7,7 @@ edition = "2024"
 # written. It can stay behind when the toolchain moves on (clippy's incompatible_msrv lint, part
 # of the CI's -D warnings, flags code that needs a newer compiler).
 rust-version = "1.99"
-description = "A tiny Kubernetes controller that explains failing workloads with an LLM"
+description = "A tiny Kubernetes controller that reports failing workloads as facts, LLM optional"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fedeam/kausa"
 readme = "README.md"

@@ -66,7 +66,7 @@ Pods failing when it settles.
 | `D010` | Pod sandbox cannot be created | Warning event `FailedCreatePodSandBox` about a Pod | No |
 | `D011` | Workload cannot create Pods or Jobs | Warning event `FailedCreate` about a ReplicaSet, a Job, a StatefulSet, a DaemonSet or a CronJob (a quota, an admission webhook or Pod Security admission refused the Pod, or the CronJob's Job). About a CronJob itself (not a Job of a CronJob), it is an incident at once | No |
 | `D012` | Volume claim cannot be provisioned | Warning event `ProvisioningFailed` about a PersistentVolumeClaim | No |
-| `D013` | Autoscaler cannot get metrics | Warning event `FailedGetResourceMetric`, `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` about a HorizontalPodAutoscaler | No |
+| `D013` | Autoscaler cannot read metrics or target scale | Warning event `FailedGetResourceMetric`, `FailedGetContainerResourceMetric`, `FailedGetPodsMetric`, `FailedGetObjectMetric`, `FailedGetExternalMetric`, `FailedComputeMetricsReplicas` or `FailedGetScale` about a HorizontalPodAutoscaler | No |
 | `D014` | Rollout does not progress | A Deployment whose `Progressing` condition is `False` with reason `ProgressDeadlineExceeded` (exact case), that is not paused, and whose `status.observedGeneration` is at least `metadata.generation` (both present); a state, about the Deployment itself. Yields to an explained incident of the same Deployment (below). Off with `--no-rollouts` | No |
 
 For `D005`, the request carries the unschedulable Pod's node selector, required affinity and
@@ -368,6 +368,79 @@ as for any Pod before) can name the executable path the runtime could not start.
 - Lifecycle-hook failures (`FailedPostStartHook`, `FailedPreStopHook`) stay out of scope: their
   notes quote the hook's command, which [0008. Send only allowlisted, redacted data to one
   OpenAI-compatible endpoint](../adr/0008-data-leaving-the-cluster.md) keeps from the model.
+
+## Fact statements
+
+For each settled incident kausa builds one line of text, its **fact statement**, before and without
+any model ([0027. Report each settled incident as a fact statement in its own `Detected` Event and
+webhook message, with or without a model, and mark the model's text as a
+model's](../adr/0027-fact-statement-for-the-detections.md), `src/fact.rs`). It is the note of the
+`Detected` Event, the `statement` of the `incident` log line, and, without its first sentence and
+its container, the `Facts:` line and the `facts` object of a notification ([Data sent in
+notifications](data-sent-in-notifications.md)). The same incident gives the same bytes. Its parts,
+in this order, each left out when its value is absent (one line; wrapped here):
+
+```text
+<detection name> (<id>). Sample: container <c>, reason <r>, exit code <n>. Pods seen failing:
+<a>. Pods now: <b>. Revision: <v>.
+```
+
+Examples, with invented names; the unit test `the_reference_page_holds_the_examples` in
+`src/fact.rs` builds each of them:
+
+```text
+crash loop (D001). Sample: container web, reason CrashLoopBackOff, exit code 1. Pods seen failing: 2. Pods now: 3.
+image cannot be pulled (D002). Sample: container web, reason ImagePullBackOff. Pods seen failing: 1. Pods now: 1.
+job failed (D008). Sample: reason BackoffLimitExceeded.
+rollout does not progress (D014). Sample: reason ProgressDeadlineExceeded. Revision: 7.
+```
+
+| Part | From | Printed when |
+|---|---|---|
+| Detection name and id | The rule, fixed in the binary | Always |
+| Container | The sample's container | It is a DNS label (lowercase letters, digits and `-`, at most 63 bytes), checked by kausa itself |
+| Reason | The sample's reason | It equals a reason of the rule's trigger in [Detection rules](#detection-rules), or `Error` for a crash loop found by its restart count. Any other value is left out and counted in `kausa_fact_reasons_omitted_total` |
+| Exit code | The sample's exit code | An integer, in decimal |
+| Pods seen failing | How many Pods the incident holds | More than zero. `at least <a>` when it holds 100 or more, since it keeps the first 100 |
+| Pods now | The Pods kausa holds with the incident's owner | Whenever `Pods seen failing` is printed |
+| Revision | The Deployment's revision | `D014` only |
+
+- **Never in a statement:** the sample's message, an event's note, a log line, the image, a
+  label, an annotation, a node, the namespace, the owner, the Pod, and any text a model wrote. The
+  `Detected` Event names the owner and the sample Pod in `regarding` and `related`.
+- **A `Detected` Event is only as trustworthy as its namespace.** Its name,
+  `kausa.detected.<fingerprint>.<8 hex of the statement's hash>`, can be known beforehand, and
+  whoever can create Events in the namespace can create it first, with reporting controller
+  `kausa` and any note; kausa then only patches its series. The `incident` log line and the
+  `detected` message carry the real statement ([Security policy](../../SECURITY.md)).
+- **It names no cause and gives no advice.** `Sample:` is one signal of the incident, the first
+  in a fixed order, as in the `incident` line, not all of them.
+- **Its bytes are letters, digits, spaces and `.,:()-`** and nothing else, so no part of it can
+  be a mention, a link, markup or a command. The longest possible statement is 286 bytes, under a
+  bound of 512; unit tests and the fuzz target `fact` check both.
+- Changing what a statement may hold needs an ADR (invariant 12 of
+  [ARCHITECTURE.md](../../ARCHITECTURE.md)).
+
+## What kausa watches, and what it does not
+
+No report means only that no rule matched what kausa watches: kausa never says that something is
+healthy or that it saw everything ([0026. Report every incident as facts without a model, keep the
+explanation optional, and widen coverage one bounded source at a
+time](../adr/0026-facts-before-the-model.md), point 3).
+
+- **Watched:** Pods (container states, restart counts, scheduling condition, eviction), Warning
+  Events about the objects listed in [Detection rules](#detection-rules), and, while `rollouts`
+  is on, Deployments (their `Progressing` condition). With `--namespace`, only the listed
+  namespaces.
+- **Not watched:** anything else. Normal Events, Warning Events whose reason no rule lists, Nodes,
+  Services, Ingresses, network policies, certificates, the rollouts of StatefulSets and
+  DaemonSets, a failure that clears within the settle window, and the logs of a workload that
+  fails no rule (logs are read only to explain an incident).
+- **Counted when dropped:** a fact the full fact queue drops (`kausa_facts_dropped_total`), an
+  explanation the full queue drops (`kausa_explanations_dropped_total`), a notification dropped
+  or over the cap (`kausa_notifications_total{outcome="dropped"}` and `{outcome="capped"}`), and
+  an Event write that failed (`kausa_event_write_errors_total`). Metrics are in [Command line and
+  log format](command-line.md).
 
 ## Redaction rules
 

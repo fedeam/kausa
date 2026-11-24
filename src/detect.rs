@@ -81,7 +81,7 @@ impl Detection {
             Detection::SandboxCreate => "pod sandbox cannot be created",
             Detection::PodCreate => "workload cannot create pods or jobs",
             Detection::ClaimProvisioning => "volume claim cannot be provisioned",
-            Detection::AutoscalerMetrics => "autoscaler cannot get metrics",
+            Detection::AutoscalerMetrics => "autoscaler cannot read metrics or target scale",
             Detection::RolloutStalled => "rollout does not progress",
         }
     }
@@ -868,7 +868,10 @@ mod tests {
             let detection = detect_event(&event("HorizontalPodAutoscaler", reason));
             assert_eq!(detection.map(Detection::id), Some("D013"), "{reason}");
             let detection = detection.expect("a detection");
-            assert_eq!(detection.name(), "autoscaler cannot get metrics");
+            assert_eq!(
+                detection.name(),
+                "autoscaler cannot read metrics or target scale"
+            );
             settled_event_without_logs(detection);
         }
         // Not D013: a rescale that failed after the metrics were read, a successful one, and the

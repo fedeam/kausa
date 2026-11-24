@@ -5,7 +5,7 @@
 //! endpoint nor a burst of incidents can stop the watches or grow kausa's memory.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::io;
 use std::time::Duration;
 
@@ -60,14 +60,11 @@ pub struct Settings {
     pub dedup_ttl: Duration,
     /// The reporting instance of kausa's Events: its Pod's name, or `kausa`.
     pub instance: String,
-    /// With `--notify-url-file`, the webhook each new explanation is posted to
-    /// (docs/adr/0015-notifications.md).
-    pub notify: Option<notify::Notifier>,
 }
 
 /// What the explanations share across incidents: the budget, the deduplication cache, the
-/// endpoint's breaker, the Event writer, the history writer, the metrics, the queue of
-/// notifications and the lease term. Borrowed only between awaits.
+/// endpoint's breaker, the Event writer, the history writer, the metrics, the webhook's outbox and
+/// the lease term. Borrowed only between awaits.
 pub struct Shared<'a> {
     pub budget: RefCell<Budget>,
     pub dedup: RefCell<Dedup>,
@@ -78,8 +75,9 @@ pub struct Shared<'a> {
     /// The history writer, with `--history` and an endpoint.
     pub history: Option<History>,
     pub metrics: &'a Metrics,
-    /// The notifications waiting for the webhook, at most `notify::QUEUE_LIMIT`.
-    pub notifications: RefCell<VecDeque<notify::Queued>>,
+    /// With `--notify-url-file`, the outbox each new explanation is queued in
+    /// (docs/adr/0015-notifications.md); the fact path queues in it too.
+    pub outbox: Option<&'a notify::Outbox<'a>>,
     /// The lease term: kausa calls the model, writes and notifies only while it holds, and drops
     /// the work silently once it has ended (docs/adr/0019-high-availability.md). Unbounded without
     /// `--leader-lease`.
@@ -228,10 +226,15 @@ pub async fn run(
             )
             .await?;
             // The stored notification, again, until the webhook has acknowledged it.
-            if let Some(notice) = cached.notice.filter(|_| settings.notify.is_some())
+            if let Some(outbox) = shared.outbox
+                && let Some(notice) = cached.notice
                 && !cached.notified
             {
-                notify::enqueue(shared, notify::queued(&gathered.incident, notice))?;
+                outbox.enqueue(notify::queued(
+                    &gathered.incident,
+                    gathered.pods_total,
+                    notice,
+                ))?;
             }
             return Ok(Next::Done);
         }
@@ -386,7 +389,7 @@ pub async fn run(
     }
     let restored = explanation.map_clean(|text| redactor.restore(text));
     // The notification's text maps back only the namespace and the top-level owner.
-    let narrow = settings.notify.is_some().then(|| {
+    let narrow = shared.outbox.is_some().then(|| {
         let incident = &gathered.incident;
         let names = [
             incident.key.namespace.as_str(),
@@ -432,8 +435,14 @@ pub async fn run(
         ),
     )?;
     emit(settings, shared, &gathered, Outcome::Explained(&restored)).await?;
-    if let Some(narrow) = narrow {
-        notify::enqueue(shared, notify::queued(&gathered.incident, narrow))?;
+    if let Some(outbox) = shared.outbox
+        && let Some(narrow) = narrow
+    {
+        outbox.enqueue(notify::queued(
+            &gathered.incident,
+            gathered.pods_total,
+            narrow,
+        ))?;
     }
     Ok(Next::Done)
 }
@@ -808,20 +817,20 @@ mod tests {
     }
 
     // Acceptance tests for notifications (docs/adr/0015-notifications.md), written before the
-    // code. They use `Settings::notify: Option<notify::Notifier>`, `Shared::notifications:
-    // RefCell<VecDeque<notify::Queued>>` and the Dedup API of budget.rs (`put` with a notice,
-    // `peek`, `mark_notified`). They run `run` against a fake model on localhost, with no log
+    // code. They use `Shared::outbox` (the webhook's `notify::Outbox`, since
+    // docs/adr/0027-fact-statement-for-the-detections.md) and the Dedup API of budget.rs (`put`
+    // with a notice, `peek`, `mark_notified`). They run `run` against a fake model on localhost, with no log
     // read and no Event or history writer, so the Kubernetes client is never used.
 
     use std::cell::RefCell;
-    use std::collections::{BTreeSet, VecDeque};
+    use std::collections::BTreeSet;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
     use crate::incident::{Incident, IncidentKey, Signal};
     use crate::leader::Term;
     use crate::model::ModelClient;
-    use crate::notify::{Format, Notifier};
+    use crate::notify::{Format, Notifier, Outbox, Queued};
     use crate::prompt::Explanation;
     use crate::record::{ContainerRecord, OwnerRef, PodRecord};
 
@@ -995,8 +1004,27 @@ mod tests {
         }
     }
 
-    fn settings(model: Option<String>, notify: bool, calls_per_hour: usize) -> Settings {
-        Settings {
+    /// The settings of a test, and whether its `Shared` has an outbox (`--notify-url-file`).
+    struct TestSettings {
+        settings: Settings,
+        notify: bool,
+    }
+
+    impl std::ops::Deref for TestSettings {
+        type Target = Settings;
+        fn deref(&self) -> &Settings {
+            &self.settings
+        }
+    }
+
+    impl std::ops::DerefMut for TestSettings {
+        fn deref_mut(&mut self) -> &mut Settings {
+            &mut self.settings
+        }
+    }
+
+    fn settings(model: Option<String>, notify: bool, calls_per_hour: usize) -> TestSettings {
+        let settings = Settings {
             model: model.map(|url| {
                 ModelClient::new(&url, None, true, Duration::from_secs(120))
                     .expect("a model client")
@@ -1012,19 +1040,23 @@ mod tests {
             calls_per_day: 200,
             dedup_ttl: Duration::from_secs(6 * 3600),
             instance: "kausa".into(),
-            notify: notify.then(|| {
-                let url = reqwest::Url::parse(&format!("{}/hook", nowhere())).expect("a URL");
-                Notifier::new(url, Format::Json, None, true).expect("a notifier")
-            }),
-        }
+        };
+        TestSettings { settings, notify }
     }
 
-    fn shared<'a>(settings: &Settings, metrics: &'a Metrics) -> Shared<'a> {
+    fn shared<'a>(settings: &TestSettings, metrics: &'a Metrics) -> Shared<'a> {
         // Without --leader-lease the term never ends.
         shared_in(settings, metrics, Box::leak(Box::new(Term::unbounded())))
     }
 
-    fn shared_in<'a>(settings: &Settings, metrics: &'a Metrics, term: &'a Term) -> Shared<'a> {
+    fn shared_in<'a>(settings: &TestSettings, metrics: &'a Metrics, term: &'a Term) -> Shared<'a> {
+        let outbox = settings.notify.then(|| {
+            let url = reqwest::Url::parse(&format!("{}/hook", nowhere())).expect("a URL");
+            let notifier = Notifier::new(url, Format::Json, None, true).expect("a notifier");
+            let notifier: &'a Notifier = Box::leak(Box::new(notifier));
+            let outbox = Outbox::new(notifier, settings.dedup_ttl, 30, metrics, term);
+            &*Box::leak(Box::new(outbox))
+        });
         Shared {
             budget: RefCell::new(Budget::new(
                 settings.calls_per_hour,
@@ -1036,7 +1068,7 @@ mod tests {
             writer: None,
             history: None,
             metrics,
-            notifications: RefCell::new(VecDeque::new()),
+            outbox,
             term,
         }
     }
@@ -1056,12 +1088,23 @@ mod tests {
             .is_given_back()
     }
 
-    fn queued_summaries(shared: &Shared<'_>) -> Vec<String> {
+    /// The messages queued for the webhook; none without an outbox.
+    fn queued(shared: &Shared<'_>) -> Vec<Queued> {
         shared
-            .notifications
-            .borrow()
+            .outbox
+            .map(|outbox| outbox.queue().iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The explanation of an `explained` message.
+    fn explained(item: &Queued) -> &Explanation {
+        item.explanation.as_ref().expect("an explained message")
+    }
+
+    fn queued_summaries(shared: &Shared<'_>) -> Vec<String> {
+        queued(shared)
             .iter()
-            .map(|q| q.explanation.summary.clone())
+            .map(|q| explained(q).summary.clone())
             .collect()
     }
 
@@ -1072,11 +1115,11 @@ mod tests {
         let shared = shared(&settings, &metrics);
         assert!(!explain(work(), &settings, &shared));
         {
-            let queue = shared.notifications.borrow();
+            let queue = queued(&shared);
             assert_eq!(queue.len(), 1);
             let item = &queue[0];
             assert_eq!(item.fingerprint, FINGERPRINT);
-            assert_eq!(item.explanation, narrow());
+            assert_eq!(explained(item), &narrow());
             assert_eq!(item.notice.namespace, "shop");
             assert_eq!(item.notice.name, "web");
             assert_eq!(item.notice.summary, narrow().summary);
@@ -1096,7 +1139,7 @@ mod tests {
         let metrics = Metrics::default();
         let shared = shared(&settings, &metrics);
         assert!(!explain(work(), &settings, &shared));
-        assert!(shared.notifications.borrow().is_empty());
+        assert!(queued(&shared).is_empty());
         let dedup = shared.dedup.borrow();
         let entry = dedup.peek(FINGERPRINT).expect("an entry");
         assert_eq!(entry.explanation, full());
@@ -1152,7 +1195,7 @@ mod tests {
                 std::time::Instant::now(),
             );
             assert!(!explain(work(), &settings, &shared));
-            assert!(shared.notifications.borrow().is_empty(), "notify {notify}");
+            assert!(queued(&shared).is_empty(), "notify {notify}");
         }
     }
 
@@ -1176,7 +1219,7 @@ mod tests {
             let metrics = Metrics::default();
             let shared = shared(&settings, &metrics);
             assert!(!explain(work(), &settings, &shared), "{case}");
-            assert!(shared.notifications.borrow().is_empty(), "{case}");
+            assert!(queued(&shared).is_empty(), "{case}");
             assert!(
                 metrics
                     .render()
@@ -1192,7 +1235,7 @@ mod tests {
         let metrics = Metrics::default();
         let shared = shared(&settings, &metrics);
         assert!(explain(work(), &settings, &shared), "a retry is asked");
-        assert!(shared.notifications.borrow().is_empty());
+        assert!(queued(&shared).is_empty());
     }
 
     #[test]
@@ -1201,7 +1244,7 @@ mod tests {
         let metrics = Metrics::default();
         let shared = shared(&settings, &metrics);
         assert!(!explain(work(), &settings, &shared));
-        assert!(shared.notifications.borrow().is_empty());
+        assert!(queued(&shared).is_empty());
         assert!(metrics.render().contains("kausa_requests_logged_total 1\n"));
     }
 
@@ -1800,7 +1843,7 @@ mod tests {
                     .take(std::time::Instant::now())
                     .is_ok();
                 let cached = shared.dedup.borrow().peek(FINGERPRINT).is_some();
-                let queued = shared.notifications.borrow().len();
+                let queued = queued(&shared).len();
                 Left {
                     retry,
                     budget_left,
@@ -1941,7 +1984,7 @@ mod tests {
 
     #[test]
     fn refusal_says_why_the_budget_refuses_a_call() {
-        let refusal_of = |settings: &Settings, takes: usize| {
+        let refusal_of = |settings: &TestSettings, takes: usize| {
             let metrics = Metrics::default();
             let shared = shared(settings, &metrics);
             let now = std::time::Instant::now();
@@ -2192,9 +2235,9 @@ mod tests {
             assert!(note.contains("<redacted:ip>"), "the note has no marker");
         }
         {
-            let queue = shared.notifications.borrow();
+            let queue = queued(&shared);
             assert_eq!(queue.len(), 1);
-            assert_eq!(queue[0].explanation, narrow);
+            assert_eq!(explained(&queue[0]), &narrow);
             let notice = &queue[0].notice;
             assert_eq!(notice.summary, narrow.summary);
             assert_eq!(notice.cause, narrow.cause);
@@ -3563,17 +3606,22 @@ mod tests {
             shapes(&note).is_empty(),
             "{case}: a shape in the Event note"
         );
-        let queue = shared.notifications.borrow();
+        let queue = queued(shared);
         assert_eq!(queue.len(), 1, "{case}: the queued notifications");
-        assert_eq!(&queue[0].explanation, notice, "{case}: the queued text");
+        assert_eq!(explained(&queue[0]), notice, "{case}: the queued text");
         let n = &queue[0].notice;
         assert_eq!(n.steps, notice.steps, "{case}: the notification's steps");
         assert_eq!(n.confidence, "low", "{case}: the notification's confidence");
         let text = crate::notification::text(n);
+        let lines: Vec<&str> = text.lines().collect();
+        let mark = lines
+            .iter()
+            .position(|line| *line == crate::notification::MARK)
+            .unwrap_or_else(|| panic!("{case}: no mark in the notification text"));
         assert_eq!(
-            text.lines().nth(1),
-            Some(WITHHELD),
-            "{case}: the notification text's line 2"
+            lines.get(mark + 1),
+            Some(&WITHHELD),
+            "{case}: the line after the mark"
         );
         assert!(
             shapes(&text).is_empty(),
@@ -3708,10 +3756,11 @@ mod tests {
             "the repeat was not cached"
         );
         assert!(text.contains(WITHHELD_ONCE), "a cached repeat counted");
-        let queue = shared.notifications.borrow();
+        let queue = queued(&shared);
         assert_eq!(queue.len(), 2, "the queued notifications");
         assert_eq!(
-            queue[1].explanation, queue[0].explanation,
+            explained(&queue[1]),
+            explained(&queue[0]),
             "the repeat's text"
         );
         assert!(stored.withheld(), "the stored text has no notice");
@@ -3759,10 +3808,7 @@ mod tests {
                 "notifications off: a shape in the Event note"
             );
         }
-        assert!(
-            shared.notifications.borrow().is_empty(),
-            "a queued notification"
-        );
+        assert!(queued(&shared).is_empty(), "a queued notification");
         assert!(metrics.render().contains(WITHHELD_ONCE), "the counter");
     }
 

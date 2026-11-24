@@ -1,6 +1,6 @@
 # 0027. Report each settled incident as a fact statement in its own `Detected` Event and webhook message, with or without a model, and mark the model's text as a model's
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-19
 - Stage 1 of: [0026. Report every incident as facts without a model, keep the explanation
   optional, and widen coverage one bounded source at a time](0026-facts-before-the-model.md)
@@ -430,3 +430,62 @@ With the implementation, before the release that ships it:
   [ARCHITECTURE.md](../../ARCHITECTURE.md): invariant 6 gains "a fact never waits for the model,
   the budget, the breaker or an explanation", and a new invariant 12 says what a fact statement
   may hold (point 1) and that changing it needs an ADR.
+
+Update 2026-11-24: accepted on 2026-11-24, after the measurement on a Raspberry Pi 4 of point 10,
+under a plan the maintainer approved on 2026-11-24, and implemented in the same pull request. The
+text above is the proposal's of 2026-11-19, with the corrections of 2026-11-20 from the
+measurement in kind: its `Date`, the status of its Context, the sentence that opens the
+Decision, "Amends, when accepted", "When accepted", "cannot be accepted on reading alone", the
+measurement on a Raspberry Pi 4 as pending and "nothing here is merged" are from before. 0015 and
+0008 get their `Update` paragraphs, and invariant 6 of [ARCHITECTURE.md](../../ARCHITECTURE.md)
+and its new invariant 12 change, with this acceptance. What the acceptance and the implementation
+add to the text above:
+
+- **The measurement on a Raspberry Pi 4**, on 2026-11-24, in a k3s cluster of three with about
+  100 Pods, the published v0.6.2 and the prototype side by side on one node ([The fact statement
+  prototype, measured](../research/2026-11-20-fact-statement-prototype.md#on-a-raspberry-pi-4)):
+  the three bars hold. The first, idle memory, was read in the kubelet's `rssBytes`, and the
+  note has the check, on those nodes the same day, that `rssBytes` is the anonymous memory of the
+  control group point 10 names, to within 20,480 bytes against a spread of v0.6.2 of more than
+  250 KiB ([`rssBytes` is the anonymous
+  memory](../research/2026-11-20-fact-statement-prototype.md#rssbytes-is-the-anonymous-memory)).
+  The 10,000 Pods were measured in kind only; reading 0026's "on a Raspberry Pi 4 and with 10,000
+  Pods" as two measurements is the note's interpretation.
+- **The fact queue's entry** holds the facts the statement is rendered from, not the rendered
+  statement. The 1,583 bytes an entry and 1.55 MiB of points 3 and 10 are the prototype's; a
+  unit test pins the implementation's at 1,336 bytes an entry and 1,368,064 bytes (1.30 MiB) for
+  a full queue, computed at the same names. No bar changes.
+- **`D013` is renamed** "autoscaler cannot read metrics or target scale", as point 1 asks, since
+  its reasons include a failure to read the target's scale; its id stays `D013`.
+- **Every bound that drops a message owes the `capped` message of point 5**, not only the limit
+  per hour: the queue of 16, which `detected` and `explained` messages share, and the fact queue
+  of 1024 too, so that the channel never reads as the whole picture after a burst. A `detected`
+  message never pushes an `explained` one out of the queue: an explanation stands for a model
+  call already spent and is sent once, while a `detected` message's facts stay in its Event and
+  in the log, and a burst of failing Pods in one namespace must not evict the explanations of
+  others. Messages dropped when kausa stops or its lease term ends owe nothing. The bounds on
+  memory are unchanged, so the measurements of point 10 stand. With the wider rule the
+  message's text changed from the one point 5 gives; as text, kausa sends `kausa: not every
+  incident is posted here (more than <limit> in an hour, or more at once than kausa queues);
+  kausa's log has every one`.
+- **Within `v2` a value of `type` may be added**, as a field may, and a receiver must ignore a
+  message whose `type` it does not know; point 5's `v2` adds no other rule ([Data sent in
+  notifications](../reference/data-sent-in-notifications.md#compatibility)).
+- **The text formats keep an owner's kind and name on one line.** The API server accepts a line
+  break in an ownerReference's kind and name and in an Event's `regarding`, which, rendered as it
+  was, forged lines of the text, the mark of point 4 among them; the Slack and Telegram texts
+  replace control characters and line separators there with U+FFFD ([Security
+  policy](../../SECURITY.md)).
+- **A `Detected` Event's name can be taken first.** It follows from the incident, and before it
+  patches the series of point 2 kausa checks only the reporting controller, which whoever creates
+  an Event sets, so whoever can create Events in a namespace can forge a `Detected` Event there; the `incident`
+  line and the `detected` message carry the real statement ([Security policy](../../SECURITY.md)).
+- **The kind test asserts both Events of one incident, not their order.** Point 3 lets either be
+  written first: a fact never waits for an explanation, and an explanation never waits for a
+  fact. So point 10's "`Detected` and then `Explained`", and the "`Detected`, then `Explained`"
+  of the Consequences, name the two Events, not an order between them. The test checks that each
+  `Explained` Event is named after the fingerprint of a `Detected` Event about the same workload
+  and that its note starts with the mark. In kind, an `Explained` Event was created before its
+  incident's `Detected` Event when several incidents settled in the same tick. The `detected` and
+  `explained` messages are the same: the webhook sends its queue in order, but each message is
+  queued by its own path after its Event, so the two of one incident can arrive in either order.

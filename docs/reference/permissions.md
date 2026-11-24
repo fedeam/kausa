@@ -2,9 +2,9 @@
 
 The Kubernetes API permissions kausa's chart grants, and the ones it never asks for.
 
-Status as of 2026-10-30: the chart in `charts/kausa` grants this table, `pods/log` only when
+Status as of 2026-11-24: the chart in `charts/kausa` grants this table, `pods/log` only when
 kausa explains incidents (an endpoint or dry-run) with log collection on, and the Event writes
-only with an endpoint, outside dry-run, unless they are turned off, and the `explanations` row only
+only outside dry-run and unless they are turned off, with or without an endpoint (since the release after v0.6.3), and the `explanations` row only
 while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; since v0.3.0), and the
 `deployments` row while Deployments are watched for stalled rollouts (`rollouts`, on by default;
 since v0.4.0), and, only with `replicaCount: 2`, `get` and `patch` on one Lease in
@@ -25,13 +25,14 @@ of what it must refuse, in each scope; both scopes passed on 2026-10-28 on the m
 machine. As of 2026-10-26,
 `kausa run` uses every row: the Pod and event watches, the metadata `get` of ReplicaSets and Jobs,
 `pods/log` for the detections that read logs, and `create` and `patch` on Events for its
-explanations (with `--endpoint`, unless `--no-events`). On 2026-10-26 it
+`Detected` Events (with or without `--endpoint`) and its explanations (with `--endpoint`), unless
+`--no-events`. On 2026-10-26 it
 ran against a live cluster through a `kubectl proxy` that let only these reads through, plus
 `POST` and `PATCH` on Events in one test namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a local
 model](../how-to/try-with-a-local-model.md)).
 
 Notifications (`--notify-url-file`, the chart's `notifications.enabled`; since v0.3.0)
-add no row and change no row, in either scope: a webhook `POST` is not a call to the Kubernetes
+add no row and change no row, in either scope, and no longer need an endpoint: a webhook `POST` is not a call to the Kubernetes
 API, and the kubelet, not kausa, reads the Secret that holds the webhook URL ([0015. Post each new
 explanation to one optional webhook, as JSON, Slack or Telegram](../adr/0015-notifications.md)).
 The kind test checks that the `kubectl auth can-i` lists stay the same with notifications on.
@@ -43,7 +44,7 @@ The kind test checks that the `kubectl auth can-i` lists stay the same with noti
 | `""` (core) | `pods` | `get`, `list`, `watch` | Container states, restart counts, phase, owner references |
 | `""` (core) | `pods/log` | `get` | The last lines of the failed container (the previous instance if it restarted) for crash-type and Job detections. Only while log collection is on |
 | `events.k8s.io` | `events` | `list`, `watch` | Warning events about Pods, Jobs, ReplicaSets, StatefulSets, DaemonSets, CronJobs, PersistentVolumeClaims and HorizontalPodAutoscalers (the objects themselves are never read) |
-| `events.k8s.io` | `events` | `create`, `patch` | Write the explanation, and update its series count when the incident repeats |
+| `events.k8s.io` | `events` | `create`, `patch` | Write the `Detected` Event of each settled incident, with or without an endpoint, and the explanation's Event when kausa explains, and update their series count when the incident repeats. Only while Event writes are on and outside dry-run |
 | `apps` | `replicasets` | `get` | Follow a ReplicaSet's owner reference to its Deployment, for a Pod or for an event about the ReplicaSet (`D011`) |
 | `apps` | `deployments` | `list`, `watch` | The Deployment watch: a Deployment's `Progressing` condition, generation, revision and replica counts, for a rollout past its progress deadline (`D014`). Each Deployment is reduced at once to those fields, and kept only while it matches. Only while `rollouts` is on (the default); `rollouts: false` removes the row and passes `--no-rollouts`. No `get` |
 | `batch` | `jobs` | `get` | Follow a Job's owner reference to its CronJob, for a Pod or for an event about the Job (`D008`, `D011`) |
@@ -87,6 +88,9 @@ without it. It changes where the rows above apply, never which rows there are:
 - **Event writes, narrowed:** in namespaced scope kausa can create and patch Events in the listed
   namespaces only. Inside a listed namespace, RBAC still cannot limit them to kausa's own Events
   (see the [Security policy](../../SECURITY.md)).
+- **Upgrading a release without an endpoint:** its role gains `create` and `patch` on Events, and kausa
+  starts writing a `Detected` Event for each settled incident. `events: false` removes both and keeps
+  it at log lines only.
 
 ## In kausa's own namespace, with two replicas
 

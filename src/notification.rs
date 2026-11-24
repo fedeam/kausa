@@ -1,13 +1,18 @@
-//! The bodies of a notification (docs/adr/0015-notifications.md): the `json`, `slack` and
-//! `telegram` bodies of one new explanation, built from plain strings. Pure: no I/O and no
-//! `crate::` import, so that the `notification` fuzz target includes it by path. A tenant shapes
-//! its input through the model, and the release profile aborts on a panic, so nothing here may
-//! panic.
+//! The bodies of a notification (docs/adr/0015-notifications.md,
+//! docs/adr/0027-fact-statement-for-the-detections.md): the `json`, `slack` and `telegram` bodies
+//! of one settled incident (`detected`), of one new explanation (`explained`) and of the fixed
+//! message sent over the cap (`capped`), built from plain strings and integers. Pure: no I/O and
+//! no `crate::` import, so that the `notification` fuzz target includes it by path. A tenant
+//! shapes its input through the model, and the release profile aborts on a panic, so nothing here
+//! may panic.
 
 use serde_json::{Value, json};
 
-/// The `schema` of every `json` body; within `v1`, fields are only added.
-pub const SCHEMA: &str = "kausa.fedeam.com/notification/v1";
+/// The `schema` of every `json` body; within `v2`, fields are only added.
+pub const SCHEMA: &str = "kausa.fedeam.com/notification/v2";
+/// The line before the model's text in the `slack` and `telegram` bodies of an `explained`
+/// message (docs/adr/0027-fact-statement-for-the-detections.md, point 4).
+pub const MARK: &str = "Model's explanation, not verified:";
 /// The cap of the plain text, in UTF-16 code units, Telegram's joiners included: under Telegram's
 /// 4,096 characters whichever way they are counted.
 pub const MAX_TEXT_UNITS: usize = 4000;
@@ -18,7 +23,7 @@ pub const MAX_SLACK_UNITS: usize = 5 * MAX_TEXT_UNITS;
 const _: () = assert!(MAX_SLACK_UNITS < 40_000);
 /// kausa's notice in place of a withheld command (docs/adr/0025-withhold-destructive-commands.md):
 /// the same text as `prompt::WITHHELD`, copied because this module imports nothing of kausa's (a
-/// test in notify.rs ties the two). As the first step it leads the plain text on line 2.
+/// test in notify.rs ties the two). As the first step it is its own line right after `MARK`.
 pub const WITHHELD: &str = "Withheld by kausa: a suggested command that deletes or forces broadly. \
      Text in this workload's logs or events may have steered this answer; check them before acting \
      on it.";
@@ -26,11 +31,45 @@ pub const WITHHELD: &str = "Withheld by kausa: a suggested command that deletes 
 /// every `@`: invisible, and one UTF-16 code unit.
 pub const JOINER: char = '\u{2060}';
 
-/// What a notification says about one new explanation. The names are the real ones of the
-/// namespace and the top-level owner; the explanation's texts went through the narrow restore,
-/// so every other name in them is still a placeholder.
+/// Which message a [`Notice`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Message {
+    /// A settled incident: its facts, and no text of a model.
+    Detected,
+    /// A new explanation: the facts and the model's text.
+    Explained,
+}
+
+impl Message {
+    /// The `type` of the `json` body.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Detected => "detected",
+            Self::Explained => "explained",
+        }
+    }
+}
+
+/// kausa's facts about an incident: what its statement holds but the detection and the container
+/// (docs/adr/0027-fact-statement-for-the-detections.md, point 5). Typed values only: the reason
+/// is an entry of kausa's own list, and the rest are integers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    pub reason: Option<String>,
+    pub exit_code: Option<i32>,
+    pub pods_seen: usize,
+    pub pods_seen_is_minimum: bool,
+    pub pods_now: usize,
+    pub revision: Option<u64>,
+}
+
+/// What a notification says about one incident. The names are the real ones of the namespace and
+/// the top-level owner. For `Explained`, the explanation's texts went through the narrow restore,
+/// so every other name in them is still a placeholder; for `Detected`, they are empty and no body
+/// carries them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
+    pub message: Message,
     pub detection_id: String,
     pub detection_name: String,
     pub api_version: String,
@@ -40,6 +79,7 @@ pub struct Notice {
     pub fingerprint: String,
     /// RFC 3339, UTC, as in the incident's log line.
     pub first_seen: String,
+    pub facts: Facts,
     pub summary: String,
     pub cause: String,
     pub steps: Vec<String>,
@@ -80,11 +120,11 @@ pub fn parse_chat_id(text: &str) -> Option<ChatId> {
     }
 }
 
-/// The `json` body: these fields and nothing else.
+/// The `json` body: these fields and nothing else. `explanation` is only in `explained`.
 pub fn json_body(n: &Notice, kausa_version: &str) -> Value {
-    json!({
+    let mut body = json!({
         "schema": SCHEMA,
-        "type": "explained",
+        "type": n.message.name(),
         "kausa_version": kausa_version,
         "detection": {"id": n.detection_id, "name": n.detection_name},
         "object": {
@@ -95,13 +135,84 @@ pub fn json_body(n: &Notice, kausa_version: &str) -> Value {
         },
         "fingerprint": n.fingerprint,
         "first_seen": n.first_seen,
-        "explanation": {
+        "facts": {
+            "reason": n.facts.reason,
+            "exit_code": n.facts.exit_code,
+            "pods_seen": n.facts.pods_seen,
+            "pods_seen_is_minimum": n.facts.pods_seen_is_minimum,
+            "pods_now": n.facts.pods_now,
+            "revision": n.facts.revision,
+        },
+    });
+    if n.message == Message::Explained {
+        body["explanation"] = json!({
             "summary": n.summary,
             "cause": n.cause,
             "steps": n.steps,
             "confidence": n.confidence,
-        },
+        });
+    }
+    body
+}
+
+/// The `json` body of the message sent over the cap: these fields and nothing else.
+pub fn capped_json_body(limit: usize, kausa_version: &str) -> Value {
+    json!({
+        "schema": SCHEMA,
+        "type": "capped",
+        "kausa_version": kausa_version,
+        "limit": limit,
     })
+}
+
+/// The text of the message that says some messages were not sent, over the cap or dropped by a
+/// bound: fixed but for the limit. Each incident has its `incident` line in kausa's log.
+pub fn capped_text(limit: usize) -> String {
+    format!(
+        "kausa: not every incident is posted here (more than {limit} in an hour, or more at once \
+         than kausa queues); kausa's log has every one"
+    )
+}
+
+/// The `slack` body of the message sent over the cap. Its text holds no `@`, `&`, `<` or `>`.
+pub fn capped_slack_body(limit: usize) -> Value {
+    slack_json(capped_text(limit))
+}
+
+/// The `telegram` body of the message sent over the cap. Its text holds no `@` or `/`.
+pub fn capped_telegram_body(limit: usize, chat: &ChatId) -> Value {
+    telegram_json(capped_text(limit), chat)
+}
+
+/// The `Facts:` line of the text formats: the statement without its first sentence and without
+/// the container, or `None` when it would hold nothing.
+pub fn facts_line(facts: &Facts) -> Option<String> {
+    let mut parts = Vec::with_capacity(3);
+    let mut sample = Vec::with_capacity(2);
+    if let Some(reason) = &facts.reason {
+        sample.push(format!("reason {reason}"));
+    }
+    if let Some(code) = facts.exit_code {
+        sample.push(format!("exit code {code}"));
+    }
+    if !sample.is_empty() {
+        parts.push(format!("{}.", sample.join(", ")));
+    }
+    if facts.pods_seen > 0 {
+        let at_least = if facts.pods_seen_is_minimum {
+            "at least "
+        } else {
+            ""
+        };
+        parts.push(format!(
+            "Pods seen failing: {at_least}{}. Pods now: {}.",
+            facts.pods_seen, facts.pods_now
+        ));
+    }
+    if let Some(revision) = facts.revision {
+        parts.push(format!("Revision: {revision}."));
+    }
+    (!parts.is_empty()).then(|| format!("Facts: {}", parts.join(" ")))
 }
 
 /// The plain text that `slack` and `telegram` share, cut on a character boundary to at most
@@ -145,15 +256,28 @@ fn joined(n: &Notice, is_joined: impl Fn(char) -> bool) -> String {
     joined
 }
 
-/// The whole text, before any cut. A first step equal to `WITHHELD` is its own line after the
-/// header, where a cut cannot reach it, and the other steps are numbered from 1
-/// (docs/adr/0025-withhold-destructive-commands.md).
+/// The whole text, before any cut: the header and the `Facts:` line, then for `detected` the
+/// fingerprint, and for `explained` the `MARK` line and the model's text. A first step equal to
+/// `WITHHELD` is its own line right after `MARK`, where a cut cannot reach it, and the other steps
+/// are numbered from 1 (docs/adr/0025-withhold-destructive-commands.md).
 fn render(n: &Notice) -> String {
-    let mut lines = Vec::with_capacity(6 + n.steps.len());
+    let mut lines = Vec::with_capacity(8 + n.steps.len());
     lines.push(format!(
         "kausa: {} ({}) in {}, {} {}",
-        n.detection_name, n.detection_id, n.namespace, n.kind, n.name
+        n.detection_name,
+        n.detection_id,
+        n.namespace,
+        one_line(&n.kind),
+        one_line(&n.name)
     ));
+    if let Some(facts) = facts_line(&n.facts) {
+        lines.push(facts);
+    }
+    if n.message == Message::Detected {
+        lines.push(format!("fingerprint {}", n.fingerprint));
+        return lines.join("\n");
+    }
+    lines.push(MARK.to_owned());
     let mut steps = &n.steps[..];
     if let Some((first, rest)) = steps.split_first()
         && first == WITHHELD
@@ -176,6 +300,25 @@ fn render(n: &Notice) -> String {
     lines.join("\n")
 }
 
+/// `value` with each control character and each line or paragraph separator (U+2028, U+2029)
+/// replaced by U+FFFD, so that it stays on its line. An owner's kind and name come from an
+/// ownerReference or an Event's `regarding`, which the API server only requires to be non-empty:
+/// a line break in them would forge lines of the text, such as a `Facts:` line or the mark. The
+/// `json` body escapes them and keeps the value, as Events and the log do; only the text formats
+/// read a line break as structure, so they are closed here.
+fn one_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// The longest prefix of `text`, on a character boundary, whose characters cost at most
 /// `MAX_TEXT_UNITS` in all, each at `cost`.
 fn cut(mut text: String, cost: impl Fn(char) -> usize) -> String {
@@ -194,8 +337,13 @@ fn cut(mut text: String, cost: impl Fn(char) -> usize) -> String {
 /// The `slack` body: the text with its joiners, cut first and then escaped, with formatting,
 /// previews and the turning of plain URLs into links (`"parse": "none"`) off.
 pub fn slack_body(n: &Notice) -> Value {
+    slack_json(slack_text(n))
+}
+
+/// The `slack` body of `text`, with its joiners already in it.
+fn slack_json(text: String) -> Value {
     json!({
-        "text": escape(&slack_text(n)),
+        "text": escape(&text),
         "mrkdwn": false,
         "unfurl_links": false,
         "unfurl_media": false,
@@ -205,13 +353,18 @@ pub fn slack_body(n: &Notice) -> Value {
 
 /// The `telegram` body: the text with its joiners, with no `parse_mode` and previews off.
 pub fn telegram_body(n: &Notice, chat: &ChatId) -> Value {
+    telegram_json(telegram_text(n), chat)
+}
+
+/// The `telegram` body of `text`, with its joiners already in it.
+fn telegram_json(text: String, chat: &ChatId) -> Value {
     let chat_id = match chat {
         ChatId::Id(id) => Value::from(*id),
         ChatId::Username(username) => Value::from(username.as_str()),
     };
     json!({
         "chat_id": chat_id,
-        "text": telegram_text(n),
+        "text": text,
         "link_preview_options": {"is_disabled": true},
     })
 }
@@ -236,34 +389,41 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    /// The example of docs/adr/0015-notifications.md, copied verbatim into the reference page
-    /// docs/reference/data-sent-in-notifications.md.
-    const GOLDEN_JSON: &str = r#"{
-  "schema": "kausa.fedeam.com/notification/v1",
-  "type": "explained",
-  "kausa_version": "0.2.0",
-  "detection": {"id": "D001", "name": "crash loop"},
-  "object": {"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "shop", "name": "web"},
-  "fingerprint": "5d0c2b7e9a1f4c38",
-  "first_seen": "2026-10-28T11:59:00Z",
-  "explanation": {
-    "summary": "The container exits right after it starts.",
-    "cause": "It is started with a flag it does not know.",
-    "steps": ["Check the container's args in the Deployment."],
-    "confidence": "medium"
-  }
-}"#;
+    /// The examples of docs/reference/data-sent-in-notifications.md, which holds each of them
+    /// verbatim (`the_reference_page_holds_the_golden_bodies`).
+    const GOLDEN_JSON: &str = include_str!("../tests/golden/notification-explained.json");
+    const GOLDEN_DETECTED_JSON: &str = include_str!("../tests/golden/notification-detected.json");
+    const GOLDEN_CAPPED_JSON: &str = include_str!("../tests/golden/notification-capped.json");
 
-    /// The text of the same example (the ADR's six lines), with no trailing newline.
+    /// The text of the explained example, with no trailing newline.
     const GOLDEN_TEXT: &str = "kausa: crash loop (D001) in shop, Deployment web\n\
+        Facts: reason CrashLoopBackOff, exit code 1. Pods seen failing: 2. Pods now: 3.\n\
+        Model's explanation, not verified:\n\
         The container exits right after it starts.\n\
         Likely cause: It is started with a flag it does not know.\n\
         Check:\n\
         1. Check the container's args in the Deployment.\n\
         Confidence: medium \u{b7} fingerprint 5d0c2b7e9a1f4c38";
 
+    /// The text of the detected example (the ADR's three lines).
+    const GOLDEN_DETECTED_TEXT: &str = "kausa: crash loop (D001) in shop, Deployment web\n\
+        Facts: reason CrashLoopBackOff, exit code 1. Pods seen failing: 2. Pods now: 3.\n\
+        fingerprint 5d0c2b7e9a1f4c38";
+
+    fn facts() -> Facts {
+        Facts {
+            reason: Some("CrashLoopBackOff".into()),
+            exit_code: Some(1),
+            pods_seen: 2,
+            pods_seen_is_minimum: false,
+            pods_now: 3,
+            revision: None,
+        }
+    }
+
     fn notice() -> Notice {
         Notice {
+            message: Message::Explained,
             detection_id: "D001".into(),
             detection_name: "crash loop".into(),
             api_version: "apps/v1".into(),
@@ -272,6 +432,7 @@ mod tests {
             name: "web".into(),
             fingerprint: "5d0c2b7e9a1f4c38".into(),
             first_seen: "2026-10-28T11:59:00Z".into(),
+            facts: facts(),
             summary: "The container exits right after it starts.".into(),
             cause: "It is started with a flag it does not know.".into(),
             steps: vec!["Check the container's args in the Deployment.".into()],
@@ -279,9 +440,34 @@ mod tests {
         }
     }
 
+    fn detected() -> Notice {
+        Notice {
+            message: Message::Detected,
+            summary: String::new(),
+            cause: String::new(),
+            steps: Vec::new(),
+            confidence: String::new(),
+            ..notice()
+        }
+    }
+
     /// The notice with every text field, the names included, set to `text`.
+    /// The lines of an `explained` text before the model's: the header, the facts and the mark.
+    fn preamble(n: &Notice) -> String {
+        format!(
+            "kausa: {} ({}) in {}, {} {}\n{}\n{MARK}\n",
+            n.detection_name,
+            n.detection_id,
+            n.namespace,
+            n.kind,
+            n.name,
+            facts_line(&n.facts).expect("a facts line")
+        )
+    }
+
     fn filled(text: &str, steps: usize) -> Notice {
         Notice {
+            message: Message::Explained,
             detection_id: text.into(),
             detection_name: text.into(),
             api_version: text.into(),
@@ -290,6 +476,10 @@ mod tests {
             name: text.into(),
             fingerprint: text.into(),
             first_seen: text.into(),
+            facts: Facts {
+                reason: Some(text.into()),
+                ..facts()
+            },
             summary: text.into(),
             cause: text.into(),
             steps: vec![text.to_owned(); steps],
@@ -301,10 +491,29 @@ mod tests {
     /// equal to `WITHHELD` is its own line after the header, and the other steps are numbered
     /// from 1 (docs/adr/0025-withhold-destructive-commands.md).
     fn uncut(n: &Notice) -> String {
+        // The owner's kind and name stay on their line.
+        let line = |value: &str| {
+            value.replace(
+                |c: char| c.is_control() || c == '\u{2028}' || c == '\u{2029}',
+                "\u{fffd}",
+            )
+        };
         let mut lines = vec![format!(
             "kausa: {} ({}) in {}, {} {}",
-            n.detection_name, n.detection_id, n.namespace, n.kind, n.name
+            n.detection_name,
+            n.detection_id,
+            n.namespace,
+            line(&n.kind),
+            line(&n.name)
         )];
+        if let Some(facts) = facts_line(&n.facts) {
+            lines.push(facts);
+        }
+        if n.message == Message::Detected {
+            lines.push(format!("fingerprint {}", n.fingerprint));
+            return lines.join("\n");
+        }
+        lines.push("Model's explanation, not verified:".into());
         let mut steps = &n.steps[..];
         if let Some((first, rest)) = steps.split_first()
             && first == WITHHELD
@@ -425,7 +634,8 @@ mod tests {
 
     #[test]
     fn the_constants_of_the_contract() {
-        assert_eq!(SCHEMA, "kausa.fedeam.com/notification/v1");
+        assert_eq!(SCHEMA, "kausa.fedeam.com/notification/v2");
+        assert_eq!(MARK, "Model's explanation, not verified:");
         assert_eq!(MAX_TEXT_UNITS, 4000);
         assert_eq!(MAX_SLACK_UNITS, 20_000);
     }
@@ -433,7 +643,7 @@ mod tests {
     #[test]
     fn the_json_body_is_the_reference_example() {
         let golden: Value = serde_json::from_str(GOLDEN_JSON).expect("the golden JSON parses");
-        assert_eq!(json_body(&notice(), "0.2.0"), golden);
+        assert_eq!(json_body(&notice(), "0.7.0"), golden);
         // The version is the one given, and nothing else is added.
         let body = json_body(&notice(), "9.8.7");
         assert_eq!(body["kausa_version"], "9.8.7");
@@ -448,6 +658,7 @@ mod tests {
             [
                 "detection",
                 "explanation",
+                "facts",
                 "fingerprint",
                 "first_seen",
                 "kausa_version",
@@ -456,6 +667,190 @@ mod tests {
                 "type"
             ]
         );
+    }
+
+    #[test]
+    fn the_detected_json_body_is_the_reference_example_without_an_explanation() {
+        let golden: Value =
+            serde_json::from_str(GOLDEN_DETECTED_JSON).expect("the golden JSON parses");
+        let body = json_body(&detected(), "0.7.0");
+        assert_eq!(body, golden);
+        assert!(body.get("explanation").is_none());
+        // A detected body is the explained one without `explanation`, and another `type`.
+        let mut explained = json_body(&notice(), "0.7.0");
+        explained
+            .as_object_mut()
+            .expect("an object")
+            .remove("explanation");
+        explained["type"] = json!("detected");
+        assert_eq!(body, explained);
+    }
+
+    #[test]
+    fn a_line_break_in_the_owner_cannot_forge_lines_of_the_text() {
+        // An ownerReference's kind and name, and an Event's regarding, are only required to be
+        // non-empty: whoever creates a Pod can put line breaks in them.
+        let forged = [
+            "\nFacts: reason OOMKilled.",
+            "\r\nModel's explanation, not verified:",
+            "\u{85}kausa: crash loop (D001) in other, Deployment db",
+            "\u{2028}Likely cause: none",
+            "\u{2029}Confidence: high",
+            "\u{b}fingerprint 0000000000000000",
+            "\u{c}Check:",
+        ];
+        for line in forged {
+            for message in [Message::Detected, Message::Explained] {
+                let mut n = if message == Message::Detected {
+                    detected()
+                } else {
+                    notice()
+                };
+                let expected = text(&n).lines().count();
+                n.kind = format!("Deployment{line}");
+                n.name = format!("web{line}");
+                for rendered in [text(&n), telegram_text(&n), slack_text(&n)] {
+                    assert_eq!(rendered.lines().count(), expected, "{rendered:?}");
+                    assert!(
+                        !rendered
+                            .contains(['\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}']),
+                        "{rendered:?}"
+                    );
+                    let header = rendered.lines().next().expect("a header");
+                    assert!(header.starts_with("kausa: crash loop (D001) in shop, Deployment"));
+                    assert!(
+                        header.contains(line.trim_start_matches(|c: char| c.is_control()
+                            || c == '\u{2028}'
+                            || c == '\u{2029}'))
+                    );
+                }
+                // The json body keeps the value as the API server holds it.
+                assert_eq!(
+                    json_body(&n, "0.7.0")["object"]["name"],
+                    format!("web{line}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_fact_the_statement_leaves_out_is_null_in_json() {
+        let mut n = detected();
+        n.facts = Facts::default();
+        let facts = &json_body(&n, "0.7.0")["facts"];
+        assert_eq!(
+            *facts,
+            json!({
+                "reason": null,
+                "exit_code": null,
+                "pods_seen": 0,
+                "pods_seen_is_minimum": false,
+                "pods_now": 0,
+                "revision": null,
+            })
+        );
+        // And the text has no Facts line.
+        assert_eq!(
+            text(&n),
+            "kausa: crash loop (D001) in shop, Deployment web\nfingerprint 5d0c2b7e9a1f4c38"
+        );
+    }
+
+    #[test]
+    fn the_reference_page_holds_the_golden_bodies() {
+        let page = include_str!("../docs/reference/data-sent-in-notifications.md");
+        for golden in [GOLDEN_JSON, GOLDEN_DETECTED_JSON, GOLDEN_CAPPED_JSON] {
+            let block = format!("```json\n{}\n```", golden.trim_end());
+            assert!(page.contains(&block), "the page lacks:\n{block}");
+        }
+        for text in [GOLDEN_TEXT, GOLDEN_DETECTED_TEXT, &capped_text(30)] {
+            let block = format!("```text\n{text}\n```");
+            assert!(page.contains(&block), "the page lacks:\n{block}");
+        }
+    }
+
+    #[test]
+    fn the_capped_json_body_is_the_reference_example() {
+        let golden: Value =
+            serde_json::from_str(GOLDEN_CAPPED_JSON).expect("the golden JSON parses");
+        assert_eq!(capped_json_body(30, "0.7.0"), golden);
+    }
+
+    #[test]
+    fn the_capped_text_is_fixed_but_for_the_limit() {
+        let t = capped_text(30);
+        assert_eq!(
+            t,
+            "kausa: not every incident is posted here (more than 30 in an hour, or more at once \
+             than kausa queues); kausa's log has every one"
+        );
+        // Nothing in it that Slack escapes or that either receiver could turn into a mention, a
+        // command or a link.
+        assert!(!t.contains(['@', '/', '&', '<', '>']));
+        assert_eq!(
+            capped_slack_body(30),
+            json!({
+                "text": t,
+                "mrkdwn": false,
+                "unfurl_links": false,
+                "unfurl_media": false,
+                "parse": "none",
+            })
+        );
+        assert_eq!(
+            capped_telegram_body(30, &ChatId::Id(-1001234567890)),
+            json!({
+                "chat_id": -1001234567890_i64,
+                "text": t,
+                "link_preview_options": {"is_disabled": true},
+            })
+        );
+    }
+
+    #[test]
+    fn the_detected_text_is_the_reference_rendering() {
+        assert_eq!(text(&detected()), GOLDEN_DETECTED_TEXT);
+        assert_eq!(uncut(&detected()), GOLDEN_DETECTED_TEXT);
+        // The model's fields are never in a detected text, even when they are not empty.
+        let mut n = notice();
+        n.message = Message::Detected;
+        assert_eq!(text(&n), GOLDEN_DETECTED_TEXT);
+        check_bodies(&n, "detected");
+    }
+
+    #[test]
+    fn the_facts_line_holds_what_the_statement_holds() {
+        let mut facts = facts();
+        assert_eq!(
+            facts_line(&facts).as_deref(),
+            Some("Facts: reason CrashLoopBackOff, exit code 1. Pods seen failing: 2. Pods now: 3.")
+        );
+        facts.pods_seen_is_minimum = true;
+        facts.revision = Some(7);
+        assert_eq!(
+            facts_line(&facts).as_deref(),
+            Some(
+                "Facts: reason CrashLoopBackOff, exit code 1. Pods seen failing: at least 2. \
+                 Pods now: 3. Revision: 7."
+            )
+        );
+        let only_revision = Facts {
+            revision: Some(7),
+            ..Facts::default()
+        };
+        assert_eq!(
+            facts_line(&only_revision).as_deref(),
+            Some("Facts: Revision: 7.")
+        );
+        let only_code = Facts {
+            exit_code: Some(-1),
+            ..Facts::default()
+        };
+        assert_eq!(
+            facts_line(&only_code).as_deref(),
+            Some("Facts: exit code -1.")
+        );
+        assert_eq!(facts_line(&Facts::default()), None);
     }
 
     #[test]
@@ -507,6 +902,8 @@ mod tests {
         assert_eq!(
             text(&n),
             "kausa: crash loop (D001) in shop, Deployment web\n\
+             Facts: reason CrashLoopBackOff, exit code 1. Pods seen failing: 2. Pods now: 3.\n\
+             Model's explanation, not verified:\n\
              The container exits right after it starts.\n\
              Likely cause: It is started with a flag it does not know.\n\
              Confidence: medium \u{b7} fingerprint 5d0c2b7e9a1f4c38"
@@ -538,9 +935,9 @@ mod tests {
         assert!(slack.contains("a&amp;b"), "{slack}");
         assert!(whole_entities(&slack), "{slack}");
         assert_eq!(unescape(&slack), text(&n));
-        // Every field of the text, the names included (header 5, summary, cause, two steps,
-        // confidence and fingerprint), went through the escaping.
-        assert_eq!(slack.matches("&lt;redacted:ip&gt;").count(), 11, "{slack}");
+        // Every field of the text, the names included (header 5, reason, summary, cause, two
+        // steps, confidence and fingerprint), went through the escaping.
+        assert_eq!(slack.matches("&lt;redacted:ip&gt;").count(), 12, "{slack}");
         // Only those three characters: quotes stay.
         let mut quoted = notice();
         quoted.summary = r#"it's "quoted""#.into();
@@ -612,7 +1009,7 @@ mod tests {
         let t = text(&n);
         assert_eq!(units(&t), MAX_TEXT_UNITS);
         let slack = slack_of(&n);
-        let header = "kausa: crash loop (D001) in shop, Deployment web\n";
+        let header = &preamble(&n);
         assert_eq!(
             units(&slack),
             header.len() + 5 * (MAX_TEXT_UNITS - header.len())
@@ -659,10 +1056,10 @@ mod tests {
             assert_eq!(json_body(&n, "0.2.0")["explanation"]["cause"], cause);
             check_bodies(&n, cause);
         }
-        // Every field of the text, the names included (header 5, summary, cause, one step,
-        // confidence and fingerprint), gets them.
+        // Every field of the text, the names included (header 5, the facts' reason, summary,
+        // cause, one step, confidence and fingerprint), gets them.
         let n = filled("@x/", 1);
-        assert_eq!(telegram_of(&n).matches("@\u{2060}x/\u{2060}").count(), 10);
+        assert_eq!(telegram_of(&n).matches("@\u{2060}x/\u{2060}").count(), 11);
         // A joiner already in the text is kept, and the one added follows it.
         let mut n = notice();
         n.cause = "@\u{2060}x".into();
@@ -702,7 +1099,7 @@ mod tests {
             "cut too early: {}",
             units(&telegram)
         );
-        let header = "kausa: crash loop (D001) in shop, Deployment web\n";
+        let header = &preamble(&n);
         let ats = (MAX_TEXT_UNITS - header.len()) / 2;
         assert_eq!(telegram, format!("{header}{}", "@\u{2060}".repeat(ats)));
         check_bodies(&n, "at signs over the cap");
@@ -831,10 +1228,12 @@ mod tests {
     }
 
     #[test]
-    fn a_withheld_notice_leads_the_text_on_line_2() {
+    fn a_withheld_notice_follows_the_mark() {
         let n = withheld_notice(&["Check the container's args in the Deployment."]);
         let expected = format!(
             "kausa: crash loop (D001) in shop, Deployment web\n\
+             Facts: reason CrashLoopBackOff, exit code 1. Pods seen failing: 2. Pods now: 3.\n\
+             Model's explanation, not verified:\n\
              {WITHHELD}\n\
              The container exits right after it starts.\n\
              Likely cause: It is started with a flag it does not know.\n\
@@ -854,6 +1253,9 @@ mod tests {
             text(&alone),
             format!(
                 "kausa: crash loop (D001) in shop, Deployment web\n\
+                 Facts: reason CrashLoopBackOff, exit code 1. Pods seen failing: 2. \
+                 Pods now: 3.\n\
+                 Model's explanation, not verified:\n\
                  {WITHHELD}\n\
                  The container exits right after it starts.\n\
                  Likely cause: It is started with a flag it does not know.\n\
@@ -865,7 +1267,7 @@ mod tests {
         let four = withheld_notice(&["s1", "s2", "s3", "s4"]);
         assert!(
             text(&four).contains(&format!(
-                "\n{WITHHELD}\nThe container exits right after it starts.\n\
+                "\n{MARK}\n{WITHHELD}\nThe container exits right after it starts.\n\
                  Likely cause: It is started with a flag it does not know.\n\
                  Check:\n1. s1\n2. s2\n3. s3\n4. s4\nConfidence: low "
             )),
@@ -887,7 +1289,7 @@ mod tests {
     #[test]
     fn a_withheld_notice_keeps_the_json_body() {
         let n = withheld_notice(&["Check the container's args in the Deployment."]);
-        let body = json_body(&n, "0.2.0");
+        let body = json_body(&n, "0.7.0");
         let mut golden: Value = serde_json::from_str(GOLDEN_JSON).expect("the golden JSON parses");
         golden["explanation"]["steps"] =
             json!([WITHHELD, "Check the container's args in the Deployment."]);
@@ -899,7 +1301,7 @@ mod tests {
     #[test]
     fn a_withheld_notice_over_the_cap_keeps_the_notice_whole() {
         // Fields far over the cap, one or two units a character: the cut falls after the notice,
-        // which stays whole on line 2, and every body keeps its invariants.
+        // which stays whole right after the mark, and every body keeps its invariants.
         for (i, c) in ["x", "\u{e9}", "\u{1f600}", "&"].into_iter().enumerate() {
             let long = c.repeat(MAX_TEXT_UNITS);
             let mut n = withheld_notice(&[&long, &long, &long, &long]);
@@ -908,9 +1310,11 @@ mod tests {
             let t = text(&n);
             assert!(
                 t.starts_with(&format!(
-                    "kausa: crash loop (D001) in shop, Deployment web\n{WITHHELD}\n"
+                    "kausa: crash loop (D001) in shop, Deployment web\n\
+                     Facts: reason CrashLoopBackOff, exit code 1. Pods seen failing: 2. \
+                     Pods now: 3.\n{MARK}\n{WITHHELD}\n"
                 )),
-                "case {i}: the notice is not whole on line 2"
+                "case {i}: the notice is not whole after the mark"
             );
             assert!(units(&t) <= MAX_TEXT_UNITS, "case {i}");
             check_bodies(&n, &format!("withheld over the cap, case {i}"));

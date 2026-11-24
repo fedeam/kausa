@@ -140,6 +140,10 @@ spec:
             {{- if $notify.allowHttp }}
             - --notify-allow-http
             {{- end }}
+            {{- with include "kausa.notifyMaxPerHour" . }}
+            - --notify-max-per-hour
+            - {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-address

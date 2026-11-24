@@ -341,6 +341,7 @@ import json, re, sys
 sys.path.insert(0, "tests/e2e")
 from fake_endpoint import ANSWER, REDACTED_STEP, WITHHELD
 kind, name, rule, api_version, target, work = sys.argv[1:7]
+MARK = "Model'"'"'s explanation, not verified:"
 
 def fail(message):
     sys.exit("FAIL: the Explanation of %s %s: %s" % (kind, name, message))
@@ -419,9 +420,11 @@ for event in explained:
              + (", after the notice" if withheld else ""))
     if target not in first["summary"]:
         fail("the summary does not name " + target)
-    if not event["note"].startswith(" ".join(notice + [first["summary"]]) + " "):
-        fail("the notice and the summary do not start the Event note" if withheld
-             else "the summary does not start the Event note")
+    # The text of the model is marked (docs/adr/0027-fact-statement-for-the-detections.md, point 4):
+    # the notice of a withheld answer first, then the mark, then the summary.
+    if not event["note"].startswith(" ".join(notice + [MARK, first["summary"]]) + " "):
+        fail("the notice, the mark and the summary do not start the Event note" if withheld
+             else "the mark and the summary do not start the Event note")
     if not isinstance(first["promptVersion"], str) or not 1 <= len(first["promptVersion"]) <= 16:
         fail("its promptVersion is %s" % json.dumps(first["promptVersion"]))
     times = [first["firstTime"], first["lastTime"], status["lastTime"]]
@@ -446,6 +449,130 @@ explanations_of() {
     sleep 3
   done
   history_names=$(check_explanations "$@") || exit 1
+}
+# The Detected Events (docs/adr/0027-fact-statement-for-the-detections.md) of the five workloads
+# that have an incident everywhere the e2e runs (crasher, failing-job, policy-job, stranded and
+# stalled), from events.json and kausa.log in WORK. $1 is model or nomodel, $2 the name of the Pod
+# that wrote them (when empty, the reportingInstance of the Event of another reason is the one
+# every Event must have). Each workload has Detected Events only of the shape the ADR gives: a
+# Warning with the action Detect, reported by kausa, named kausa.detected.<fingerprint>.<hash> with
+# the fingerprint of an incident the log gives for that owner and rule, whose note is the logged
+# statement, starts with the detection's name and id, holds only letters, digits, spaces and
+# .,:()- and none of the namespace, the owner's name, the Pod's name and the image. crasher's
+# note is, byte for byte, the statement of its crash loop, sampled while the container waits in
+# CrashLoopBackOff or while it is terminated with Error between restarts. With model, each
+# workload has Explained Events, each named kausa.<fingerprint>.<hash> after the fingerprint of
+# one of its Detected Events, so both are of the same incident, and each note carries the mark; not
+# which of the two was written first, since point 3 of 0027 lets either be. With nomodel, kausa
+# wrote no Event of any other reason.
+check_detected() {
+  python3 -I -c '
+import json, re, sys
+mode, pod, target, work = sys.argv[1:5]
+MARK = "Model'"'"'s explanation, not verified:"
+WORKLOADS = (("Deployment", "crasher", "D001", "apps/v1"),
+             ("Job", "failing-job", "D008", "batch/v1"),
+             ("Job", "policy-job", "D008", "batch/v1"),
+             ("Deployment", "stranded", "D005", "apps/v1"),
+             ("Deployment", "stalled", "D014", "apps/v1"))
+# What the ADR gives for crasher: a container that exits 2 at its flag, one Pod. The kubelet
+# reports it waiting in CrashLoopBackOff for part of each back-off and terminated with Error for
+# the rest, and src/detect.rs takes either as the crash loop, so the sample holds either reason.
+CRASHER = {"crash loop (D001). Sample: container app, reason %s, exit code 2. "
+           "Pods seen failing: 1. Pods now: 1." % reason
+           for reason in ("CrashLoopBackOff", "Error")}
+ALLOWED = re.compile(r"[A-Za-z0-9 .,:()-]+")
+NAME = re.compile(r"kausa\.detected\.([0-9a-f]{16})\.[0-9a-f]{8}")
+EXPLAINED = re.compile(r"kausa\.([0-9a-f]{16})\.[0-9a-f]{8}")
+
+def fail(message):
+    sys.exit("FAIL: the Detected Events: " + message)
+
+incidents = {}
+for line in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "incident":
+        incidents[entry.get("fingerprint")] = entry
+events = [e for e in json.load(open(work + "/events.json"))["items"]
+          if e.get("reportingController") == "kausa"]
+if mode == "nomodel":
+    other = sorted({e.get("reason") for e in events if e.get("reason") != "Detected"})
+    if other:
+        fail("kausa wrote Events with the reasons %s without an endpoint" % json.dumps(other))
+instances = {e.get("reportingInstance") for e in events}
+if pod and instances - {pod}:
+    fail("an Event was reported by another Pod than the one that ran")
+if len(instances) != 1:
+    fail("the Events have %d reportingInstances" % len(instances))
+seen = 0
+for kind, name, rule, api_version in WORKLOADS:
+    mine = [e for e in events if (e.get("regarding") or {}).get("kind") == kind
+            and (e["regarding"].get("name")) == name]
+    detected = [e for e in mine if e.get("reason") == "Detected"]
+    if not detected:
+        fail("no Detected Event about %s %s" % (kind, name))
+    notes = set()
+    fingerprints = set()
+    for event in detected:
+        who = "%s %s" % (kind, name)
+        if (event.get("type"), event.get("action")) != ("Warning", "Detect"):
+            fail("the Detected Event about %s has type %s and action %s" % (
+                who, event.get("type"), event.get("action")))
+        if event["regarding"].get("namespace") != target or (
+                event["regarding"].get("apiVersion") != api_version):
+            fail("the Detected Event about %s regards another namespace or apiVersion" % who)
+        match = NAME.fullmatch(event["metadata"]["name"])
+        incident = incidents.get(match.group(1)) if match else None
+        if incident is None:
+            fail("the Detected Event about %s is not named after a logged incident" % who)
+        if (incident.get("detection"), incident.get("namespace"),
+                (incident.get("owner") or {}).get("name")) != (rule, target, name):
+            fail("the log gives the Detected Event of %s another detection or owner" % who)
+        note = event.get("note")
+        if not isinstance(note, str) or note != incident.get("statement"):
+            fail("the Detected Event about %s has a note other than the logged statement" % who)
+        if not note.startswith("%s (%s). " % (incident.get("detection_name"), rule)):
+            fail("the note of the Detected Event about %s does not start with the detection" % who)
+        if not ALLOWED.fullmatch(note):
+            fail("the note of the Detected Event about %s has a byte outside the allowed set" % who)
+        related = (event.get("related") or {}).get("name")
+        for word in (target, name, "kausa:e2e", "e2e-shop"):
+            if word in note:
+                fail("the note of the Detected Event about %s holds a name or the image" % who)
+        if related and related in note:
+            fail("the note of the Detected Event about %s holds the Pod" % who)
+        notes.add(note)
+        fingerprints.add(match.group(1))
+    if name == "crasher" and not CRASHER & notes:
+        fail("no Detected Event about crasher has the statement of its crash loop")
+    if mode == "model":
+        explained = [e for e in mine if e.get("reason") == "Explained"]
+        if not explained:
+            fail("no Explained Event about %s %s" % (kind, name))
+        for event in explained:
+            named = EXPLAINED.fullmatch(event["metadata"]["name"])
+            if not named or named.group(1) not in fingerprints:
+                fail("an Explained Event about %s %s is not of the incident of a Detected Event"
+                     % (kind, name))
+            note = event.get("note") or ""
+            marked = (MARK + " ") in note and (
+                note.startswith(MARK + " ") or note.startswith("Withheld by kausa:"))
+            if not marked:
+                fail("the Explained Event about %s %s does not carry the mark" % (kind, name))
+            if note.startswith("Withheld by kausa:") and (
+                    note.find(MARK) < 0 or note.find(MARK) > 250):
+                fail("the mark of the Explained Event about %s %s does not follow the notice"
+                     % (kind, name))
+            if event.get("reportingInstance") != next(iter(instances)):
+                fail("an Explained Event has another reportingInstance")
+    seen += len(detected)
+print("the Detected Events: %d about 5 workloads, each Warning, Detect, the logged statement%s"
+      % (seen, ", each Explained Event of the incident of one and marked" if mode == "model"
+         else ", no other reason"))
+' "$1" "${2:-}" "$TARGET" "$WORK"
 }
 # None of the values the fake endpoint injected in its answer reached a sink
 # (docs/adr/0022-redact-the-answer.md): kausa's Event notes in TARGET, the entries of the

@@ -1,0 +1,6 @@
+{
+  "schema": "kausa.fedeam.com/notification/v2",
+  "type": "capped",
+  "kausa_version": "0.7.0",
+  "limit": 30
+}

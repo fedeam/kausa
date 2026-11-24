@@ -10,8 +10,11 @@
 //! Jobs, `pods/log` for `D001`, `D003` and `D008` unless `--no-logs`, the Event writes and, with
 //! `--history`, the Explanation writes and their sweep, at start and hourly in the explanation
 //! slot (docs/reference/permissions.md, docs/adr/0014-explanation-history.md).
-//! With `--notify-url-file`, each new explanation is also posted to the webhook, one at a time,
-//! from a slot of its own beside the explanation's (`notify.rs`,
+//! Each settled incident's fact statement is in its log line and, unless `--no-events` or
+//! `--dry-run`, written as a `Detected` Event from a slot of its own that never waits for the
+//! model (`report.rs`, docs/adr/0027-fact-statement-for-the-detections.md). With
+//! `--notify-url-file`, each detection and each new explanation is also posted to the webhook, one
+//! at a time, from a slot of its own beside the explanation's (`notify.rs`,
 //! docs/adr/0015-notifications.md). `--metrics-address` serves the counters (`metrics.rs`).
 //!
 //! With `--leader-lease`, only the holder of that Lease acts (docs/adr/0019-high-availability.md):
@@ -52,16 +55,18 @@ use crate::context::Gathered;
 use crate::detect::{Detection, detect_event, detect_rollout};
 use crate::events::Writer;
 use crate::explain::{self, LogSource, Next, QUEUE_LIMIT, Settings, Shared, Work};
+use crate::fact;
 use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals, rollout_signals};
 use crate::leader::pure::{TIMINGS, Timings};
 use crate::leader::{self, KubeLease, LEASE_ERROR_PERIOD, LeaseApi, LeaseErrors, Lost, Term};
 use crate::log;
 use crate::metrics::{self, Metrics};
-use crate::notify::{self, Notifier};
+use crate::notify::{Notifier, Outbox};
 use crate::owner::{Hop, OwnerLookup, top_owner};
 use crate::prompt;
 use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
+use crate::report::{self, Fact, Reporter};
 
 /// The reporting controller of the Events kausa writes, excluded from its own watch.
 pub const REPORTING_CONTROLLER: &str = "kausa";
@@ -102,6 +107,22 @@ pub struct Options {
     /// With `--leader-lease`, the Lease this replica acts under: it acts only while it holds it,
     /// and waits as a standby otherwise (docs/adr/0019-high-availability.md).
     pub leader_lease: Option<LeaderLease>,
+    /// Whether to write a `Detected` Event for each settled incident, and the reporting instance
+    /// it is written with: unless `--no-events` or `--dry-run`
+    /// (docs/adr/0027-fact-statement-for-the-detections.md, point 2).
+    pub detected: Option<String>,
+    /// With `--notify-url-file`, the webhook and the bounds of its `detected` messages
+    /// (docs/adr/0015-notifications.md, docs/adr/0027-fact-statement-for-the-detections.md).
+    pub notify: Option<Notify>,
+}
+
+/// The webhook of `--notify-url-file` and the bounds of its `detected` messages.
+pub struct Notify {
+    pub notifier: Notifier,
+    /// `--notify-max-per-hour`: the most `detected` messages started in any 60 minutes.
+    pub max_per_hour: usize,
+    /// `--dedup-hours`: a fingerprint's `detected` message is sent once in this time.
+    pub dedup_ttl: Duration,
 }
 
 /// The Lease of `--leader-lease` and this replica's identity in it.
@@ -477,9 +498,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             "settle_seconds": options.settle.as_secs(),
             "namespaces": watched(&options.namespaces),
             "rollouts": options.rollouts,
-            "notifications": notifications(
-                options.explain.as_ref().and_then(|s| s.notify.as_ref())
-            ),
+            "notifications": notifications(options.notify.as_ref().map(|n| &n.notifier)),
             "leader_lease": leader_lease(options.leader_lease.as_ref()),
             // `null` without a model client: no --endpoint, or --dry-run.
             "model_timeout_seconds": options
@@ -511,6 +530,11 @@ pub async fn run(options: Options) -> Result<(), RunError> {
     } else {
         Term::unbounded()
     };
+    // The webhook's queue, its table of `detected` messages sent and its cap, across terms.
+    let outbox = options
+        .notify
+        .as_ref()
+        .map(|n| Outbox::new(&n.notifier, n.dedup_ttl, n.max_per_hour, &metrics, &term));
     let shared = options.explain.as_ref().map(|settings| Shared {
         budget: RefCell::new(Budget::new(
             settings.calls_per_hour,
@@ -526,7 +550,17 @@ pub async fn run(options: Options) -> Result<(), RunError> {
             .filter(|_| settings.model.is_some())
             .map(|days| History::new(client.clone(), days)),
         metrics: &metrics,
-        notifications: RefCell::new(VecDeque::new()),
+        outbox: outbox.as_ref(),
+        term: &term,
+    });
+    // The fact path: its Events, its `detected` messages, or both.
+    let reporter = (options.detected.is_some() || outbox.is_some()).then(|| Reporter {
+        writer: options
+            .detected
+            .as_ref()
+            .map(|instance| Writer::new(client.clone(), instance.clone())),
+        outbox: outbox.as_ref(),
+        metrics: &metrics,
         term: &term,
     });
     show_start(&metrics, &options, shared.as_ref(), Instant::now());
@@ -548,6 +582,8 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         lease: lease.as_ref(),
         cluster: &cluster,
         shared: shared.as_ref(),
+        reporter: reporter.as_ref(),
+        outbox: outbox.as_ref(),
         metrics: &metrics,
         term: &term,
         listener: listener.as_ref(),
@@ -630,8 +666,8 @@ impl Cluster for KubeCluster {
 }
 
 /// Everything that lives across terms (docs/adr/0019-high-availability.md): the metrics and their
-/// listener, the term, and `Shared` (the budget, the deduplication cache, the writers and the
-/// notification queue). A term's own state lives in `lead`.
+/// listener, the term, `Shared` (the budget, the deduplication cache and the writers), the fact
+/// path's `Reporter` and the webhook's `Outbox`. A term's own state lives in `lead`.
 struct Serving<'a, L, C> {
     options: &'a Options,
     /// The Lease's API. kausa elects only with `options.leader_lease` too; without the flag, no
@@ -639,6 +675,12 @@ struct Serving<'a, L, C> {
     lease: Option<&'a L>,
     cluster: &'a C,
     shared: Option<&'a Shared<'a>>,
+    /// The fact path: its Event writer and the outbox of its `detected` messages
+    /// (docs/adr/0027-fact-statement-for-the-detections.md).
+    reporter: Option<&'a Reporter<'a>>,
+    /// With `--notify-url-file`: the webhook's queue, its table of `detected` messages sent and its
+    /// cap, kept across terms; the queue is emptied when a term ends.
+    outbox: Option<&'a Outbox<'a>>,
     metrics: &'a Metrics,
     term: &'a Term,
     listener: Option<&'a TcpListener>,
@@ -768,6 +810,8 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
                     self.options,
                     self.cluster,
                     self.shared,
+                    self.reporter,
+                    self.outbox,
                     self.metrics,
                     self.tick
                 ));
@@ -875,8 +919,8 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
 
     /// Steps down after a lost Lease, in place: the term is closed (the controller was already
     /// dropped with its records, queue, retries and owner cache), the notifications waiting for
-    /// the webhook are dropped and counted, and the budget and the deduplication cache are kept
-    /// for the next term: the budget's windows are kept, and its credit is cut to the start burst
+    /// the webhook are dropped and counted, and the budget, the deduplication cache, the table of
+    /// `detected` messages sent and their cap are kept for the next term: the budget's windows are kept, and its credit is cut to the start burst
     /// when the next term starts (docs/adr/0021-refill-the-call-budget.md). The queue, the records
     /// and the owner cache went with the controller, so their gauges read 0; the deduplication
     /// cache's gauge is left as it is. The breaker is kept too, and the endpoint is shown closed
@@ -896,9 +940,11 @@ impl<L: LeaseApi, C: Cluster> Serving<'_, L, C> {
         self.metrics.set_leading(false);
         show_endpoint(self.metrics, BreakerState::Closed);
         show_held(self.metrics, self.options.rollouts, [0; 3], 0);
-        if let Some(shared) = self.shared {
+        if self.shared.is_some() {
             self.metrics.set_gauge(QUEUE_GAUGE, &[], 0);
-            let cleared = shared.notifications.borrow_mut().drain(..).count();
+        }
+        if let Some(outbox) = self.outbox {
+            let cleared = outbox.clear();
             if cleared > 0 {
                 self.metrics.add(
                     "kausa_notifications_total",
@@ -919,6 +965,8 @@ async fn lead<C: Cluster>(
     options: &Options,
     cluster: &C,
     shared: Option<&Shared<'_>>,
+    reporter: Option<&Reporter<'_>>,
+    outbox: Option<&Outbox<'_>>,
     metrics: &Metrics,
     tick: Duration,
 ) -> Result<Infallible, RunError> {
@@ -950,7 +998,19 @@ async fn lead<C: Cluster>(
     let mut waiting = false;
     let mut announced = false;
 
+    // The facts of this term's settled incidents, and the `Detected` Event being written: a slot
+    // of its own, which no model call and no webhook holds
+    // (docs/adr/0027-fact-statement-for-the-detections.md).
+    let mut facts = report::Queue::default();
+    let mut reporting: Option<Notifying<'_>> = None;
+
     loop {
+        if let Some(reporter) = reporter
+            && reporting.is_none()
+            && let Some(fact) = facts.pop()
+        {
+            reporting = Some(Box::pin(reporter.report(fact)));
+        }
         if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
             let now = Instant::now();
             let queue_empty = queue.is_empty();
@@ -1013,16 +1073,18 @@ async fn lead<C: Cluster>(
                     }),
                 )?;
             }
-            if let Some(notifier) = settings.notify.as_ref()
-                && notifying.is_none()
-            {
-                let next = {
-                    let dedup = shared.dedup.borrow();
-                    notify::take_next(&mut shared.notifications.borrow_mut(), &dedup)
-                };
-                if let Some(item) = next {
-                    notifying = Some(Box::pin(notify::deliver(notifier, item, shared)));
-                }
+        }
+        // The notification slot: `detected` messages with or without a model, `explained` ones
+        // with it.
+        if let Some(outbox) = outbox
+            && notifying.is_none()
+        {
+            let next = {
+                let dedup = shared.map(|s| s.dedup.borrow());
+                outbox.take_next(dedup.as_deref(), tokio::time::Instant::now())?
+            };
+            if let Some(item) = next {
+                notifying = Some(Box::pin(outbox.deliver(item, shared.map(|s| &s.dedup))));
             }
         }
         tokio::select! {
@@ -1041,6 +1103,12 @@ async fn lead<C: Cluster>(
                 if notifying.is_some() => {
                 notifying = None;
                 // A failed send is only logged and counted; the error is kausa's own log.
+                result?;
+            }
+            result = async { reporting.as_mut().expect("guarded by the condition").await },
+                if reporting.is_some() => {
+                reporting = None;
+                // A failed write is only logged and counted; the error is kausa's own log.
                 result?;
             }
             item = pods.next() => match item {
@@ -1137,7 +1205,20 @@ async fn lead<C: Cluster>(
                 }
                 for incident in state.tick(&mut tracker, now) {
                     metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
-                    log_incident(&incident, state.pods_of(&incident.owner))?;
+                    let pods_total = state.pods_of(&incident.owner);
+                    let statement = fact::statement(&incident, pods_total);
+                    if statement.reason_omitted {
+                        metrics.inc("kausa_fact_reasons_omitted_total", &[]);
+                    }
+                    log_incident(&incident, pods_total, &statement.text)?;
+                    if reporter.is_some() {
+                        report::enqueue(
+                            &mut facts,
+                            Fact::new(&incident, statement.facts),
+                            metrics,
+                            reporter.as_ref().and_then(|r| r.outbox),
+                        )?;
+                    }
                     if options.explain.is_some() {
                         enqueue(&mut queue, state.job(incident), metrics, waiting)?;
                     }
@@ -1192,7 +1273,7 @@ fn show_start(metrics: &Metrics, options: &Options, shared: Option<&Shared<'_>>,
 /// Adds 0 to each series of the counters with fixed labels that this mode can count, so that each
 /// shows from the start: the watch counters always (deployments only with the Deployment watch),
 /// the model calls only with a model, the skips whenever kausa explains, the notifications with a
-/// webhook and the leadership changes with the Lease. Elsewhere a counter keeps its unlabelled 0.
+/// webhook, the leadership changes with the Lease and the `Detected` Events when they are written. Elsewhere a counter keeps its unlabelled 0.
 fn show_zero_counters(metrics: &Metrics, options: &Options) {
     let watches: &[&str] = if options.rollouts {
         &["pods", "events", "deployments"]
@@ -1200,7 +1281,7 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
         &["pods", "events"]
     };
     let settings = options.explain.as_ref();
-    let counters: [(&'static str, &str, &[&str], bool); 7] = [
+    let counters: [(&'static str, &str, &[&str], bool); 8] = [
         ("kausa_watch_errors_total", "watch", watches, true),
         ("kausa_watch_relists_total", "watch", watches, true),
         ("kausa_watch_restarts_total", "watch", watches, true),
@@ -1219,14 +1300,20 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
         (
             "kausa_notifications_total",
             "outcome",
-            &["sent", "failed", "dropped"],
-            settings.is_some_and(|s| s.notify.is_some()),
+            &["sent", "failed", "dropped", "capped"],
+            options.notify.is_some(),
         ),
         (
             "kausa_leadership_changes_total",
             "to",
             &["leader", "standby"],
             options.leader_lease.is_some(),
+        ),
+        (
+            "kausa_events_written_total",
+            "reason",
+            &["Detected"],
+            options.detected.is_some(),
         ),
     ];
     for (name, label, values, shown) in counters {
@@ -1280,7 +1367,7 @@ fn show_budget(metrics: &Metrics, budget: &Budget, now: Instant) {
     metrics.set_gauge(name, &[("window", "day")], day);
 }
 
-fn log_incident(incident: &Incident, pods_total: usize) -> io::Result<()> {
+fn log_incident(incident: &Incident, pods_total: usize, statement: &str) -> io::Result<()> {
     let sample = &incident.sample;
     log::info(
         "incident",
@@ -1304,6 +1391,7 @@ fn log_incident(incident: &Incident, pods_total: usize) -> io::Result<()> {
                 "message": sample.message,
                 "exit_code": sample.exit_code,
             },
+            "statement": statement,
         }),
     )
 }
@@ -2728,7 +2816,7 @@ mod tests {
     #[test]
     fn started_names_the_notification_format_and_host_only() {
         use crate::notification::ChatId;
-        use crate::notify::Format;
+        use crate::notify::{self, Format};
 
         assert_eq!(notifications(None), serde_json::Value::Null);
         // A visibly fake token, built to look like a Telegram bot token.
@@ -3715,7 +3803,7 @@ mod tests {
     enum Explains {
         /// Ends at once.
         Done,
-        /// Queues two notifications, then never ends.
+        /// Queues three notifications when there is an outbox, then never ends.
         Hang,
         /// Takes a call from the budget and caches its incident, after noting whether a call was
         /// left and whether the incident was cached already.
@@ -3915,11 +4003,14 @@ mod tests {
                     Explains::Done => {}
                     Explains::Hang => {
                         let _dropped = Dropped(Rc::clone(&self.dropped));
-                        for _ in 0..2 {
-                            shared
-                                .notifications
-                                .borrow_mut()
-                                .push_back(notify::queued(&incident, explanation()));
+                        if let Some(outbox) = shared.outbox {
+                            for _ in 0..3 {
+                                outbox.enqueue(crate::notify::queued(
+                                    &incident,
+                                    1,
+                                    explanation(),
+                                ))?;
+                            }
                         }
                         std::future::pending::<()>().await;
                     }
@@ -3982,7 +4073,6 @@ mod tests {
                 calls_per_day: 200,
                 dedup_ttl: Duration::from_secs(3600),
                 instance: ME.into(),
-                notify: None,
             }),
             metrics_address: None,
             namespaces: Vec::new(),
@@ -3992,6 +4082,8 @@ mod tests {
                 name: "kausa-leader".into(),
                 identity: ME.into(),
             }),
+            detected: None,
+            notify: None,
         }
     }
 
@@ -4008,7 +4100,7 @@ mod tests {
             writer: None,
             history: None,
             metrics,
-            notifications: RefCell::new(VecDeque::new()),
+            outbox: None,
             term,
         }
     }
@@ -4034,6 +4126,8 @@ mod tests {
             lease: Some(lease),
             cluster,
             shared: Some(shared),
+            reporter: None,
+            outbox: shared.outbox,
             metrics: shared.metrics,
             term: shared.term,
             listener,
@@ -4148,14 +4242,29 @@ mod tests {
     fn a_lost_lease_drops_the_explanation_in_flight_and_the_queued_notifications() {
         let options = options(true, 10);
         let (metrics, term) = (Metrics::default(), Term::closed());
-        let shared = shared_of(&options, &metrics, &term);
+        // A webhook that takes the connection and never answers: the first notification stays in
+        // flight, the other two queued.
+        let webhook = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let hook = format!("http://{}/hook", webhook.local_addr().expect("an address"));
+        let notifier = Notifier::new(
+            hook.parse().expect("a URL"),
+            crate::notify::Format::Json,
+            None,
+            true,
+        )
+        .expect("a notifier");
+        let outbox = Outbox::new(&notifier, Duration::from_secs(3600), 30, &metrics, &term);
+        let shared = Shared {
+            outbox: Some(&outbox),
+            ..shared_of(&options, &metrics, &term)
+        };
         let lease = FakeLease::new(None);
         let cluster = FakeCluster::new(vec![crashing("api-1")], Explains::Hang);
         let dropped_at_step_down = Cell::new(None);
         let result = runtime().block_on(serve(&options, &lease, &cluster, &shared, None, async {
             assert!(
-                until(WAIT, || shared.notifications.borrow().len() == 2).await,
-                "an explanation in flight, two notifications queued"
+                until(WAIT, || outbox.queue().len() == 2).await,
+                "an explanation in flight, a notification in flight, two queued"
             );
             // Another replica takes the Lease and keeps renewing it.
             lease.renewing.set(true);
@@ -4178,8 +4287,10 @@ mod tests {
             "dropped at the step-down"
         );
         assert_eq!(cluster.jobs(), 1, "never started again");
-        assert!(shared.notifications.borrow().is_empty());
+        assert!(outbox.queue().is_empty());
+        // The two queued; the one in flight is dropped with its term, uncounted.
         assert_eq!(counter(&metrics, DROPPED), 2);
+        drop(webhook);
         assert_eq!(cluster.watches.get(), 1, "a standby starts no watch");
         assert!(!term.holds() && !metrics.is_leading());
         assert_eq!(counter(&metrics, LEADER), 0);
@@ -5778,7 +5889,7 @@ mod tests {
         let total = cluster.items();
         runtime().block_on(async {
             tokio::select! {
-                result = lead(options, cluster, None, metrics, TEST_TICK) => {
+                result = lead(options, cluster, None, None, None, metrics, TEST_TICK) => {
                     let Err(error) = result;
                     match error {
                         RunError::Failure(error) => panic!("the term ended: {error}"),
@@ -6009,7 +6120,7 @@ mod tests {
 
     #[test]
     fn the_start_shows_build_info_zero_records_and_the_zero_series_of_each_mode() {
-        use crate::notify::Format;
+        use crate::notify::{self, Format};
 
         let term = Term::unbounded();
         let build_info = format!(
@@ -6019,8 +6130,11 @@ mod tests {
         let notifying = |mut options: Options| {
             let url = notify::check_url("https://hooks.example.com/a/b", &Format::Json, false)
                 .expect("a valid URL");
-            options.explain.as_mut().expect("settings").notify =
-                Some(Notifier::new(url, Format::Json, None, false).expect("a client"));
+            options.notify = Some(Notify {
+                notifier: Notifier::new(url, Format::Json, None, false).expect("a client"),
+                max_per_hour: notify::DEFAULT_MAX_PER_HOUR,
+                dedup_ttl: Duration::from_secs(3600),
+            });
             options
         };
         let no_rollouts = |mut options: Options| {
@@ -6031,6 +6145,14 @@ mod tests {
         // (--endpoint or --dry-run), notifications (--notify-url-file) and the Lease.
         let modes: Vec<(&str, Options, bool, bool, bool, bool)> = vec![
             ("watching", watching(&[], true), false, false, false, false),
+            (
+                "watching, notifications",
+                notifying(watching(&[], true)),
+                false,
+                false,
+                true,
+                false,
+            ),
             (
                 "watching, --no-rollouts",
                 watching(&[], false),
@@ -6085,11 +6207,7 @@ mod tests {
             let settings = options.explain.as_ref();
             assert_eq!(settings.is_some(), explaining, "{mode}");
             assert_eq!(settings.is_some_and(|s| s.model.is_some()), model, "{mode}");
-            assert_eq!(
-                settings.is_some_and(|s| s.notify.is_some()),
-                notifies,
-                "{mode}"
-            );
+            assert_eq!(options.notify.is_some(), notifies, "{mode}");
             assert_eq!(options.leader_lease.is_some(), lease, "{mode}");
             let rollouts = options.rollouts;
             let metrics = Metrics::default();
@@ -6143,7 +6261,7 @@ mod tests {
             // The other counters with fixed labels: one 0 series per value in the modes that can
             // count them, the unlabelled 0 line otherwise.
             let model_calls = ["ok", "error", "invalid"];
-            let notifications = ["sent", "failed", "dropped"];
+            let notifications = ["sent", "failed", "dropped", "capped"];
             let changes = ["leader", "standby"];
             for (name, label, values, shown) in [
                 (

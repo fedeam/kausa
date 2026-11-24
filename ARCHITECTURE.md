@@ -44,6 +44,13 @@ API server ──watch──▶ run.rs ──▶ record.rs ──▶ detect.rs �
                    by redact::restore_only for the namespace and the owner only) ──▶ run.rs sends
                    it beside the watches, one at a time ──▶ notification.rs body ──▶ the webhook
 
+The fact path runs beside the explanation path, and neither waits for the other, so an
+incident's `Detected` and `Explained` Events, and its two messages, can come in either order:
+
+  (settled incident) ──▶ fact.rs statement ──▶ report.rs fact queue (1024) ──▶ fact slot:
+      the `Detected` Event (events.rs) ──▶ notify.rs queue: the `detected` message ──▶ the webhook
+  with or without --endpoint; the `incident` line carries the same statement
+
 With --leader-lease (two replicas): run.rs ◀── leader.rs keeper (get / merge patch of one Lease
 every 5 s; pure decisions in leader/pure.rs) ── only the holder runs the loop above, and every
 write and webhook attempt first checks that its term (sent + 20 s) still holds
@@ -69,6 +76,8 @@ budget.
 | `src/incident.rs` | Signals, grouping by top-level owner, the settle window, and the yield of `D014` to an explained incident of the same Deployment | Grouping or settling changes |
 | `src/fingerprint.rs` | The incident fingerprint (dedup key, Event name, notification field), never sent to the model | What makes two incidents "the same" changes |
 | `src/owner.rs` | ReplicaSet → Deployment and Job → CronJob, metadata only | A new owner hop (needs an ADR: a new permission) |
+| `src/fact.rs` | The pure, fuzzed fact statement: one line built from an incident and `pods_total`, with the reasons list compiled in, the DNS-label check of the container, the facts object of a notification, `MAX_STATEMENT_BYTES` and `LONGEST_STATEMENT_BYTES`; the examples of [Detection and redaction rules](docs/reference/rules.md#fact-statements) are tied by a test | What a statement may hold changes (needs an ADR, invariant 12) |
+| `src/report.rs` | The fact path: the fact queue (1024, drops its oldest, `fact dropped`, `kausa_facts_dropped_total`; the queue itself is pure) and the fact slot (`Reporter`), which writes one `Detected` Event at a time through `events.rs` (unless `--no-events`) and then queues the `detected` message through `notify.rs`; it never waits for the model, the budget, the breaker or an explanation | The fact path changes |
 | `src/explain.rs` | One incident to one explanation: the breaker's and the budget's refusal (`refusal`) before the log is read, log tail, fit to the token cap, dry-run or call, each call counted and timed by outcome (`called`), the call recorded into the breaker (`Shared.breaker`) before the term check with its `endpoint unavailable` / `endpoint available` lines and the last-success gauge, the job's outcome by cause (`Next`: done, retry, requeue), validation, Event; the term guard (`Shared.term`) before the budget take, after the model's answer and before each write; after the answer pass and both restores, `prompt::withhold_all` on the placeholder, restored and notification versions before the dedup entry, the log line, the Event, the history and the notification, with `kausa_answers_withheld_total` and the `withheld` and `model_confidence` fields of the fresh `explanation` line | The explanation pipeline changes |
 | `src/context.rs` | The context sent to the model: allowlisted fields only (`R001`), all names and text redacted | Anything sent to the model changes (needs an ADR) |
 | `src/redact.rs` | The redaction rules `R002`–`R014`; the answer pass (`Redactor::answer`), which runs the pattern rules of `ANSWER_RULES` (all but `R002`) on the model's answer and counts them apart; the mapping back of placeholders, and `restore_only`, which maps back only the names a notification may carry | A redaction rule is added or changed (a pattern rule also joins `ANSWER_RULES`) |
@@ -77,12 +86,12 @@ budget.
 | `src/model.rs` | The client of the one OpenAI-compatible endpoint: `--model-timeout`, the reqwest errors mapped to `connection` and `timeout`, `Retry-After` read before the body, and a `CallError` with its cause, status and delay | The HTTP call changes |
 | `src/model/pure.rs` | The pure, fuzzed reading of an endpoint's answer: `Cause` and its class and hint, `classify` (status, then `error.code` / `error.type` against `QUOTA_CODES` and `TOO_LARGE_CODES`), `completion` (a chat completion, `not_an_answer` or `no_content` of a kind), `retry_after` (clamped to 30-600 s) | A cause, a code list or the reading of an answer changes (a code joins a list only with a captured body as a fixture) |
 | `src/breaker.rs` | The pure breaker in front of the budget: `OPEN_AFTER` (3), `FIRST_HOLD` (60 s), `MAX_HOLD` (1800 s), `state(now)` and `record(call, now)`, which returns the transition the log reports; no clock of its own | How kausa holds calls while the endpoint fails changes (needs an ADR) |
-| `src/events.rs` | The `Explained` / `ExplanationSkipped` Event, whose note leads with kausa's notice when the answer was withheld (still `Normal` and `Explained`); a repeat patches only its series; each call checks the term first, and the whole write ends within `WRITE_BOUND` (10 s) | The output changes |
-| `src/notification.rs` | The pure, fuzzed bodies of a notification: `json`, the shared plain text, `slack` (escaped) and `telegram` (with word joiners), with a withheld answer's notice on the line after the header (`WITHHELD`, a copy of `prompt::WITHHELD` tied by a test in `src/notify.rs`, since this file has no `crate::` import), the 4,000-unit cut, the Telegram chat id | What a notification carries changes (needs an ADR, and [Data sent in notifications](docs/reference/data-sent-in-notifications.md)) |
-| `src/notify.rs` | The webhook transport: the URL checks, the `reqwest` client (no proxy, no redirects), one send with its retry (each attempt checks the term first), the queue of 16 and the dequeue rule, the `notification *` log lines and counters | How notifications are sent or queued changes |
+| `src/events.rs` | The `Detected` Event (`Warning`, action `Detect`, the statement as its note, named `kausa.detected.<fingerprint>.<8 hex>`), the `Explained` Event (still `Normal`), whose note is the mark `Model's explanation, not verified: ` and the model's text, after kausa's notice when the answer was withheld, and the `ExplanationSkipped` Event; a repeat patches only its series; each call checks the term first, and the whole write ends within `WRITE_BOUND` (10 s) | The output changes |
+| `src/notification.rs` | The pure, fuzzed bodies of a notification (`detected`, `explained` and `capped`, schema `v2`): `json`, the shared plain text, `slack` (escaped) and `telegram` (with word joiners), with a withheld answer's notice on the line after the header (`WITHHELD`, a copy of `prompt::WITHHELD` tied by a test in `src/notify.rs`, since this file has no `crate::` import), the 4,000-unit cut, the Telegram chat id | What a notification carries changes (needs an ADR, and [Data sent in notifications](docs/reference/data-sent-in-notifications.md)) |
+| `src/notify.rs` | The webhook transport, with or without an endpoint, and the bound of `detected` messages (once per fingerprint per `--dedup-hours`, `--notify-max-per-hour`, the `capped` message): the URL checks, the `reqwest` client (no proxy, no redirects), one send with its retry (each attempt checks the term first), the queue of 16 and the dequeue rule, the `notification *` log lines and counters | How notifications are sent or queued changes |
 | `src/history.rs` | With `--history`: the writer of the Explanation of an explained incident (`list` by name, then `create` or a merge patch of `status`, under one 10-second timeout) and the sweep (age, then `MAX_OBJECTS`, with `resourceVersion` preconditions, each call within 10 s), both checking the term before each call, over `Api<DynamicObject>` | What kausa keeps of an explanation, or its retention, changes |
 | `src/history/pure.rs` | The pure, fuzzed part of the history: the name, the create and patch bodies, the reading of a stored (untrusted) object, the identity check, the merge and the sweep's plan | The Explanation's content or the merge changes |
-| `src/metrics.rs` | The 23 counters (`COUNTERS`; among them `kausa_redactions_total` for the requests, `kausa_answer_redactions_total` for the answers, `kausa_answers_withheld_total` for the answers kausa withheld (last), and `kausa_watch_relists_total` and `kausa_watch_restarts_total` per watch), a counter's unlabelled `0` line until a series exists (`run.rs` starts the counters with fixed labels at `0` per value), the nine gauges (`GAUGES`: `kausa_leader`, always rendered, and `kausa_budget_calls_remaining`, `kausa_explanation_queue_length`, `kausa_endpoint_state`, `kausa_model_last_success_timestamp_seconds`, `kausa_build_info`, `kausa_records`, `kausa_owner_cache_entries` and `kausa_dedup_cache_entries`, through `set_gauge`, rendered only once set), the histogram `kausa_model_call_duration_seconds` (`HISTOGRAMS`, `CALL_DURATION_BUCKETS`, `observe`, rendered only once observed), `/metrics`, `/healthz`, `/readyz` (`starting`, `ready`, or `standby` for a replica that does not hold the Lease); its tests pin the whole exposition to `tests/golden/metrics.prom` and tie the metrics the alerting rules read, and their sections in Alerts, to the lists | A counter, gauge or histogram is added |
+| `src/metrics.rs` | The 25 counters (`COUNTERS`; among them `kausa_facts_dropped_total` and `kausa_fact_reasons_omitted_total` for the fact path, `kausa_events_written_total{reason="Detected"}` and `kausa_notifications_total{outcome="capped"}`; among them `kausa_redactions_total` for the requests, `kausa_answer_redactions_total` for the answers, `kausa_answers_withheld_total` for the answers kausa withheld (last), and `kausa_watch_relists_total` and `kausa_watch_restarts_total` per watch), a counter's unlabelled `0` line until a series exists (`run.rs` starts the counters with fixed labels at `0` per value), the nine gauges (`GAUGES`: `kausa_leader`, always rendered, and `kausa_budget_calls_remaining`, `kausa_explanation_queue_length`, `kausa_endpoint_state`, `kausa_model_last_success_timestamp_seconds`, `kausa_build_info`, `kausa_records`, `kausa_owner_cache_entries` and `kausa_dedup_cache_entries`, through `set_gauge`, rendered only once set), the histogram `kausa_model_call_duration_seconds` (`HISTOGRAMS`, `CALL_DURATION_BUCKETS`, `observe`, rendered only once observed), `/metrics`, `/healthz`, `/readyz` (`starting`, `ready`, or `standby` for a replica that does not hold the Lease); its tests pin the whole exposition to `tests/golden/metrics.prom` and tie the metrics the alerting rules read, and their sections in Alerts, to the lists | A counter, gauge or histogram is added |
 | `src/log.rs` | One JSON object per line, through a serializer | Only to keep it safe |
 | `charts/kausa/` | The Helm chart: RBAC by `rbac.scope` (`templates/rbac.yaml`: a ClusterRole, or a Role per listed namespace, both from `kausa.rules`), the refusals of `kausa.validate`, Deployment, Service, NetworkPolicy (`templates/networkpolicy.yaml`: kausa's, and a second, `<fullname>-endpoint-check`, with egress to DNS and the endpoint only, for the test Pod) | Install, permissions or a flag change |
 | `charts/kausa/templates/tests/` | `endpoint-check.yaml`: the `helm test` Pod that runs `kausa check-endpoint` (`before-hook-creation`, no ServiceAccount token, the namespace's `default` identity, the API-key Secret only, labels that no selector of kausa's matches), rendered by `kausa.endpointCheck` | The endpoint check's Pod changes |
@@ -142,7 +151,8 @@ accepted ADR, and most should never change.
    as the next precondition).
 6. **One call per incident per process, within the budget, and one explanation at a time;
    nothing the cluster, the endpoint or the webhook does may stop the watches without
-   `--leader-lease`, and a notification never delays an explanation or an Event.** A namespace
+   `--leader-lease`, a notification never delays an explanation or an Event, and a fact never
+   waits for the model, the budget, the breaker or an explanation.** A namespace
    that refuses kausa (`403`) is logged and retried; it never stops the other namespaces, and
    kausa never widens its scope. With `--leader-lease`, only the holder of the Lease acts; losing
    it stops the watches in that replica and hands them to the other, and never ends the process.
@@ -160,7 +170,7 @@ accepted ADR, and most should never change.
    `invalid_answer` counts as an answer; an incident is still called at most twice per process.
    `kausa check-endpoint` is not the controller: it sends one fixed synthetic request, reads
    nothing from the cluster, and no budget counts it ([0020](docs/adr/0020-check-the-endpoint.md)).
-7. **Rules are pure**: `detect.rs`, `incident.rs`, `fingerprint.rs`, `redact.rs`,
+7. **Rules are pure**: `detect.rs`, `incident.rs`, `fingerprint.rs`, `fact.rs`, `redact.rs`,
    `history/pure.rs`, `model/pure.rs` and `breaker.rs` do no I/O and read no clock of their own
    (the history's `now` comes in as a string, the breaker's as an `Instant`), so the same state
    gives the same incidents, fingerprints, redactions, merges, causes and breaker decisions.
@@ -175,6 +185,13 @@ accepted ADR, and most should never change.
     event message or any part of the context sent to the model, and no real name but the
     namespace's and the object's. The webhook URL and token are secrets read from files, never
     logged ([0015](docs/adr/0015-notifications.md)).
+12. **A fact statement holds only what kausa read or fixed in its binary**: a detection's name and
+    id, a container name that is a DNS label (checked by kausa), a reason that is in the compiled
+    list, integers (exit code, two counts, a revision), and fixed words; its bytes are letters,
+    digits, spaces and `.,:()-`, and it is under 512 bytes. Never the sample's message, an event's
+    note, a log line, the image, a label, a node, a name but the container's, or any text a model
+    wrote. Changing what it may hold needs an ADR
+    ([0027](docs/adr/0027-fact-statement-for-the-detections.md)).
 
 ## How each kind of change goes
 
@@ -196,8 +213,8 @@ feature that is not a rule starts with an issue and an ADR.
   same change.
 - **Anything sent in a notification** → an ADR first; then `src/notification.rs` and its golden
   tests, [Data sent in notifications](docs/reference/data-sent-in-notifications.md) (additive only
-  within `v1`, with a line in the [Changelog](CHANGELOG.md)) and [SECURITY.md](SECURITY.md) in the
-  same change.
+  within `v2`, with a line in the [Changelog](CHANGELOG.md); anything else is a new schema
+  version) and [SECURITY.md](SECURITY.md) in the same change.
 - **A new permission** → an ADR first; then the `kausa.rules` helper in
   `charts/kausa/templates/_helpers.tpl`, which `templates/rbac.yaml` renders in the ClusterRole and
   in every Role (never a rule in one scope only), [Permissions](docs/reference/permissions.md),

@@ -4,8 +4,9 @@
 
 ![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-0969da) ![rust: 1.99+](https://img.shields.io/badge/rust-1.99%2B-0969da) [![CI](https://github.com/fedeam/kausa/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fedeam/kausa/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/fedeam/kausa/badge)](https://scorecard.dev/viewer/?uri=github.com/fedeam/kausa) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16024/badge)](https://www.bestpractices.dev/projects/16024)
 
-> **What it does:** when a workload fails, kausa groups its failures into one incident and writes a
-> redacted, budgeted LLM explanation as a Kubernetes Event on the failing object.
+> **What it does:** when a workload fails, kausa groups its failures into one incident and reports
+> it as facts in a Kubernetes Event on the failing object, with or without a model; with a model
+> endpoint it adds a redacted, budgeted LLM explanation, marked as the model's.
 >
 > **Who it is for:** people who run Kubernetes and want a readable first answer in `kubectl
 > describe`, from a model of their choice, including one served inside the cluster.
@@ -17,7 +18,7 @@
 > The `internet: no` badge means kausa serves nothing on the internet: it only calls the Kubernetes
 > API server, the model endpoint you configure and, if you set one, one webhook.
 
-A tiny Kubernetes controller that explains failing workloads with an LLM: one redacted, budgeted explanation per incident, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects and, with `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease.
+A tiny Kubernetes controller that reports failing workloads and, optionally, explains them with an LLM: one `Detected` Event of facts per incident, with or without a model, and with a model endpoint one redacted, budgeted explanation, marked as the model's, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects and, with `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease.
 
 ## The problem
 
@@ -42,26 +43,35 @@ they usually mean.
 
 kausa watches Warning events, Pod status and Deployments. When a failure persists, it groups the
 failing Pods of one workload into one incident, takes the relevant status, events and last log
-lines, redacts them, and asks one OpenAI-compatible model endpoint for an explanation, within a
-call and token budget. It writes the answer as an Event on the Deployment:
+lines. It writes a `Detected` Event on the Deployment with the facts it read, such as the
+detection, the reason and the exit code, with or without a model. With `--endpoint` it also
+redacts the context and asks one OpenAI-compatible model endpoint for an explanation, within a
+call and token budget, and writes the answer as another Event, marked `Model's explanation, not
+verified:`. Neither Event waits for the other, so either can be written first:
 
 ```text
 $ kubectl describe deployment -n shop api
 ...
 Events:
-  Type    Reason     Age   From   Message
-  ----    ------     ----  ----   -------
-  Normal  Explained  20s   kausa  3 of 3 pods crash on start: the app cannot reach its
-                                  PostgreSQL server (connection refused on port 5432).
-                                  Likely cause: the database is down or the address in the
-                                  app's configuration is wrong. Check: 1. the database
-                                  Service has ready endpoints 2. the host and port the app
-                                  uses (confidence: medium)
+  Type     Reason     Age   From   Message
+  ----     ------     ----  ----   -------
+  Warning  Detected   45s   kausa  crash loop (D001). Sample: container api, reason
+                                   CrashLoopBackOff, exit code 1. Pods seen failing: 3. Pods
+                                   now: 3.
+  Normal   Explained  20s   kausa  Model's explanation, not verified: 3 of 3 pods crash on
+                                   start: the app cannot reach its PostgreSQL server
+                                   (connection refused on port 5432). Likely cause: the
+                                   database is down or the address in the app's configuration
+                                   is wrong. Check: 1. the database Service has ready
+                                   endpoints 2. the host and port the app uses (confidence:
+                                   medium)
 ```
 
-Output of this shape was seen on a live cluster on 2026-10-26; the wording is the model's. What
-the model saw was `deployment-1` in `namespace-1` and `<redacted:ip>:5432`; kausa maps the names
-back before writing the Event.
+The `Explained` Event of this shape was seen on a live cluster on 2026-10-26, before the mark; the
+wording is the model's. The `Detected` line is written by hand from the format of [Detection and
+redaction rules](docs/reference/rules.md#fact-statements), not seen live. What the model saw was
+`deployment-1` in `namespace-1` and `<redacted:ip>:5432`; kausa maps the names back before writing
+the Event.
 
 ## Try it
 
@@ -106,10 +116,11 @@ Point the endpoint at a model served in your cluster (Ollama, vLLM or any OpenAI
 server) and nothing leaves it. `--dry-run` shows the exact requests without sending them. The
 full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.md).
 
-Optionally, and off by default (since v0.3.0), kausa also posts each new
-explanation to one webhook of yours, as JSON, to a Slack incoming webhook or to a Telegram chat:
-the explanation, the rule and the fingerprint, with the real names of the namespace and the
-workload only, never a log line or the request ([Data sent in
+Optionally, and off by default (since v0.3.0), kausa also posts to one webhook of yours, as JSON,
+to a Slack incoming webhook or to a Telegram chat, each new explanation and, since the release
+after v0.6.3, each settled incident, with or without a model: the rule, the facts, the fingerprint
+and the explanation when there is one, with the real names of the namespace and the workload only,
+never a log line or the request ([Data sent in
 notifications](docs/reference/data-sent-in-notifications.md)).
 
 ## Design principles
@@ -164,17 +175,23 @@ sources are in [Competitive landscape](docs/research/2026-10-23-competitive-land
 
 Pre-alpha. v0.6.3 is released (2026-11-20). What there is:
 
-- **Detection and explanation:** `kausa run` watches Pods, Warning events and Deployments, in the
-  whole cluster or in a list of namespaces, groups failures by workload, builds a redacted context
-  with the failed container's log, asks the model within a call budget (or logs the request with
-  `--dry-run`), reuses explanations of repeated incidents and writes each explanation as an Event
-  on the failing workload.
+- **Detection, facts and explanation:** `kausa run` watches Pods, Warning events and Deployments,
+  in the whole cluster or in a list of namespaces, and groups failures by workload. For each
+  settled incident it writes a `Detected` Event on the failing workload, with or without a model:
+  one line of facts that kausa read, never text a tenant or a model wrote ([Detection and redaction
+  rules](docs/reference/rules.md#fact-statements)). With `--endpoint` it also builds a redacted
+  context with the failed container's log, asks the model within a call budget (or logs the
+  request with `--dry-run`), reuses explanations of repeated incidents and writes each explanation
+  as another Event, marked as the model's and not verified; neither Event waits for the other, so
+  either can be written first. What kausa does not watch is listed in [Detection and redaction
+  rules](docs/reference/rules.md#what-kausa-watches-and-what-it-does-not).
 - **Metrics:** Prometheus metrics with `--metrics-address`, with alert rules for them in
   `deploy/prometheus/` ([Alerts](docs/reference/alerts.md)); the log lines are JSON ([Command line
   and log format](docs/reference/command-line.md)).
 - **Optional, off by default:** with `--history`, each incident's explanations are kept in an
-  Explanation object; with `--notify-url-file`, each new explanation is posted to one webhook; with
-  the chart's `replicaCount: 2`, a standby replica takes over through a Lease.
+  Explanation object; with `--notify-url-file`, each settled incident and each new explanation is
+  posted to one webhook, with or without a model; with the chart's `replicaCount: 2`, a standby
+  replica takes over through a Lease.
 - **Safety of the answer:** it redacts the model's answer as it redacts the request, withholds an
   answer that holds a listed destructive command, and holds its calls behind a breaker while the
   endpoint fails; `kausa check-endpoint` (the chart's `helm test`) checks the endpoint on demand.
@@ -237,7 +254,8 @@ With Rust installed through [rustup](https://rustup.rs), which picks up the tool
 ```sh
 cargo build --locked
 cargo run --locked -- --help
-# Watch the cluster of the kubeconfig's current context and log incidents (read-only):
+# Watch the cluster of the kubeconfig's current context, log incidents and write their
+# Detected Events (add --no-events to write nothing):
 cargo run --locked -- run
 # Also log the redacted request each incident would send:
 cargo run --locked -- run --dry-run
@@ -246,11 +264,11 @@ cargo run --locked -- run --endpoint http://127.0.0.1:11434/v1 --model qwen3:0.6
 ```
 
 `kausa run` uses the current context of your kubeconfig and needs read access to Pods, their
-logs, Events, ReplicaSets, Jobs and, unless `--no-rollouts`, Deployments, and, with `--endpoint`
-and without `--no-events`, permission to create and patch Events; it has no flag to pick a
-context, so check
-`kubectl config current-context` first, or follow [Try kausa against a cluster with a local
-model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of it.
+logs, Events, ReplicaSets, Jobs and, unless `--no-rollouts`, Deployments, and, without
+`--no-events` or `--dry-run`, permission to create and patch Events; it has no flag to pick a
+context, so check `kubectl config current-context` first, or follow [Try kausa against a cluster
+with a local model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of
+it.
 
 To run it in a cluster, install the released chart, which uses the published image: [Install
 kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build the image

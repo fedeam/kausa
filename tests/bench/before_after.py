@@ -186,7 +186,7 @@ DETECTION_NAMES = {
     "D006": "probe failures", "D007": "volume cannot be attached or mounted",
     "D008": "job failed", "D009": "pod evicted", "D010": "pod sandbox cannot be created",
     "D011": "workload cannot create pods or jobs", "D012": "volume claim cannot be provisioned",
-    "D013": "autoscaler cannot get metrics", "D014": "rollout does not progress",
+    "D013": "autoscaler cannot read metrics or target scale", "D014": "rollout does not progress",
 }
 ARMS = ("B", "A", "R", "HB", "HA")
 BARS = ("N", "A", "B1", "B2", "C1", "C2", "D", "E", "F", "G", "H")

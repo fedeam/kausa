@@ -2,7 +2,8 @@ name: ClusterFuzzLite
 
 # Fuzzes the parsers of untrusted text (fuzz/: redaction of cluster text, validation of the
 # model's answers, the explanation history read back from the cluster, the notification bodies
-# built from the model's text, the model endpoint's error and chat completion answers) with
+# built from the model's text, the model endpoint's error and chat completion answers, the fact
+# statement built from any incident) with
 # ClusterFuzzLite (https://google.github.io/clusterfuzzlite/): a short run on pull requests that
 # change the fuzzed code, and a longer one every week on main, which keeps the corpus. A crash
 # fails the job and leaves the input that caused it as an artifact.
@@ -14,6 +15,11 @@ on:
       - 'src/history/pure.rs'
       - 'src/notification.rs'
       - 'src/model/pure.rs'
+      - 'src/fact.rs'
+      - 'src/incident.rs'
+      - 'src/detect.rs'
+      - 'src/record.rs'
+      - 'src/fingerprint.rs'
       - 'fuzz/**'
       - '.clusterfuzzlite/**'
       - '.github/workflows/cflite.yml'

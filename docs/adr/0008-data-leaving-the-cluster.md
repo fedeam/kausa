@@ -158,3 +158,12 @@ Update 2026-11-04: with [0025. Replace the model's text that holds one of six li
 fixed notice, show the notice first, and give that answer `low` confidence](0025-withhold-destructive-commands.md), "untrusted data stays data" also covers what comes back: a
 field of the model's answer that holds a listed destructive command shape is not written to any
 sink. Nothing in the request changes.
+
+Update 2026-11-24: [0027. Report each settled incident as a fact statement in its own `Detected`
+Event and webhook message, with or without a model, and mark the model's text as a
+model's](0027-fact-statement-for-the-detections.md) lets the webhook of [0015. Post each new
+explanation to one optional webhook, as JSON, Slack or Telegram](0015-notifications.md) receive data
+with no model endpoint set: the `detected` message's typed facts (an enumerated reason, an exit
+code, two counts and a revision) and the names it already carried. The fact statement is not sent
+to the model; the only change in the request is the name of `D013`, which 0027 renames
+"autoscaler cannot read metrics or target scale".

@@ -3,7 +3,8 @@
 How kausa is planned to work: it watches Warning events, Pod status and Deployments, turns the
 failures of one workload into one incident with deterministic rules, sends a redacted context to
 one OpenAI-compatible endpoint within a budget, and writes the explanation as an Event on the
-failing workload.
+failing workload. Since the release after v0.6.3 it first reports each incident as facts, with or
+without a model ([The fact path](#the-fact-path)).
 
 Status as of 2026-10-26: **the code of the four implementation weekends of v0.1 is done**:
 watching, detection, the settle window, owner correlation, fingerprints, the context with log
@@ -41,8 +42,11 @@ Deployments ────┘                                          │
                              Event ◀─ withhold listed commands ◀─ map names back
 ```
 
-Only the model call leaves the cluster, and, with notifications on, the post of each new
-explanation to one webhook (Output, below). Every other stage is deterministic: the same cluster state
+Beside this path, and never waiting for it, each settled incident goes down the fact path ([The
+fact path](#the-fact-path)), with or without a model.
+
+Only the model call leaves the cluster, and, with notifications on, the post of each settled
+incident and each new explanation to one webhook (Output, below). Every other stage is deterministic: the same cluster state
 produces the same incident, the same fingerprint and the same request bytes.
 
 ## Watching without a large cache
@@ -306,8 +310,52 @@ produces the same incident, the same fingerprint and the same request bytes.
   responder on `tokio::net`, with no framework. The list: [Command line and log
   format](../reference/command-line.md#metrics).
 
+## The fact path
+
+Since the release after v0.6.3 ([0027. Report each settled incident as a fact statement in its own
+`Detected` Event and webhook message, with or without a model, and mark the model's text as a
+model's](../adr/0027-fact-statement-for-the-detections.md), stage 1 of [0026. Report every
+incident as facts without a model, keep the explanation optional, and widen coverage one bounded
+source at a time](../adr/0026-facts-before-the-model.md)), a settled incident is reported before
+and without any model:
+
+- **A statement, built where the incident settles.** `src/fact.rs` builds one line from the
+  incident and the count of Pods kausa holds with its owner: the detection's name and id, the
+  sample's container (only a DNS label), its reason (only one kausa lists), its exit code, two
+  counts and a revision. Never a message, a log line, the image or a name of a tenant's or a
+  model's making; the same incident gives the same bytes. The `incident` log line carries it as
+  `statement`. The parts and the bound: [Fact statements](../reference/rules.md#fact-statements).
+- **A queue of its own.** The facts and what the Event needs go on a fact queue of 1024 entries
+  (1.30 MiB full at the longest names, computed and pinned by a unit test); a full queue drops
+  its oldest, which is logged (`fact dropped`) and counted (`kausa_facts_dropped_total`). Nothing is written at the tick that settles it, so a
+  slow API server cannot hold the watches.
+- **One fact slot** beside the explanation slot and the notification slot writes one `Detected`
+  Event at a time, then queues the `detected` message when a webhook is set. A fact never waits
+  for the model, the budget, the breaker or an explanation, and an explanation never waits for a
+  fact. It runs with or without `--endpoint`, unless `--no-events` (no Event; the message is
+  queued at once), and never in dry-run.
+- **A bound on the webhook.** A `detected` message goes once per fingerprint per `--dedup-hours`
+  and at most `--notify-max-per-hour` an hour; over the cap, or when the queue of 16 or the fact
+  queue drops a message, kausa posts one fixed `capped` message at most once an hour, and the log
+  line stands. A `detected` message never pushes an `explained` one out of the queue.
+- **The model's text is marked.** An `Explained` Event, a Slack or Telegram text and the `json`
+  body's `explanation` start with or sit under `Model's explanation, not verified:` or its key,
+  so a reader can tell what kausa read from what a model wrote. The statement is not in the
+  request to the model; the only change in that request is `D013`'s name, "autoscaler cannot
+  read metrics or target scale".
+
 ## Output
 
+- **The `Detected` Event.** For each settled incident, with or without an endpoint: type
+  `Warning`, reason `Detected`, action `Detect`, `regarding` the top-level owner and `related` the
+  sample Pod, whose note is the fact statement and nothing else. Its name is
+  `kausa.detected.<fingerprint>.<8 hex of the statement's hash>`: the same statement again
+  patches the series, and a different one is a new Event. It is a Warning because it reports a
+  failure; whoever alerts on every Warning event gets one more per incident. The name can be
+  known beforehand, so whoever can create Events in the namespace can create it first with
+  reporting controller `kausa` and another note, and kausa then only patches its series ([Security
+  policy](../../SECURITY.md)); the `incident` log line and the `detected` message keep the real
+  statement.
 - **An Event on the failing workload.** `events.k8s.io/v1`, `regarding` the top-level owner (a
   Deployment, StatefulSet, DaemonSet, Job or CronJob, the owner of another kind where the chain
   stops, as in Correlation above, or the Pod when it has none) and `related` the Pod the context
@@ -327,7 +375,7 @@ produces the same incident, the same fingerprint and the same request bytes.
   the validation compares the string's byte length with Go's `len`; `NoteLengthLimit` and
   `ReasonLengthLimit` in Kubernetes' `pkg/apis/core/validation/events.go`, checked on
   2026-10-23), and the API server keeps Events for one hour by default (`--event-ttl`). The note
-  is the summary, `Likely cause:` and the numbered steps, cut at a UTF-8 character boundary with an
+  starts with `Model's explanation, not verified: `, then the summary, `Likely cause:` and the numbered steps, cut at a UTF-8 character boundary with an
   ellipsis when it does not fit. An `Explained` Event of a withheld answer is still `Normal` and
   `Explained`, but its note leads with kausa's notice (171 bytes, so it always fits), numbers the
   other steps from 1 and ends `(confidence: low)`.
@@ -340,9 +388,10 @@ produces the same incident, the same fingerprint and the same request bytes.
   reads its object back as untrusted input and never logs or sends what it read ([Explanation
   resource](../reference/explanation-resource.md), [0014. Keep each incident's full explanations
   in a namespaced Explanation resource, off by default](../adr/0014-explanation-history.md)).
-- **A notification**, with `--notify-url-file` (off by default; since v0.3.0): each explanation the model wrote is posted to one webhook, as a documented
+- **A notification**, with `--notify-url-file` (off by default; since v0.3.0; needs no endpoint since the release after v0.6.3): each settled incident (`detected`) and each explanation the model wrote (`explained`) is posted to one webhook, as a documented
   `json` body, a Slack incoming webhook's plain text or a Telegram `sendMessage`, with the real
-  names of the namespace and the top-level owner only; every other name stays a placeholder
+  names of the namespace and the top-level owner only (the schema is `v2`: [Data sent in
+  notifications](../reference/data-sent-in-notifications.md)); every other name stays a placeholder
   (`Redactor::restore_only`). It is queued after the Event, never for a skip, and sent by its own
   task beside the watches, one at a time from a queue of 16, with one retry 30 seconds later
   after a transient failure, so a slow or dead webhook never delays an explanation or an Event. A
@@ -429,6 +478,7 @@ renewal (27.7 to 32.7 s after it stopped), five runs each.
 | Explanation queue (16), delayed retries | Lost | The incidents come back if they still fail |
 | The explanation in flight | Its call is spent, its answer dropped | One call |
 | Notification queue (16) | Dropped (counted `dropped`) | 16 |
+| Fact queue (1024) | Dropped; the incidents' `Detected` Events come again from the new leader's list if they still fail | 1024 |
 | `Dedup` and the notified marks | Per process; the new leader's is its own (empty, or from its last term) | One more call, Event series patch or new Event, history merge and notification per still-failing incident |
 | `Budget` | Per process; windows kept across its terms, credit cut to 3 at each term start | A release starts at most `c(s) + 3K + T/I`; each process at most `callsPerHour` an hour and `callsPerDay` a day |
 | Owner cache | Rebuilt | One `get` per ReplicaSet or Job |
@@ -484,7 +534,7 @@ format](../reference/command-line.md#exit-codes).
 
 Summarised here, and in full in the [Security policy](../../SECURITY.md):
 
-- **Read-only, except Events.** No Secrets, no ConfigMaps, no write verbs but Events
+- **Read-only, except Events** (a `Detected` Event even without a model). No Secrets, no ConfigMaps, no write verbs but Events
   ([0009. Run with read-only permissions that never include
   Secrets](../adr/0009-least-privilege-rbac.md)), kausa's own Explanations with the history, and,
   with a standby, a merge patch of the `spec` of its one Lease.

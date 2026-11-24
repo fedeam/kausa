@@ -609,7 +609,8 @@ fn help_lists_the_history_flags_and_what_kausa_writes() {
     let help = stdout(&output);
     let lines: Vec<&str> = help.lines().collect();
     let expected = [
-        "  --no-events            Do not write Events (log the explanations only)",
+        "  --no-events            Do not write Events (log the incidents and",
+        "                         explanations only)",
         "  --history              Keep each incident's explanations in an Explanation",
         "                         object in its namespace (needs the CRD)",
         "  --history-days <N>     Delete history older than N days (1-30, default 7)",
@@ -633,7 +634,6 @@ fn help_lists_the_history_flags_and_what_kausa_writes() {
 
 const NOTIFY_URL_NOT_IN_DRY_RUN: &str =
     "--notify-url-file is not used with --dry-run: no explanation is written";
-const NOTIFY_URL_NEEDS_ENDPOINT: &str = "--notify-url-file needs --endpoint";
 const CHAT_ID_ONLY_TELEGRAM: &str =
     "--notify-telegram-chat-id is used only with --notify-format telegram";
 const TOKEN_ONLY_JSON: &str = "--notify-token-file is used only with --notify-format json";
@@ -710,7 +710,7 @@ fn assert_usage_error_starting(output: &Output, prefix: &str, case: &str) {
 fn notify_flags_need_the_url_file() {
     let dir = notify_dir("needs-url");
     let token = file(&dir, "token", "a-token\n");
-    let cases: [(&[&str], &str); 6] = [
+    let cases: [(&[&str], &str); 8] = [
         (&["--notify-format", "slack"], "--notify-format"),
         (&["--notify-format", "json"], "--notify-format"),
         (&["--notify-format", "telegram"], "--notify-format"),
@@ -720,6 +720,8 @@ fn notify_flags_need_the_url_file() {
         ),
         (&["--notify-token-file", &token], "--notify-token-file"),
         (&["--notify-allow-http"], "--notify-allow-http"),
+        (&["--notify-max-per-hour", "30"], "--notify-max-per-hour"),
+        (&["--notify-max-per-hour", "1"], "--notify-max-per-hour"),
     ];
     for (flags, flag) in cases {
         let message = needs_url_file(flag);
@@ -739,8 +741,8 @@ fn notify_flags_need_the_url_file() {
 fn the_first_notify_flag_without_the_url_file_is_named_in_a_fixed_order() {
     let dir = notify_dir("needs-url-order");
     let token = file(&dir, "token", "a-token\n");
-    // format, chat id, token file, allow-http, whatever the order of the arguments.
-    let cases: [(&[&str], &str); 4] = [
+    // format, chat id, token file, allow-http, max per hour, whatever the order of the arguments.
+    let cases: [(&[&str], &str); 5] = [
         (
             &[
                 "--notify-allow-http",
@@ -768,6 +770,10 @@ fn the_first_notify_flag_without_the_url_file_is_named_in_a_fixed_order() {
             "--notify-token-file",
         ),
         (&["--notify-allow-http", "--dry-run"], "--notify-allow-http"),
+        (
+            &["--notify-max-per-hour", "10", "--notify-allow-http"],
+            "--notify-allow-http",
+        ),
     ];
     for (flags, flag) in cases {
         let mut args = vec!["run"];
@@ -813,34 +819,82 @@ fn the_url_file_is_not_used_with_dry_run() {
     }
 }
 
+// Detected messages need no model (docs/adr/0027-fact-statement.md): the URL file is accepted
+// without --endpoint, and so is --notify-max-per-hour with it.
 #[test]
-fn the_url_file_needs_an_endpoint() {
-    let dir = notify_dir("endpoint");
+fn the_url_file_needs_no_endpoint() {
+    let dir = notify_dir("no-endpoint");
     let url = file(&dir, "url", HOOK);
-    let missing = dir.join("missing").to_str().expect("UTF-8").to_owned();
+    let telegram = file(&dir, "telegram", TELEGRAM_HOOK);
     for args in [
         vec!["run", "--notify-url-file", &url],
-        vec!["run", "--notify-url-file", &url, "--model", "m"],
-        // Before the file is read, and before the format checks.
-        vec!["run", "--notify-url-file", &missing],
+        vec!["run", "--notify-url-file", &url, "--no-events"],
         vec![
             "run",
             "--notify-url-file",
             &url,
-            "--notify-format",
-            "telegram",
+            "--notify-max-per-hour",
+            "1",
         ],
         vec![
             "run",
             "--notify-url-file",
             &url,
+            "--notify-max-per-hour",
+            "3600",
+            "--notify-format",
+            "slack",
+        ],
+        vec![
+            "run",
+            "--notify-url-file",
+            &telegram,
+            "--notify-format",
+            "telegram",
             "--notify-telegram-chat-id",
             "1",
         ],
     ] {
+        assert_gets_past_the_flags(&kausa(&args), &format!("{args:?}"));
+    }
+    // With an endpoint too.
+    let args = with_endpoint(&["--notify-url-file", &url, "--notify-max-per-hour", "45"]);
+    assert_gets_past_the_flags(&kausa_owned(&args), &format!("{args:?}"));
+}
+
+#[test]
+fn the_cap_on_detected_messages_takes_a_whole_number_from_1_to_3600() {
+    let dir = notify_dir("max-per-hour");
+    let url = file(&dir, "url", HOOK);
+    for value in [
+        "0",
+        "3601",
+        "-1",
+        "1.5",
+        "thirty",
+        " 30",
+        "99999999999999999999999",
+    ] {
+        let args = [
+            "run",
+            "--notify-url-file",
+            &url,
+            "--notify-max-per-hour",
+            value,
+        ];
         assert_usage_error(
             &kausa(&args),
-            NOTIFY_URL_NEEDS_ENDPOINT,
+            &format!("--notify-max-per-hour takes a whole number from 1 to 3600, not '{value}'"),
+            &format!("{args:?}"),
+        );
+    }
+    for args in [
+        &["run", "--notify-max-per-hour"][..],
+        &["run", "--notify-max-per-hour", ""][..],
+    ] {
+        assert_usage_error(
+            &kausa(args),
+            "--notify-max-per-hour needs a value",
             &format!("{args:?}"),
         );
     }
@@ -1383,8 +1437,8 @@ fn help_lists_the_notify_flags_and_where_data_goes() {
     let help = stdout(&output);
     let lines: Vec<&str> = help.lines().collect();
     let url_lines = [
-        "  --notify-url-file <PATH>  Post each new explanation to the webhook whose URL is",
-        "                            in this file (needs --endpoint)",
+        "  --notify-url-file <PATH>  Post each detection and each new explanation to the",
+        "                            webhook whose URL is in this file",
     ];
     assert!(
         lines.windows(2).any(|w| w == url_lines),
@@ -1395,6 +1449,7 @@ fn help_lists_the_notify_flags_and_where_data_goes() {
         "  --notify-telegram-chat-id <ID>  telegram's chat: an integer or @channel",
         "  --notify-token-file <PATH>  json only: a bearer token for the webhook",
         "  --notify-allow-http       Allow a plain http:// webhook (local or in-cluster)",
+        "  --notify-max-per-hour <N>  Detections posted in any hour (1-3600, default 30)",
     ] {
         assert!(lines.contains(&line), "missing '{line}': {help}");
     }
@@ -1409,6 +1464,7 @@ fn help_lists_the_notify_flags_and_where_data_goes() {
         "--notify-telegram-chat-id",
         "--notify-token-file",
         "--notify-allow-http",
+        "--notify-max-per-hour",
     ] {
         assert!(
             options.iter().any(|l| l.starts_with(&format!("  {flag} "))),
@@ -1834,7 +1890,7 @@ const PLAIN_HTTP: &str = "the endpoint uses plain HTTP: pass --allow-http for an
                           the cluster or the same private network";
 const NEEDS_ENDPOINT_OR_DRY_RUN: &str = "--model, --api-key-file, --allow-http, --no-json-schema \
                                          and --model-timeout need --endpoint or --dry-run";
-const RUN_ONLY: [&str; 19] = [
+const RUN_ONLY: [&str; 20] = [
     "--settle-seconds",
     "--namespace",
     "--no-rollouts",
@@ -1848,6 +1904,7 @@ const RUN_ONLY: [&str; 19] = [
     "--notify-telegram-chat-id",
     "--notify-token-file",
     "--notify-allow-http",
+    "--notify-max-per-hour",
     "--max-calls-per-hour",
     "--max-calls-per-day",
     "--max-input-tokens",

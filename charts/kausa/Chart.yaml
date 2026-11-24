@@ -1,6 +1,6 @@
 apiVersion: v2
 name: kausa
-description: A tiny Kubernetes controller that explains failing workloads with an LLM
+description: A tiny Kubernetes controller that reports failing workloads as facts, LLM optional
 type: application
 # The same version as the binary (Cargo.toml); the release checks that they match.
 version: 0.6.3
