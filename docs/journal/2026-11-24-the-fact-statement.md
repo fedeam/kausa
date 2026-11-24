@@ -115,6 +115,13 @@ kurita's `main` as `proposed`.
   and its owner-cache entry is gone after 10 minutes, so for most long-running workloads the
   revision would have been absent and kurita would almost never have proposed an undo. 0028 now
   reads it in the fact slot, before the create.
+- A seventh review of 0028 made that read happen only for a create kausa will send, after the gate
+  and the table's room, bounded it per create attempted, since a failed create is not retried and
+  reads again at the next occurrence, and stated what a writer of Pods gets outside its namespace: a
+  wait of the fact slot of at most 5 seconds per create. The Incident carries the revision as of
+  that read, not of detection, and kurita's change check counts from the read. `owner-lookup-failed`
+  also covers the owner lookup of an Event incident about a Job or a ReplicaSet, and 0027's `Update`
+  says the slot can hold the read.
 - Nothing is implemented, and nothing in it is measured.
 
 ### Decisions
@@ -128,6 +135,12 @@ kurita's `main` as `proposed`.
   is `revision-lookup-failed`. Keeping the revision with each Pod's resolved owner was rejected,
   since it is as old as the Pod; a third value of `missing` alone, since it would leave undo
   proposals rare. The design is the ADR author's, added after the design review.
+- In [0028](../adr/0028-incident-resource-and-remediation-report.md), the owner cache keeps, with
+  the revision, the UID its `get` returned, and the fact slot gives `revision-lookup-failed` when it
+  differs from the UID in the Pod's `ownerReference`: the cache is keyed by name, so a ReplicaSet
+  recreated under the same name could otherwise lend the Incident the deleted one's revision under
+  the new one's UID. Both reviewers asked for it. The revision and the UID sit behind one pointer of
+  the cache entry, empty with incidents off.
 
 ### Next
 

@@ -492,11 +492,13 @@ add to the text above:
 
 Update 2026-11-24: [0028. Publish each incident as an immutable Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by default](0028-incident-resource-and-remediation-report.md) is proposed, not accepted. It would amend three points of this ADR. Point 3:
 with incidents on, the fact slot also creates the incident's Incident, after its `Detected` Event
-(at once with `--no-events`), within the same time a write has there. Point 5: the webhook gains a
-`remediation` value of `type`, within `v2`, with an hourly bound of its own that the `detected`
-count never includes, and that owes no `capped` message. Point 10: each entry of the fact queue
-gains one optional pointer, 8 bytes with incidents off and, by an estimate bar 2 of 0028 measures,
-about 320 bytes with them on, and a table of the Incidents kausa created, at most 500 entries, none
-dropped before it is 6 hours old, is a new bounded structure; the bar of 2 MiB for a full fact
-queue does not change. This takes effect only when 0028 is accepted, which needs its bars measured
-and kurita's ADR 0008 accepted; until then the text above holds.
+(at once with `--no-events`) and, for a sample Pod run by a ReplicaSet, after a read of its revision
+through the owner lookup, made only for a create kausa will send, which can hold the slot up to 5
+seconds more (0028's point 3); the create itself takes the time a write has there. Point 5: the
+webhook gains a `remediation` value of `type`, within `v2`, with an hourly bound of its own that the
+`detected` count never includes, and that owes no `capped` message. Point 10: each entry of the fact
+queue gains one optional pointer, 8 bytes with incidents off and, by an estimate bar 2 of 0028
+measures, about 320 bytes with them on, and a table of the Incidents kausa created, at most 500
+entries, none dropped before it is 6 hours old, is a new bounded structure; the bar of 2 MiB for a
+full fact queue does not change. This takes effect only when 0028 is accepted, which needs its bars
+measured and kurita's ADR 0008 accepted; until then the text above holds.

@@ -236,8 +236,9 @@ spec:                       # required; CEL: self == oldSelf
       uid: UID
       revision: int64 1..2^53   # optional: absent exactly when missing names
                                 # revision-lookup-failed (the fact slot's read of point 3
-                                # failed, or found the annotation absent or not a whole
-                                # number); CEL: only with kind ReplicaSet
+                                # failed, answered with another UID than the Pod's
+                                # ownerReference, or found the annotation absent or not a
+                                # whole number); CEL: only with kind ReplicaSet
   deployment: {generation: int64 >= 1, revision: int64 >= 1}   # CEL: D014 only
   regarding:                # an Event incident about something other than a Pod
     kind: Job | ReplicaSet | StatefulSet | DaemonSet | CronJob | PersistentVolumeClaim
@@ -280,18 +281,25 @@ Each entry of the fact queue gains one optional pointer, filled only with incide
   and `regarding`'s share one field.
 - **`regarding`**: the kind, the name and, when the Event has one, the UID of the object an Event
   incident is about, when that object is not a Pod.
-- **`missing`**: which of the two reads failed. `owner-lookup-failed`: the sample Pod's owner lookup
-  failed when kausa resolved it, so the incident names the ReplicaSet or the Job in place of its
-  owner (the third value of a Pod's entry, `src/run.rs:1399-1401`), taken in the tick.
-  `revision-lookup-failed`: the read of the revision in the fact slot found none, because its `get`
-  failed or gave no answer within 5 seconds, or because it answered and the annotation is absent or
-  not a whole number. `sample.controller.revision` of a ReplicaSet is absent exactly when `missing`
-  names `revision-lookup-failed`.
+- **`missing`**: which of the two reads failed. `owner-lookup-failed`: the owner lookup failed when
+  kausa resolved the incident's owner, so the incident names the ReplicaSet or the Job in place of
+  its owner. For an incident about a Pod, that is the sample Pod's lookup (the third value of a
+  Pod's entry, `src/run.rs:1399-1401`); for an Event incident about a Job or a ReplicaSet (`D008`,
+  `D011`), the lookup of the Event's object (`src/run.rs:1540-1548`), whose failure an Event's entry
+  does not keep today (`:1410`, only logged): the entry gains the same flag, kept with incidents off
+  too, and then `object` and `regarding` name the same Job or ReplicaSet. Both are taken in the
+  tick. `revision-lookup-failed`: the read of the revision in the fact slot found none, because its
+  `get` failed or gave no answer within 5 seconds, because it answered for a ReplicaSet with another
+  UID than the one in the Pod's `ownerReference`, or because the annotation is absent or not a whole
+  number. `sample.controller.revision` of a ReplicaSet is absent exactly when `missing` names
+  `revision-lookup-failed`.
 - **For `D014`**, the Deployment's `metadata.generation` and revision at detection, from the record
   kausa already holds while the rule matches.
 
-UIDs are kept as 16 binary bytes. Each owner-cache entry gains the revision, 8 bytes. No table of
-Deployments is added, and no Pod beyond the sample.
+UIDs are kept as 16 binary bytes. Each owner-cache entry gains one optional pointer, 8 bytes, empty
+with incidents off; with incidents on, the entry of a ReplicaSet whose `get` answered points to the
+revision and the UID that `get` returned, 8 and 16 bytes. No table of Deployments is added, and no
+Pod beyond the sample.
 
 **Where the revision comes from.** This paragraph was written after the design review, which left
 the read implicit: it is this ADR's own design, not one of the two compared. kausa reads a
@@ -299,31 +307,52 @@ ReplicaSet's revision only through the owner lookup (`controller_of`, `src/run.r
 cache entry holds it, and only from async code; the tick, which is synchronous (`src/run.rs:1636`),
 makes no request. The tick cannot use the entry either: a Pod's owner is resolved once and reused
 while its controller reference stays the same and the lookup worked (`src/run.rs:1448-1452`), and an
-entry is dropped at the first lookup after its 600 seconds (`OWNER_CACHE_TTL`, `:82`; `retain`,
-`:1950`), so at the tick that emits an incident about a Pod older than 10 minutes the sample's entry
-is usually expired or gone. The fact slot reads it instead: after the incident's `Detected` Event
-and the create gate of point 1, and before the create, it calls the lookup for the sample's
-ReplicaSet. A fresh entry answers with no request; an absent or expired one costs the existing
-metadata `get` of `replicasets`, with its timeout of 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`); a
-failed one is answered from the cache for 30 seconds (`OWNER_ERROR_TTL`, `:83`). The slot can reach
-the lookup as the code stands: the term's lookup (`src/run.rs:973`) is created before the slot's
-future (`:1005`) and outlives it; it is passed to `Reporter::report` as an argument, since the
-reporter outlives terms; and its cache is a `RefCell` (`:1904`) never borrowed across an `await`, so
-the slot and `on_pod` share it. So:
+entry expires after 600 seconds (`OWNER_CACHE_TTL`, `:82`) and is dropped only when a later lookup
+misses the cache and sends a `get` (`retain`, `:1950`), so at the tick that emits an incident about
+a Pod older than 10 minutes the sample's entry is usually expired or gone. The fact slot reads it
+instead, and only for a create kausa will send: after the incident's `Detected` Event, after the
+gate of point 1 admits the create and after the table of created Incidents is found to have room,
+and before the create. It calls the lookup for the sample's ReplicaSet: a fresh entry answers with
+no request; an absent or expired one costs the existing metadata `get` of `replicasets`, with its
+timeout of 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`); a failed one is answered from the cache for 30
+seconds (`OWNER_ERROR_TTL`, `:83`). The slot compares the UID the entry's `get` returned with the
+UID in the Pod's `ownerReference`, and gives `revision-lookup-failed` when they differ. The slot can
+reach the lookup as the code stands: the term's lookup (`src/run.rs:973`) is created before the
+slot's future, which is assigned at `:1012` (`reporter.report(fact)`; `reporting` is declared at
+`:1005`), and outlives it; it is passed to `Reporter::report` as an argument, since the reporter
+outlives terms; and its cache is a `RefCell` (`:1905`) never borrowed across an `await`, so the slot
+and `on_pod` share it. So:
 
-- **Fresh at the create, within 600 seconds.** The owner cache keys an entry by hop, namespace and
-  name, not by UID, so the revision can be older than the live one after a rollout, or a rollback
-  that reuses the ReplicaSet, in the 600 seconds before the create, and newer after the ReplicaSet
-  was deleted and recreated under the same name. kurita compares for equality (its ADR 0008, point
-  4), so either difference stops an undo proposal, and a recreation also changes the UID, which it
-  compares; a failed read gives no revision, which stops it too. A stale revision can stop a
-  proposal and never allow one as long as a Deployment never gives one revision number to two of its
-  ReplicaSets ("Not verified"). A proposal is missed this way only when the ReplicaSet's revision
-  changed in the 600 seconds before the create.
-- **At most one `get` per Incident created**, none for a create the gate refuses: at most 500 in any
-  6 hours per process (point 1), each holding the fact slot at most 5 seconds, before the create and
+- **Fresh at the read, within 600 seconds, and of the same ReplicaSet.** The owner cache keys an
+  entry by hop, namespace and name, not by UID; the UID kept in the entry makes a ReplicaSet deleted
+  and recreated under the same name within 600 seconds, or a Pod whose reference pairs one
+  ReplicaSet's name with another's UID, give `revision-lookup-failed`. What remains is the staleness
+  of the same ReplicaSet: its revision changes only when a rollback reuses it, which gives it a
+  revision higher than any other of its Deployment's, so a stale value is lower than its live one
+  and than the Deployment's live revision. kurita compares for equality (its ADR 0008, point 4), so
+  a stale revision stops an undo proposal and never allows one, as long as a ReplicaSet's revision
+  only grows and a Deployment's revision is never lower than any of its ReplicaSets' ("Not
+  verified"); a failed read stops it too. A proposal is missed this way only when the ReplicaSet's
+  revision changed in the 600 seconds before the read.
+- **The revision at the read, not at detection.** The entry can have been filled after the tick that
+  emitted the incident, so the Incident carries the revision as of the read, and kurita's point 4
+  detects changes from that read on, not from detection. A rollback onto the sample's ReplicaSet
+  between the tick and the read (the time the fact waited in the queue and its `Detected` Event
+  took) gives it the Deployment's highest revision; the Incident carries it, the newest ReplicaSet
+  is the sample's, and kurita's comparison passes where a value from detection would have stopped
+  it. That needs a ReplicaSet that was not the newest at detection, and a writer of Deployments in
+  N, which can make any change to that Deployment itself; what it can get is an undo proposal of
+  that rollback, made only if kurita's live reads confirm the failure, and executed by nobody in
+  kurita v0.1. Whether kurita's rows reach that proposal is under "Not verified".
+- **At most one `get` per create attempted**, none for a create the gate or the table refuses. A
+  create the server accepts happens at most 500 times in any 6 hours per process (point 1). A failed
+  create is not retried and its fingerprint is not marked (point 1), so the fingerprint's next
+  occurrence is a new attempt and reads again; for those, the cache is the bound: at most one `get`
+  per ReplicaSet name every 600 seconds while its `get` answers, 36 in 6 hours, or every 30 seconds
+  while it fails, 720 in 6 hours. Each holds the fact slot at most 5 seconds, before the create and
   its own 10 seconds. No new verb and no new watch.
-- **With incidents off,** no read is made and nothing is kept: the entry's pointer stays empty.
+- **With incidents off,** no read is made, the revision is not parsed and nothing is kept: the fact
+  queue entry's pointer and the owner-cache entry's stay empty.
 
 ### 4. Retention
 
@@ -602,12 +631,19 @@ a new create, or a create with any valid `spec`.
 but chooses what point 3 reads: a Pod's controller `ownerReference` names the ReplicaSet the fact
 slot reads, and that ReplicaSet's `deployment.kubernetes.io/revision` annotation is the revision it
 copies. So the writer can make an Incident in N about a failing Pod carry a revision of its choice,
-or none (a ReplicaSet that does not exist, or an annotation that is not a whole number, gives
-`revision-lookup-failed`), and so suppress kurita's undo proposal for a Deployment of N, or let one
-through, as a writer of Incidents can (above), on workloads it can already change itself. What it
-costs kausa is bounded by the create gate: the read is made once per Incident created, at most 500
-`get`s in any 6 hours, each holding the fact slot at most 5 seconds, by which the next facts' Events
-wait. Nothing outside N.
+or none (a ReplicaSet that does not exist, an annotation that is not a whole number, or a reference
+that pairs one ReplicaSet's name with another's UID gives `revision-lookup-failed`), and so suppress
+kurita's undo proposal for a Deployment of N, or let one through, as a writer of Incidents can
+(above), on workloads it can already change itself. What it costs kausa: the read is made only for a
+create kausa will send, once per create attempted, at most 500 `get`s in any 6 hours for creates the
+server accepts (point 3 bounds the failed ones, which a writer of Incidents or the API server
+causes, not this writer), each holding the fact slot at most 5 seconds, by which the next facts'
+Events wait. Outside N, that wait is all it gets: the incident's own `Detected` Event is written
+before the read, and the facts of other namespaces wait at most 5 seconds per create attempted,
+which for the creates the server accepts is 500 × 5 = 2,500 seconds in any 6 hours (11.6 % of
+21,600), and only while the API server answers those `get`s slowly. That the writer cannot lengthen
+a metadata `get` by itself, and that the wait does not fill the fact queue for other namespaces, are
+under "Not verified".
 
 **Whoever can create Events in N**, which the built-in `edit` role in N can, writes no Incident but
 chooses, through kausa, what some of kausa's Incidents in N say. For an Event incident kausa takes
@@ -706,11 +742,18 @@ bar 2, 3 or 6 measures it.
   rule of point 1 keeps a creation time in each entry, a monotonic instant of 16 bytes on a 64-bit
   Linux target; whether the review's estimates count it is not known, so at most 500 × 16 = 8,000
   bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry.
-- **The owner cache:** +8 bytes an entry, the revision.
-- **Reads:** at most one metadata `get` of `replicasets` per Incident created, when the sample's
-  owner-cache entry is absent or expired at the create, so at most 500 in any 6 hours per process,
-  0.023 a second at the most; each holds the fact slot at most 5 seconds (point 3). None with
-  incidents off.
+- **The owner cache:** +8 bytes an entry, one optional pointer, empty with incidents off (bar 1);
+  with incidents on, 24 bytes more for each entry of a ReplicaSet whose `get` answered, the revision
+  (8) and the UID its `get` returned (16), plus the allocator's overhead, not counted.
+- **The table of Events:** one flag an entry, whether the owner lookup of the Event's object failed
+  (point 3's `missing`), kept with incidents off too: at most 8 bytes an entry with alignment, an
+  estimate; bar 1 measures it.
+- **Reads:** at most one metadata `get` of `replicasets` per create attempted, when the sample's
+  owner-cache entry is absent or expired at the read: at most 500 in any 6 hours per process for
+  creates the server accepts, 0.023 a second at the most, and, for failed creates, at most one per
+  ReplicaSet name every 600 seconds while its `get` answers or every 30 seconds while it fails
+  (point 3). Each holds the fact slot at most 5 seconds: 2,500 seconds in any 6 hours for the 500,
+  11.6 % of the slot's time, only while the API server answers slowly. None with incidents off.
 - **Writes per incident:** kausa +1 create and, later, +1 delete; kurita +1 create and +1 delete,
   besides its own Event. **Writes per change of an object:** 0; neither resource is patched.
 - **Stored objects:** an Incident at most about 2.5 KB (a `spec` of about 1.5 KB at the longest
@@ -761,7 +804,8 @@ before this ADR and kurita's ADR 0008 are accepted:
 3. The table of created Incidents at 500 entries is at most 0.5 MiB.
 4. 1024 `Detected` Events and 1024 Incident creates in a row: no watch error, relist or restart in
    kausa or kurita; the drain time recorded against the 7.9 to 21.5 seconds of Events alone, with
-   the `get`s of point 3's read counted and the time they held the slot.
+   the `get`s of point 3's read counted and the time they held the slot, and the fact queue's
+   length recorded while they ran.
 5. A sweep of 1,000 Incidents, kausa's worst case between two sweeps (point 4), deletes the 500
    beyond the cap within its 30 seconds and causes no relist.
 6. The stored sizes of both resources, `managedFields` included, on k3s with its default
@@ -785,15 +829,30 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 - **Whether the metadata `get` of a ReplicaSet returns its annotations,** where the revision is.
   Test: read a ReplicaSet with a metadata-only `get` in kind and check the
   `deployment.kubernetes.io/revision` annotation.
-- **How often the sample's owner-cache entry is absent or expired at the create,** so how many
-  `get`s point 3's read makes and for how long it holds the fact slot. Computed only as a bound, one
-  per Incident created. Test: bar 4, and an Incident about a Pod older than 10 minutes in kind,
-  whose `sample.controller.revision` must be set.
-- **That a Deployment never gives one revision number to two of its ReplicaSets,** on which point 3
-  rests the claim that a stale revision can stop an undo proposal and never allow one: a hypothesis
-  from the Deployment controller's known behaviour (a rollback gives the reused ReplicaSet the
-  highest revision plus one), not read in its source here. Test: read the controller's source, and
-  in kind roll a Deployment out and back and compare the revisions.
+- **How often the sample's owner-cache entry is absent or expired at the read,** so how many `get`s
+  point 3's read makes and for how long it holds the fact slot. Computed only as a bound, one per
+  create attempted. Test: bar 4, and an Incident about a Pod older than 10 minutes in kind, whose
+  `sample.controller.revision` must be set.
+- **That a ReplicaSet's revision only grows, and that a Deployment's revision is never lower than
+  any of its ReplicaSets',** on which point 3 rests the claim that a stale revision of the same
+  ReplicaSet can stop an undo proposal and never allow one: a hypothesis from the Deployment
+  controller's known behaviour (a rollback gives the reused ReplicaSet the highest revision plus
+  one), not read in its source here. A ReplicaSet recreated under the same name is covered by the
+  UID, not by this. Test: read the controller's source; in kind, roll a Deployment out and back and
+  compare the revisions; and delete the sample's ReplicaSet with `--cascade=orphan` so that the
+  Deployment recreates it under the same name and its Pods are adopted, then let an incident about
+  one of them be created within 600 seconds of a cached read: its Incident must carry
+  `revision-lookup-failed`.
+- **Whether a rollback onto the sample's ReplicaSet between the tick and the read reaches an undo
+  proposal in kurita,** point 3's "The revision at the read": kurita's point 4 passes; whether its
+  rows' other rules then propose the undo was not walked here. Test: in kind, with kurita, roll a
+  Deployment back onto the ReplicaSet of failing Pods while their fact waits in the queue.
+- **That a writer of Pods or ReplicaSets cannot lengthen a metadata `get` by itself,** for instance
+  with a ReplicaSet of about 1.5 MiB of metadata on a Raspberry Pi; the exposure exists today in
+  `on_pod`. Test: bar 4 with such a ReplicaSet as the sample's, recording each `get`'s time.
+- **That the reads' wait, added to the `Detected` Event's 10 seconds and the create's 10, does not
+  fill the fact queue (1,024) for other namespaces** under point 3's bound. Test: bar 4, with the
+  reads' `get`s slowed.
 - **That one forged Incident every 120 seconds exactly leaves no gap** in which a genuine
   `remediation` message is sent: point 6's bound counts over a rolling 60 minutes, and whether a
   message 3,600 seconds after the first of 30 counts in the window or out of it depends on the
