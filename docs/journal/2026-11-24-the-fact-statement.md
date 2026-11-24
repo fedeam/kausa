@@ -91,8 +91,8 @@ Write the ADR that records kausa's half of the contract with kurita, a controlle
 remediations for kausa's incidents: an `Incident` resource that only kausa writes, and the report
 by webhook of what kurita proposed. Docs only; kurita's ADR 0008, its other half, was already on
 kurita's `main` as `proposed`. Then write the ADR that says how kausa reports the end of an
-incident, which the maintainer asked for: kausa detects and reports, kurita proposes, and kausa says
-whether it was resolved, which kausa cannot know.
+incident. The maintainer asked for this loop: kausa detects and reports, kurita proposes, and kausa
+says whether it was resolved. kausa cannot know that, so the ADR decides what it says instead.
 
 ### What was done
 
@@ -121,6 +121,11 @@ whether it was resolved, which kausa cannot know.
   every non-terminal Pod of the owner within a window, 60 minutes by default. Both by webhook and
   log, off by default; `Incident.status` stays declared, empty and reserved, and no permission
   changes. `Update 2026-11-24` paragraphs at the end of 0015, 0026, 0027 and 0028.
+- A security and a docs review of 0029 changed it the same day: the closing matches on a
+  `first_seen` that the tracker no longer lowers once the incident is emitted, and a closing that
+  matches no Incident is counted; the Pods of the owner are only those of the Incident's
+  namespace, which also corrects 0027's `Pods now`; and in the queue an end message never evicts a
+  `remediation`.
 - While 0029 was reviewed, its author found that 0028 never said how the tick that emits an Incident
   reads the sample's ReplicaSet revision: the tick makes no request, a Pod's owner is resolved once,
   and its owner-cache entry is gone after 10 minutes, so for most long-running workloads the
@@ -175,8 +180,9 @@ whether it was resolved, which kausa cannot know.
   would otherwise hide the stop of the table, which holds Incidents back in every namespace. The
   manager's decision, taken from the security reader's ninth review.
 - Proposed only: [0029](../adr/0029-incident-end-report.md), after 0028. A write of the end to
-  `Incident.status` was rejected: on a `/status` patch the API server ignores the UID, and a
-  `status: null` patch skips rules on `status`.
+  `Incident.status` was rejected. The review read in the Kubernetes source, not yet checked in
+  kind, that on a `/status` patch the API server ignores the UID and that a `status: null` patch
+  skips rules on `status`; not writing `status` is the smaller design either way.
 
 ### Next
 
@@ -188,4 +194,4 @@ whether it was resolved, which kausa cannot know.
   implementation.
 - Measure bars 1 to 8, and settle what "Not verified" lists, first whether a metadata `get` of a
   ReplicaSet returns its annotations.
-- Implement 0029 after 0028, behind `incidents.reportEnd`, and measure its bars 1 to 11.
+- Implement 0029 after 0028, behind `incidents.reportEnd`, and measure its bars 1 to 12.

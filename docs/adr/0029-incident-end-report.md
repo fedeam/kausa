@@ -30,11 +30,11 @@ reports; its ADR 0008, the contract with kausa, is the other half of 0028. This 
 the maintainer asked for: kausa detects and publishes the incident, kurita re-checks it and
 proposes, and kausa then says, by its webhook, how the incident ended. **kausa cannot know that an
 incident was resolved, and never says so.** It says two narrower things, each typed: that it
-stopped seeing the failure, on which basis and when; and, after kurita proposed one of three
-actions that change a workload, whether it saw the change that action makes on every Pod of the
-workload within a stated window. In kurita v0.1 nothing executes, so an `observed` is always a
-change someone else made, by hand or otherwise. Every figure of memory, size and time below is
-**computed, not measured**, unless it says measured.
+stopped seeing the failure, on which basis and when; and, after kurita proposed one of three actions
+that change a workload, whether it saw the change that action makes on every non-terminal Pod of the
+workload, Pending ones included, within a stated window. In kurita v0.1 nothing executes, so an
+`observed` is always a change someone else made, by hand or otherwise. Every figure of memory, size
+and time below is **computed, not measured**, unless it says measured.
 
 ## Context
 
@@ -76,6 +76,17 @@ and its outcome check from the other (a window with a deadline, every Pod). The 
 choices to the maintainer; all twelve stand as it made them, and "Alternatives considered" gives
 each one's alternative.
 
+**What a review of this proposal changed in that judgment,** on 2026-11-24, after a security review
+read the source: three departures, each with its reason. The closing's match uses a `first_seen`
+that the tracker stops lowering once the entry is emitted, since `observe` lowered it at every later
+signal (`src/incident.rs:452`) and a late Event with an earlier time made the closing match nothing,
+uncounted; and a closing that matches nothing is counted (point 1). The Pods of the owner are those
+of the Incident's namespace, since `pods_of` filters by UID alone over every watched namespace
+(`src/run.rs:1744-1749`) and a Pod in another namespace could name the owner's UID (point 2). And in
+the queue an end message never evicts a `remediation`, since whoever writes Events can cause
+closings, while a `remediation` rests on a record only the two controllers write (point 4). None
+raises a bar or adds a byte to the costs.
+
 The fixed limits of that brief, which this ADR keeps: kausa executes nothing and reads no Secret
 and no ConfigMap; nothing new goes to the model, and nothing of the closing or the outcome comes
 from it; no free text written by another controller leaves by the webhook; what leaves about a
@@ -86,19 +97,21 @@ couple only through cluster resources.
 ## Alternatives considered
 
 - **Writing the end into `Incident.status`**, the slot 0028's point 9 reserved, with `patch` on
-  `incidents/status`. Rejected; the slot stays declared, empty and reserved. The review found in the
-  Kubernetes source that the design as proposed does not hold: a merge patch to `/status` that
-  carries `metadata.uid` is not refused when the UID differs, the UID is ignored (the patch handler
-  passes no preconditions, and the status strategy copies the whole old object over the new one),
-  so after a delete and a new create under the same name kausa would patch the status of an
-  object it did not create; and a rule placed on `status` does not run when a merge patch removes
-  `status` itself (`status: null`), so a written result could be erased. Both can be fixed (a
-  `resourceVersion` precondition, a root rule `!has(oldSelf.status) || has(self.status)`), and
+  `incidents/status`. Rejected; the slot stays declared, empty and reserved. The review read in the
+  Kubernetes source (`kubernetes/kubernetes` at `master`, fetched on 2026-11-24, no commit recorded;
+  the paths are under "Not verified") that the design as proposed does not hold: a merge patch to
+  `/status` that carries `metadata.uid` is not refused when the UID differs, the UID is ignored (the
+  patch handler passes no preconditions, and the status strategy copies the whole old object over
+  the new one), so after a delete and a new create under the same name kausa would patch the status
+  of an object it did not create; and a rule placed on `status` does not run when a merge patch
+  removes `status` itself (`status: null`), so a written result could be erased. Both can be fixed
+  (a `resourceVersion` precondition, a root rule `!has(oldSelf.status) || has(self.status)`), and
   kurita would have to parse only `metadata` and `spec`. What remains costs `patch` on
-  `incidents/status`, two writes per Incident, one `MODIFIED` event per write to kurita's watch,
-  and a way for any holder of `*/status` to write a result first and make kausa send nothing. What
-  it buys is that `kubectl get incident` shows the end, for the day an Incident is kept; the
-  webhook receiver, who asked, gets nothing from it.
+  `incidents/status`, two writes per Incident, one `MODIFIED` event per write to kurita's watch, and
+  a way for any holder of `*/status` to write a result first and make kausa send nothing. What it
+  buys is that `kubectl get incident` shows the end, for the day an Incident is kept; the webhook
+  receiver, who asked, gets nothing from it. The rejection does not rest on those four readings: not
+  writing `status` is the smaller design even if a kind test proves them wrong.
 - **A snapshot of the Pods at closing instead of an outcome over a window.** Simpler, and it needs
   no pending check. But a failure that never stops gets no outcome, which is the case the request
   most needs; and with "any Pod shows the change", one forged Pod whose `ownerReference` names an
@@ -109,7 +122,7 @@ couple only through cluster resources.
 - **A bound of its own for each of `closed` and `outcome`.** 30 more messages an hour at the
   default, for no reader who needs them apart. Or sharing the bound of `remediation` messages,
   which would let closings of forged Event incidents use up the bound of genuine `remediation`
-  messages. One shared bound for the two end messages instead (point 5).
+  messages. One shared bound for the two end messages instead (point 4).
 - **End messages that owe the `capped` message.** The `capped` text speaks of incidents not posted
   and of kausa's log having every one (`src/notification.rs:170-175`); an end message is not an
   incident, so it would need a new text. They owe none, as 0028 decided for `remediation`.
@@ -122,8 +135,8 @@ couple only through cluster resources.
   receiver cannot infer from a `closed` and a later Event. A returning failure stays silent until
   the window ends, as today.
 - **Leaving `none` out of the `closed` message,** as 0028 leaves it out of `remediation` messages.
-  Then `recorded: no` would misstate that kurita recorded something. `none` is shown as
-  `recorded: yes, action: none`.
+  Then a record of `none` that passed kausa's checks would show as `recorded: no`, which says that
+  kausa holds no such record. `none` is shown as `recorded: yes, action: none`.
 - **A window shorter than 20 minutes.** The owner cache keeps an entry 600 seconds
   (`OWNER_CACHE_TTL`, `src/run.rs:82`), so after an undo a stale revision can hold `observed` back
   for up to 10 minutes; a window of 10 would then give false `not-observed` results.
@@ -150,21 +163,37 @@ An incident is **closed** at the tick where `Tracker::tick` drops its key from `
 - 0028's table holds an Incident that kausa created **in the current lease term**, with the same
   namespace, owner kind, owner name and detection as the key (`IncidentKey`,
   `src/incident.rs:33-38`) and the same `firstSeenUnix` as the entry's `first_seen`, and whose
-  closing has not been taken; each table entry carries the number of the term that created it;
+  closing has not been taken (the oldest such entry when two qualify); each table entry carries the
+  number of the term that created it;
 - the detection is not `D008`.
 
 `tick` returns those keys with their `first_seen` and `last_signal_at`, which `Pending` already
-holds. Nothing else closes an incident: not the dedup window, not the sweep, not the deletion of
-the Incident. At most one closing per Incident: the table entry marks it.
+holds. **What the match uses is frozen at emission:** `observe` stops lowering `first_seen` once
+the entry is emitted, where today it lowers it at every signal (`entry.first_seen =
+entry.first_seen.min(first)`, `src/incident.rs:452`), so a later signal of the same key with an
+earlier time (another Pod of the owner, or an Event whose `lastTimestamp` its writer set earlier,
+`src/incident.rs:175`) no longer moves it away from the Incident's `firstSeenUnix`. Nothing of
+0027 changes: an emitted entry's `first_seen` is read by no one but this match, since `emit` runs
+only for an entry not emitted (`src/incident.rs:397`, `:421`). No field is added. A test pins it: a
+later Event of the same key with an earlier `lastTimestamp`, then the closing, which matches.
 
-| Detection | `basis` | Closes when | Earliest after the last signal |
+**A closing with no match** (an emitted entry dropped by `tick` whose key and `first_seen` match no
+entry of the current term: an incident held back by the gate, refused while 500 Incidents are
+held, a create that failed or is still in flight, a `D014` handled by another incident, or a table
+entry dropped after 6 hours) sends nothing, and is counted under its own result, `no-incident`
+(point 6). `D008` is not a closing and is not counted.
+
+Nothing else closes an incident: not the dedup window, not the sweep, not the deletion of the
+Incident. At most one closing per Incident: the table entry marks it.
+
+| Detection | `basis` | Closes when | The closing tick comes |
 |---|---|---|---|
-| `D001` to `D005` | `state` | No tick counted the state for more than 330 s | 330 s, plus up to one 5 s tick |
-| `D014` | `state` | The Deployment's record was dropped because the rule stopped matching (progress, a new rollout, a pause, the deadline removed, the Deployment deleted), then 330 s | 330 s, plus up to 5 s |
-| `D009` | `recent-state` | No Pod of the owner failed by eviction in 10 minutes, then 330 s | 600 + 330 = 930 s, plus up to 5 s |
-| `D006`, `D007`, `D010` to `D013` | `event` | The first tick with no fresh matching Event: its last occurrence 10 minutes old or more, the Event gone, or the Pod it is about gone | at most 600 s + 5 s |
+| `D001` to `D005` | `state` | No tick counted the state for more than 330 s | 330 to 335 s after the last signal, the last tick that counted the state |
+| `D014` | `state` | The Deployment's record was dropped because the rule stopped matching (progress, a new rollout, a pause, the deadline removed, the Deployment deleted), then 330 s | 330 to 335 s after the last signal |
+| `D009` | `recent-state` | No Pod of the owner held that failed by eviction in the last 10 minutes, then 330 s | 330 to 335 s after the last signal; from the last eviction at most 600 + 335 = 935 s, and no minimum beyond the 330: deleting the evicted Pods ends the signal at once |
+| `D006`, `D007`, `D010` to `D013` | `event` | The first tick with no fresh matching Event: its last occurrence 10 minutes old or more, the Event gone, or the Pod it is about gone | At most 600 + 5 = 605 s after the Event's last occurrence; at the next tick, within 5 s, when the Event or the Pod is gone |
 | `D008` | none | No closing: a failed Job is a terminal fact | n/a |
-| `D014` handled (yields to another incident) | none | No Incident, so no match (`src/incident.rs:424-430`) | n/a |
+| `D014` handled (yields to another incident) | none | No Incident, so no match: counted `no-incident` (`src/incident.rs:424-430`) | n/a |
 
 The tick is 5 seconds (`TICK`, `src/run.rs:75`). **How it closed:** `source-lost` when a watch
 that covers the Incident's namespace dropped its records on a `403` at a time after
@@ -178,16 +207,21 @@ the watch's position: 3 kinds × (1 + n) watches at most, for n listed namespace
 fingerprint per `--dedup-hours`, and a second Incident is possible as it states. So:
 
 - **A reoccurrence held back by the gate** is a new pending entry under the same key, with a new
-  `first_seen`; no Incident has that `firstSeenUnix`, so its end is silent, as its `detected`
-  message is (0027's point 5).
+  `first_seen`; no Incident has that `firstSeenUnix`, so its end sends nothing, as its `detected`
+  message is not sent (0027's point 5), and is counted `no-incident`.
 - **A second Incident** (the table dropped the first one's entry after 6 hours, or `--dedup-hours`
   is `0`) has its own entry and its own `firstSeenUnix`, and matches it.
-- **Two entries can share the match.** `IncidentKey` has no fingerprint, so with `--dedup-hours`
-  at `0` two forged Events can make two Incidents with the same key and the same `firstSeenUnix`
-  under two fingerprints. The match then takes the one whose closing has not been taken, and the
-  next closing of that key takes the other; no Incident is closed twice.
-- **An entry dropped after 6 hours** under 0028's rule loses its closing, and the loss is counted
-  (point 7).
+- **Two entries can share the match,** at any `--dedup-hours`. `IncidentKey` has no fingerprint,
+  and the tracker holds one entry per key at a time, so two Incidents share a key and a
+  `firstSeenUnix` only when two entries of an event key, one after the other, got the same
+  `first_seen`: whoever writes the Events chooses their `lastTimestamp`, and a different note
+  gives a different fingerprint, which the gate does not hold back. The match takes the oldest
+  whose closing has not been taken; when the first entry's closing came before its create landed
+  (counted `no-incident`), the second entry's closing takes the first Incident and names its
+  fingerprint. No Incident is closed twice. Freezing `first_seen` at emission does not change this:
+  each entry is frozen at its own emission.
+- **An entry dropped after 6 hours** under 0028's rule loses its pending check, counted lost (point
+  7); its closing, when the tracker drops the key, is counted `no-incident`.
 
 ### 2. The outcome of an accepted action
 
@@ -203,9 +237,15 @@ changes a workload: `rollout-undo`, `raise-memory-limit` or `set-image-pull-poli
 - **What decides it:** the action id chooses the check. `proposedAt` is only reported. No other
   field of the Remediation is read, and none of its parameters.
 
-**The Pods of the owner** are the Pods kausa holds whose resolved top-level owner has the
-Incident's `object.uid`, the filter of `pods_of` (`src/run.rs:1744-1749`). An owner with no UID
-gives `not-checkable`. **Non-terminal:** `phase` is neither `Failed` nor `Succeeded`.
+**The Pods of the owner** are the Pods kausa holds **in the Incident's namespace** whose resolved
+top-level owner has the Incident's `object.uid`. This changes `pods_of` (`src/run.rs:1744-1749`),
+which today filters by UID alone over the Pods of every watched namespace: `top_owner` keeps a
+controller `ownerReference` that is neither a ReplicaSet nor a Job as the Pod carries it, UID
+included (`src/owner.rs:59-61`), so a Pod in another namespace could name the owner's UID. The
+same set gives `closed.pods_now`, and the change also corrects 0027's `Pods now` (`facts.podsNow`,
+`src/run.rs:1208`, `:1692`), which counts the same way today. An owner with no UID gives
+`not-checkable`. **Non-terminal:** `phase` is neither `Failed` nor `Succeeded`; Pending Pods
+count.
 
 The baseline is taken at acceptance, at `t_a` on kausa's monotonic clock, from those Pods:
 
@@ -284,8 +324,8 @@ of the Incident, never read back.
 | `closed.basis` | `state`, `recent-state` or `event` |
 | `closed.last_seen` | the `last_signal_at` of the entry: the last tick that counted a signal |
 | `closed.at` | the closing tick |
-| `closed.pods_now` | 0 to 1,000,000: the Pods of the owner kausa holds at the closing tick |
-| `remediation.recorded` | `yes`; `no` (the report is on and nothing was accepted); `not-read` (the report is off); `source-missing` (0028's gauge of the `remediations` watch is 0) |
+| `closed.pods_now` | 0 to 1,000,000: the Pods of the owner kausa holds at the closing tick (point 2's set); absent for `D012` and `D013`, whose owner, a PersistentVolumeClaim or a HorizontalPodAutoscaler, is no Pod's owner, so the count would always be 0 |
+| `remediation.recorded` | `yes`; `no` (the report is on and kausa holds no record of kurita's for this Incident that passed the checks of 0028's point 6); `not-read` (the report is off); `source-missing` (0028's gauge of the `remediations` watch is 0) |
 | `remediation.action` | only with `yes`: `none`, `needs-human`, `inspect`, `rollout-undo`, `raise-memory-limit` or `set-image-pull-policy` |
 | `remediation.result`, `outcome.result_of_record` | `proposed`; `executed` may be added later, as a value |
 | `outcome.action` | `rollout-undo`, `raise-memory-limit` or `set-image-pull-policy` |
@@ -301,27 +341,32 @@ of the Incident, never read back.
   tests and fixed by the reference page, such as `kausa: stopped seeing out of memory (D003) in
   shop, Deployment web at 10:04:12 UTC (last seen 09:58:42; 3 Pods held). kurita proposed
   raise-memory-limit at 09:41:20.` The `event` basis says "no fresh Warning event for … in 10
-  minutes"; `rollout-undo` says "the ReplicaSet revision of every running Pod changed", never "the
-  undo was applied".
+  minutes"; `rollout-undo` says "the ReplicaSet revision of every non-terminal Pod changed", never
+  "the undo was applied"; for `D012` and `D013` the line has no count of Pods.
 - **Banned words.** A test checks that no enum value and no fixed text holds `healthy`, `fixed`,
-  `resolved`, `recovered`, `ok`, `success` or `worked`.
+  `resolved`, `recovered`, `ok`, `success`, `worked`, `applied`, `succeeded`, `remediated` or
+  `restored`.
 - **At most one of each per Incident**, each queued after its log line, in either order.
 - **One bound for both, their own.** At most the value of `--notify-max-per-hour` of `closed` and
   `outcome` messages together start in any 60 minutes, counted apart from the `detected` and the
   `remediation` messages; no new flag. Over it a message is not sent, counted as `capped` and
   logged as `incident end capped` at most once an hour.
-- **In the queue they rank with `remediation`.** On the way in, when the queue of 16 is full, the
-  oldest queued message of the three lower types (`remediation`, `closed`, `outcome`) is dropped
-  first; with none queued, a new message of those types drops itself; only then does 0027's rule
-  apply (`src/notify.rs:478-494`). On the way out, after the owed `capped` message when it is due,
+- **In the queue they rank below `remediation` on the way in, with it on the way out.** On the way
+  in, when the queue of 16 is full, the oldest queued end message is dropped first, whatever
+  arrives; with none queued, a new end message drops itself; only then does 0028's rule for
+  `remediation` apply (the oldest queued `remediation` dropped, or a new one dropping itself), and
+  then 0027's (`src/notify.rs:478-494`). So an end message never evicts a `remediation`: a closing
+  can be caused by whoever writes Events, a `remediation` only by a record that the two controllers
+  write. The rule is one more `position` search before the one the push already does
+  (`src/notify.rs:483`), and it replaces 0028's sentence that a `remediation` never evicts another
+  message: it evicts an end message. On the way out, after the owed `capped` message when it is due,
   `take_next` takes the oldest message that is neither of the three, and the oldest of the three
-  only when no `detected` and no `explained` message is queued. **Among the three, arrival
-  order:** the queue is one `VecDeque` taken with `pop_front` (`src/notify.rs:524-566`), and
-  nothing in its shape asks for another order. So a `detected` or an `explained` message waits for
-  an end message only when one is being sent as it arrives, at most 10 + 30 + 10 = 50 seconds, as
-  0028's point 6 computes for `remediation` (`TIMEOUT`, `src/notify.rs:57`; `RETRY_WAIT`,
-  `src/notify.rs:70`). A dropped end message is counted and logged as `incident end dropped` at
-  most once an hour.
+  only when no `detected` and no `explained` message is queued. **Among the three, arrival order:**
+  the queue is one `VecDeque` taken with `pop_front` (`src/notify.rs:524-559`), and nothing in its
+  shape asks for another order. So a `detected` or an `explained` message waits for an end message
+  only when one is being sent as it arrives, at most 10 + 30 + 10 = 50 seconds, as 0028's point 6
+  computes for `remediation` (`TIMEOUT`, `src/notify.rs:57`; `RETRY_WAIT`, `src/notify.rs:70`). A
+  dropped end message is counted and logged as `incident end dropped` at most once an hour.
 - **Neither owes the `capped` message**, for 0028's reason: its text speaks of incidents
   (`src/notification.rs:170-175`).
 - **The `sent` check of `detected` messages does not apply to them** (`src/notify.rs:474`, `:539`):
@@ -341,10 +386,11 @@ Pod watch and the existing cached metadata `get` of `replicasets` of the owner l
 
 The log lines of point 3, and `incident end capped`, `incident end dropped` and `incident end
 lost`, the last three at most once an hour. Three counters, proposed here; the reference page fixes
-the names with the code:
+the names with the code, the label `outcome` beside `type="outcome"` included:
 
 - `kausa_incident_ends_total{kind, result}`: what kausa observed. `kind="closed"` with `result` the
-  `how` of point 1; `kind="outcome"` with `result` the five results of point 2. Seven series.
+  `how` of point 1, or `no-incident` for a closing that matched no Incident; `kind="outcome"` with
+  `result` the five results of point 2. 3 + 5 = 8 series.
 - `kausa_end_notifications_total{type, outcome}`: the messages, `type` `closed` or `outcome`, and
   `outcome` `sent`, `failed`, `dropped` or `capped`, the shape of 0028's
   `kausa_remediation_notifications_total{outcome}`. Eight series.
@@ -372,11 +418,13 @@ per term: `lead`, `src/run.rs:959-964`):
 
 - **At the end of a term** (the lease lost, `SIGTERM`), the closings not yet taken and the pending
   checks are counted in `kausa_incident_ends_lost_total` and dropped.
-- **After a crash** nothing is counted.
+- **After a crash** nothing is counted, a restart on memory during a relist included: every
+  pending closing and check is lost, uncounted.
 - **Nothing is read back:** no status, no list of Incidents. The standby holds nothing and sends
   nothing.
-- **A table entry older than 6 hours** dropped under 0028's rule loses its closing or its pending
-  check, and the loss is counted.
+- **A table entry older than 6 hours** dropped under 0028's rule loses its pending check, counted
+  in `kausa_incident_ends_lost_total`; its closing, when the tracker drops the key, matches nothing
+  and is counted `no-incident`.
 
 So a missing `closed` message never means the failure is still there.
 
@@ -386,7 +434,8 @@ So a missing `closed` message never means the failure is still there.
   (`stopped-observing`, or `source-lost` when it lost the permission to see it), on which basis
   and when; how many Pods of the owner it held then; and what kurita recorded for it, if anything.
 - **`outcome`** says: whether the typed change that the accepted action makes was seen on every
-  non-terminal Pod kausa holds of the owner, within a stated window.
+  non-terminal Pod kausa holds of the owner in its namespace, Pending ones included, within a
+  stated window.
 - **Neither says** that the workload is healthy, fixed or resolved, that the failure will not come
   back, that kurita or anyone acted, or that the change caused anything. In kurita v0.1 nothing
   executes: an `observed` is always a change someone else made. A later ADR of kurita's that
@@ -409,26 +458,50 @@ Changed in [ARCHITECTURE.md](../../ARCHITECTURE.md) with the code:
 What each principal gains:
 
 - **A writer of Remediations in N** (kurita's service account, or whoever holds a wildcard grant):
-  it chooses which outcome check runs for a real Incident kausa created in N, among the actions
-  0028 allows for its detection, and when the window starts, by when it writes the record; it puts
-  its action id and time into the `closed` message; and it causes one `outcome` message per
-  Incident, within the end bound. It never chooses the result, never reaches another namespace
-  (0028's lookup by namespace, name and UID) or an Incident of an earlier process, and never costs a
-  `detected` or an `explained` message. Worst case: it records `rollout-undo` and rolls the
-  Deployment itself; kausa reports `observed`, which is true of the Pods, and names kurita only as
-  the proposer of record.
-- **Whoever can create Events in N** (the built-in `edit` role can, and can delete them): one
+  it chooses which outcome check runs for a real Incident kausa created in N, among the actions 0028
+  allows for its detection, and when the window starts, by when it writes the record; it puts its
+  action id and time into the `closed` message; and it causes one `outcome` message per Incident,
+  within the end bound, which is one for the process. It never chooses the result, never reaches
+  another namespace (0028's lookup by namespace, name and UID) or an Incident of an earlier process,
+  and never costs a `detected` or an `explained` message. Worst case: it records `rollout-undo` and
+  rolls the Deployment itself; kausa reports `observed`, which is true of the Pods, and names kurita
+  only as the proposer of record.
+- **A writer of Incidents in N** (0028's trust statement): deleting an Incident and creating
+  another under its name makes kurita's record for it fail kausa's check (`incident-unknown`,
+  0028's point 6), so the closing says `recorded: no` and no outcome check runs. The closing itself
+  comes from kausa's table, not from the object, and is still sent.
+- **Whoever can create Events in N** (the built-in `edit` role can, and can delete them): in N, one
   `closed` message per Incident a forged Event makes kausa create (0028's trust statement), within
   the end bound; it can delay a closing by refreshing the Event and bring it forward by deleting
-  it. No acting id comes from an Event alone, so it never gets an `outcome`.
+  it, and, since the match is frozen at emission, a later Event with an earlier `lastTimestamp` no
+  longer suppresses one. No acting id comes from an Event alone, so it never gets an `outcome`.
+  Outside N, since the end bound and the queue are one for the process: 30 forged Incidents an
+  hour, one Event with a new note every 3,600 / 30 = 120 seconds, within 0028's gate of 500 in 6
+  hours (83 an hour), give 30 closings an hour that fill the end bound, and kausa then sends no
+  `closed` and no `outcome` message about any namespace for that hour, each counted `capped`; a
+  burst of its closings in the queue evicts end messages of other namespaces, counted `dropped`,
+  never a `remediation`. While the process lives, no end is lost uncounted. Within 0028's relist
+  exposure it can make kausa restart on memory, and that loses every pending closing and check,
+  uncounted (point 7).
 - **Whoever can create or delete Pods in N** (`edit` can): a failing forged Pod keeps a state
   incident open, since owner resolution goes by the ReplicaSet's name, which delays its `closed`
   but not the end of its outcome window; it can hold a check at `not-observed`, or make it
   `not-checkable` at acceptance with values that differ; it reaches `observed` only when every
   real non-terminal Pod already shows the change, or when there is none, where one forged Pod
   gives `observed` instead of `no-pods`; and deleting the Pods closes a state incident with
-  `pods_now: 0`, which is true. `edit` can also change the Deployment for real, so the forgery
-  buys little.
+  `pods_now: 0`, which is true. A Pod in N whose controller `ownerReference` names the Deployment
+  with its real UID counts as one of its Pods (`top_owner` keeps such a reference as the Pod
+  carries it, `src/owner.rs:59-61`), and the garbage collector does not delete it, since its owner
+  exists: it lasts until someone deletes it. A Pod in another namespace counts for nothing in N
+  (point 2). `edit` can also change the Deployment for real, so the forgery buys little.
+- **Whoever can write `pods/status` in N** (a kubelet, for the Pods of its node, and principals
+  with a wildcard grant: high-privilege principals): it can keep the status of a genuine state
+  incident's Pods clean, against the kubelet, for more than 330 seconds, and so forge its
+  `closed`; and it can mark real Pods `Failed`, taking them out of the non-terminal set, which
+  gives `no-pods`, `not-checkable` at acceptance, or `observed` when at least one remaining Pod
+  shows the change. It cannot make an `observed` without a real change on at least one Pod: the
+  revision comes from the Pod's `ownerReference` and its ReplicaSet, the limit and the policy from
+  the Pod's spec, none from its status.
 - **Unchanged:** kausa executes nothing, changes no workload, reads no Secret or ConfigMap, and
   sends nothing new to the model.
 
@@ -455,8 +528,10 @@ What each principal gains:
 - **This ADR's share:** 16,000 + 40,000 + 4,848 = 60,848 bytes, under 64 KiB = 65,536 bytes by
   4,688 bytes (bar 4).
 - **CPU:** with at least one check pending, one pass over the Pods kausa holds at each 5-second
-  tick, with one map lookup per Pod: 10,000 lookups a tick at 10,000 Pods. Hashing applies only to
-  the containers of Pods with a check. Not measured (bar 5).
+  tick, with one map lookup and one comparison of the namespace per Pod: 10,000 of each a tick at
+  10,000 Pods. Hashing applies only to the containers of Pods with a check. Not measured (bar 5).
+- **The three departures of Context** add no byte: the frozen `first_seen` is a condition in
+  `observe`, the namespace a comparison in `pods_of`, the queue rule a search of the queue of 16.
 - **Messages:** at most 2 per Incident, and at most 30 end messages an hour at the default.
 
 ### Conditions of acceptance
@@ -476,9 +551,9 @@ before this ADR is accepted, and after 0028's bars:
 5. **The tick in kind** with 10,000 Pods and 500 pending checks takes less than 1 second.
 6. **500 Incidents closing within one minute**, in kind and on the Raspberry Pis: no watch error,
    relist or restart; the `closed` messages received, plus those counted `failed`, `capped` or
-   `dropped`, equal the closings counted, nothing is counted lost, and no Incident is in two
-   `closed` messages; the `detected` messages sent in that hour equal those of the same scenario
-   with `reportEnd` off.
+   `dropped`, plus the closings counted `no-incident`, equal the 500 emitted incidents the tracker
+   dropped, nothing is counted lost, and no Incident is in two `closed` messages; the `detected`
+   messages sent in that hour equal those of the same scenario with `reportEnd` off.
 7. **One kind scenario per acting row,** with `W` at 20: `D001` undone by hand gives `observed`,
    with an `ended_at` at most 600 seconds plus the rollout's time after the undo, and left alone
    `not-observed`; `D003` raised by a rollout, and again by an in-place resize, gives `observed`;
@@ -487,11 +562,20 @@ before this ADR is accepted, and after 0028's bars:
    `closed`; `D011` on a ReplicaSet whose Event stops gives `basis: event`.
 8. **A revoked Pods permission** in a listed namespace closes its open state incidents with
    `source-lost`, and its pending checks end `source-lost`.
-9. **Killing the leader** during an open incident with a pending check gives no `closed` and no
-   `outcome` for that Incident, and a `closed` for the new Incident of the same fingerprint.
+9. **Killing the leader** during an open `D001` with a pending check gives no `closed` and no
+   `outcome` for that Incident. The failure goes on into the new term, whose leader creates its
+   own Incident of the same fingerprint; then the Deployment is fixed by hand, and 330 to 335
+   seconds after its last signal the new Incident gets one `closed`.
 10. **31 acting Remediations within an hour,** written by a test principal, give 30 `outcome`
-    messages and 1 counted `capped`, and change no `detected` count.
+    messages and 1 counted `capped`, and change no `detected` count. The scenario: `W` at 20; 31
+    `D001` Incidents created before the hour, whose failures go on through it, so that no
+    `closed` takes the bound; the 31 Remediations accepted within its first 30 minutes, and no
+    Pod changed, so that each check ends `not-observed` 20 minutes after its acceptance, all 31
+    between minutes 20 and 50, inside one 60-minute span.
 11. **The vocabulary test** passes on every enum value and fixed text.
+12. **A Pod in another listed namespace M** whose controller `ownerReference` names the
+    Deployment of an Incident in N, with its UID, changes nothing in N's outcome check, in its
+    `pods_now` or in its `Pods now`.
 
 ### Not verified
 
@@ -507,9 +591,24 @@ Each was read in source or documentation only, or not derived; the bar or test t
   [Detection and redaction rules](../reference/rules.md); the cause a hypothesis). Bar 7, row
   `D011`.
 - **That a `403` drop and its relist behave as `on_watch_error` says.** Bar 8.
-- **How long the garbage collector takes to delete a Pod whose controller `ownerReference` names a
-  UID that matches no object,** the window of a forged Pod. In kind, create one and time its
-  deletion.
+- **That the garbage collector leaves a Pod in N whose controller `ownerReference` names the
+  Deployment with its real UID,** since the owner exists, so that such a Pod lasts until someone
+  deletes it; and, a hypothesis that bar 12 does not need, that it treats a reference to an owner
+  in another namespace as absent. In kind, create both and watch them for an hour.
+- **What a writer of `pods/status` can do against the kubelet:** that a `Failed` phase written by
+  hand stays, and how long a clean status written by hand stays before the kubelet writes it
+  again. In kind, patch both on a failing Pod and watch the closing and a pending check.
+- **The four readings of the Kubernetes source behind the rejected `/status` write**, read at
+  `kubernetes/kubernetes` `master` on 2026-11-24 with no commit recorded: that the patch handler
+  passes no preconditions (`staging/src/k8s.io/apiserver/pkg/endpoints/handlers/patch.go`, and
+  `DefaultUpdatedObjectInfo` in `staging/src/k8s.io/apiserver/pkg/registry/rest/update.go`); that
+  a `metadata.uid` in a merge patch to `/status` is then ignored, not refused; that the CRD status
+  strategy copies the old object over the new one, UID included
+  (`staging/src/k8s.io/apiextensions-apiserver/pkg/registry/customresource/status_strategy.go`);
+  and that a rule on `status` does not run when a merge patch sets `status: null`. In kind: create
+  an Incident, delete it, create another under its name, and send a merge patch to its `/status`
+  with the first one's UID; then send `status: null` with a rule on `status`. The decision does not
+  depend on them.
 - **The layout of `Instant`, the baseline and the allocator's rounding,** behind the 32 and 80
   bytes, and 0028's 383,000 bytes on which the margin sits. Bar 4, and 0028's bar 3.
 - **The tick's CPU with 500 pending checks at 10,000 Pods.** Bar 5.
@@ -525,15 +624,21 @@ Each was read in source or documentation only, or not derived; the bar or test t
 - **kausa still never says "resolved".** Its two new statements are about its own observation and
   about a typed field of the Pods; the banned-word test keeps them so.
 - **A missing `closed` is not an open failure:** a restart, a failover, a table entry dropped
-  after 6 hours, `D008`, or an incident held back by the gate all leave none, and only the first
-  three are counted.
+  after 6 hours, `D008`, or an incident held back by the gate all leave none. The end of a term
+  (`SIGTERM`, the lease lost) counts its closings lost; a table entry dropped after 6 hours and an
+  incident held back by the gate count theirs `no-incident`; a crash, a restart on memory included,
+  and `D008` count nothing.
 - **For `D011` to `D013` a `closed` can come with the failure still there,** because Kubernetes
   stopped updating the Event; its return inside `--dedup-hours` is silent, as today. Stated in the
   message (`basis: event`) and on the reference page.
 - **A proposal nobody applied gives `not-observed`** after the window, 60 minutes by default.
 - **A writer of Remediations gains one `outcome` message per Incident** and the choice of which
   check runs, never the result; a writer of Events gains one `closed` per forged Incident; neither
-  costs a `detected` or an `explained` message.
+  costs a `detected` or an `explained` message, and neither evicts a `remediation`.
+- **The end bound is not fair:** it is one for the process, so a writer of Events in one namespace,
+  with 30 forged Incidents an hour, one every 120 seconds, leaves no `closed` and no `outcome`
+  message about any namespace for that hour; each is counted `capped` and logged, the log line of
+  each end is written, and nothing is lost uncounted while the process lives.
 - **kurita changes nothing.** Its ADR 0008 reads `Incident.status` as declared and empty, which it
   stays.
 - **Pages that change with the implementation**, not with this ADR: [Data sent in

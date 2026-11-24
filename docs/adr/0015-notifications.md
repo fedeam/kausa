@@ -271,7 +271,13 @@ non-terminal Pod of the owner within a window. Every field comes from kausa's ow
 watches, except the action id and time that 0028 already lets out. They share the receiver, the
 formats and the delivery rules decided here, but not the bound: at most the value of
 `--notify-max-per-hour` of the two together start in any 60 minutes, counted apart from the
-`detected` and the `remediation` messages; in the queue they rank with `remediation`;
-`kausa_notifications_total` never counts one; and they owe no `capped` message. This takes effect
-only when 0029 is accepted, which needs its bars measured and 0028 accepted; until then the text
-above holds.
+`detected` and the `remediation` messages; in the queue, when it is full, the oldest end message is
+dropped first, whatever arrives, and a new end message drops itself when none is queued, so an end
+message never evicts a `remediation`; on the way out they leave with `remediation`, in arrival
+order, after every `detected` and `explained` message; `kausa_notifications_total` never counts one;
+and they owe no `capped` message. With 0029, the sentence of 0028's `Update` above, "in the queue a
+`remediation` never evicts another message and is taken only when no other message is queued", no
+longer holds as written: a `remediation` evicts the oldest end message when the queue is full, and
+it is taken when no `detected` and no `explained` message is queued, before a later end message.
+This takes effect only when 0029 is accepted, which needs its bars measured and 0028 accepted; until
+then the text above holds.

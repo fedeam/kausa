@@ -203,11 +203,12 @@ the chart's description and the Artifact Hub entry) changes with the release tha
 not now: until then kausa reports nothing without a model, and the new description would say what
 it does not do. 0001 gets its `Update` paragraph with this acceptance.
 
-Update 2026-11-24: [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a proposed action was observed, never that the incident was resolved, off by default](0029-incident-end-report.md) is proposed, not accepted. It keeps point 3 as worded and adds to it:
-kausa never says that an incident was resolved, fixed or recovered. What it may say of an incident's
-end is two typed statements about its own observation, that it stopped counting the detection's
-signal (on a stated basis, or because it lost the permission to see it) and whether a typed field of
-the owner's Pods changed as an accepted action would change it, within a stated window; a test keeps
-the words `healthy`, `fixed`, `resolved`, `recovered`, `ok`, `success` and `worked` out of every
-value and fixed text. This takes effect only when 0029 is accepted, which needs its bars measured
-and 0028 accepted; until then the text above holds.
+Update 2026-11-24: [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a proposed action was observed, never that the incident was resolved, off by default](0029-incident-end-report.md) is proposed, not accepted. It keeps point 3 as worded and adds to
+it: kausa never says that an incident was resolved, fixed or recovered. What it may say of an
+incident's end is two typed statements about its own observation, that it stopped counting the
+detection's signal (on a stated basis, or because it lost the permission to see it) and whether a
+typed field of the owner's Pods changed as an accepted action would change it, within a stated
+window; a test keeps the words `healthy`, `fixed`, `resolved`, `recovered`, `ok`, `success`,
+`worked`, `applied`, `succeeded`, `remediated` and `restored` out of every value and fixed text.
+This takes effect only when 0029 is accepted, which needs its bars measured and 0028 accepted; until
+then the text above holds.
