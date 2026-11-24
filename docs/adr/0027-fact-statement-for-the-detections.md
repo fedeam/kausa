@@ -371,11 +371,8 @@ an entry for the table.
   `proto/0027-fact-statement`: [The fact statement prototype,
   measured](../research/2026-11-20-fact-statement-prototype.md). The three bars hold there; the
   numbers of points 1 and 3 and the hypothesis about the image were corrected in this text from
-  it.
-- **Measured on a Raspberry Pi 4 on 2026-11-24**, in a k3s cluster of three with about 100 Pods,
-  the published v0.6.2 and the prototype side by side on one node, in the same note: the three
-  bars hold there too. The 10,000 Pods were measured in kind only; reading 0026's "on a
-  Raspberry Pi 4 and with 10,000 Pods" as two measurements is the note's interpretation.
+  it. The measurement on a Raspberry Pi 4 is **pending**, and this ADR stays `proposed` until
+  the note has it.
 
 With the implementation, before the release that ships it:
 
@@ -418,7 +415,8 @@ With the implementation, before the release that ships it:
   the README, the documentation front page, the chart's description and the Artifact Hub entry.
 - **This ADR cannot be accepted on reading alone.** Point 10 needs a prototype and a research
   note first, as 0026 decided for every stage.
-- **Not verified:** the prototype of point 10 has no webhook message, so the cost of that path is in no figure. The
+- **Not verified:** nothing here is merged, and nothing is measured on a Raspberry Pi 4. The
+  prototype of point 10 has no webhook message, so the cost of that path is in no figure. The
   defaults of point 5 (30 an hour, 1024 fingerprints) are chosen by analogy with the call budget
   and the deduplication cache, and the hypotheses still open are listed in point 10.
 - **When accepted:** `Update` paragraphs in 0015 and 0008. With the implementation: [Command line
@@ -434,8 +432,46 @@ With the implementation, before the release that ships it:
   may hold (point 1) and that changing it needs an ADR.
 
 Update 2026-11-24: accepted on 2026-11-24, after the measurement on a Raspberry Pi 4 of point 10,
-under a plan that FedeAM approved that day and that delegates the acceptance of ADRs within the
-limits it sets. It is implemented in the same pull request as this acceptance, which also renames
-`D013` to "autoscaler cannot read metrics or target scale", as point 1 asks; its id stays `D013`.
-0015 and 0008 get their `Update` paragraphs, and invariant 6 of
-[ARCHITECTURE.md](../../ARCHITECTURE.md) and its new invariant 12 change, with this acceptance.
+under a plan the maintainer approved on 2026-11-24, and implemented in the same pull request. The
+text above is the proposal's of 2026-11-19, with the corrections of 2026-11-20 from the
+measurement in kind: its `Date`, the status of its Context, the sentence that opens the
+Decision, "Amends, when accepted", "When accepted", "cannot be accepted on reading alone", the
+measurement on a Raspberry Pi 4 as pending and "nothing here is merged" are from before. 0015 and
+0008 get their `Update` paragraphs, and invariant 6 of [ARCHITECTURE.md](../../ARCHITECTURE.md)
+and its new invariant 12 change, with this acceptance. What the acceptance and the implementation
+add to the text above:
+
+- **The measurement on a Raspberry Pi 4**, on 2026-11-24, in a k3s cluster of three with about
+  100 Pods, the published v0.6.2 and the prototype side by side on one node ([The fact statement
+  prototype, measured](../research/2026-11-20-fact-statement-prototype.md#on-a-raspberry-pi-4)):
+  the second and the third bars hold. The first, idle memory, was read in the kubelet's
+  `rssBytes`, and it holds if that figure is the anonymous memory of the control group, which is
+  a hypothesis on those nodes: cAdvisor's code supports it, and it was not checked there. The
+  10,000 Pods were measured in kind only; reading 0026's "on a Raspberry Pi 4 and with 10,000
+  Pods" as two measurements is the note's interpretation.
+- **The fact queue's entry** holds the facts the statement is rendered from, not the rendered
+  statement. The 1,583 bytes an entry and 1.55 MiB of points 3 and 10 are the prototype's; a
+  unit test pins the implementation's at 1,336 bytes an entry and 1,368,064 bytes (1.30 MiB) for
+  a full queue, computed at the same names. No bar changes.
+- **`D013` is renamed** "autoscaler cannot read metrics or target scale", as point 1 asks, since
+  its reasons include a failure to read the target's scale; its id stays `D013`.
+- **Every bound that drops a message owes the `capped` message of point 5**, not only the limit
+  per hour: the queue of 16, which `detected` and `explained` messages share, and the fact queue
+  of 1024 too, so that the channel never reads as the whole picture after a burst. A `detected`
+  message never pushes an `explained` one out of the queue: an explanation stands for a model
+  call already spent and is sent once, while a `detected` message's facts stay in its Event and
+  in the log, and a burst of failing Pods in one namespace must not evict the explanations of
+  others. Messages dropped when kausa stops or its lease term ends owe nothing. The bounds on
+  memory are unchanged, so the measurements of point 10 stand.
+- **Within `v2` a value of `type` may be added**, as a field may, and a receiver must ignore a
+  message whose `type` it does not know; point 5's `v2` adds no other rule ([Data sent in
+  notifications](../reference/data-sent-in-notifications.md#compatibility)).
+- **The text formats keep an owner's kind and name on one line.** The API server accepts a line
+  break in an ownerReference's kind and name and in an Event's `regarding`, which, rendered as it
+  was, forged lines of the text, the mark of point 4 among them; the Slack and Telegram texts
+  replace control characters and line separators there with U+FFFD ([Security
+  policy](../../SECURITY.md)).
+- **A `Detected` Event's name can be taken first.** It follows from the incident, and before it
+  patches the series of point 2 kausa checks only the reporting controller, which whoever creates
+  an Event sets, so whoever can create Events in a namespace can forge a `Detected` Event there; the `incident`
+  line and the `detected` message carry the real statement ([Security policy](../../SECURITY.md)).
