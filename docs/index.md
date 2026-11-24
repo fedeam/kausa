@@ -224,4 +224,6 @@ checks](how-to/develop.md).
   coverage check that came of it, and the stalls of the Event watch on k3s;
   [2026-11-19 — Facts before the model](journal/2026-11-19-facts-before-the-model.md): 0026
   proposed and accepted;
-  [2026-11-20 — Release v0.6.3](journal/2026-11-20-release-v0-6-3.md).
+  [2026-11-20 — Release v0.6.3](journal/2026-11-20-release-v0-6-3.md);
+  [2026-11-24 — The fact statement](journal/2026-11-24-the-fact-statement.md): 0027 measured on a
+  Raspberry Pi 4, accepted and implemented.
