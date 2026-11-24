@@ -350,7 +350,11 @@ and without any model:
   sample Pod, whose note is the fact statement and nothing else. Its name is
   `kausa.detected.<fingerprint>.<8 hex of the statement's hash>`: the same statement again
   patches the series, and a different one is a new Event. It is a Warning because it reports a
-  failure; whoever alerts on every Warning event gets one more per incident.
+  failure; whoever alerts on every Warning event gets one more per incident. The name can be
+  known beforehand, so whoever can create Events in the namespace can create it first with
+  reporting controller `kausa` and another note, and kausa then only patches its series ([Security
+  policy](../../SECURITY.md)); the `incident` log line and the `detected` message keep the real
+  statement.
 - **An Event on the failing workload.** `events.k8s.io/v1`, `regarding` the top-level owner (a
   Deployment, StatefulSet, DaemonSet, Job or CronJob, the owner of another kind where the chain
   stops, as in Correlation above, or the Pod when it has none) and `related` the Pod the context

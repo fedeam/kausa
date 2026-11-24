@@ -496,6 +496,16 @@ kausa must:
   when it already exists with that name and with reporting controller `kausa`, refuses the patch
   otherwise, and patches only its series (count and last time); it never changes another
   Event's note.
+- **A `Detected` Event can be forged in a namespace where one can create Events.** Its name,
+  `kausa.detected.<fingerprint>.<hash of the statement>`, follows from the incident's owner,
+  message and facts, which whoever runs the workload knows, and the reporting controller is a
+  field that whoever creates an Event sets. Whoever can create Events in a watched namespace can
+  create that name first, with reporting controller `kausa` and any note; kausa then takes it for
+  its own and patches only its series, so the forged note stays on the workload under kausa's
+  name. `kausa.skipped.…` names behave the same. The reach is that namespace, where that writer
+  could already create Events with any reporting controller, and the `incident` log line and the
+  `detected` message carry the real statement: read a `Detected` Event as something anyone who
+  can create Events in its namespace could have written.
 - **Tenants of a listed namespace can change kausa's access there** (`rbac.scope=namespaced`).
   kausa's Role and RoleBinding live in that namespace, so whoever administers it can:
   - **delete the RoleBinding.** kausa's watches there are refused (`403`); it drops what they had

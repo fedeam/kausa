@@ -408,6 +408,11 @@ rollout does not progress (D014). Sample: reason ProgressDeadlineExceeded. Revis
 - **Never in a statement:** the sample's message, an event's note, a log line, the image, a
   label, an annotation, a node, the namespace, the owner, the Pod, and any text a model wrote. The
   `Detected` Event names the owner and the sample Pod in `regarding` and `related`.
+- **A `Detected` Event is only as trustworthy as its namespace.** Its name,
+  `kausa.detected.<fingerprint>.<8 hex of the statement's hash>`, can be known beforehand, and
+  whoever can create Events in the namespace can create it first, with reporting controller
+  `kausa` and any note; kausa then only patches its series. The `incident` log line and the
+  `detected` message carry the real statement ([Security policy](../../SECURITY.md)).
 - **It names no cause and gives no advice.** `Sample:` is one signal of the incident, the first
   in a fixed order, as in the `incident` line, not all of them.
 - **Its bytes are letters, digits, spaces and `.,:()-`** and nothing else, so no part of it can
