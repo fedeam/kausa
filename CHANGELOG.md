@@ -11,8 +11,8 @@ Every settled incident is now reported as facts, with or without a model: a `Det
 with a webhook a `detected` message (0027, stage 1 of 0026). The model's text is marked as the
 model's. **Breaking for `json` receivers: the notification schema is `v2`. Upgrade note: a
 release without an endpoint starts writing `Detected` Events on upgrade, and its role gains
-`create` and `patch` on Events; set `events: false` to keep it silent.** What is sent to the
-model provider does not change: the statement is not in the request.
+`create` and `patch` on Events; set `events: false` to keep it silent.** The statement is not in
+the request to the model provider; the only change in that request is `D013`'s name (below).
 
 ### Added
 

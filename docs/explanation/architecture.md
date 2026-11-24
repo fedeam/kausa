@@ -340,8 +340,9 @@ and without any model:
   line stands. A `detected` message never pushes an `explained` one out of the queue.
 - **The model's text is marked.** An `Explained` Event, a Slack or Telegram text and the `json`
   body's `explanation` start with or sit under `Model's explanation, not verified:` or its key,
-  so a reader can tell what kausa read from what a model wrote. What goes to the model does not
-  change: the statement is not in the request.
+  so a reader can tell what kausa read from what a model wrote. The statement is not in the
+  request to the model; the only change in that request is `D013`'s name, "autoscaler cannot
+  read metrics or target scale".
 
 ## Output
 

@@ -164,5 +164,6 @@ Event and webhook message, with or without a model, and mark the model's text as
 model's](0027-fact-statement-for-the-detections.md) lets the webhook of [0015. Post each new
 explanation to one optional webhook, as JSON, Slack or Telegram](0015-notifications.md) receive data
 with no model endpoint set: the `detected` message's typed facts (an enumerated reason, an exit
-code, two counts and a revision) and the names it already carried. Nothing in the request to the
-model changes, and the fact statement is not sent to it.
+code, two counts and a revision) and the names it already carried. The fact statement is not sent
+to the model; the only change in the request is the name of `D013`, which 0027 renames
+"autoscaler cannot read metrics or target scale".
