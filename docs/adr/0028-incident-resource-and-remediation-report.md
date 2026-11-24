@@ -580,8 +580,11 @@ reason. Every other outcome comes after a live read of the object: one of an obj
 fail gives `none{not-reproduced}`, which is not sent, and a forged UID gives
 `none{target-replaced}`. What it cannot: an Event alone never yields an acting id or a proposal of
 an action, since kurita records an acting id only after a live read confirms the target's UID (its
-ADR 0008, point 2); it reaches nothing outside N; and it is bounded by the create gate of point 1,
-by the 500 Incidents in any 6 hours of point 1 and by the `remediation` bound of point 6.
+ADR 0008, point 2); what it chooses, the objects and the sent "kurita proposed needs-human", is in N
+only; outside N it has one effect, towards silence: the stop of point 4, no new Incidents in any
+namespace, and so no proposals of kurita, for as long as it goes on, while kausa still writes its
+Events and posts its `detected` messages; and it is bounded by the create gate of point 1, by the
+500 Incidents in any 6 hours of point 1 and by the `remediation` bound of point 6.
 
 **Already true before this contract, and out of its scope:** editors of kausa's namespace can read
 the webhook's Secret (`charts/kausa/values.yaml:96-99`) and post anything to the receiver
@@ -728,9 +731,11 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   notice per Incident at most, within the `remediation` bound, which never costs a `detected` or
   an `explained` message.
 - **A writer of Events in a namespace gains, besides the forged detection it had,** Incidents about
-  objects of its choice there and, for the outcomes kurita gives without a live confirmation, a
-  sent "kurita proposed needs-human" about them; never an acting id, and nothing outside that
-  namespace.
+  objects of its choice there and, for the outcomes kurita gives without a live confirmation, a sent
+  "kurita proposed needs-human" about them, in that namespace only, and never an acting id. Outside
+  it, one effect, towards silence: by the stop of point 4, no new Incidents in any namespace, and so
+  no proposals of kurita, for as long as it goes on; kausa still writes its Events and posts its
+  `detected` messages.
 - **A restart loses notices, never invents them:** Remediations of Incidents created before it are
   not reported.
 - **The bounds are not fair:** whoever makes kausa create 500 Incidents in 6 hours, one tenant's
