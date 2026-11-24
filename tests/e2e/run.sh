@@ -1709,11 +1709,14 @@ print(len(found))
   echo "$metrics" | awk '$1 == "kausa_notifications_total{outcome=\"sent\"}" && $2 >= 5 { n++ }
     END { exit !n }' || fail "kausa_notifications_total{outcome=\"sent\"} is under 5 without a model"
   echo "without a model: $bodies detected bodies, no explained one, no model request, no explanation"
-  # events=false: the incidents are logged and posted, and nothing is written to the cluster.
+  # events=false: the incidents are logged and posted, and nothing is written to the cluster. The
+  # receiver's lines are counted before the upgrade, as above: the new Pod posts within its settle
+  # window of starting, which deleting the earlier Events can outlast. Recreate stops the old Pod
+  # first, and it has nothing left to post.
+  hooks_before=$(lines_of "$WORK/hooks.jsonl")
   h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
     --set events=false
   delete_kausa_events
-  hooks_before=$(lines_of "$WORK/hooks.jsonl")
   pod=pod/$(kausa_pods | head -n 1)
   for verb in create patch; do
     if allowed "$verb" events.events.k8s.io -n "$TARGET"; then
