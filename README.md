@@ -182,8 +182,9 @@ Pre-alpha. v0.6.3 is released (2026-11-20). What there is:
   rules](docs/reference/rules.md#fact-statements)). With `--endpoint` it also builds a redacted
   context with the failed container's log, asks the model within a call budget (or logs the
   request with `--dry-run`), reuses explanations of repeated incidents and writes each explanation
-  as a second Event, marked as the model's and not verified. What kausa does not watch is listed
-  in [Detection and redaction rules](docs/reference/rules.md#what-kausa-watches-and-what-it-does-not).
+  as another Event, marked as the model's and not verified; neither Event waits for the other, so
+  either can be written first. What kausa does not watch is listed in [Detection and redaction
+  rules](docs/reference/rules.md#what-kausa-watches-and-what-it-does-not).
 - **Metrics:** Prometheus metrics with `--metrics-address`, with alert rules for them in
   `deploy/prometheus/` ([Alerts](docs/reference/alerts.md)); the log lines are JSON ([Command line
   and log format](docs/reference/command-line.md)).

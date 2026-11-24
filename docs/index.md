@@ -4,11 +4,11 @@ kausa is a Kubernetes controller for people who run small clusters and want to k
 fails: it watches Warning events, Pod status and Deployments, groups the failures of one workload
 into one incident and reports it as facts in a `Detected` Event on the failing object, with or
 without a model. With a model endpoint it also sends a redacted context to one OpenAI-compatible
-endpoint within a call and token budget and writes the explanation as a second Event, marked as the
-model's and not verified. It never reads Secrets or
-ConfigMaps, never changes a workload, and writes nothing but its own Events (none with
-`--no-events`) and, with `--history` (off by default), its own Explanation objects and, with
-`--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease. With
+endpoint within a call and token budget and writes the explanation as another Event, marked as the
+model's and not verified; neither Event waits for the other, so either can be written first. It
+never reads Secrets or ConfigMaps, never changes a workload, and writes nothing but its own Events
+(none with `--no-events`) and, with `--history` (off by default), its own Explanation objects and,
+with `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease. With
 `--notify-url-file` (off by default) it also posts each settled incident and each new explanation to one webhook, with or without a model.
 
 Status as of 2026-11-24: **in development** (pre-alpha). The four implementation weekends of v0.1
