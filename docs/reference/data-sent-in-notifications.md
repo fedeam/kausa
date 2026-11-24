@@ -302,9 +302,9 @@ its fake model never echoes its input, so it cannot catch a model that does.
 
 ## Compatibility
 
-- Within `v2`, fields are only added, never removed, renamed or given another type or meaning,
-  and no `type` is added.
-- Receivers must ignore the fields they do not know.
+- Within `v2`, fields and values of `type` are only added; a field is never removed, renamed or
+  given another type or meaning.
+- Receivers must ignore the fields they do not know, and a message whose `type` they do not know.
 - Anything else is `v3`, a new `schema` string, announced in the [Changelog](../../CHANGELOG.md);
   a release sends one version.
 - **From `v1`:** `type` is `detected`, `explained` or `capped` instead of always `explained`;

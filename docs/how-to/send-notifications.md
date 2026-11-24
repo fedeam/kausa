@@ -176,8 +176,11 @@ From the release after v0.6.3 a `json` body has the schema `kausa.fedeam.com/not
 This breaks a receiver written for `v1`: `type` is `detected`, `explained` or `capped`,
 `explanation` is only in `explained`, and the new object `facts` is in `detected` and
 `explained`. Change the receiver before you upgrade; the fields are in [The `json`
-body](../reference/data-sent-in-notifications.md#the-json-body). The Slack and Telegram texts gain
-a `Facts:` line and the line `Model's explanation, not verified:`, and need no change.
+body](../reference/data-sent-in-notifications.md#the-json-body). Within `v2` a later release may
+add a value of `type`, so a receiver must ignore a message whose `type` it does not know
+([Compatibility](../reference/data-sent-in-notifications.md#compatibility)). The Slack and
+Telegram texts gain a `Facts:` line and the line `Model's explanation, not verified:`, and need no
+change.
 
 `D013` is now named `autoscaler cannot read metrics or target scale` (it was `autoscaler cannot
 get metrics`), in `detection.name` and in the first line of the texts: change a receiver or a
