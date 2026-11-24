@@ -207,7 +207,8 @@ kausa: not every incident is posted here (more than 30 in an hour, or more at on
   1. Check the archive the Job reads.
   Confidence: low · fingerprint 5d0c2b7e9a1f4c38
   ```
- The separator in the last line is U+00B7 (middle dot).
+
+  The separator in the last line is U+00B7 (middle dot).
 - The text is then cut, with no marker, at a character boundary so that it holds at most 4,000
   UTF-16 code units (a character outside the Basic Multilingual Plane, such as most emoji, counts
   two).

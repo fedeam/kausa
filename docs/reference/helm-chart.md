@@ -109,7 +109,7 @@ but about kausa's own Lease, and is the same in both scopes.
 | `notifications.tokenKey` | `""` | `json` only, optional: the key that holds a bearer token, mounted as the file `token` and passed as `--notify-token-file` |
 | `notifications.telegramChatId` | `""` | Required with `telegram`, refused with the others: `--notify-telegram-chat-id`, an integer or `@` and a channel's username |
 | `notifications.allowHttp` | `false` | `--notify-allow-http`, for an `http://` webhook in the cluster or on the same private network |
-| `notifications.maxPerHour` | `30` | `--notify-max-per-hour`: the most messages sent in any hour, a whole number from 1 to 3600. A missing key (the values of an earlier release reused with `--reuse-values`) or `null` leaves the flag out, and kausa's default, 30, applies |
+| `notifications.maxPerHour` | `30` | `--notify-max-per-hour`: the most `detected` messages started in any hour, a whole number from 1 to 3600; `explained` messages are bound by the call budget instead. A missing key (the values of an earlier release reused with `--reuse-values`) or `null` leaves the flag out, and kausa's default, 30, applies |
 | `settleSeconds` | `60` | `--settle-seconds` |
 | `budget.callsPerHour` | `30` | `--max-calls-per-hour`: model calls in any hour, per process. Each start (an install, upgrade, restart or takeover) allows 3 at once, then one every `3600/callsPerHour` seconds, up to `callsPerHour`; incidents wait in the queue for their call |
 | `budget.callsPerDay` | `200` | `--max-calls-per-day`: model calls in any 24 hours, per process. For it to hold across restarts, up to the bursts of 3, set `callsPerHour <= callsPerDay / 24` |

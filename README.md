@@ -116,10 +116,11 @@ Point the endpoint at a model served in your cluster (Ollama, vLLM or any OpenAI
 server) and nothing leaves it. `--dry-run` shows the exact requests without sending them. The
 full list: [Data sent to the provider](docs/reference/data-sent-to-the-provider.md).
 
-Optionally, and off by default (since v0.3.0), kausa also posts each new
-explanation to one webhook of yours, as JSON, to a Slack incoming webhook or to a Telegram chat:
-the explanation, the rule and the fingerprint, with the real names of the namespace and the
-workload only, never a log line or the request ([Data sent in
+Optionally, and off by default (since v0.3.0), kausa also posts to one webhook of yours, as JSON,
+to a Slack incoming webhook or to a Telegram chat, each new explanation and, since the release
+after v0.6.3, each settled incident, with or without a model: the rule, the facts, the fingerprint
+and the explanation when there is one, with the real names of the namespace and the workload only,
+never a log line or the request ([Data sent in
 notifications](docs/reference/data-sent-in-notifications.md)).
 
 ## Design principles
@@ -187,8 +188,9 @@ Pre-alpha. v0.6.3 is released (2026-11-20). What there is:
   `deploy/prometheus/` ([Alerts](docs/reference/alerts.md)); the log lines are JSON ([Command line
   and log format](docs/reference/command-line.md)).
 - **Optional, off by default:** with `--history`, each incident's explanations are kept in an
-  Explanation object; with `--notify-url-file`, each settled incident and each new explanation is posted to one webhook, with or without a model; with
-  the chart's `replicaCount: 2`, a standby replica takes over through a Lease.
+  Explanation object; with `--notify-url-file`, each settled incident and each new explanation is
+  posted to one webhook, with or without a model; with the chart's `replicaCount: 2`, a standby
+  replica takes over through a Lease.
 - **Safety of the answer:** it redacts the model's answer as it redacts the request, withholds an
   answer that holds a listed destructive command, and holds its calls behind a breaker while the
   endpoint fails; `kausa check-endpoint` (the chart's `helm test`) checks the endpoint on demand.
@@ -251,7 +253,8 @@ With Rust installed through [rustup](https://rustup.rs), which picks up the tool
 ```sh
 cargo build --locked
 cargo run --locked -- --help
-# Watch the cluster of the kubeconfig's current context and log incidents (read-only):
+# Watch the cluster of the kubeconfig's current context, log incidents and write their
+# Detected Events (add --no-events to write nothing):
 cargo run --locked -- run
 # Also log the redacted request each incident would send:
 cargo run --locked -- run --dry-run
@@ -260,11 +263,11 @@ cargo run --locked -- run --endpoint http://127.0.0.1:11434/v1 --model qwen3:0.6
 ```
 
 `kausa run` uses the current context of your kubeconfig and needs read access to Pods, their
-logs, Events, ReplicaSets, Jobs and, unless `--no-rollouts`, Deployments, and, with `--endpoint`
-and without `--no-events`, permission to create and patch Events; it has no flag to pick a
-context, so check
-`kubectl config current-context` first, or follow [Try kausa against a cluster with a local
-model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of it.
+logs, Events, ReplicaSets, Jobs and, unless `--no-rollouts`, Deployments, and, without
+`--no-events` or `--dry-run`, permission to create and patch Events; it has no flag to pick a
+context, so check `kubectl config current-context` first, or follow [Try kausa against a cluster
+with a local model](docs/how-to/try-with-a-local-model.md) to put a read-only proxy in front of
+it.
 
 To run it in a cluster, install the released chart, which uses the published image: [Install
 kausa with Helm](docs/how-to/install-with-helm.md). To run your own build, build the image

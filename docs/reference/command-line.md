@@ -17,7 +17,7 @@ cluster-wide](../adr/0013-namespaced-install-mode.md)); with `--history` it also
 explained incident's full explanations in an Explanation object in its namespace ([0014. Keep each
 incident's full explanations in a namespaced Explanation resource, off by
 default](../adr/0014-explanation-history.md)); with `--notify-url-file` it also posts each new
-explanation to one webhook ([0015. Post each new explanation to one optional webhook, as JSON, Slack
+explanation, and each settled incident as below, to one webhook ([0015. Post each new explanation to one optional webhook, as JSON, Slack
 or Telegram](../adr/0015-notifications.md)). v0.4.0 adds a watch on Deployments for stalled rollouts
 (`D014`), on unless `--no-rollouts` ([0018. Explain a Deployment past its progress deadline (`D014`)
 from a Deployment watch that is on by default, and add nothing for StatefulSets or

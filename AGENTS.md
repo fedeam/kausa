@@ -85,7 +85,8 @@ Maintainer: FedeAM (GitHub: `fedeam`).
 ```sh
 cargo build --locked
 cargo run --locked -- --help
-# Watch the cluster of the kubeconfig's current context and log incidents (read-only):
+# Watch the cluster of the kubeconfig's current context, log incidents and write their
+# Detected Events (add --no-events to write nothing):
 cargo run --locked -- run
 ```
 
