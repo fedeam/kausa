@@ -306,14 +306,15 @@ mod tests {
         let entry = longest(0);
         assert!(entry.statement().len() <= LONGEST_STATEMENT_BYTES);
         assert!(entry.statement().len() < MAX_STATEMENT_BYTES);
+        // The figures, pinned: 1,336 bytes an entry and 1,368,064 (1.30 MiB) a full queue, on a
+        // 64-bit target. They come first, so that a failure of the bounds below, which changes
+        // them, prints them; the bounds format nothing.
+        assert_eq!((size_of::<Fact>(), entry.bytes()), (272, 1336));
+        assert_eq!(queue.bytes(), 1_368_064);
         // The ADR computes 1,583 bytes for an entry that holds the rendered statement; an entry
         // that holds the facts it is rendered from takes less, so a full queue stays under the
         // 1.55 MiB it computes.
-        assert!(entry.bytes() <= 1583, "{}", entry.bytes());
-        assert!(queue.bytes() <= 1_620_992, "{}", queue.bytes());
-        // The figures, pinned: 1,336 bytes an entry and 1,368,064 (1.30 MiB) a full queue, on a
-        // 64-bit target.
-        assert_eq!((size_of::<Fact>(), entry.bytes()), (272, 1336));
-        assert_eq!(queue.bytes(), 1_368_064);
+        assert!(entry.bytes() <= 1583);
+        assert!(queue.bytes() <= 1_620_992);
     }
 }
