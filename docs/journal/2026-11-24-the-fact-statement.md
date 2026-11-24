@@ -82,3 +82,95 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
 - The cost of the webhook path is in no measured figure.
 - The kind test checks that kausa sends no `type` outside the three of `v2`; a new type changes
   that check with it.
+
+## The Incident resource
+
+### Request
+
+Write the ADR that records kausa's half of the contract with kurita, a controller that proposes
+remediations for kausa's incidents: an `Incident` resource that only kausa writes, and the report
+by webhook of what kurita proposed. Docs only; kurita's ADR 0008, its other half, was already on
+kurita's `main` as `proposed`.
+
+### What was done
+
+- [0028. Publish each incident as an immutable Incident that only kausa writes, and report by
+  webhook what kurita proposed for it, both off by default](../adr/0028-incident-resource-and-remediation-report.md),
+  `proposed`. It records the design chosen by a review of two complete proposals, aligned field by
+  field with kurita's ADR 0008: the Incident's schema, the data kausa keeps for it, retention,
+  permissions, the `remediation` message of the webhook's `v2`, the trust statement, the costs
+  computed and the bars that must be measured before both ADRs are accepted.
+- `Update 2026-11-24` paragraphs at the end of 0001, 0009, 0015 and 0027, each saying what 0028
+  would change there and that it takes effect only when 0028 is accepted.
+- A security and a docs review of the proposal changed it the same day: `remediation` messages got
+  an hourly bound of their own, so they never cost a `detected` or an `explained` message; the
+  table of created Incidents never drops an entry younger than 6 hours, and kausa creates no
+  Incident while 500 such entries exist; the trust statement gained whoever can create Events;
+  the Incident's `spec` is required, so that its immutability rule always runs. A second
+  security round made `remediation` messages leave the queue only when no other message waits,
+  gave them a counter of their own, and stated how long one forged Event every 43.2 seconds keeps
+  new Incidents stopped.
+- While 0029 was reviewed, its author found that 0028 never said how the tick that emits an Incident
+  reads the sample's ReplicaSet revision: the tick makes no request, a Pod's owner is resolved once,
+  and its owner-cache entry is gone after 10 minutes, so for most long-running workloads the
+  revision would have been absent and kurita would almost never have proposed an undo. 0028 now
+  reads it in the fact slot, before the create.
+- A seventh review of 0028 made that read happen only for a create kausa will send, after the gate
+  and the table's room, bounded it per create attempted, since a failed create is not retried and
+  reads again at the next occurrence, and stated what a writer of Pods gets outside its namespace: a
+  wait of the fact slot of at most 5 seconds per create. The Incident carries the revision as of
+  that read, not of detection, and kurita's change check counts from the read. `owner-lookup-failed`
+  also covers the owner lookup of an Event incident about a Job or a ReplicaSet, and 0027's `Update`
+  says the slot can hold the read. An eighth review found that a writer of ReplicaSets or Pods could
+  still make a create fail, with a revision of 0 or an owner's UID that does not parse; 0028 now
+  says kausa never sends a create the schema would refuse, and that the owner lookup never looks up
+  nor keeps a name that is not a DNS-1123 subdomain of at most 253 characters, which at `4b85369` it
+  sends unencoded in a URL.
+- Nothing is implemented, and nothing in it is measured.
+
+### Decisions
+
+- Proposed only: [0028](../adr/0028-incident-resource-and-remediation-report.md). It is accepted
+  together with kurita's ADR 0008, once the bars of its "Conditions of acceptance" are measured on
+  the Raspberry Pis and in kind.
+- In [0028](../adr/0028-incident-resource-and-remediation-report.md), the sample's ReplicaSet
+  revision is read in the fact slot, after the create gate and before the create, through the cached
+  owner lookup: at most 600 seconds old, at most one `get` per create attempted, and a failed read
+  is `revision-lookup-failed`. Keeping the revision with each Pod's resolved owner was rejected,
+  since it is as old as the Pod; a third value of `missing` alone, since it would leave undo
+  proposals rare. The design is the ADR author's, added after the design review.
+- In [0028](../adr/0028-incident-resource-and-remediation-report.md), the owner cache keeps, with
+  the revision, the UID its `get` returned, and the fact slot gives `revision-lookup-failed` when it
+  differs from the UID in the Pod's `ownerReference`: the cache is keyed by name, so a ReplicaSet
+  recreated under the same name could otherwise lend the Incident the deleted one's revision under
+  the new one's UID. Both reviewers asked for it. The revision and the UID sit behind one pointer of
+  the cache entry, empty with incidents off.
+- In [0028](../adr/0028-incident-resource-and-remediation-report.md), kausa never sends a create the
+  schema would refuse: a revision that does not fit is `revision-lookup-failed`, and any other value
+  read from the cluster that does not fit means no create, counted as a refusal. The owner lookup
+  answers as a failed one, without a request or a cache entry, for a name that is not a DNS-1123
+  subdomain of at most 253 characters, for every caller. Both rules are the ADR author's.
+- In 0028, `podsSeen` takes 0 to 100: 0 for `D008` and `D011` to `D014`, which have no Pod and no
+  `sample`, so that the rule above does not leave them without an Incident. This is the manager's
+  decision, under the plan's authority to decide ADRs within its invariants: the number is true, a
+  reader keeps one integer with no optional, and kurita's decision core does not read the field.
+  Leaving the field out at 0, as the fact statement does, was not taken: the statement is prose for
+  a person, the Incident a typed record. The count, which can pass 100 when the incident settles, is
+  capped at 100 with `podsSeenIsMinimum` true, the ADR author's choice. kurita's ADR 0008 changes "1
+  to 100" to "0 to 100" in the change there.
+- In 0028, `kausa_incidents_refused_total` takes a label `reason`, `table-full` or `schema`, and the
+  `incident refused` line is at most one an hour for each reason, naming for `schema` the field and
+  the namespace, never the value: one refusal of the schema an hour, which a writer in N can cause,
+  would otherwise hide the stop of the table, which holds Incidents back in every namespace. The
+  manager's decision, taken from the security reader's ninth review.
+
+### Next
+
+- The implementation, behind `incidents.enabled` and `incidents.reportRemediations`, both off by
+  default, with the reference pages that 0028 lists under Consequences.
+- In 0028, whether the Incident takes as its sample the first signal whose values fit, refusing only
+  when none fits, so that a signal a writer in N places first does not leave a genuine incident
+  without an Incident; its cost is a sample that can differ from the fact statement's. Open for the
+  implementation.
+- Measure bars 1 to 8, and settle what "Not verified" lists, first whether a metadata `get` of a
+  ReplicaSet returns its annotations.

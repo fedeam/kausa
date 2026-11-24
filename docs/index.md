@@ -202,6 +202,9 @@ checks](how-to/develop.md).
   release after v0.6.3 as the stage 1 of 0026: [0027. Report each settled incident as a fact
   statement in its own `Detected` Event and webhook message, with or without a model, and mark the
   model's text as a model's](adr/0027-fact-statement-for-the-detections.md).
+  Proposed on 2026-11-24, not accepted, with kurita's ADR 0008 as its other half: [0028. Publish
+  each incident as an immutable Incident that only kausa writes, and report by webhook what kurita
+  proposed for it, both off by default](adr/0028-incident-resource-and-remediation-report.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
@@ -226,4 +229,5 @@ checks](how-to/develop.md).
   proposed and accepted;
   [2026-11-20 — Release v0.6.3](journal/2026-11-20-release-v0-6-3.md);
   [2026-11-24 — The fact statement](journal/2026-11-24-the-fact-statement.md): 0027 measured on a
-  Raspberry Pi 4, accepted and implemented.
+  Raspberry Pi 4, accepted and implemented; 0028 proposed, with kurita's ADR 0008 as its other
+  half.
