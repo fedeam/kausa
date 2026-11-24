@@ -50,6 +50,7 @@ h() { helm --kube-context "$CONTEXT" "$@"; }
 cleanup() {
   status=$?
   [ -n "${LOGS_PID:-}" ] && kill "$LOGS_PID" 2>/dev/null || true
+  [ -n "${WATCH_PID:-}" ] && kill "$WATCH_PID" 2>/dev/null || true
   if [ "$status" -ne 0 ]; then
     # Every kausa Pod's log: with two replicas, the leader's and the standby's.
     for p in $(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name 2>/dev/null ||
@@ -562,6 +563,66 @@ for kind, name, rule, api_version in WORKLOADS:
 print("the Detected Events: %d about 5 workloads, each Warning, Detect, the logged statement%s"
       % (seen, ", each Explained note marked" if mode == "model" else ", no other reason"))
 ' "$1" "${2:-}" "$TARGET" "$WORK"
+}
+# Each of the five workloads' Explained Events was created after a Detected Event of the same
+# incident (docs/adr/0027-fact-statement-for-the-detections.md, point 10), from events.json and
+# event-watch.txt in WORK. event-watch.txt is the name and resourceVersion of each Event in TARGET
+# as one watch, started before the failures, delivered it: an Event's first line is its creation.
+# The order is the resourceVersions of those creations, which cannot be equal by accident: each
+# write gets its own, and one watch delivers them in the order the API server committed them
+# (etcd's revision in kind). The list's resourceVersion would not do, since a series patch raises
+# it, and neither would creationTimestamp, which has a resolution of one second, within which
+# the fake endpoint lets kausa write both Events of one incident.
+check_detected_first() {
+  python3 -I -c '
+import json, re, sys
+target, work = sys.argv[1:3]
+WORKLOADS = (("Deployment", "crasher"), ("Job", "failing-job"), ("Job", "policy-job"),
+             ("Deployment", "stranded"), ("Deployment", "stalled"))
+DETECTED = re.compile(r"kausa\.detected\.([0-9a-f]{16})\.[0-9a-f]{8}")
+EXPLAINED = re.compile(r"kausa\.([0-9a-f]{16})\.[0-9a-f]{8}")
+
+def fail(message):
+    sys.exit("FAIL: Detected before Explained: " + message)
+
+created = {}
+for line in open(work + "/event-watch.txt"):
+    parts = line.split()
+    if len(parts) == 2 and parts[0] not in created:
+        created[parts[0]] = int(parts[1])
+events = [e for e in json.load(open(work + "/events.json"))["items"]
+          if e.get("reportingController") == "kausa"]
+pairs = 0
+for kind, name in WORKLOADS:
+    mine = [e for e in events if (e.get("regarding") or {}).get("kind") == kind
+            and e["regarding"].get("name") == name]
+    explained = [e for e in mine if e.get("reason") == "Explained"]
+    if not explained:
+        fail("no Explained Event about %s %s" % (kind, name))
+    for event in explained:
+        match = EXPLAINED.fullmatch(event["metadata"]["name"])
+        if not match:
+            fail("an Explained Event about %s %s is not named after an incident" % (kind, name))
+        if event["metadata"]["name"] not in created:
+            fail("the watch did not see the creation of an Explained Event about %s %s"
+                 % (kind, name))
+        detected = []
+        for other in mine:
+            seen = DETECTED.fullmatch(other["metadata"]["name"])
+            if (other.get("reason") == "Detected" and seen and seen.group(1) == match.group(1)
+                    and other["metadata"]["name"] in created):
+                detected.append(created[other["metadata"]["name"]])
+        if not detected:
+            fail("no Detected Event of the incident of an Explained Event about %s %s was seen"
+                 % (kind, name))
+        if min(detected) >= created[event["metadata"]["name"]]:
+            fail("an Explained Event about %s %s was created at resourceVersion %d, before the "
+                 "Detected Event of its incident (%d)" % (
+                     kind, name, created[event["metadata"]["name"]], min(detected)))
+        pairs += 1
+print("Detected before Explained: %d Explained Events about 5 workloads, each created after the "
+      "Detected Event of its incident" % pairs)
+' "$TARGET" "$WORK"
 }
 # None of the values the fake endpoint injected in its answer reached a sink
 # (docs/adr/0022-redact-the-answer.md): kausa's Event notes in TARGET, the entries of the

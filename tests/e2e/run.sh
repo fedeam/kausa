@@ -97,15 +97,19 @@
 # with the action Detect, named after the logged incident, whose note is the statement the log
 # gives (crasher's, byte for byte) and holds only letters, digits, spaces and .,:()- and no
 # namespace, owner, Pod or image. The Explained notes start with the mark (after the notice, when
-# withheld). The webhook receives, for each failing workload, one v2 detected body (the facts, no
-# explanation) and one explained one (the facts and the explanation), the facts agreeing with the
-# statement; no series of the capped and dropped facts is over 0.
+# withheld), and each was created after the Detected Event of its incident, in the order one watch
+# of TARGET's Events delivered them. The webhook receives, for each failing workload, one v2
+# detected body (the facts, no explanation) and one explained one (the facts and the explanation),
+# the facts agreeing with the statement; no series of the capped and dropped facts is over 0.
 # With one replica, both then upgrade to an empty model.endpoint and no history, and check that kausa
 # writes Detected Events and nothing else (no other reason, no model request, no explanation line),
 # that the Role or ClusterRole grants Events create and patch, and that the receiver gets only
 # detected bodies; then events=false, with no grant, no Event and the incidents still logged and
-# posted. The next upgrade gives the model and the history back. The cluster scope's breaker case
-# also checks that the incidents the breaker skipped have their Detected Event.
+# posted. The next upgrade gives the model and the history back. Then, with budget.callsPerDay=0, a
+# new failing Job gets a Detected and an ExplanationSkipped Event of the same incident, the skip
+# logged and counted as budget, and no request reaches the endpoint; the next upgrade sets the
+# daily budget back. The cluster scope's breaker case also checks that the incidents the breaker
+# skipped have their Detected Event.
 #
 # Every run checks the endpoint check (docs/adr/0020-check-the-endpoint.md): helm test --logs
 # passes against the fake endpoint, its Pod admitted under the restricted Pod Security Standard,
@@ -184,6 +188,11 @@ else
     --set rbac.scope=cluster
 fi
 
+# The name and resourceVersion of each Event in TARGET as one watch delivers it, from before the
+# failures, for the order of the Detected and Explained Events (check_detected_first).
+k -n "$TARGET" get events.events.k8s.io --watch \
+  -o jsonpath='{.metadata.name} {.metadata.resourceVersion}{"\n"}' > "$WORK/event-watch.txt" &
+WATCH_PID=$!
 k apply -f tests/e2e/failures.yaml
 if [ "$SCOPE" = namespaced ]; then
   # The same failures where kausa is granted nothing.
@@ -658,6 +667,11 @@ no_injected_values
 # The Detected Event of each failing workload (docs/adr/0027-fact-statement-for-the-detections.md)
 # and the mark on its Explained Event's note.
 check_detected model
+# And each Explained Event after the Detected Event of its incident; the watch is no longer needed.
+check_detected_first
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+WATCH_PID=""
 # The withheld answer (docs/adr/0025-withhold-destructive-commands.md): the destructive step of
 # failing-job's answer reached no sink (kausa's Event notes in TARGET, the Explanations' entries,
 # the webhook's bodies and kausa's explanation log lines), each of which holds something to look
@@ -1734,6 +1748,93 @@ print(len(found))
   h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
     --set model.endpoint="http://$gateway:$PORT/v1" --set history.enabled=true --set events=true
   HISTORY=on
+
+  # A spent budget (docs/adr/0027-fact-statement-for-the-detections.md, point 10), in both scopes:
+  # with budget.callsPerDay=0 the budget refuses every call as spent (src/budget.rs: the daily call
+  # budget is spent), and a new failing Job, budget-spent, gets a Detected Event and an
+  # ExplanationSkipped Event of the same incident, from the one Pod, whose skip is logged with that
+  # reason and counted as budget; the Pod makes no model call and no request reaches the endpoint.
+  # The next upgrade sets the daily budget back.
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+    --set budget.callsPerDay=0
+  # Recreate stopped the Pod before: every request from here on would be the new Pod's.
+  requests_before=$(lines_of "$WORK/requests.jsonl")
+  pod=pod/$(kausa_pods | head -n 1)
+  seed_failure budget-spent
+  check_spent() {
+    python3 -I - "${pod#pod/}" "$WORK" <<'EOF'
+import json, re, sys
+pod, work = sys.argv[1:3]
+REASON = "the daily call budget is spent"
+
+
+def fail(message):
+    sys.exit("FAIL: with a spent budget: " + message)
+
+
+detected, skipped = set(), set()
+for event in json.load(open(work + "/events.json"))["items"]:
+    regarding = event.get("regarding") or {}
+    if (event.get("reportingController") != "kausa"
+            or (regarding.get("kind"), regarding.get("name")) != ("Job", "budget-spent")):
+        continue
+    if event.get("reportingInstance") != pod:
+        fail("an Event about Job budget-spent was reported by another Pod")
+    name = event["metadata"]["name"]
+    match = re.fullmatch(r"kausa\.detected\.([0-9a-f]{16})\.[0-9a-f]{8}", name)
+    if event.get("reason") == "Detected" and match:
+        detected.add(match.group(1))
+    match = re.fullmatch(r"kausa\.skipped\.([0-9a-f]{16})\.[0-9a-f]{8}", name)
+    if event.get("reason") == "ExplanationSkipped" and match:
+        if event.get("note") != "kausa could not explain this failure: " + REASON:
+            fail("the ExplanationSkipped Event about Job budget-spent has another note")
+        skipped.add(match.group(1))
+    if event.get("reason") == "Explained":
+        fail("Job budget-spent has an Explained Event")
+both = detected & skipped
+if not both:
+    fail("Job budget-spent has %d Detected and %d ExplanationSkipped incidents, none in common"
+         % (len(detected), len(skipped)))
+logged = set()
+for text in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(text)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "explanation skipped" and (
+            entry.get("reason") == REASON and entry.get("fingerprint") in both):
+        logged.add(entry["fingerprint"])
+if not logged:
+    fail("no explanation skipped line gives the daily budget for Job budget-spent")
+metrics = {}
+for text in open(work + "/metrics.txt"):
+    parts = text.split()
+    if len(parts) == 2 and not text.startswith("#"):
+        metrics[parts[0]] = float(parts[1])
+if not metrics.get('kausa_explanations_skipped_total{reason="budget"}', 0) >= 1:
+    fail("kausa_explanations_skipped_total{reason=\"budget\"} is not 1 or more")
+calls = sum(v for k, v in metrics.items() if re.match(r"kausa_model_calls_total([{]|$)", k))
+if calls:
+    fail("the Pod counted %d model calls" % calls)
+print("with a spent budget: Job budget-spent has a Detected and an ExplanationSkipped Event of "
+      "the same incident, the skip logged and counted as budget, no model call")
+EOF
+  }
+  spent_report=""
+  for _ in $(seq 1 40); do
+    k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
+    kausa_log "$pod"
+    pod_get "${pod#pod/}" metrics > "$WORK/metrics.txt"
+    spent_report=$(check_spent 2>/dev/null) && break
+    sleep 3
+  done
+  [ -n "$spent_report" ] || spent_report=$(check_spent) || exit 1
+  echo "$spent_report"
+  [ "$(lines_of "$WORK/requests.jsonl")" = "$requests_before" ] ||
+    fail "a model request reached the endpoint with a spent budget"
+  k -n "$TARGET" delete job budget-spent --wait >/dev/null
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+    --set budget.callsPerDay=200
 fi
 
 if [ "$SCOPE" = namespaced ]; then
