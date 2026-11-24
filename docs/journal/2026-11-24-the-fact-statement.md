@@ -146,6 +146,13 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
   says kausa never sends a create the schema would refuse, and that the owner lookup never looks up
   nor keeps a name that is not a DNS-1123 subdomain of at most 253 characters, which at `4b85369` it
   sends unencoded in a URL.
+- A third review of 0029 found that the lookups of its revision check, awaited in the run loop,
+  would hold it for as long as their `get`s take, with no bound. 0029 now reads in a slot of its
+  own, at most 16 `get`s a tick, forces a read of each ReplicaSet at acceptance so that a rollback
+  made just before is not reported `observed`, and names the writer of ReplicaSets, who can forge
+  an `observed` through the revision annotation and can as well undo for real. Its `Update` of 0028
+  adds point 3, the Costs and the trust statement, and the `pods_total` field of the `incident` log
+  line joins the places where `Pods now` changes.
 - Nothing is implemented, and nothing in them is measured.
 
 ### Decisions
@@ -190,6 +197,14 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
 - In 0029, the count of 0027's `Pods now` is corrected with every switch off, not behind
   `incidents.reportEnd`: keeping a count known to be wrong as the default was the worse choice. It
   is the one change of 0029 with every switch off, and can ship ahead of it in its own change.
+- In [0029](../adr/0029-incident-end-report.md), the revision reads of the `rollout-undo` check run
+  in a read slot polled by the run loop, never awaited in it: at most 16 `get`s started a tick (3.2
+  a second), one in flight, one name per check per round; at acceptance a `get` of each of at most
+  4 ReplicaSets past a fresh entry gives the baseline, and more than 4 is `not-checkable`; and
+  `not-observed` needs `C` decided at a tick of the window's last 600 seconds, else
+  `not-checkable`. A time budget per pass and no retry of a failed lookup were weighed and not
+  taken: a cap per tick bounds every writer the same way and keeps a failed read retryable. The
+  design is the ADR author's, added after the third review.
 
 ### Next
 

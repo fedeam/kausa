@@ -14,15 +14,15 @@
   report by webhook what kurita proposed for it, both off by default](0028-incident-resource-and-remediation-report.md)
   (the table of created Incidents, the checks of a Remediation, the `remediation` message and the
   attach point of its point 9)
-- Amends, when accepted, each with an `Update 2026-11-24` paragraph at its end: [0015. Post each
-  new explanation to one optional webhook, as JSON, Slack or Telegram](0015-notifications.md) (two
-  new kinds of message, and the queue sentence of 0028's `Update` there);
+- Amends, when accepted, each with an `Update 2026-11-24` paragraph at its end: [0015. Post each new
+  explanation to one optional webhook, as JSON, Slack or Telegram](0015-notifications.md) (two new
+  kinds of message, and the queue sentence of 0028's `Update` there);
   [0026](0026-facts-before-the-model.md) (its point 3);
   [0027](0027-fact-statement-for-the-detections.md) (its point 1's `Pods now`, corrected with every
   switch off, its point 5, its tracker and its acceptance item on `capped`);
-  [0028](0028-incident-resource-and-remediation-report.md) (its points 1, 4, 5, 6 and 9, its
-  "Alternatives considered" and its "Not verified"); and invariants 5, 11 and 12 of
-  [ARCHITECTURE.md](../../ARCHITECTURE.md), changed with the code
+  [0028](0028-incident-resource-and-remediation-report.md) (its points 1, 3, 4, 5, 6 and 9, its
+  "Alternatives considered", its trust statement, its Costs and its "Not verified"); and invariants
+  5, 11 and 12 of [ARCHITECTURE.md](../../ARCHITECTURE.md), changed with the code
 - Keeps: [0008. Send only allowlisted, redacted data to one OpenAI-compatible
   endpoint](0008-data-leaving-the-cluster.md) (nothing new goes to the model) and [0009. Run with
   read-only permissions that never include Secrets](0009-least-privilege-rbac.md) (no permission
@@ -149,7 +149,8 @@ correction, of 0027's `Pods now` (point 2); the two projects couple only through
   kausa holds no such record. `none` is shown as `recorded: yes, action: none`.
 - **A window shorter than 20 minutes.** The owner cache keeps an entry 600 seconds
   (`OWNER_CACHE_TTL`, `src/run.rs:82`), so after an undo a stale revision can hold `observed` back
-  for up to 10 minutes; a window of 10 would then give false `not-observed` results.
+  for up to 10 minutes and the wait for its read (point 2); a window of 10 would then give false
+  `not-observed` results.
 - **Closings for any Incident in the process's table, matched on first-seen time alone.** A new
   term's event-born occurrence can carry a first-seen time from before the term, the time of its
   Event's last occurrence, and match an Incident of an earlier term. Only the current term's
@@ -262,32 +263,78 @@ names the owner's UID inflates it. The change applies with every switch off, not
 `incidents.reportEnd`: keeping a count known to be wrong as the default is worse than changing it.
 It is the one thing this ADR changes with every switch off: `Pods now` counts only the Pods of the
 owner's namespace, in the fact statement, the request to the model (`pods_total`,
-`src/context.rs:120`), the `Detected` Event, the webhook's `facts.podsNow` and 0028's
-`facts.podsNow`; no new watch, verb, write, table field or message. It changes the count only for
-an owner whose UID a Pod of another namespace names, and it can ship ahead of the rest of this ADR,
-in its own change, since it depends on nothing else here.
+`src/context.rs:120`), the `pods_total` field of the `incident` log line (`log_incident`, called at
+`src/run.rs:1213`, the field at `:1384`), the `Detected` Event, the webhook's `facts.podsNow` and
+0028's `facts.podsNow`; no new watch, verb, write, table field or message. It changes the count only
+for an owner whose UID a Pod of another namespace names, and it can ship ahead of the rest of this
+ADR, in its own change, since it depends on nothing else here.
 
 **Where a Pod's revision comes from.** As 0028 decides it (its point 3, "Where the revision comes
-from"): a ReplicaSet's revision is held in the owner cache's entry, kausa reads it only through the
-owner lookup (`controller_of`, `src/run.rs:1909-1953`) from async code, and the tick makes no
-request. 0028's reader is the fact slot; this ADR adds a second one, the run loop, since nothing
-else reads a ReplicaSet again while its Pods live (`on_pod` reuses a resolved owner,
-`src/run.rs:1448-1452`). At acceptance, before the baseline is taken, and right after each tick
-while a `rollout-undo` check is pending, the run loop calls the lookup for each ReplicaSet named by
-the controller reference of a non-terminal Pod of the check's set, and `C` is evaluated there, from
-the revisions the lookup answers; a failed lookup, or an answer without a whole-number revision, is
-a revision kausa could not read. A fresh entry costs no request; an absent or expired one, one
-metadata `get` within 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `src/run.rs:89`). Each such ReplicaSet then
-costs at most one `get` every 600 seconds (`OWNER_CACHE_TTL`, `:82`), or every 30 seconds while its
-`get` fails (`OWNER_ERROR_TTL`, `:83`), with the existing verb; the lookups run in the run loop, as
-`on_pod`'s do today, so a slow `get` delays the loop as one does today. A revision is then at most
-600 seconds and one lookup older than the live one.
+from"): a ReplicaSet's revision, with the UID its `get` returned, is held in the owner cache's
+entry, which only the owner lookup (`controller_of`, `src/run.rs:1909-1953`) fills, from async code.
+0028's reader is the fact slot; this ADR adds a second one, since nothing else reads a ReplicaSet
+again while its Pods live (`on_pod` reuses a resolved owner, `src/run.rs:1448-1452`). How it reads,
+and the bound below, are the ADR author's design, written after a third review found that lookups
+awaited in the run loop (`src/run.rs:1007-1235`), as `on_pod`'s are (`:1462-1463`, awaited from the
+`select!` at `:1090`), would hold it, with no tick, no watch event and no fact slot served, for as
+long as the `get`s of every pending check take: 1,000 in a row every 600 seconds at 500 checks, or 5
+seconds each with an API server that does not answer. So:
 
-The baseline is taken at acceptance, at `t_a` on kausa's monotonic clock, from those Pods:
+- **The run loop never waits for a revision.** The reads run in a read slot, a future polled as one
+  more branch of the run loop's `select!`, as 0027's fact slot is (`reporting`, declared at
+  `src/run.rs:1005`, assigned at `:1012` and polled at `:1108`), with one `get` in flight at a time.
+  It borrows the term's lookup (`:973`) as 0028's read does; the cache's `RefCell` (`:1905`) is
+  never borrowed across an `await`, so the read slot, the fact slot, `on_pod` and the run loop share
+  it. `C` is evaluated right after each tick, in the run loop, from the cache alone, with no
+  request: a Pod's revision is known when its controller ReplicaSet's entry is fresh, its `get`
+  answered with a whole-number revision, and the UID that `get` returned equals the one in the Pod's
+  `ownerReference`.
+- **At most 16 `get`s started per tick.** At each tick the loop lists the names that the pending
+  `rollout-undo` checks need read, at most 16: a ReplicaSet named by the controller reference of a
+  non-terminal Pod of a check's set, whose entry is absent, expired, or a failure older than 30
+  seconds (`OWNER_ERROR_TTL`, `:83`). It takes one name per check per round, that check's next one,
+  the checks in the order of 0028's table from the one after where the previous list stopped, and
+  the slot reads them in that order; the next tick's list replaces it, and a name it did not reach
+  waits for a later one. So kausa sends at most 16 of these `get`s every 5 seconds, 3.2 a second,
+  11,520 an hour, whatever the checks name; with an API server that does not answer, each holds the
+  slot 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`), about one a tick, 0.2 a second. Each is the owner
+  lookup's metadata `get` of `replicasets`, and the forced read below is the same call past a fresh
+  entry: no new verb and no new watch.
+- **At acceptance, a forced read.** A `rollout-undo` check whose set names more than 4 distinct
+  ReplicaSets is `not-checkable` at once, with no read, since two ReplicaSets of one Deployment hold
+  different revisions ("Not verified"). Otherwise, in its turn, its names, at most 4, are listed
+  together or wait together for a later tick, and each is read with a `get` even when its entry is
+  fresh, within the 16; `B` comes from those answers, and `t_a` is the first tick after the last of
+  them. A read that fails, or answers with another UID than the Pod's `ownerReference` or with no
+  whole-number revision, makes the check `not-checkable`. So `B` is as of a read made after kausa
+  accepted the record, never a cached value up to 600 seconds older: a rollback made before that
+  read is in `B`, and an `observed` is a change seen after `t_a`.
+- **`C` decided, or not.** At a tick `C` holds when every non-terminal Pod's revision is known and
+  not in `B`. It is decided false when no Pod is non-terminal, when one has a controller reference
+  that is not a ReplicaSet, or when one's known revision is in `B`; otherwise it is not decided,
+  since a Pod's revision is not known. At the window's end, `not-observed` needs `C` decided at a
+  tick of the window's last 600 seconds, the age an entry may have anyway; without one, the result
+  is `not-checkable`. So a check whose reads fail or wait is never reported `observed` or
+  `not-observed` on a revision kausa did not read.
+- **What it costs at 500 checks** of 2 ReplicaSets each, accepted in one tick (a writer of
+  Remediations can write their records together): 1,000 forced reads, at 16 a tick the last baseline
+  taken 63 ticks, 315 seconds, after acceptance; then 1,000 entries refreshed every 600 seconds, 1.7
+  `get`s a second, under the 3.2. A round lists one name of each check, or up to 4 of one that
+  awaits its baseline, so a name waits for its read at most ⌈500 / 16⌉ = 32 ticks, 160 seconds, once
+  the baselines are taken, and at most 2,000 / 16 = 125 ticks, 625 seconds, while 500 checks await
+  theirs. After a change, `observed` comes at most an entry's 600 seconds plus that wait later: 605
+  seconds with one check of one ReplicaSet, 600 + 2 × 160 = 920 with 500 checks of 2, under the
+  shortest window of 1,200 seconds. The list holds at most 16 names, each with the index of its
+  table entry, whose namespace it uses: 16 × (32 + 256) + 24 = 4,632 bytes, from one tick to the
+  next. With a switch off, or with no `rollout-undo` check pending, nothing is listed and nothing is
+  read.
+
+The baseline is taken at acceptance from those Pods, at `t_a` on kausa's monotonic clock: the
+acceptance, or for `rollout-undo` the first tick after its forced reads:
 
 | Detection | Action | Baseline `B` | Condition `C` at a tick |
 |---|---|---|---|
-| `D001` to `D005`, `D014` | `rollout-undo` | The revisions of the controller ReplicaSets of the non-terminal Pods, read through the owner lookup after the tick (point 2, 0028's point 3); at most 4 | At least one non-terminal Pod, and **every** one has a controller ReplicaSet with a known revision not in `B` |
+| `D001` to `D005`, `D014` | `rollout-undo` | The revisions of the controller ReplicaSets of the non-terminal Pods, from the forced reads after acceptance (above); at most 4 ReplicaSets | At least one non-terminal Pod, and **every** one has a controller ReplicaSet with a known revision not in `B` (decided or not, above) |
 | `D003` | `raise-memory-limit` | A keyed SipHash (a random key per process) of the `memory_limit` string of the container named by the fact statement, equal in every non-terminal Pod that has that container | At least one non-terminal Pod with that container, and **every** one has a limit whose hash differs: the limit "differs as written" |
 | `D002` | `set-image-pull-policy` | That container's policy is `Never` in every non-terminal Pod that has it | At least one such Pod, and **every** one has `Always` or `IfNotPresent` |
 | any other pair | none | none | No outcome: `none`, `needs-human` and `inspect` act on nothing, and 0028 allows `delete-evicted-pods` for no detection |
@@ -301,12 +348,15 @@ The baseline is taken at acceptance, at `t_a` on kausa's monotonic clock, from t
 - `observed`: at a tick within the window, `C` held. It does not say who made the change, that the
   change caused anything, or that it stayed.
 - `not-observed`: the window ended with at least one non-terminal Pod of the owner held, and `C`
-  never held. It does not say that nobody acted, or that the failure goes on.
+  never held; for `rollout-undo`, `C` was also decided at a tick of the window's last 600 seconds.
+  It does not say that nobody acted, or that the failure goes on.
 - `no-pods`: the window ended with no non-terminal Pod of the owner held. It does not say the owner
   was deleted.
 - `not-checkable`: at acceptance there was no single baseline: no Pod, no such container, values
-  that differ between Pods, more than 4 revisions, a revision kausa could not read, a policy other
-  than `Never`, or an owner with no UID. Decided at once.
+  that differ between Pods, more than 4 ReplicaSets or revisions, a revision kausa could not read, a
+  policy other than `Never`, or an owner with no UID, decided at once (for `rollout-undo`, when its
+  forced reads answer); or, for `rollout-undo`, `C` not decided at any tick of the window's last 600
+  seconds, decided at its end.
 - `source-lost`: the Pods watch that covers the namespace dropped its records on a `403` after
   `t_a`. Decided at once.
 
@@ -316,8 +366,9 @@ The baseline is taken at acceptance, at `t_a` on kausa's monotonic clock, from t
 ### 3. Where it is recorded
 
 `Incident.status` stays declared, empty and reserved, and `incidents/status` gets no verb. kausa
-writes nothing new to the cluster and reads no new kind of object: point 2's lookups are the owner
-lookup's metadata `get` of `replicasets`, made more often. The record of an end is:
+writes nothing new to the cluster and reads no new kind of object: point 2's reads are the owner
+lookup's metadata `get` of `replicasets`, made more often, in a slot of their own and at most 16 a
+tick. The record of an end is:
 
 - the log lines `incident closed` and `incident outcome`, through `log.rs`, at `info`, with the
   fields of the message;
@@ -510,9 +561,13 @@ What each principal gains:
   action id and time into the `closed` message; and it causes one `outcome` message per Incident,
   within the end bound, which is one for the process. It never chooses the result, never reaches
   another namespace (0028's lookup by namespace, name and UID) or an Incident of an earlier process,
-  and never costs a `detected` or an `explained` message. Worst case: it records `rollout-undo` and
-  rolls the Deployment itself; kausa reports `observed`, which is true of the Pods, and names kurita
-  only as the proposer of record.
+  and never costs a `detected` or an `explained` message. Each `rollout-undo` it gets accepted costs
+  at most 4 forced reads at acceptance and one read per round while pending, within the 16 a tick,
+  and never holds the run loop; with a record for each of the 500 Incidents the table holds at most,
+  the reads of other namespaces' checks wait at most 625 seconds while the baselines are taken and
+  160 seconds after (point 2). Worst case: it records `rollout-undo` and rolls the Deployment
+  itself; kausa reports `observed`, which is true of the Pods, and names kurita only as the proposer
+  of record.
 - **A writer of Incidents in N** (0028's trust statement): deleting an Incident and creating
   another under its name makes kurita's record for it fail kausa's check (`incident-unknown`,
   0028's point 6), so the closing says `recorded: no` and no outcome check runs. The closing itself
@@ -538,39 +593,59 @@ What each principal gains:
   uncounted. Within 0028's relist exposure it can make kausa restart on memory, and that loses every
   pending closing and check, uncounted (point 7).
 - **Whoever can create or delete Pods in N** (`edit` can): a failing forged Pod keeps a state
-  incident open, since owner resolution goes by the ReplicaSet's name, which delays its `closed`
-  but not the end of its outcome window; it can hold a check at `not-observed`, or make it
-  `not-checkable` at acceptance with values that differ; it reaches `observed` only when every
-  real non-terminal Pod already shows the change, or when there is none, where one forged Pod
-  gives `observed` instead of `no-pods`; and deleting the Pods closes a state incident with
-  `pods_now: 0`, which is true. A Pod in N whose controller `ownerReference` names the Deployment
-  with its real UID counts as one of its Pods (`top_owner` keeps such a reference as the Pod
-  carries it, `src/owner.rs:61-63`), and the garbage collector does not delete it, since its owner
-  exists: it lasts until someone deletes it. A Pod in another namespace counts for nothing in N
-  (point 2). While a `rollout-undo` check is pending, each Pod it adds to the set whose controller
-  reference names a ReplicaSet kausa cannot read costs one metadata `get` every 30 seconds (point
-  2), within the Pods it may create. `edit` can also change the Deployment for real, so the forgery
-  buys little.
-- **Whoever can write `pods/status` in N** (a kubelet, for the Pods of its node, and principals
-  with a wildcard grant: high-privilege principals): it can keep the status of a genuine state
-  incident's Pods clean, against the kubelet, for more than 330 seconds, and so forge its
-  `closed`; and it can mark real Pods `Failed`, taking them out of the non-terminal set, which
-  gives `no-pods`, `not-checkable` at acceptance, or `observed` when at least one remaining Pod
-  shows the change. It cannot make an `observed` without a real change on at least one Pod: the
-  revision comes from the Pod's `ownerReference` and its ReplicaSet, the limit and the policy from
-  the Pod's spec, none from its status; that a write to `pods/status` cannot change the Pod's
-  `ownerReferences` or its spec is under "Not verified".
+  incident open, since owner resolution goes by the ReplicaSet's name, which delays its `closed` but
+  not the end of its outcome window; it can hold a check at `not-observed`, or make it
+  `not-checkable` at acceptance with values that differ; it reaches `observed` only when every real
+  non-terminal Pod already shows the change, or when there is none, where one forged Pod gives
+  `observed` instead of `no-pods`; and deleting the Pods closes a state incident with `pods_now: 0`,
+  which is true. A Pod in N whose controller `ownerReference` names the Deployment with its real UID
+  counts as one of its Pods (`top_owner` keeps such a reference as the Pod carries it,
+  `src/owner.rs:61-63`), and the garbage collector does not delete it, since its owner exists: it
+  lasts until someone deletes it. A Pod in another namespace counts for nothing in N (point 2).
+  While a `rollout-undo` check is pending, a Pod it adds whose controller reference names a
+  ReplicaSet kausa cannot read (none, or one with another UID: the lookup fails and `top_owner`
+  keeps the reference, `src/owner.rs:67`) leaves `C` undecided while no other Pod decides it false,
+  so the check ends `not-checkable`, never `observed`; each such name costs one `get` per round of
+  its check, within the 16 a tick. Whether the garbage collector deletes such a Pod, whose owner
+  does not exist, is under "Not verified". Outside N it gets nothing more: the run loop never waits
+  for these reads, the 16 a tick hold whatever it adds, and a round lists one name of each check, so
+  the checks of other namespaces wait at most 32 ticks, 160 seconds, for a read at 500 checks, as
+  without it. `edit` can also change the Deployment for real, so the forgery buys little.
+- **Whoever can write ReplicaSets in N** (`edit` can): point 2 reads the revision from the
+  `deployment.kubernetes.io/revision` annotation of each Pod's controller ReplicaSet, so it can set
+  that annotation on the Pods' real ReplicaSets to numbers not in `B` and make `C` hold with no Pod
+  and no spec changed: a forged `observed`, whose text says that the ReplicaSet revision of every
+  non-terminal Pod changed, true of the annotation it wrote and of no rollout. It can also hold `C`
+  false by writing a number in `B`, or give `not-checkable` by deleting a ReplicaSet and creating
+  another under its name, whose UID differs. The impact is low: the same role can roll the
+  Deployment back for real, and kausa reports only what it read, naming kurita only as the proposer
+  of record. Whether the Deployment controller writes the annotation back, and how soon, is under
+  "Not verified". Outside N, its ReplicaSets are read only in its own checks' turns: a `get` it
+  could make slow, which 0028's "Not verified" asks of a ReplicaSet with about 1.5 MiB of metadata,
+  holds the read slot up to 5 seconds a read, never the run loop, and delays the reads of other
+  namespaces' checks by that much per turn of its checks.
+- **Whoever can write `pods/status` in N** (a kubelet, for the Pods of its node, and principals with
+  a wildcard grant: high-privilege principals): it can keep the status of a genuine state incident's
+  Pods clean, against the kubelet, for more than 330 seconds, and so forge its `closed`; and it can
+  mark real Pods `Failed`, taking them out of the non-terminal set, which gives `no-pods`,
+  `not-checkable` at acceptance, or `observed` when at least one remaining Pod shows the change. A
+  write to `pods/status` cannot make an `observed` without a real change on at least one Pod, as a
+  writer of ReplicaSets can (above): the revision comes from the Pod's `ownerReference` and its
+  ReplicaSet's annotation, the limit and the policy from the Pod's spec, none from its status; that
+  a write to `pods/status` cannot change the Pod's `ownerReferences` or its spec is under "Not
+  verified".
 - **Unchanged:** kausa executes nothing, changes no workload, reads no Secret or ConfigMap, and
   sends nothing new to the model.
 
 ### Costs, computed
 
-- **Writes:** 0. **New watches and verbs:** 0. **Reads:** with a `rollout-undo` check pending, at
-  most one metadata `get` of `replicasets` per ReplicaSet named by a non-terminal Pod of its set
-  every 600 seconds, or every 30 seconds while that `get` fails (point 2); at 500 checks with 2
-  ReplicaSets each, 1,000 `get`s every 600 seconds, 1.7 a second, before the cache shares entries.
-  Not measured (bar 5). **The fact queue:** +0 bytes: the baseline is taken at acceptance, and the
-  container name is already in the fact statement.
+- **Writes:** 0. **New watches and verbs:** 0. **Reads:** with a `rollout-undo` check pending, the
+  read slot's metadata `get`s of `replicasets` (point 2): at most 16 started a tick, one in flight,
+  3.2 a second and 11,520 an hour, of which at most 4 forced at each acceptance; at 500 checks with
+  2 ReplicaSets each, 1,000 at acceptance and then 1,000 every 600 seconds, 1.7 a second, before the
+  cache shares entries. None with a switch off or with no such check pending, and the run loop never
+  waits for one. Not measured (bar 5). **The fact queue:** +0 bytes: the baseline is taken at
+  acceptance, and the container name is already in the fact statement.
 - **Each entry of 0028's table, with `reportEnd` on:** +32 bytes, counted even where 0028 already
   keeps one of the values: the term number (`u32`), the accepted action (`u8`), the flags (`u8`:
   closing taken, outcome taken, a record accepted) and padding, 8; `proposedAt` in Unix seconds
@@ -589,12 +664,17 @@ What each principal gains:
   map's own overhead, about ten times as much, so the array it is.
 - **This ADR's share:** 16,000 + 40,000 + 4,848 = 60,848 bytes, under 64 KiB = 65,536 bytes by
   4,688 bytes (bar 4).
+- **The read list of point 2:** at most 16 names with their table index, 4,632 bytes, and the one
+  `get` in flight, held from one tick to the next while a `rollout-undo` check is pending. It is not
+  kept for the term, and bar 4, which measures what is, does not count it; with it, this ADR's
+  memory peaks at 60,848 + 4,632 = 65,480 bytes, 56 under 64 KiB, too close for a computed figure,
+  so bar 5 records the list's size apart.
 - **CPU:** with at least one check pending, one pass over the Pods kausa holds at each 5-second
   tick, with one map lookup and one comparison of the namespace per Pod: 10,000 of each a tick at
   10,000 Pods. Hashing applies only to the containers of Pods with a check. Not measured (bar 5).
 - **The departures of Context** add no byte: the frozen `first_seen` is a condition in `observe`,
   the namespace a comparison in `pods_of`, the queue rule a search of the queue of 16. Point 2's
-  revision reads add none either: the revision is in 0028's owner-cache entry.
+  revision reads keep nothing for the term either: the revision is in 0028's owner-cache entry.
 - **Messages:** at most 2 per Incident, and at most 30 end messages an hour at the default.
 
 ### Conditions of acceptance
@@ -604,29 +684,33 @@ before this ADR is accepted, and after 0028's bars:
 
 1. **Every switch off:** idle memory within the run-to-run spread of the previous release; the
    `kubectl auth can-i` matrix equal to 0028's; the logs, Events and messages of the scenario
-   byte-identical to the previous release's, except `Pods now` (point 2), and only for an owner
-   whose UID a Pod of another namespace names. The baseline is a release without the correction;
-   a test with such a Pod shows the count before and after.
+   byte-identical to the previous release's, except `Pods now` and the `incident` log line's
+   `pods_total` (point 2), and only for an owner whose UID a Pod of another namespace names. The
+   baseline is a release without the correction; a test with such a Pod shows the count before and
+   after.
 2. **The switches on:** the `can-i` matrix still equal to 0028's.
 3. **A full fact queue** at the longest names adds at most 2 MiB (0027's point 10), measured again
    with the switches on.
 4. **0028's table at 500 entries,** each at the longest values with a pending `rollout-undo` check,
    takes at most 0.5 MiB (0028's bar 3, not raised); this ADR's share, by difference with
    `reportEnd` off, at most 64 KiB, with the drop times at 100 listed namespaces.
-5. **The tick in kind** with 10,000 Pods and 500 pending checks takes less than 1 second, and the
-   `get`s of `replicasets` that point 2's lookups make in an hour are counted, against the computed
-   bound, with how long each held the run loop.
+5. **The tick in kind** with 10,000 Pods and 500 pending `rollout-undo` checks, accepted in one
+   tick, takes less than 1 second. The `get`s of `replicasets` that point 2's read slot makes in
+   that hour are counted against its bound, at most 16 in any tick; the time from each tick to the
+   next stays the tick's own while they run, with the API server answering and with its answers held
+   past 5 seconds; and the read list's size is recorded.
 6. **500 Incidents closing within one minute**, in kind and on the Raspberry Pis: no watch error,
    relist or restart; the `closed` messages received, plus those counted `failed`, `capped` or
    `dropped`, plus the closings counted `no-incident`, equal the 500 emitted incidents the tracker
    dropped, nothing is counted lost, and no Incident is in two `closed` messages; the `detected`
    messages sent in that hour equal those of the same scenario with `reportEnd` off.
 7. **One kind scenario per acting row,** with `W` at 20: `D001` undone by hand gives `observed`,
-   with an `ended_at` at most 600 seconds plus the rollout's time after the undo, and left alone
-   `not-observed`; `D003` raised by a rollout, and again by an in-place resize, gives `observed`;
-   `D002` with its policy changed gives `observed`; `D014` undone gives `observed`; the owner
-   scaled to 0 gives `no-pods`; `D009` closes with `recent-state` and no outcome; `D008` gives no
-   `closed`; `D011` on a ReplicaSet whose Event stops gives `basis: event`.
+   with an `ended_at` at most 600 seconds plus one tick plus the rollout's time after the undo, left
+   alone `not-observed`, and rolled back just before its Remediation is accepted `not-observed`, not
+   `observed` (point 2's forced read); `D003` raised by a rollout, and again by an in-place resize,
+   gives `observed`; `D002` with its policy changed gives `observed`; `D014` undone gives
+   `observed`; the owner scaled to 0 gives `no-pods`; `D009` closes with `recent-state` and no
+   outcome; `D008` gives no `closed`; `D011` on a ReplicaSet whose Event stops gives `basis: event`.
 8. **A revoked Pods permission** in a listed namespace closes its open state incidents with
    `source-lost`, and its pending checks end `source-lost`.
 9. **Killing the leader** during an open `D001` with a pending check gives no `closed` and no
@@ -653,14 +737,30 @@ Each was read in source or documentation only, or not derived; the bar or test t
   controller's `sync.go` and `deployment_util.go`, read on `master` on 2026-11-24). Bar 7, rows
   `D001` and `D014`.
 - **That an in-place resize writes the Pod spec's limit, as the watch sees it.** Bar 7, row `D003`.
-- **How long the owner cache's stale revision delays `observed` after an undo,** at most 600
-  seconds and one lookup computed, through point 2's lookups. Bar 7, row `D001`, and a
-  kind test that changes the revision of a running Pod's ReplicaSet (an undo to the ReplicaSet of
-  Pods still running) and measures when the check sees it, with the `get`s it made.
+- **How long the owner cache's stale revision delays `observed` after an undo,** at most 600 seconds
+  and the wait for a read computed: one tick with one check, 320 seconds at 500 checks of 2
+  ReplicaSets (point 2). Bar 7, row `D001`, and a kind test that changes the revision of a running
+  Pod's ReplicaSet (an undo to the ReplicaSet of Pods still running) and measures when the check
+  sees it, with the `get`s it made.
 - **That a write to `pods/status` cannot change a Pod's `metadata.ownerReferences` or its spec**
   (the trust statement's writer of `pods/status`): not read in the API server's source. In kind, a
   PATCH to a Pod's `/status` that changes `metadata.ownerReferences`, and one that changes a
   container's `resources.limits`, are not applied.
+- **That the garbage collector deletes a Pod whose controller `ownerReference` names a ReplicaSet
+  that does not exist,** with the Deployment's UID, and how soon (the trust statement's writer of
+  Pods, point 2's reads). In kind, create such a Pod while a `rollout-undo` check is pending and
+  watch it, with the `get`s it costs and the check's result.
+- **How long a metadata `get` of a ReplicaSet that does not exist takes on the Raspberry Pis,** a
+  `404`, alone and 16 in a row, against the timeout of 5 seconds: bar 5 counts the `get`s in kind,
+  not their time on the Pis. Measure it there.
+- **That the Deployment controller does not write a ReplicaSet's `deployment.kubernetes.io/revision`
+  back** after a writer of ReplicaSets changes it, or how soon it does (the trust statement): not
+  read in its source. In kind, patch the annotation of a running Pod's ReplicaSet while a
+  `rollout-undo` check is pending, and watch the annotation and the result.
+- **That two ReplicaSets of one Deployment never hold the same revision,** on which point 2 gives
+  `not-checkable` with no read for more than 4 distinct ReplicaSets: not read in source. If two can,
+  such a check is `not-checkable` where it could have been checked, never given a false result. Bar
+  7's rows `D001` and `D014` record the revisions they meet.
 - **How many `detected` messages enter the queue in one tick** when forged Incidents settle
   together, and so how many end messages they evict. Not derived; a unit test of the tick with
   many forged Events, and bar 6.
@@ -699,8 +799,9 @@ Each was read in source or documentation only, or not derived; the bar or test t
   three actions, whether the change it makes was seen, without kausa writing, reading or
   executing anything more. Both are off by default; with them off nothing changes but `Pods now`.
 - **0027's `Pods now` is corrected with every switch off:** it counts only the Pods of the owner's
-  namespace, in the fact statement, the request to the model, the `Detected` Event and the
-  webhook. It depends on nothing else here, so it can ship ahead of 0029, in its own change.
+  namespace, in the fact statement, the request to the model, the `incident` log line, the
+  `Detected` Event and the webhook. It depends on nothing else here, so it can ship ahead of 0029,
+  in its own change.
 - **kausa still never says "resolved".** Its two new statements are about its own observation and
   about a typed field of the Pods; the banned-word test keeps them so.
 - **A missing `closed` is not an open failure:** a restart, a failover, a table entry dropped
@@ -718,6 +819,10 @@ Each was read in source or documentation only, or not derived; the bar or test t
   `explained` message. An end message never evicts a `remediation`; the `detected` messages of
   forged Incidents evict queued end messages first and, once none is queued, a `remediation`, by
   0028's rule.
+- **A writer of ReplicaSets in a namespace can forge an `observed` there,** by writing the revision
+  annotation of the Pods' ReplicaSets, and can as well roll the Deployment back for real. The reads
+  the checks need run in a slot of their own, at most 16 a tick, so no writer of Pods, ReplicaSets
+  or Remediations makes them hold the run loop.
 - **The end bound is not fair:** it is one for the process, so a writer of Events in one namespace,
   with 30 forged Incidents an hour, one every 120 seconds, leaves no `closed` and no `outcome`
   message about any namespace for that hour; each is counted `capped` and logged, the log line of

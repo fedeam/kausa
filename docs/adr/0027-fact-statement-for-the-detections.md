@@ -509,6 +509,7 @@ in the incident's namespace whose resolved owner has the owner's UID; today `pod
 (`src/run.rs:1744-1749`, used at `src/run.rs:1208` and `:1692`) counts by UID alone over the Pods of
 every watched namespace, so a Pod in another namespace that names the owner's UID inflates it. This
 correction applies with every switch off, in the fact statement, the request to the model, the
+`pods_total` field of the `incident` log line (`src/run.rs:1213`, the field at `:1384`), the
 `Detected` Event and the webhook, and only for an owner whose UID a Pod of another namespace names;
 it is the one change of 0029 with every switch off, and it can ship ahead of 0029 in its own change.
 Point 5: the webhook gains the `closed` and `outcome` values of `type`, within `v2`, with one hourly
