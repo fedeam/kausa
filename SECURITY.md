@@ -390,6 +390,17 @@ kausa must:
   `github.com/<anyone>/…` stays) or no rule recognizes it: an uppercase host, a bare host under a
   suffix `R013` does not list (`name.test/x`), or a value split, encoded or written in fullwidth
   characters for the model to join. Those links stay links.
+- **An owner's kind and name cannot add lines to a notification's text.** The API server only
+  requires an ownerReference's `kind` and `name`, and an Event's `regarding`, to be non-empty. In
+  kind, with Kubernetes v1.36.4 on 2026-11-24, it accepted a Pod whose ownerReference had a line
+  break in its kind and in its name and the uid of no object, and an Event whose `regarding` had
+  one; three minutes later that Pod was still running and failing, while a Pod with the same
+  reference but the kind `Deployment` was gone. Whoever can create Pods or Events in a watched
+  namespace can so give kausa an owner whose name, rendered as it is, would forge a `Facts:` line,
+  the mark or the header of another incident. Since the release after v0.6.3, the Slack and
+  Telegram texts replace each control character and each line or paragraph separator in the kind
+  and the name with U+FFFD; the `json` body, the Events and the log escape the value as JSON and
+  keep it.
 - **The budget is shared.** The call budget and the queue are one per release, shared by every
   namespace it watches (the whole cluster, or the listed namespaces), so a tenant that makes
   many workloads fail can use up the budget and, by flooding the queue, push other namespaces'

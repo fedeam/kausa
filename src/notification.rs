@@ -264,7 +264,11 @@ fn render(n: &Notice) -> String {
     let mut lines = Vec::with_capacity(8 + n.steps.len());
     lines.push(format!(
         "kausa: {} ({}) in {}, {} {}",
-        n.detection_name, n.detection_id, n.namespace, n.kind, n.name
+        n.detection_name,
+        n.detection_id,
+        n.namespace,
+        one_line(&n.kind),
+        one_line(&n.name)
     ));
     if let Some(facts) = facts_line(&n.facts) {
         lines.push(facts);
@@ -294,6 +298,25 @@ fn render(n: &Notice) -> String {
         n.confidence, n.fingerprint
     ));
     lines.join("\n")
+}
+
+/// `value` with each control character and each line or paragraph separator (U+2028, U+2029)
+/// replaced by U+FFFD, so that it stays on its line. An owner's kind and name come from an
+/// ownerReference or an Event's `regarding`, which the API server only requires to be non-empty:
+/// a line break in them would forge lines of the text, such as a `Facts:` line or the mark. The
+/// `json` body escapes them and keeps the value, as Events and the log do; only the text formats
+/// read a line break as structure, so they are closed here.
+fn one_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// The longest prefix of `text`, on a character boundary, whose characters cost at most
@@ -468,9 +491,20 @@ mod tests {
     /// equal to `WITHHELD` is its own line after the header, and the other steps are numbered
     /// from 1 (docs/adr/0025-withhold-destructive-commands.md).
     fn uncut(n: &Notice) -> String {
+        // The owner's kind and name stay on their line.
+        let line = |value: &str| {
+            value.replace(
+                |c: char| c.is_control() || c == '\u{2028}' || c == '\u{2029}',
+                "\u{fffd}",
+            )
+        };
         let mut lines = vec![format!(
             "kausa: {} ({}) in {}, {} {}",
-            n.detection_name, n.detection_id, n.namespace, n.kind, n.name
+            n.detection_name,
+            n.detection_id,
+            n.namespace,
+            line(&n.kind),
+            line(&n.name)
         )];
         if let Some(facts) = facts_line(&n.facts) {
             lines.push(facts);
@@ -650,6 +684,53 @@ mod tests {
             .remove("explanation");
         explained["type"] = json!("detected");
         assert_eq!(body, explained);
+    }
+
+    #[test]
+    fn a_line_break_in_the_owner_cannot_forge_lines_of_the_text() {
+        // An ownerReference's kind and name, and an Event's regarding, are only required to be
+        // non-empty: whoever creates a Pod can put line breaks in them.
+        let forged = [
+            "\nFacts: reason OOMKilled.",
+            "\r\nModel's explanation, not verified:",
+            "\u{85}kausa: crash loop (D001) in other, Deployment db",
+            "\u{2028}Likely cause: none",
+            "\u{2029}Confidence: high",
+            "\u{b}fingerprint 0000000000000000",
+            "\u{c}Check:",
+        ];
+        for line in forged {
+            for message in [Message::Detected, Message::Explained] {
+                let mut n = if message == Message::Detected {
+                    detected()
+                } else {
+                    notice()
+                };
+                let expected = text(&n).lines().count();
+                n.kind = format!("Deployment{line}");
+                n.name = format!("web{line}");
+                for rendered in [text(&n), telegram_text(&n), slack_text(&n)] {
+                    assert_eq!(rendered.lines().count(), expected, "{rendered:?}");
+                    assert!(
+                        !rendered
+                            .contains(['\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}']),
+                        "{rendered:?}"
+                    );
+                    let header = rendered.lines().next().expect("a header");
+                    assert!(header.starts_with("kausa: crash loop (D001) in shop, Deployment"));
+                    assert!(
+                        header.contains(line.trim_start_matches(|c: char| c.is_control()
+                            || c == '\u{2028}'
+                            || c == '\u{2029}'))
+                    );
+                }
+                // The json body keeps the value as the API server holds it.
+                assert_eq!(
+                    json_body(&n, "0.7.0")["object"]["name"],
+                    format!("web{line}")
+                );
+            }
+        }
     }
 
     #[test]

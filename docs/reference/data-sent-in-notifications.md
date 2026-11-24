@@ -186,6 +186,9 @@ kausa: not every incident is posted here (more than 30 in an hour, or more at on
 - The lines are joined with a newline, with none at the end. The `Facts:` line is the fact
   statement without its first sentence and without the container; it is left out when it would
   hold nothing. The `Check:` block is left out when the explanation has no steps.
+- In the first line, each control character (a line break among them) and each line or paragraph
+  separator (U+2028, U+2029) in the owner's kind and name becomes U+FFFD (REPLACEMENT
+  CHARACTER), so that an owner cannot add lines to the text. The `json` body keeps the value.
 - `Model's explanation, not verified:` is fixed, and marks where kausa's facts end and the
   model's text begins.
 - When the first step is kausa's notice for a withheld answer ([Withheld command

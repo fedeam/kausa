@@ -68,6 +68,13 @@ model provider does not change: the statement is not in the request.
   Hub page, the crate and the image) now puts the facts first and the model's explanation as
   optional (0026).
 
+### Security
+
+- The Slack and Telegram texts replace each control character and each line or paragraph
+  separator in the owner's kind and name with U+FFFD. An ownerReference or an Event's `regarding`
+  with a line break in them could forge lines of the text, such as `Facts:` or the mark; the
+  `json` body escaped them already.
+
 ## [0.6.3] - 2026-11-20
 
 Four fixes. One is a fix of redaction: the Pod's UID could reach the model in the kubelet's
