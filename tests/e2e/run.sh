@@ -1659,11 +1659,26 @@ if not WANT <= set(found):
 print(len(found))
 '
   }
+  # Scales kausa to 0 and waits until no kausa Pod is left, not even a terminating one. The Pod
+  # before may still be posting when a phase starts: its tables are per process, so after a
+  # restart it posts each incident that still fails once more (data-sent-in-notifications.md),
+  # one message at a time. Once no Pod is left, every line the receiver gets is from the Pod the
+  # next upgrade starts, and that upgrade sets the replicas back from the chart.
+  stop_kausa() {
+    k -n "$NAMESPACE" scale deploy/kausa --replicas=0 >/dev/null
+    for _ in $(seq 1 60); do
+      [ -z "$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name)" ] && return
+      sleep 1
+    done
+    fail "a kausa Pod is left 60 s after scaling kausa to 0"
+  }
+  stop_kausa
   delete_kausa_events
   hooks_before=$(lines_of "$WORK/hooks.jsonl")
   requests_before=$(lines_of "$WORK/requests.jsonl")
   h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
     --set model.endpoint="" --set history.enabled=false
+  [ "$(pods_ready 1)" = yes ] || fail "the upgrade without a model left no one Ready kausa Pod"
   HISTORY=off
   pod=pod/$(kausa_pods | head -n 1)
   args=$(kausa_args "$pod")
@@ -1710,13 +1725,14 @@ print(len(found))
     END { exit !n }' || fail "kausa_notifications_total{outcome=\"sent\"} is under 5 without a model"
   echo "without a model: $bodies detected bodies, no explained one, no model request, no explanation"
   # events=false: the incidents are logged and posted, and nothing is written to the cluster. The
-  # receiver's lines are counted before the upgrade, as above: the new Pod posts within its settle
-  # window of starting, which deleting the earlier Events can outlast. Recreate stops the old Pod
-  # first, and it has nothing left to post.
+  # receiver's lines are counted with no kausa Pod left, as above, and before the upgrade: the new
+  # Pod posts within its settle window of starting, which deleting the earlier Events can outlast.
+  stop_kausa
+  delete_kausa_events
   hooks_before=$(lines_of "$WORK/hooks.jsonl")
   h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
     --set events=false
-  delete_kausa_events
+  [ "$(pods_ready 1)" = yes ] || fail "the upgrade with events=false left no one Ready kausa Pod"
   pod=pod/$(kausa_pods | head -n 1)
   for verb in create patch; do
     if allowed "$verb" events.events.k8s.io -n "$TARGET"; then

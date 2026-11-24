@@ -54,6 +54,9 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
   written before its `Detected` Event when several incidents settled at once, as point 3 of 0027
   allows; the `Update` of 0027 and the pages on Events and notifications say either can come
   first.
+- **The kind test's phases without a model** count the receiver's lines with no kausa Pod left:
+  in cluster scope on GitHub, the Pod restarted before them was still posting, its tables per
+  process, and one workload got two `detected` bodies in the count.
 
 ## Decisions
 
