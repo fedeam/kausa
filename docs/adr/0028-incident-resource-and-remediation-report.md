@@ -1095,3 +1095,40 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   chart's `values.yaml`, `templates/_helpers.tpl`, `templates/incident-crd.yaml`,
   `templates/incident-reader.yaml` and `files/incident-schema.json`; and the kind test,
   `tests/e2e/run.sh`.
+
+Update 2026-11-24: [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a proposed action was observed, never that the incident was resolved, off by default](0029-incident-end-report.md) is proposed, not accepted.
+It would amend points 1, 3, 4, 5, 6 and 9 of this ADR, its "Alternatives considered", its trust
+statement, its Costs and its "Not verified", all with `incidents.reportEnd` on but point 9, which it
+replaces. Point 1: the table of created Incidents keeps each entry in one slot of an array of at
+most 500 from its create to its drop, so that a drop moves no other entry, and each entry gains 32
+bytes (the term that created it, the action of the first Remediation that passed point 6's checks
+and its time, a keyed hash of the container's name, the closing and outcome marks and a pointer to a
+pending check of at most 80 bytes), within bar 3's 0.5 MiB, which is not raised; the gate, the
+6-hour rule and the name do not change; and the `status` subresource stays declared and empty, so
+"it is the place of the outcome check (point 9)" no longer holds, nor, in "Alternatives considered",
+"The outcome check attaches to `Incident.status` instead (point 9)". Point 3: the owner cache gains
+a second reader, 0029's read slot, which while a `rollout-undo` check is pending refreshes the
+entries of the ReplicaSets its Pods name, and reads them past a fresh entry at acceptance, with the
+same `get`, started at least 312.5 ms apart and never in the run loop; so an entry the fact slot
+finds fresh may have been filled by it, and "At most one `get` per create attempted" counts the fact
+slot's reads only. Costs: "Reads" gains those `get`s, at most 3.2 a second and 11,520 in any
+half-open hour, apart from the creates' 500 in any 6 hours, the read slot's 4,608 bytes held while a
+check is pending, and its one `get` in flight, whose body can be in transit while the fact slot's
+answer is parsed, with at most one parse alive at a time (0029's Costs); "The table of created
+Incidents" gains point 1's 32 bytes an entry. The trust statement: for a writer of Pods or
+ReplicaSets in N, "Outside N, that wait is all it gets" no longer holds whole: its Pods and
+ReplicaSets also feed those reads, in its own checks' turns, and a `get` it could make slow delays
+the reads of other namespaces' checks, never the run loop; a writer of ReplicaSets can also make the
+outcome check report `observed` by writing the revision annotation (0029's trust statement). What
+the fact slot's wait costs does not change. Point 4: "The outcome check may raise the default" no
+longer holds: the outcome check reads no Incident and does not raise the default of
+`incidents.days`. Point 5: `incidents/status` keeps no verb, and "until the outcome check adds
+`patch` there" no longer holds. Point 9 is replaced whole: the later ADR it names is 0029, which
+reports the end of an incident by webhook and log and neither writes `Incident.status` nor moves
+`incidents.days`; the slot stays reserved. The checks of point 6 do not change; its queue rule does:
+when the queue is full the oldest `closed` or `outcome` message is dropped first, before any
+`remediation`, and on the way out a `remediation` and the end messages leave in arrival order, after
+every `detected` and `explained` message; the end messages have a bound and a counter of their own.
+"Not verified" no longer needs the two `/status` tests before an outcome check. This takes effect
+only when 0029 is accepted, which needs its bars measured and 0028 accepted; until then the text
+above holds.

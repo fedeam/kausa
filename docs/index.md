@@ -205,6 +205,9 @@ checks](how-to/develop.md).
   Proposed on 2026-11-24, not accepted, with kurita's ADR 0008 as its other half: [0028. Publish
   each incident as an immutable Incident that only kausa writes, and report by webhook what kurita
   proposed for it, both off by default](adr/0028-incident-resource-and-remediation-report.md).
+  Proposed on 2026-11-24, not accepted, after 0028: [0029. Report when kausa stopped seeing an
+  incident's failure, and whether the change of a proposed action was observed, never that the
+  incident was resolved, off by default](adr/0029-incident-end-report.md).
 - [Maintain the repository](how-to/maintain.md): triage, merges on GitHub, the sync to Gitea,
   the pinned tools.
 - [2026-10-23 — Repository setup](journal/2026-10-23-repository-setup.md): what was set up first
@@ -230,4 +233,4 @@ checks](how-to/develop.md).
   [2026-11-20 — Release v0.6.3](journal/2026-11-20-release-v0-6-3.md);
   [2026-11-24 — The fact statement](journal/2026-11-24-the-fact-statement.md): 0027 measured on a
   Raspberry Pi 4, accepted and implemented; 0028 proposed, with kurita's ADR 0008 as its other
-  half.
+  half, and 0029, how kausa says an incident ended.

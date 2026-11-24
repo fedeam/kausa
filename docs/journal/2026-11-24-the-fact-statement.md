@@ -90,7 +90,9 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
 Write the ADR that records kausa's half of the contract with kurita, a controller that proposes
 remediations for kausa's incidents: an `Incident` resource that only kausa writes, and the report
 by webhook of what kurita proposed. Docs only; kurita's ADR 0008, its other half, was already on
-kurita's `main` as `proposed`.
+kurita's `main` as `proposed`. Then write the ADR that says how kausa reports the end of an
+incident. The maintainer asked for this loop: kausa detects and reports, kurita proposes, and kausa
+says whether it was resolved. kausa cannot know that, so the ADR decides what it says instead.
 
 ### What was done
 
@@ -110,6 +112,24 @@ kurita's `main` as `proposed`.
   security round made `remediation` messages leave the queue only when no other message waits,
   gave them a counter of their own, and stated how long one forged Event every 43.2 seconds keeps
   new Incidents stopped.
+- [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a
+  proposed action was observed, never that the incident was resolved, off by
+  default](../adr/0029-incident-end-report.md), `proposed`, on top of 0028. It records the design a
+  review chose from two proposals: a `closed` message when the tracker drops an incident kausa
+  created an Incident for (never for `D008`), and an `outcome` message saying whether the typed
+  change of an accepted `rollout-undo`, `raise-memory-limit` or `set-image-pull-policy` was seen on
+  every non-terminal Pod of the owner within a window, 60 minutes by default. Both by webhook and
+  log, off by default; `Incident.status` stays declared, empty and reserved, and no permission
+  changes. `Update 2026-11-24` paragraphs at the end of 0015, 0026, 0027 and 0028.
+- A security and a docs review of 0029 changed it the same day: the closing matches on a
+  `first_seen` that the tracker no longer lowers once the incident is emitted, and a closing that
+  matches no Incident is counted; the Pods of the owner are only those of the Incident's
+  namespace, which also corrects 0027's `Pods now`; and in the queue an end message never evicts a
+  `remediation`.
+- A second review of 0029 made the correction of 0027's `Pods now` unconditional, gave the `event`
+  closing a text true whether the Event aged, was deleted or lost its Pod, and said how the check
+  reads a ReplicaSet's revision without a request at the tick: the run loop refreshes the owner
+  cache's entries while a `rollout-undo` check is pending.
 - While 0029 was reviewed, its author found that 0028 never said how the tick that emits an Incident
   reads the sample's ReplicaSet revision: the tick makes no request, a Pod's owner is resolved once,
   and its owner-cache entry is gone after 10 minutes, so for most long-running workloads the
@@ -126,7 +146,18 @@ kurita's `main` as `proposed`.
   says kausa never sends a create the schema would refuse, and that the owner lookup never looks up
   nor keeps a name that is not a DNS-1123 subdomain of at most 253 characters, which at `4b85369` it
   sends unencoded in a URL.
-- Nothing is implemented, and nothing in it is measured.
+- A third review of 0029 found that the lookups of its revision check, awaited in the run loop,
+  would hold it for as long as their `get`s take, with no bound. 0029 now reads in a slot of its
+  own, at most 16 `get`s a tick, forces a read of each ReplicaSet at acceptance so that a rollback
+  made just before is not reported `observed`, and names the writer of ReplicaSets, who can forge an
+  `observed` through the revision annotation and can as well undo for real. Its `Update` of 0028
+  adds point 3, the Costs and the trust statement, and the `pods_total` field of the `incident` log
+  line joins the places where `Pods now` changes. A fourth review found that the read slot's waits
+  held only with fast answers and that a slow slot could leave some checks never read; 0029 now
+  starts each list where the slot stopped reading, spaces its `get`s 312.5 ms apart, ends a check
+  without its baseline after 900 seconds as `not-checkable`, counts the `get` in flight's decode,
+  and lists no name the owner lookup refuses.
+- Nothing is implemented, and nothing in them is measured.
 
 ### Decisions
 
@@ -163,6 +194,40 @@ kurita's `main` as `proposed`.
   the namespace, never the value: one refusal of the schema an hour, which a writer in N can cause,
   would otherwise hide the stop of the table, which holds Incidents back in every namespace. The
   manager's decision, taken from the security reader's ninth review.
+- Proposed only: [0029](../adr/0029-incident-end-report.md), after 0028. A write of the end to
+  `Incident.status` was rejected. The review read in the Kubernetes source, not yet checked in
+  kind, that on a `/status` patch the API server ignores the UID and that a `status: null` patch
+  skips rules on `status`; not writing `status` is the smaller design either way.
+- In 0029, the count of 0027's `Pods now` is corrected with every switch off, not behind
+  `incidents.reportEnd`: keeping a count known to be wrong as the default was the worse choice. It
+  is the one change of 0029 with every switch off, and can ship ahead of it in its own change.
+- In [0029](../adr/0029-incident-end-report.md), the revision reads of the `rollout-undo` check run
+  in a read slot polled by the run loop, never awaited in it: at most 16 `get`s started a tick (3.2
+  a second), one in flight, one name per check per round; at acceptance a `get` of each of at most
+  4 ReplicaSets past a fresh entry gives the baseline, and more than 4 is `not-checkable`; and
+  `not-observed` needs `C` decided at a tick of the window's last 600 seconds, else
+  `not-checkable`. A time budget per pass and no retry of a failed lookup were weighed and not
+  taken: a cap per tick bounds every writer the same way and keeps a failed read retryable. The
+  design is the ADR author's, added after the third review.
+- In [0029](../adr/0029-incident-end-report.md), the read slot's next list starts at the first name
+  it has not read, so every check is read at any pace, and a check whose forced reads have not all
+  ended 900 seconds after acceptance is `not-checkable`. The slot starts a `get` at least 312.5 ms
+  after the previous one, so its bound is 16 in any 5 seconds and 11,520 in any hour whatever the
+  ticks do; changing the tick to `Delay` or `Skip` was not taken, since it would change the tick's
+  other work with every switch off. Both are the ADR author's design, added after the fourth review.
+- In [0029](../adr/0029-incident-end-report.md), a forced read counts as done once its cache entry
+  was filled after the check's acceptance, the tick lists neither a name in flight nor one already
+  filled, and the read slot's next list starts at a position that a drop from 0028's table does not
+  shift, so no `get` is sent twice and every baseline completes at any pace. The manager's decision,
+  the fix both reviewers of the fifth review described. The position, a slot of 0028's table kept
+  from an entry's create to its drop, is the ADR author's choice.
+- In [0029](../adr/0029-incident-end-report.md), after the review of its pull request: an `event`
+  incident about a Pod (`D006`, `D007`, `D010`) closes `source-lost` when the Pods watch drops its
+  records on a `403`, as when the Events watch does, since its signal needs the Pod; a forced read
+  whose `get` started before the acceptance counts, so `B` can predate the acceptance by at most 5
+  seconds, a window accepted rather than keeping each cache entry's start; and a container with no
+  memory limit kausa keeps makes a `raise-memory-limit` check `not-checkable`. The three are the ADR
+  author's choices.
 
 ### Next
 
@@ -174,3 +239,4 @@ kurita's `main` as `proposed`.
   implementation.
 - Measure bars 1 to 8, and settle what "Not verified" lists, first whether a metadata `get` of a
   ReplicaSet returns its annotations.
+- Implement 0029 after 0028, behind `incidents.reportEnd`, and measure its bars 1 to 12.

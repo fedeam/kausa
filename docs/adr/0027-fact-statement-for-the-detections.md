@@ -502,3 +502,24 @@ measures, about 320 bytes with them on, and a table of the Incidents kausa creat
 entries, none dropped before it is 6 hours old, is a new bounded structure; the bar of 2 MiB for a
 full fact queue does not change. This takes effect only when 0028 is accepted, which needs its bars
 measured and kurita's ADR 0008 accepted; until then the text above holds.
+
+Update 2026-11-24: [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a proposed action was observed, never that the incident was resolved, off by default](0029-incident-end-report.md) is proposed, not accepted. It would amend points 1 and
+5, the tracker and the acceptance item on `capped`. Point 1: `Pods now` counts the Pods kausa holds
+in the incident's namespace whose resolved owner has the owner's UID; today `pods_of`
+(`src/run.rs:1744-1749`, used at `src/run.rs:1208` and `:1692`) counts by UID alone over the Pods of
+every watched namespace, so a Pod in another namespace that names the owner's UID inflates it. This
+correction applies with every switch off, in the fact statement, the request to the model, the
+`pods_total` field of the `incident` log line (`src/run.rs:1213`, the field at `:1384`), the
+`Detected` Event and the webhook, and only for an owner whose UID a Pod of another namespace names;
+it is the one change of 0029 with every switch off, and it can ship ahead of 0029 in its own change.
+Point 5: the webhook gains the `closed` and `outcome` values of `type`, within `v2`, with one hourly
+bound for the two that the `detected` count never includes; in the queue an end message is dropped
+before any other message and never evicts a `remediation`, and they leave with `remediation`, taken
+only when no `detected` and no `explained` message is queued; the `sent` check of `detected`
+messages does not apply to them. The `capped` message stays owed only for incidents: an end message
+dropped or over its bound owes none, and `kausa_notifications_total` never counts one. The tracker
+gains no field: a closing is read from the key it drops and the `first_seen` and `last_signal_at`
+its entry already holds; and `observe` stops lowering an entry's `first_seen` once the entry is
+emitted, which changes nothing this ADR emits, since only an entry not yet emitted is emitted. This
+takes effect only when 0029 is accepted, which needs its bars measured and 0028 accepted, or, for
+the correction of point 1, when the change that ships it is merged; until then the text above holds.
