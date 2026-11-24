@@ -154,9 +154,8 @@ version `v1alpha1`, kind `Incident`:
   created in this process (below), never a list of the resource, and a fingerprint is marked
   only after a create the server accepted. The table keys it by namespace and fingerprint, as
   kurita keys its budget (its ADR 0008, point 8): the fingerprint already hashes the namespace
-  (`src/fingerprint.rs`), but it is not cryptographic. kurita proposes at most once per
-  fingerprint every 6 hours anyway, so more creates would be writes nobody uses. This table, not
-  0027's table of notified fingerprints (1024 entries), is the gate, and it holds at most 500
+  (`src/fingerprint.rs`), but it is not cryptographic. This table, not 0027's table of notified
+  fingerprints (1024 entries), is the gate, and it holds at most 500
   entries under the rule below: an entry younger than 6 hours is never dropped, so with
   `--dedup-hours` at 6 or less the gate holds for the whole window; with more than 6, an entry
   older than 6 hours can be dropped to make room, and then a second Incident for that fingerprint
@@ -556,9 +555,14 @@ Incidents in every namespace, for 6 hours after the last of them and for as long
 goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2 seconds holds the stop
 (point 4); and, for the outcomes kurita gives without a live
 read that confirms the failure, a sent `remediation` message "kurita proposed needs-human" about an
-object the writer chose in N. Those outcomes are `needs-human{unconfirmable}` (kurita's ADR 0006,
-its point 5, and its ADR 0008, point 6): `D006` when no container with a readiness probe is
-running and not ready, and `D011` of a StatefulSet, a DaemonSet, a Job or a CronJob. Every other
+object the writer chose in N. Those outcomes are `needs-human{unconfirmable}`, which kurita gives
+whenever it cannot identify the object or no typed field can confirm the failure (kurita's ADR
+0006, its point 5, and its ADR 0008, point 6). For the Incidents such an Event shapes, that is:
+`D006` when no container with a readiness probe is running and not ready; `D011` whose `object`
+is a StatefulSet, a DaemonSet, a Job or a CronJob, or whose `regarding` is not a ReplicaSet;
+`D012` and `D013` whose `object` has no UID, which happens whenever the Event's `regarding` has
+none, since kausa then leaves the UID empty (`src/incident.rs:186-191`); and `D008` whose Job is
+its own owner and has no UID, for the same reason. Every other
 outcome needs a live read: one of an object that does not fail gives `none{not-reproduced}`,
 which is not sent, and a forged UID gives `none{target-replaced}`. What it cannot: an Event alone
 never yields an acting id or a proposal of an action, since kurita records an acting id only after
@@ -590,10 +594,10 @@ bar 2, 3 or 6 measures it.
   bytes), not derived field by field here; bar 2 measures it. Then (1,336 + 320) × 1024 =
   1,695,744 bytes = 1.617 MiB computed, and about 1.82 to 1.92 MiB resident, at the ratio of
   measured to computed in 0027's prototype. The queue computed there is 1,583 × 1024 = 1,620,992
-  bytes = 1.546 MiB. In kind the resident memory grew by 1.74 MiB for the queue alone, a ratio of
-  1.74 / 1.546 = 1.126; the control group's anonymous memory grew by 1.80, 1.80 and 1.84 MiB for
-  the queue and the table of notified fingerprints together, and the highest reading gives
-  1.84 / 1.546 = 1.190 ([The fact statement prototype,
+  bytes = 1.5459 MiB (1,620,992 / 1,048,576). In kind the resident memory grew by 1.74 MiB for the
+  queue alone, a ratio of 1.74 / 1.5459 = 1.126; the control group's anonymous memory grew by
+  1.80, 1.80 and 1.84 MiB for the queue and the table of notified fingerprints together, and the
+  highest reading gives 1.84 / 1.5459 = 1.190 ([The fact statement prototype,
   measured](../research/2026-11-20-fact-statement-prototype.md)). So 1.617 × 1.126 = 1.82 MiB and
   1.617 × 1.190 = 1.92 MiB, under the bar of 2 MiB by 0.08 MiB at the highest reading, which
   counts the table (40 KiB computed) as if it were the queue's and so errs high. The bar is not
@@ -619,8 +623,10 @@ bar 2, 3 or 6 measures it.
   it follows kausa's rate of Incidents, which kausa's create gate (one per fingerprint per
   `--dedup-hours`) and its table (at most 500 creates in any 6 hours per process, point 1)
   bound. kurita never deletes a Remediation younger than 6 hours and creates none while 500 exist,
-  so kausa's watch sees at most 500 creates by kurita in any 6 hours, plus the deletes of older
-  records. Writes to `remediations` by anyone
+  so within one kurita term kausa's watch sees at most 500 creates by kurita in any 6 hours, plus
+  the deletes of older records. Across terms it can see more: kurita counts from the list it reads
+  at the start of a term (its ADR 0008, point 8), so records others delete let the next term
+  create more. Writes to `remediations` by anyone
   else are not bounded by this ADR or by kurita's.
 - **The memory of the `remediations` watch:** it starts from kausa's `watcher_config()`, as every
   watch of kausa's does, so its initial list and each relist ask for pages of 50
