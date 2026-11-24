@@ -739,7 +739,7 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   oldest supported k3s (bar 7).
 - **That a forged Event yields an `inspect` that kurita's cluster window counts:** test in kind that
   a forged `D006` or `D012` about an object that really fails gives `inspect`, and that kurita's
-  cluster window counts it in the next term.
+  cluster window counts it in the same term.
 - **Nothing above is measured.** The Event latency is computed from measured totals.
 
 ## Consequences
