@@ -42,7 +42,11 @@ Idle memory with 10,000 Pods, 20 seconds after start, ten runs of each image, in
   the entry itself and 374 of the statement's buffer, which holds a statement of 269 bytes. The
   resident memory of the process (`VmRSS`) grew by 1,776, 1,776 and 1,784 kB in three runs when
   the queue filled, and by 40 to 60 kB more when the table of notified fingerprints filled (40
-  bytes an entry, 40 KiB computed).
+  bytes an entry, 40 KiB computed). These are the prototype's figures, whose entry holds the
+  rendered statement. The implementation's entry holds the facts the statement is rendered from
+  instead, and a unit test in `src/report.rs` pins it, at the same names, at 1,336 bytes an entry
+  and 1,368,064 bytes (1.30 MiB) for a full queue, computed; its resident memory was not
+  measured.
 - **Writing 1024 Events takes about a second and disturbs nothing.** One at a time, the 1024
   creates took 954 and 975 ms; `kausa_event_write_errors_total`, `kausa_facts_dropped_total` and
   the three counters of each watch (`kausa_watch_errors_total`, `kausa_watch_relists_total`,
@@ -53,8 +57,8 @@ Idle memory with 10,000 Pods, 20 seconds after start, ten runs of each image, in
 What the numbers ask of the record before acceptance:
 
 - Point 1: 286 bytes for the longest statement.
-- Points 3 and 10: 1,583 bytes an entry and 1.55 MiB for the full queue, computed, and 1.74 MiB
-  resident; the bar of 2 MiB stays. The table of point 5 is 40 bytes an entry, inside its "under
+- Points 3 and 10: the prototype's 1,583 bytes an entry and 1.55 MiB for the full queue,
+  computed, and 1.74 MiB resident; the bar of 2 MiB stays. The table of point 5 is 40 bytes an entry, inside its "under
   64 bytes".
 - Point 10, the first bar: name the figure. The process's own memory separates the images to
   0.02 MiB; `docker stats` moves by more than that between two readings of one idle container.
@@ -185,7 +189,7 @@ read 0 for `pods`, `deployments` and `events`, and `kausa_event_write_errors_tot
 
 ### Bar 2: a full fact queue, three runs
 
-- The harness logged 1024 entries of 1,583 bytes, 1,620,992 bytes in all.
+- The harness logged 1024 entries of the prototype's 1,583 bytes, 1,620,992 bytes in all.
 - `VmRSS` grew by 1,844, 1,844 and 1,848 KiB when the queue and the table filled, under the
   2,048 KiB of the bar; the kubelet's `rssBytes` by 2,011,136, 1,826,816 and 1,830,912 bytes,
   against 2,097,152.

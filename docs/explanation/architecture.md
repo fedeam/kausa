@@ -325,9 +325,9 @@ and without any model:
   counts and a revision. Never a message, a log line, the image or a name of a tenant's or a
   model's making; the same incident gives the same bytes. The `incident` log line carries it as
   `statement`. The parts and the bound: [Fact statements](../reference/rules.md#fact-statements).
-- **A queue of its own.** The statement and what the Event needs go on a fact queue of 1024
-  entries (about 1.55 MiB full); a full queue drops its oldest, which is logged (`fact dropped`)
-  and counted (`kausa_facts_dropped_total`). Nothing is written at the tick that settles it, so a
+- **A queue of its own.** The facts and what the Event needs go on a fact queue of 1024 entries
+  (1.30 MiB full at the longest names, computed and pinned by a unit test); a full queue drops
+  its oldest, which is logged (`fact dropped`) and counted (`kausa_facts_dropped_total`). Nothing is written at the tick that settles it, so a
   slow API server cannot hold the watches.
 - **One fact slot** beside the explanation slot and the notification slot writes one `Detected`
   Event at a time, then queues the `detected` message when a webhook is set. A fact never waits
