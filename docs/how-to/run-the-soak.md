@@ -4,13 +4,15 @@ Run the pinned latest release for seven days on a small cluster, sample its memo
 metrics every 30 seconds, and decide with a rule fixed in advance whether the chart's memory limit
 may go back from `192Mi` to `128Mi`.
 
-Status as of 2026-11-18: the scripts in `tests/soak/` were run once, for nine minutes, in a
+Status as of 2026-11-24: the scripts in `tests/soak/` were run once, for nine minutes, in a
 throwaway kind cluster; a dry-run soak of v0.5.1 started on 2026-11-03 ([A dry-run
-soak](#a-dry-run-soak)) and has no result yet: its first two windows are invalid, because the
-sampler stopped reading the cluster two days and one day after it started, and a third started
-on 2026-11-16 ([2026-11-18 — The soak sampler on
-macOS](../journal/2026-11-18-the-soak-sampler-on-macos.md)). `install.sh` installs the release
-pinned in `tests/e2e/upgrade-from.txt`, v0.6.3 since 2026-11-20.
+soak](#a-dry-run-soak)). Its first two windows are invalid, because the sampler stopped reading
+the cluster two days and one day after it started ([2026-11-18 — The soak sampler on
+macOS](../journal/2026-11-18-the-soak-sampler-on-macos.md)); the third, from 2026-11-16 to
+2026-11-23, passed the soak gate in the terms a dry-run soak can check ([Seven days of v0.5.1 in
+dry-run](../research/2026-11-23-seven-days-in-dry-run.md)). The scale gate has not been run, so
+the chart's memory limit is still `192Mi`. `install.sh` installs the release pinned in
+`tests/e2e/upgrade-from.txt`, v0.6.3 since 2026-11-20.
 
 ## What the soak answers, and what it cannot
 
@@ -47,7 +49,7 @@ CustomResourceDefinition.
 
 ### A dry-run soak
 
-The first soak, started on 2026-11-03, runs in dry-run instead: the release `kausa-soak` in
+The first soak, started on 2026-11-03, ran in dry-run instead: the release `kausa-soak` in
 `kausa-soak` with `rbac.scope=cluster`, two replicas, the pinned image digest and `dryRun=true`,
 installed by the cluster's own deploy tool rather than `install.sh`, with no fake endpoint and no
 notifications. kausa then calls no model and writes nothing, so it answers the memory question
