@@ -31,11 +31,10 @@ size, writes and latency below is **computed, not measured**, unless it says mea
 
 ## Context
 
-Status as of 2026-11-24: `main` at `588f3b5`, v0.6.3 released. 0027 is `proposed` on `main`; the
-change that implements and accepts it is not merged that day, and every path and line cited below
-is that change's (`src/report.rs` and `src/fact.rs` are new there). Nothing below is
-implemented. kurita is not published as of 2026-11-24, so its ADRs are cited here by number and
-title, without links, until it is.
+Status as of 2026-11-24: `main` at `4b85369`, after the merge that implements and accepts 0027, and
+v0.6.3 released; every path and line cited below is `main`'s. Nothing below is implemented. kurita
+is not published as of 2026-11-24, so its ADRs are cited here by number and title, without links,
+until it is.
 
 **What another controller would need, and kausa has no way to give.** kausa reports an incident
 in its log, in a `Detected` Event and, with a webhook, in a `detected` message (0027). A
@@ -567,19 +566,19 @@ fingerprints as it likes, and:
   for a Pod of N it has seen (`src/incident.rs:194-198`), so the writer chooses which one.
 
 What that achieves: Incidents in N with those objects, each making kurita record an outcome, which
-spends kurita's budget for its namespace and fingerprint only if that outcome counts (kurita's ADR
-0008, point 8), which is when it is an `inspect` about a failing object kurita's live read
-confirmed, and each taking a place in the table of point 1, so that 500 of them in 6 hours stop new
-Incidents in every namespace until the oldest of them passes 6 hours, and for as long as the writer
-goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2 seconds holds the stop (point
-4); and, for the outcomes kurita gives without a live read that confirms the failure, a sent
-`remediation` message "kurita proposed needs-human" about an object the writer chose in N. Those
-outcomes are `needs-human{unconfirmable}`, which kurita gives without a live read that confirms the
-failure: before reading anything when it cannot identify the object, and after reading it when no
-typed field can confirm the failure (kurita's ADR 0006, its point 5, and its ADR 0008, point 6);
-kurita's ADR 0008 lists the cases in its trust statement, and this ADR does not repeat the list. For
-kausa it means a `needs-human` message that kausa sends about an object the writer chose in N,
-within the bounds below. Among the cases an Event can reach: `D006` when no container with a
+spends kurita's budget for its namespace and fingerprint, and the cluster's, only if that outcome
+counts (kurita's ADR 0008, point 8), which is when it is an `inspect` about a failing object
+kurita's live read confirmed, and each taking a place in the table of point 1, so that 500 of them
+in 6 hours stop new Incidents in every namespace until the oldest of them passes 6 hours, and for as
+long as the writer goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2 seconds
+holds the stop (point 4); and, for the outcomes kurita gives without a live read that confirms the
+failure, a sent `remediation` message "kurita proposed needs-human" about an object the writer chose
+in N. Those outcomes are `needs-human{unconfirmable}`, which kurita gives without a live read that
+confirms the failure: before reading anything when it cannot identify the object, and after reading
+it when no typed field can confirm the failure (kurita's ADR 0006, its point 5, and its ADR 0008,
+point 6); kurita's ADR 0008 lists the cases in its trust statement, and this ADR does not repeat the
+list. For kausa it means a `needs-human` message that kausa sends about an object the writer chose
+in N, within the bounds below. Among the cases an Event can reach: `D006` when no container with a
 readiness probe is running and not ready; `D011`, `D012` or `D013` whose `object` is of a kind or an
 apiVersion kurita does not recognise; `D012` and `D013` whose `object` has no UID, which happens
 whenever the Event's `regarding` has none, since kausa then leaves the UID empty
@@ -587,19 +586,25 @@ whenever the Event's `regarding` has none, since kausa then leaves the UID empty
 reason. Every other outcome comes after a live read of the object: one of an object that does not
 fail gives `none{not-reproduced}`, which is not sent, and a forged UID gives
 `none{target-replaced}`. What it cannot: an Event alone never yields an acting id or a proposal of
-an action, since kurita records an acting id only after a live read confirms the target's UID (its
-ADR 0008, point 2); what it chooses, the objects and the sent "kurita proposed needs-human", is in N
-only; outside N it has two effects, both towards silence, and not a third on kurita's cluster
-window, since the `needs-human` outcomes kurita gives before a live read count in none of its
-windows (its ADR 0008, point 8): the stop of point 4, no new Incidents in any namespace, and so no
-proposals of kurita, for as long as it goes on; and the `remediation` bound of point 6, which is one
-for the process: 30 Incidents an hour whose outcome kurita gives before any live read, one forged
-Event every 3,600 / 30 = 120 seconds, well under the 43.2 seconds of the stop, fill it with sent
-"kurita proposed needs-human", and kausa then sends no `remediation` message about kurita's genuine
-proposals in any namespace for that hour (counted and logged as capped; each proposal stays in its
-Remediation and in kurita's Event, and nothing is executed). kausa still writes its Events and posts
-its `detected` messages. It is bounded by the create gate of point 1, by the 500 Incidents in any 6
-hours of point 1 and by the `remediation` bound of point 6.
+an action that changes an object, since kurita records an acting id only after a live read confirms
+the target's UID (its ADR 0008, point 2); what it chooses, the objects and the sent "kurita proposed
+needs-human" or "kurita proposed inspect", is in N only. For an object of N that really fails, a new
+fingerprint for each forged Event sidesteps kurita's per-fingerprint window, which leaves several
+true, repeated "kurita proposed inspect" messages about it, within point 6's `remediation` bound.
+Outside N it has three effects, all towards silence: the stop of point 4, no new Incidents in any
+namespace, and so no proposals of kurita, for as long as it goes on; and the `remediation` bound of
+point 6, which is one for the process: 30 Incidents an hour whose outcome kurita gives before any
+live read, one forged Event every 3,600 / 30 = 120 seconds, 30 an hour, well under the 83.3 an hour,
+3,600 / 43.2, that hold the stop, fill it with sent "kurita proposed needs-human", and kausa then
+sends no `remediation` message about kurita's genuine proposals in any namespace for that hour
+(counted and logged as capped; each proposal stays in its Remediation and in kurita's Event, and
+nothing is executed); and, bounded, kurita's cluster window: the `inspect` outcomes on failures
+kurita's live read confirms count in it too, at most kurita's per-namespace limit an hour from N, so
+filling it takes that in as many namespaces as the ratio of the two limits, and genuine Incidents in
+every namespace then get `needs-human{budget}` (kurita's ADR 0008, point 8), while the `needs-human`
+outcomes kurita gives before a live read count in none of its windows. kausa still writes its Events
+and posts its `detected` messages. It is bounded by the create gate of point 1, by the 500 Incidents
+in any 6 hours of point 1 and by the `remediation` bound of point 6.
 
 **Already true before this contract, and out of its scope:** editors of kausa's namespace can read
 the webhook's Secret (`charts/kausa/values.yaml:96-99`) and post anything to the receiver
@@ -732,6 +737,9 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   relies on them.
 - **The CEL cost of the per-detection rules.** Test: install both CustomResourceDefinitions on the
   oldest supported k3s (bar 7).
+- **That a forged Event yields an `inspect` that kurita's cluster window counts:** test in kind that
+  a forged `D006` or `D012` about an object that really fails gives `inspect`, and that kurita's
+  cluster window counts it in the next term.
 - **Nothing above is measured.** The Event latency is computed from measured totals.
 
 ## Consequences
@@ -747,14 +755,17 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   an `explained` message.
 - **A writer of Events in a namespace gains, besides the forged detection it had,** Incidents about
   objects of its choice there and, for the outcomes kurita gives without a live confirmation, a sent
-  "kurita proposed needs-human" about them, in that namespace only, and never an acting id. Outside
-  it, two effects, both towards silence (the `needs-human` outcomes kurita gives before a live read
-  count in none of kurita's windows, so they do not fill its cluster window): by the stop of point
-  4, no new Incidents in any namespace, and so no proposals of kurita, for as long as it goes on;
-  and, since the `remediation` bound of point 6 is one for the process, one such Incident every 120
-  seconds (30 an hour) leaves no `remediation` message for kurita's genuine proposals in any
-  namespace for that hour, counted as capped. kausa still writes its Events and posts its `detected`
-  messages.
+  "kurita proposed needs-human" about them, and, for an object there that really fails, repeated
+  true "kurita proposed inspect" messages, in that namespace only, and never an acting id. Outside
+  it, three effects, all towards silence: by the stop of point 4, no new Incidents in any namespace,
+  and so no proposals of kurita, for as long as it goes on; and, since the `remediation` bound of
+  point 6 is one for the process, one such Incident every 120 seconds (30 an hour) leaves no
+  `remediation` message for kurita's genuine proposals in any namespace for that hour, counted as
+  capped; and, bounded, its `inspect` outcomes on failures kurita's live read confirms count in
+  kurita's cluster window, at most kurita's per-namespace limit an hour from that namespace, so as
+  many such namespaces as the ratio of kurita's two limits fill it and genuine Incidents everywhere
+  get `needs-human{budget}` (kurita's ADR 0008, point 8). kausa still writes its Events and posts
+  its `detected` messages.
 - **A restart loses notices, never invents them:** Remediations of Incidents created before it are
   not reported.
 - **The bounds are not fair:** whoever makes kausa create 500 Incidents in 6 hours, one tenant's
