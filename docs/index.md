@@ -229,6 +229,5 @@ checks](how-to/develop.md).
   proposed and accepted;
   [2026-11-20 — Release v0.6.3](journal/2026-11-20-release-v0-6-3.md);
   [2026-11-24 — The fact statement](journal/2026-11-24-the-fact-statement.md): 0027 measured on a
-  Raspberry Pi 4, accepted and implemented.
-  [2026-11-24 — The Incident resource](journal/2026-11-24-incident-resource.md): 0028 proposed,
-  with kurita's ADR 0008 as its other half.
+  Raspberry Pi 4, accepted and implemented; 0028 proposed, with kurita's ADR 0008 as its other
+  half.
