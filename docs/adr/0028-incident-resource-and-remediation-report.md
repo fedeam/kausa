@@ -278,13 +278,13 @@ is never kept and never sent:
 - **Every other value read from the cluster**, required or optional: `object`'s `apiVersion`,
   `kind`, `name` and `uid`; `sample.controller.uid`; `regarding`'s `kind`, `name` and `uid`;
   `deployment.revision` of `D014`, which the fact statement parses as any `u64`
-  (`src/fact.rs:135-138`); and `firstSeen`, which also sets the name. One that does not fit means no
-  create: the incident's Events, its `incident` log line and its `detected` message are not
-  affected; the occurrence is counted and logged as a refusal of point 1
-  (`kausa_incidents_refused_total`, `incident refused` at most once an hour, naming the field); no
-  `get` is made for it; and its fingerprint is not marked, so a later occurrence is checked again,
-  at no request. None is left out instead: `missing` has no code for it, and an optional `uid` left
-  out would say the object has none.
+  (`src/fact.rs:135-138`); and `firstSeen`, which also sets the name. An owner's name the lookup
+  refused (point 3) is one of these. One that does not fit means no create: the incident's Events,
+  its `incident` log line and its `detected` message are not affected; the occurrence is counted and
+  logged as a refusal of point 1 (`kausa_incidents_refused_total`, `incident refused` at most once
+  an hour, naming the field); no `get` is made for it; and its fingerprint is not marked, so a later
+  occurrence is checked again, at no request. None is left out instead: `missing` has no code for
+  it, and an optional `uid` left out would say the object has none.
 - **The values kausa makes** fit by construction: `detection`, `fingerprint`, `settledAt`,
   `missing`, `sample.controller.kind` (any other kind is `Other`), and `facts`, since the fact
   statement admits only a listed reason, an `i32` exit code, a container that is a DNS label and at
@@ -337,6 +337,26 @@ UIDs are kept as 16 binary bytes. Each owner-cache entry gains one optional poin
 with incidents off; with incidents on, the entry of a ReplicaSet whose `get` answered points to the
 revision and the UID that `get` returned, 8 and 16 bytes. No table of Deployments is added, and no
 Pod beyond the sample.
+
+**The owner lookup checks the name it is given.** This rule is the ADR author's, added after an
+eighth review, and it is the lookup's own, so it holds for every caller and with incidents off too:
+`on_pod`'s resolution of a Pod's owner and of an Event's object (`src/run.rs:1463`, `:1542`) and the
+fact slot's read of the revision below. At `4b85369` the name comes from an `ownerReference` or an
+Event's `regarding`, copied unbounded (`src/record.rs:239-244`); `controller_of`
+(`src/run.rs:1909-1953`) keys its cache by it and passes it to `get_metadata`, which in kube-core
+4.2.0 refuses only an empty name (`validate_name`, `src/request.rs:338-343`) and puts it in the path
+unencoded (`src/request.rs:274`); and the API server asks an ownerReference's name, by a reviewer's
+reading not re-read here, only to be non-empty. So a writer of Pods in N chooses a string of any
+length with `/`, `..` or `?` that kausa keeps as a key and sends in a URL. Under this rule a name
+that is not a DNS-1123 subdomain of at most 253 characters is never looked up and never kept: the
+lookup answers as a failed one without a request and without a cache entry. For the owner, that
+gives `owner-lookup-failed`, and the incident's `object` is the `ownerReference` as the Pod gives
+it, as after any failed lookup (`top_owner`, `src/owner.rs:67`), with its Events and its log line as
+today; its name does not fit `Name`, so point 2's rule creates no Incident for it. For the revision
+it gives `revision-lookup-failed`, and the name is not kept in the fact queue entry. A name that
+passes has no `/`, no `?` and no `..` segment. That no Secret or ConfigMap can be read through such
+a path today rests on RBAC, which grants kausa no verb on them
+([Permissions](../reference/permissions.md)), not on the code.
 
 **Where the revision comes from.** This paragraph was written after the design review, which left
 the read implicit: it is this ADR's own design, not one of the two compared. kausa reads a
@@ -676,17 +696,18 @@ reference that pairs one ReplicaSet's name with another's UID gives `revision-lo
 so suppress kurita's undo proposal for a Deployment of N, or let one through, as a writer of
 Incidents can (above), on workloads it can already change itself. With an `ownerReference` whose
 kind, name or UID does not fit the Incident's schema, it can make kausa create no Incident about a
-Pod of N, at no request (point 2's rule). What it costs kausa: the read is made only for a create
-kausa will send, once per create attempted, at most 500 `get`s in any 6 hours for creates the server
-accepts (point 3 bounds the failed ones; under point 2's rule no value this writer chooses reaches
-the server and fails there, so they come from a writer of Incidents, which can take an Incident's
-name first, or from the API server), each holding the fact slot at most 5 seconds, by which the next
-facts' Events wait. Outside N, that wait is all it gets: the incident's own `Detected` Event is
-written before the read, and the facts of other namespaces wait at most 5 seconds per create
-attempted, which for the creates the server accepts is 500 × 5 = 2,500 seconds in any 6 hours
-(11.6 % of 21,600), and only while the API server answers those `get`s slowly. That the writer
-cannot lengthen a metadata `get` by itself, and that the wait does not fill the fact queue for other
-namespaces, are under "Not verified".
+Pod of N, at no request (point 2's rule). A name that is not a DNS-1123 subdomain of at most 253
+characters gets it nothing more: no request and no cache entry (point 3). What it costs kausa: the
+read is made only for a create kausa will send, once per create attempted, at most 500 `get`s in any
+6 hours for creates the server accepts (point 3 bounds the failed ones; under point 2's rule no
+value this writer chooses reaches the server and fails there, so they come from a writer of
+Incidents, which can take an Incident's name first, or from the API server), each holding the fact
+slot at most 5 seconds, by which the next facts' Events wait. Outside N, that wait is all it gets:
+the incident's own `Detected` Event is written before the read, and the facts of other namespaces
+wait at most 5 seconds per create attempted, which for the creates the server accepts is 500 × 5 =
+2,500 seconds in any 6 hours (11.6 % of 21,600), and only while the API server answers those `get`s
+slowly. That the writer cannot lengthen a metadata `get` by itself, and that the wait does not fill
+the fact queue for other namespaces, are under "Not verified".
 
 **Whoever can create Events in N**, which the built-in `edit` role in N can, writes no Incident but
 chooses, through kausa, what some of kausa's Incidents in N say. For an Event incident kausa takes
@@ -763,20 +784,20 @@ bar 2, 3 or 6 measures it.
   optional pointer, 8 bytes on a 64-bit target: 8 × 1024 = 8,192 bytes. So 1,344 bytes an entry
   and 1,376,256 bytes (1.31 MiB) full: (1,336 + 8) × 1024.
 - **The fact queue, incidents on, worst case:** about +320 bytes an entry, an estimate carried from
-  the design review (dominated by a `regarding` name of up to 253 bytes; the UIDs kept as 16 binary
-  bytes), not derived field by field here; bar 2 measures it. The ReplicaSet's name of point 3
-  shares that field, since an entry holds a `sample` or a `regarding`, never both, and adds
-  nothing; kept in a field of its own it would add an empty string's 24 bytes to an entry with a
-  `regarding`, (1,336 + 344) × 1024 = 1,720,320 bytes = 1.641 MiB computed, 1.85 to 1.95 MiB
-  resident at the ratios below, still under the bar. Then (1,336 + 320) × 1024 =
-  1,695,744 bytes = 1.617 MiB computed, and about 1.82 to 1.92 MiB resident, at the ratio of
-  measured to computed in 0027's prototype. The queue computed there is 1,583 × 1024 = 1,620,992
-  bytes = 1.5459 MiB (1,620,992 / 1,048,576). In kind the resident memory grew by 1.74 MiB for the
-  queue alone, a ratio of 1.74 / 1.5459 = 1.126; the control group's anonymous memory grew by
-  1.80, 1.80 and 1.84 MiB for the queue and the table of notified fingerprints together, and the
-  highest reading gives 1.84 / 1.5459 = 1.190 ([The fact statement prototype,
-  measured](../research/2026-11-20-fact-statement-prototype.md)). So 1.617 × 1.126 = 1.82 MiB and
-  1.617 × 1.190 = 1.92 MiB, under the bar of 2 MiB by 0.08 MiB at the highest reading, which
+  the design review (dominated by a `regarding` name of up to 253 bytes, a bound that point 2's rule
+  and the lookup's of point 3 make true; the UIDs kept as 16 binary bytes), not derived field by
+  field here; bar 2 measures it. The ReplicaSet's name of point 3 shares that field, since an entry
+  holds a `sample` or a `regarding`, never both, and adds nothing; kept in a field of its own it
+  would add an empty string's 24 bytes to an entry with a `regarding`, (1,336 + 344) × 1024 =
+  1,720,320 bytes = 1.641 MiB computed, 1.85 to 1.95 MiB resident at the ratios below, still under
+  the bar. Then (1,336 + 320) × 1024 = 1,695,744 bytes = 1.617 MiB computed, and about 1.82 to 1.92
+  MiB resident, at the ratio of measured to computed in 0027's prototype. The queue computed there
+  is 1,583 × 1024 = 1,620,992 bytes = 1.5459 MiB (1,620,992 / 1,048,576). In kind the resident
+  memory grew by 1.74 MiB for the queue alone, a ratio of 1.74 / 1.5459 = 1.126; the control group's
+  anonymous memory grew by 1.80, 1.80 and 1.84 MiB for the queue and the table of notified
+  fingerprints together, and the highest reading gives 1.84 / 1.5459 = 1.190 ([The fact statement
+  prototype, measured](../research/2026-11-20-fact-statement-prototype.md)). So 1.617 × 1.126 = 1.82
+  MiB and 1.617 × 1.190 = 1.92 MiB, under the bar of 2 MiB by 0.08 MiB at the highest reading, which
   counts the table (40 KiB computed) as if it were the queue's and so errs high. The bar is not
   raised. On the Raspberry Pis the prototype did not measure the queue alone.
 - **The table of created Incidents:** about 48 bytes an entry without the report and at most about
@@ -787,7 +808,9 @@ bar 2, 3 or 6 measures it.
   bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry.
 - **The owner cache:** +8 bytes an entry, one optional pointer, empty with incidents off (bar 1);
   with incidents on, 24 bytes more for each entry of a ReplicaSet whose `get` answered, the revision
-  (8) and the UID its `get` returned (16), plus the allocator's overhead, not counted.
+  (8) and the UID its `get` returned (16), plus the allocator's overhead, not counted. The name in
+  an entry's key is at most 253 bytes under the lookup's rule (point 3); at `4b85369` it has no
+  bound.
 - **The table of Events:** one flag an entry, whether the owner lookup of the Event's object failed
   (point 3's `missing`), kept with incidents off too: at most 8 bytes an entry with alignment, an
   estimate; bar 1 measures it.
@@ -878,6 +901,13 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   and how long the garbage collector takes to delete a Pod whose owner's UID matches no object.
   Test: in kind, create a Pod with `ownerReferences[0].uid: x` naming a Deployment of N, check that
   it is accepted, and time its deletion.
+- **What the API server does today with `..` or `?` in a looked-up name,** before the lookup's rule
+  of point 3, and whether it asks an ownerReference's name only to be non-empty (a reviewer's
+  reading of `apimachinery/pkg/api/validation/objectmeta.go:79-80`, not re-read here). Test: in
+  kind, an authenticated `curl` of
+  `/apis/apps/v1/namespaces/N/replicasets/../../../namespaces/M/replicasets/x` with kausa's
+  ServiceAccount token, recording the status and which object, if any, it returns; and a Pod whose
+  `ownerReferences[0].name` is longer than 253 characters, recording whether it is accepted.
 - **How often the sample's owner-cache entry is absent or expired at the read,** so how many `get`s
   point 3's read makes and for how long it holds the fact slot. Computed only as a bound, one per
   create attempted. Test: bar 4, and an Incident about a Pod older than 10 minutes in kind, whose

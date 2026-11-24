@@ -123,7 +123,9 @@ kurita's `main` as `proposed`.
   also covers the owner lookup of an Event incident about a Job or a ReplicaSet, and 0027's `Update`
   says the slot can hold the read. An eighth review found that a writer of ReplicaSets or Pods could
   still make a create fail, with a revision of 0 or an owner's UID that does not parse; 0028 now
-  says kausa never sends a create the schema would refuse.
+  says kausa never sends a create the schema would refuse, and that the owner lookup never looks up
+  nor keeps a name that is not a DNS-1123 subdomain of at most 253 characters, which at `4b85369` it
+  sends unencoded in a URL.
 - Nothing is implemented, and nothing in it is measured.
 
 ### Decisions
@@ -143,10 +145,11 @@ kurita's `main` as `proposed`.
   recreated under the same name could otherwise lend the Incident the deleted one's revision under
   the new one's UID. Both reviewers asked for it. The revision and the UID sit behind one pointer of
   the cache entry, empty with incidents off.
-- In [0028](../adr/0028-incident-resource-and-remediation-report.md), kausa never sends a create
-  the schema would refuse: a revision that does not fit is `revision-lookup-failed`, and any other
-  value read from the cluster that does not fit means no create, counted as a refusal. The rule is
-  the ADR author's.
+- In [0028](../adr/0028-incident-resource-and-remediation-report.md), kausa never sends a create the
+  schema would refuse: a revision that does not fit is `revision-lookup-failed`, and any other value
+  read from the cluster that does not fit means no create, counted as a refusal. The owner lookup
+  answers as a failed one, without a request or a cache entry, for a name that is not a DNS-1123
+  subdomain of at most 253 characters, for every caller. Both rules are the ADR author's.
 
 ### Next
 
