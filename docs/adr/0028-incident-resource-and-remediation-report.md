@@ -130,7 +130,7 @@ string in either schema is an enum, or a pattern with a maximum length.
   that reuses the Pod's ReplicaSet gives it a new revision, and every Incident about its older Pods
   would then carry the old one, so kurita's equality would stop each undo proposal for as long as
   those Pods live. The read in the fact slot (point 3) is at most 600 seconds old for at most one
-  `get` per Incident.
+  `get` per create attempted.
 - **A third value of `missing` for a revision with no fresh entry, and nothing else.** At the
   emitting tick the entry of a Pod resolved more than 10 minutes earlier is usually gone (point 3),
   so most Incidents about a long-running workload would carry no revision, and kurita would almost
@@ -238,7 +238,7 @@ spec:                       # required; CEL: self == oldSelf
                                 # revision-lookup-failed (the fact slot's read of point 3
                                 # failed, answered with another UID than the Pod's
                                 # ownerReference, or found the annotation absent or not a
-                                # whole number); CEL: only with kind ReplicaSet
+                                # whole number in 1..2^53); CEL: only with kind ReplicaSet
   deployment: {generation: int64 >= 1, revision: int64 >= 1}   # CEL: D014 only
   regarding:                # an Event incident about something other than a Pod
     kind: Job | ReplicaSet | StatefulSet | DaemonSet | CronJob | PersistentVolumeClaim
@@ -261,6 +261,43 @@ The schema is kausa's second allowlist, beside invariant 12's fact statement: an
 only the fact statement's facts and the typed values listed here, never a message, a note, a log
 line, an image, a label, a node or any text a model wrote. Changing what it may hold needs an ADR,
 and invariant 12 says so (point 8). Within `v1alpha1` changes are additive only.
+
+**kausa never sends a create the schema would refuse.** This rule is the ADR author's, added after
+an eighth review. Part of an Incident comes from objects a writer in N chooses: the
+`ownerReferences` of a Pod and of its ReplicaSet, an Event's `regarding` and times, the revision
+annotation of a ReplicaSet or a Deployment. The API server asks little of them: in kind it accepted
+a line break in an ownerReference's kind and name and in an Event's `regarding` ([2026-11-24 — The
+fact statement](../journal/2026-11-24-the-fact-statement.md)), and that it asks an ownerReference's
+UID only to be non-empty is under "Not verified". So kausa checks each value against its field, by
+the patterns, ranges, enums and CEL rules above and the rule for the Incident's name, when the tick
+builds the fact queue entry, and the revision again after point 3's read; a value that does not fit
+is never kept and never sent:
+
+- **`sample.controller.revision`**, the one value with a code of `missing`, is left out with
+  `revision-lookup-failed` when the annotation is absent or not a whole number in 1..2^53 (point 3).
+- **Every other value read from the cluster**, required or optional: `object`'s `apiVersion`,
+  `kind`, `name` and `uid`; `sample.controller.uid`; `regarding`'s `kind`, `name` and `uid`;
+  `deployment.revision` of `D014`, which the fact statement parses as any `u64`
+  (`src/fact.rs:135-138`); and `firstSeen`, which also sets the name. One that does not fit means no
+  create: the incident's Events, its `incident` log line and its `detected` message are not
+  affected; the occurrence is counted and logged as a refusal of point 1
+  (`kausa_incidents_refused_total`, `incident refused` at most once an hour, naming the field); no
+  `get` is made for it; and its fingerprint is not marked, so a later occurrence is checked again,
+  at no request. None is left out instead: `missing` has no code for it, and an optional `uid` left
+  out would say the object has none.
+- **The values kausa makes** fit by construction: `detection`, `fingerprint`, `settledAt`,
+  `missing`, `sample.controller.kind` (any other kind is `Other`), and `facts`, since the fact
+  statement admits only a listed reason, an `i32` exit code, a container that is a DNS label and at
+  most 100 Pods seen (`src/fact.rs:115-139`, `src/incident.rs:458-460`); a `podsNow` above 1,000,000
+  is a no create, as above. `sample.pod` comes from a Pod's own metadata, whose name the API server
+  validates and whose UID it sets.
+- **Where it cannot hold as the sketch stands: `podsSeen`.** An incident with no Pod, `D008` and
+  `D011` to `D014`, has a `podsSeen` of 0 (`src/incident.rs:185-192` and `:236-245` give its signals
+  no Pod; a test at `:917`), which the fact statement leaves out (`src/fact.rs:166`) and which the
+  sketch's 1..100 refuses, as kurita's ADR 0008's "1 to 100" does. Under this rule those Incidents
+  are never created; without it the server refuses them. The fix, 0..100 or a `podsSeen` absent at
+  0, changes the contract on both sides and is not made here: it is open, for the maintainer, with
+  kurita's ADR 0008.
 
 ### 3. The data kausa keeps for it
 
@@ -291,8 +328,8 @@ Each entry of the fact queue gains one optional pointer, filled only with incide
   tick. `revision-lookup-failed`: the read of the revision in the fact slot found none, because its
   `get` failed or gave no answer within 5 seconds, because it answered for a ReplicaSet with another
   UID than the one in the Pod's `ownerReference`, or because the annotation is absent or not a whole
-  number. `sample.controller.revision` of a ReplicaSet is absent exactly when `missing` names
-  `revision-lookup-failed`.
+  number in 1..2^53 (point 2's rule). `sample.controller.revision` of a ReplicaSet is absent exactly
+  when `missing` names `revision-lookup-failed`.
 - **For `D014`**, the Deployment's `metadata.generation` and revision at detection, from the record
   kausa already holds while the rule matches.
 
@@ -349,10 +386,13 @@ and `on_pod` share it. So:
   create is not retried and its fingerprint is not marked (point 1), so the fingerprint's next
   occurrence is a new attempt and reads again; for those, the cache is the bound: at most one `get`
   per ReplicaSet name every 600 seconds while its `get` answers, 36 in 6 hours, or every 30 seconds
-  while it fails, 720 in 6 hours. Each holds the fact slot at most 5 seconds, before the create and
-  its own 10 seconds. No new verb and no new watch.
-- **With incidents off,** no read is made, the revision is not parsed and nothing is kept: the fact
-  queue entry's pointer and the owner-cache entry's stay empty.
+  while it fails, 720 in 6 hours. Both figures are per name: they multiply by the ReplicaSets whose
+  Pods fail, and a writer of Pods in N chooses those names, within the Pods it may create. Each
+  holds the fact slot at most 5 seconds, before the create and its own 10 seconds. No new verb and
+  no new watch.
+- **With incidents off,** no read is made, the revision is not parsed and nothing of the read is
+  kept: the fact queue entry's pointer and the owner-cache entry's stay empty. The Event entry's
+  flag of `owner-lookup-failed` (above) is kept with incidents off too.
 
 ### 4. Retention
 
@@ -631,19 +671,22 @@ a new create, or a create with any valid `spec`.
 but chooses what point 3 reads: a Pod's controller `ownerReference` names the ReplicaSet the fact
 slot reads, and that ReplicaSet's `deployment.kubernetes.io/revision` annotation is the revision it
 copies. So the writer can make an Incident in N about a failing Pod carry a revision of its choice,
-or none (a ReplicaSet that does not exist, an annotation that is not a whole number, or a reference
-that pairs one ReplicaSet's name with another's UID gives `revision-lookup-failed`), and so suppress
-kurita's undo proposal for a Deployment of N, or let one through, as a writer of Incidents can
-(above), on workloads it can already change itself. What it costs kausa: the read is made only for a
-create kausa will send, once per create attempted, at most 500 `get`s in any 6 hours for creates the
-server accepts (point 3 bounds the failed ones, which a writer of Incidents or the API server
-causes, not this writer), each holding the fact slot at most 5 seconds, by which the next facts'
-Events wait. Outside N, that wait is all it gets: the incident's own `Detected` Event is written
-before the read, and the facts of other namespaces wait at most 5 seconds per create attempted,
-which for the creates the server accepts is 500 × 5 = 2,500 seconds in any 6 hours (11.6 % of
-21,600), and only while the API server answers those `get`s slowly. That the writer cannot lengthen
-a metadata `get` by itself, and that the wait does not fill the fact queue for other namespaces, are
-under "Not verified".
+or none (a ReplicaSet that does not exist, an annotation that is not a whole number in 1..2^53, or a
+reference that pairs one ReplicaSet's name with another's UID gives `revision-lookup-failed`), and
+so suppress kurita's undo proposal for a Deployment of N, or let one through, as a writer of
+Incidents can (above), on workloads it can already change itself. With an `ownerReference` whose
+kind, name or UID does not fit the Incident's schema, it can make kausa create no Incident about a
+Pod of N, at no request (point 2's rule). What it costs kausa: the read is made only for a create
+kausa will send, once per create attempted, at most 500 `get`s in any 6 hours for creates the server
+accepts (point 3 bounds the failed ones; under point 2's rule no value this writer chooses reaches
+the server and fails there, so they come from a writer of Incidents, which can take an Incident's
+name first, or from the API server), each holding the fact slot at most 5 seconds, by which the next
+facts' Events wait. Outside N, that wait is all it gets: the incident's own `Detected` Event is
+written before the read, and the facts of other namespaces wait at most 5 seconds per create
+attempted, which for the creates the server accepts is 500 × 5 = 2,500 seconds in any 6 hours
+(11.6 % of 21,600), and only while the API server answers those `get`s slowly. That the writer
+cannot lengthen a metadata `get` by itself, and that the wait does not fill the fact queue for other
+namespaces, are under "Not verified".
 
 **Whoever can create Events in N**, which the built-in `edit` role in N can, writes no Incident but
 chooses, through kausa, what some of kausa's Incidents in N say. For an Event incident kausa takes
@@ -752,8 +795,9 @@ bar 2, 3 or 6 measures it.
   owner-cache entry is absent or expired at the read: at most 500 in any 6 hours per process for
   creates the server accepts, 0.023 a second at the most, and, for failed creates, at most one per
   ReplicaSet name every 600 seconds while its `get` answers or every 30 seconds while it fails
-  (point 3). Each holds the fact slot at most 5 seconds: 2,500 seconds in any 6 hours for the 500,
-  11.6 % of the slot's time, only while the API server answers slowly. None with incidents off.
+  (point 3), times the ReplicaSets whose Pods fail, names a writer of Pods in N chooses. Each holds
+  the fact slot at most 5 seconds: 2,500 seconds in any 6 hours for the 500, 11.6 % of the slot's
+  time, only while the API server answers slowly. None with incidents off.
 - **Writes per incident:** kausa +1 create and, later, +1 delete; kurita +1 create and +1 delete,
   besides its own Event. **Writes per change of an object:** 0; neither resource is patched.
 - **Stored objects:** an Incident at most about 2.5 KB (a `spec` of about 1.5 KB at the longest
@@ -829,6 +873,11 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 - **Whether the metadata `get` of a ReplicaSet returns its annotations,** where the revision is.
   Test: read a ReplicaSet with a metadata-only `get` in kind and check the
   `deployment.kubernetes.io/revision` annotation.
+- **That the API server asks an ownerReference's `uid` only to be non-empty,** on which point 2's
+  rule rests for `object.uid` and `sample.controller.uid` (a hypothesis, not read in its source),
+  and how long the garbage collector takes to delete a Pod whose owner's UID matches no object.
+  Test: in kind, create a Pod with `ownerReferences[0].uid: x` naming a Deployment of N, check that
+  it is accepted, and time its deletion.
 - **How often the sample's owner-cache entry is absent or expired at the read,** so how many `get`s
   point 3's read makes and for how long it holds the fact slot. Computed only as a bound, one per
   create attempted. Test: bar 4, and an Incident about a Pod older than 10 minutes in kind, whose

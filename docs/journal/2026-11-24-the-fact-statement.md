@@ -121,7 +121,9 @@ kurita's `main` as `proposed`.
   wait of the fact slot of at most 5 seconds per create. The Incident carries the revision as of
   that read, not of detection, and kurita's change check counts from the read. `owner-lookup-failed`
   also covers the owner lookup of an Event incident about a Job or a ReplicaSet, and 0027's `Update`
-  says the slot can hold the read.
+  says the slot can hold the read. An eighth review found that a writer of ReplicaSets or Pods could
+  still make a create fail, with a revision of 0 or an owner's UID that does not parse; 0028 now
+  says kausa never sends a create the schema would refuse.
 - Nothing is implemented, and nothing in it is measured.
 
 ### Decisions
@@ -131,7 +133,7 @@ kurita's `main` as `proposed`.
   the Raspberry Pis and in kind.
 - In [0028](../adr/0028-incident-resource-and-remediation-report.md), the sample's ReplicaSet
   revision is read in the fact slot, after the create gate and before the create, through the cached
-  owner lookup: at most 600 seconds old, at most one `get` per Incident created, and a failed read
+  owner lookup: at most 600 seconds old, at most one `get` per create attempted, and a failed read
   is `revision-lookup-failed`. Keeping the revision with each Pod's resolved owner was rejected,
   since it is as old as the Pod; a third value of `missing` alone, since it would leave undo
   proposals rare. The design is the ADR author's, added after the design review.
@@ -141,10 +143,16 @@ kurita's `main` as `proposed`.
   recreated under the same name could otherwise lend the Incident the deleted one's revision under
   the new one's UID. Both reviewers asked for it. The revision and the UID sit behind one pointer of
   the cache entry, empty with incidents off.
+- In [0028](../adr/0028-incident-resource-and-remediation-report.md), kausa never sends a create
+  the schema would refuse: a revision that does not fit is `revision-lookup-failed`, and any other
+  value read from the cluster that does not fit means no create, counted as a refusal. The rule is
+  the ADR author's.
 
 ### Next
 
 - The implementation, behind `incidents.enabled` and `incidents.reportRemediations`, both off by
   default, with the reference pages that 0028 lists under Consequences.
+- `podsSeen` is 0 for an incident with no Pod, which the Incident's 1..100 refuses on both sides:
+  open, for the maintainer, with kurita's ADR 0008.
 - Measure bars 1 to 8, and settle what "Not verified" lists, first whether a metadata `get` of a
   ReplicaSet returns its annotations.
