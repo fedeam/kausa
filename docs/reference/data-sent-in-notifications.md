@@ -311,8 +311,9 @@ its fake model never echoes its input, so it cannot catch a model that does.
   `facts` is new in `detected` and `explained`; `explanation` is only in `explained`; `capped`
   carries `limit` and none of the incident's fields. A receiver of `v1` that reads `explanation`
   without checking `type` must check it first. The `slack` and `telegram` texts gain the `Facts:`
-  line and the mark. kausa sends `v1` up to v0.6.3 and `v2` from the next release on; no release
-  sends both.
+  line and the mark. `D013`'s name, in `detection.name` and the texts' first line, is now
+  `autoscaler cannot read metrics or target scale` (it was `autoscaler cannot get metrics`). kausa
+  sends `v1` up to v0.6.3 and `v2` from the next release on; no release sends both.
 - To drop duplicates (a send that timed out after the receiver took it, then the retry, or a
   later occurrence of the same incident), key on `fingerprint` and `first_seen`.
 

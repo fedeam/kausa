@@ -179,6 +179,10 @@ This breaks a receiver written for `v1`: `type` is `detected`, `explained` or `c
 body](../reference/data-sent-in-notifications.md#the-json-body). The Slack and Telegram texts gain
 a `Facts:` line and the line `Model's explanation, not verified:`, and need no change.
 
+`D013` is now named `autoscaler cannot read metrics or target scale` (it was `autoscaler cannot
+get metrics`), in `detection.name` and in the first line of the texts: change a receiver or a
+filter that matches the old name.
+
 A release without a model endpoint that has notifications on starts posting `detected` messages
 on upgrade, and, unless `events: false`, writing `Detected` Events ([Upgrade to the `Detected`
 Event](install-with-helm.md#upgrade-to-the-detected-event)).
