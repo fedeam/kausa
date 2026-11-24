@@ -149,10 +149,14 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
 - A third review of 0029 found that the lookups of its revision check, awaited in the run loop,
   would hold it for as long as their `get`s take, with no bound. 0029 now reads in a slot of its
   own, at most 16 `get`s a tick, forces a read of each ReplicaSet at acceptance so that a rollback
-  made just before is not reported `observed`, and names the writer of ReplicaSets, who can forge
-  an `observed` through the revision annotation and can as well undo for real. Its `Update` of 0028
+  made just before is not reported `observed`, and names the writer of ReplicaSets, who can forge an
+  `observed` through the revision annotation and can as well undo for real. Its `Update` of 0028
   adds point 3, the Costs and the trust statement, and the `pods_total` field of the `incident` log
-  line joins the places where `Pods now` changes.
+  line joins the places where `Pods now` changes. A fourth review found that the read slot's waits
+  held only with fast answers and that a slow slot could leave some checks never read; 0029 now
+  starts each list where the slot stopped reading, spaces its `get`s 312.5 ms apart, ends a check
+  without its baseline after 900 seconds as `not-checkable`, counts the `get` in flight's decode,
+  and lists no name the owner lookup refuses.
 - Nothing is implemented, and nothing in them is measured.
 
 ### Decisions
@@ -205,6 +209,12 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
   `not-checkable`. A time budget per pass and no retry of a failed lookup were weighed and not
   taken: a cap per tick bounds every writer the same way and keeps a failed read retryable. The
   design is the ADR author's, added after the third review.
+- In [0029](../adr/0029-incident-end-report.md), the read slot's next list starts at the first name
+  it has not read, so every check is read at any pace, and a check whose forced reads have not all
+  ended 900 seconds after acceptance is `not-checkable`. The slot starts a `get` at least 312.5 ms
+  after the previous one, so its bound is 16 in any 5 seconds and 11,520 in any hour whatever the
+  ticks do; changing the tick to `Delay` or `Skip` was not taken, since it would change the tick's
+  other work with every switch off. Both are the ADR author's design, added after the fourth review.
 
 ### Next
 

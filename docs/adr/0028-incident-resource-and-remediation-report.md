@@ -1108,10 +1108,11 @@ outcome check (point 9)" no longer holds, nor, in "Alternatives considered", "Th
 attaches to `Incident.status` instead (point 9)". Point 3: the owner cache gains a second reader,
 0029's read slot, which while a `rollout-undo` check is pending refreshes the entries of the
 ReplicaSets its Pods name, and reads them past a fresh entry at acceptance, with the same `get`, at
-most 16 a tick and never in the run loop; so an entry the fact slot finds fresh may have been filled
-by it, and "At most one `get` per create attempted" counts the fact slot's reads only. Costs:
-"Reads" gains those `get`s, at most 3.2 a second and 11,520 an hour, apart from the creates' 500 in
-any 6 hours, and the read list of 4,632 bytes held from one tick to the next; "The table of created
+most 16 in any 5 seconds and never in the run loop; so an entry the fact slot finds fresh may have
+been filled by it, and "At most one `get` per create attempted" counts the fact slot's reads only.
+Costs: "Reads" gains those `get`s, at most 3.2 a second and 11,520 in any hour, apart from the
+creates' 500 in any 6 hours, the read slot's 4,608 bytes held while a check is pending, and its one
+`get` in flight, whose decode can be alive together with the fact slot's; "The table of created
 Incidents" gains point 1's 32 bytes an entry. The trust statement: for a writer of Pods or
 ReplicaSets in N, "Outside N, that wait is all it gets" no longer holds whole: its Pods and
 ReplicaSets also feed those reads, in its own checks' turns, and a `get` it could make slow delays

@@ -289,15 +289,26 @@ seconds each with an API server that does not answer. So:
   request: a Pod's revision is known when its controller ReplicaSet's entry is fresh, its `get`
   answered with a whole-number revision, and the UID that `get` returned equals the one in the Pod's
   `ownerReference`.
-- **At most 16 `get`s started per tick.** At each tick the loop lists the names that the pending
-  `rollout-undo` checks need read, at most 16: a ReplicaSet named by the controller reference of a
-  non-terminal Pod of a check's set, whose entry is absent, expired, or a failure older than 30
-  seconds (`OWNER_ERROR_TTL`, `:83`). It takes one name per check per round, that check's next one,
-  the checks in the order of 0028's table from the one after where the previous list stopped, and
-  the slot reads them in that order; the next tick's list replaces it, and a name it did not reach
-  waits for a later one. So kausa sends at most 16 of these `get`s every 5 seconds, 3.2 a second,
-  11,520 an hour, whatever the checks name; with an API server that does not answer, each holds the
-  slot 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`), about one a tick, 0.2 a second. Each is the owner
+- **At most 16 `get`s started per tick, and never faster than one every 312.5 ms.** At each tick the
+  loop lists the names that the pending `rollout-undo` checks need read, at most 16: a ReplicaSet
+  named by the controller reference of a non-terminal Pod of a check's set, whose entry is absent,
+  expired, or a failure older than 30 seconds (`OWNER_ERROR_TTL`, `:83`). It takes one name per
+  check per round, that check's next one, the checks in the order of 0028's table, and the slot
+  reads them in that order. The list starts at the first name the slot has not read: the slot keeps
+  the table index of the check after the last one whose read ended (answered, failed or timed out),
+  8 bytes, and the next tick's list, which replaces this one, starts there, so a name the slot did
+  not reach is first in the next list. With N checks that need a read and r reads ended a tick,
+  every check gets its read within ⌈N / r⌉ ticks of its previous one, at any r ≥ 1: none starves.
+  The slot starts a `get` only 312.5 ms (5 / 16 seconds) or more after it started the previous one,
+  keeping that start's time, 16 bytes. The tick keeps tokio's default behavior for missed ticks
+  (`Burst`: `tokio::time::interval` at `src/run.rs:983`, polled at `:1196`, with no
+  `set_missed_tick_behavior`), so after a handler held the run loop late ticks fire in a row, each
+  with its list; the spacing makes the bound one of time, not of ticks: kausa sends at most 16 of
+  these `get`s in any 5 seconds, 3.2 a second, 11,520 in any hour, whatever the checks name and the
+  ticks do. Changing the tick to `Delay` or `Skip` was not taken: it would change the timing of the
+  tick's other work with every switch off. The spacing and the list's start are the ADR author's
+  design, added after a fourth review; with an API server that does not answer, each holds the slot
+  5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`), about one a tick, 0.2 a second. Each is the owner
   lookup's metadata `get` of `replicasets`, and the forced read below is the same call past a fresh
   entry: no new verb and no new watch.
 - **At acceptance, a forced read.** A `rollout-undo` check whose set names more than 4 distinct
@@ -306,7 +317,12 @@ seconds each with an API server that does not answer. So:
   together or wait together for a later tick, and each is read with a `get` even when its entry is
   fresh, within the 16; `B` comes from those answers, and `t_a` is the first tick after the last of
   them. A read that fails, or answers with another UID than the Pod's `ownerReference` or with no
-  whole-number revision, makes the check `not-checkable`. So `B` is as of a read made after kausa
+  whole-number revision, makes the check `not-checkable`. A name the owner lookup refuses (0028's
+  point 3: not a DNS-1123 subdomain of at most 253 characters) is never listed and is a read that
+  fails, with no request. A check whose forced reads have not all ended 900 seconds after its
+  acceptance is `not-checkable` then, with no `t_a`: 900 is above the 625 seconds the baselines of
+  500 checks of 4 ReplicaSets take with every `get` answered within 312.5 ms (below). This deadline
+  is the ADR author's design, added after the fourth review. So `B` is as of a read made after kausa
   accepted the record, never a cached value up to 600 seconds older: a rollback made before that
   read is in `B`, and an `observed` is a change seen after `t_a`.
 - **`C` decided, or not.** At a tick `C` holds when every non-terminal Pod's revision is known and
@@ -321,13 +337,22 @@ seconds each with an API server that does not answer. So:
   taken 63 ticks, 315 seconds, after acceptance; then 1,000 entries refreshed every 600 seconds, 1.7
   `get`s a second, under the 3.2. A round lists one name of each check, or up to 4 of one that
   awaits its baseline, so a name waits for its read at most ⌈500 / 16⌉ = 32 ticks, 160 seconds, once
-  the baselines are taken, and at most 2,000 / 16 = 125 ticks, 625 seconds, while 500 checks await
-  theirs. After a change, `observed` comes at most an entry's 600 seconds plus that wait later: 605
-  seconds with one check of one ReplicaSet, 600 + 2 × 160 = 920 with 500 checks of 2, under the
-  shortest window of 1,200 seconds. The list holds at most 16 names, each with the index of its
-  table entry, whose namespace it uses: 16 × (32 + 256) + 24 = 4,632 bytes, from one tick to the
-  next. With a switch off, or with no `rollout-undo` check pending, nothing is listed and nothing is
-  read.
+  the baselines are taken, and, while 500 checks await theirs, at most 1,000 / 16 = 63 ticks, 315
+  seconds, with 2 ReplicaSets each, or 2,000 / 16 = 125 ticks, 625 seconds, with 4. After a change,
+  `observed` comes at most an entry's 600 seconds plus that wait later: 605 seconds with one check
+  of one ReplicaSet, 600 + 2 × 160 = 920 with 500 checks of 2, under the shortest window of 1,200
+  seconds. With 500 checks of 4 it is 600 + 4 × 160 = 1,240 seconds, past that window by 40: a real
+  change on a check of 4 ReplicaSets can end it `not-checkable` instead of `observed`, never
+  `not-observed`, since its forced entries stop being fresh at `t_a` + 600 at the latest and the
+  window's last 600 seconds begin at `t_a` + W − 600 ≥ `t_a` + 600. These waits hold with every
+  `get` answered within 312.5 ms. With each answer held d seconds, the slot ends about 5 / d reads a
+  tick instead of 16, and each wait is multiplied by about 16 d / 5: at d = 1, 500 checks of 2 have
+  their baselines after 1,000 seconds, so those still waiting at 900 end `not-checkable`, and a
+  round takes 500 seconds, so `C` is decided less often and more checks end `not-checkable`. No
+  result is false: a check that waits ends `not-checkable`. The list holds at most 16 names of at
+  most 253 bytes (0028's lookup rule), each with the index of its table entry, whose namespace it
+  uses: 16 × (32 + 253) + 24 = 4,584 bytes, from one tick to the next. With a switch off, or with no
+  `rollout-undo` check pending, nothing is listed and nothing is read.
 
 The baseline is taken at acceptance from those Pods, at `t_a` on kausa's monotonic clock: the
 acceptance, or for `rollout-undo` the first tick after its forced reads:
@@ -355,8 +380,9 @@ acceptance, or for `rollout-undo` the first tick after its forced reads:
 - `not-checkable`: at acceptance there was no single baseline: no Pod, no such container, values
   that differ between Pods, more than 4 ReplicaSets or revisions, a revision kausa could not read, a
   policy other than `Never`, or an owner with no UID, decided at once (for `rollout-undo`, when its
-  forced reads answer); or, for `rollout-undo`, `C` not decided at any tick of the window's last 600
-  seconds, decided at its end.
+  forced reads answer); or, for `rollout-undo`, its forced reads not all ended 900 seconds after
+  acceptance, decided then, or `C` not decided at any tick of the window's last 600 seconds, decided
+  at its end.
 - `source-lost`: the Pods watch that covers the namespace dropped its records on a `403` after
   `t_a`. Decided at once.
 
@@ -564,10 +590,14 @@ What each principal gains:
   and never costs a `detected` or an `explained` message. Each `rollout-undo` it gets accepted costs
   at most 4 forced reads at acceptance and one read per round while pending, within the 16 a tick,
   and never holds the run loop; with a record for each of the 500 Incidents the table holds at most,
-  the reads of other namespaces' checks wait at most 625 seconds while the baselines are taken and
-  160 seconds after (point 2). Worst case: it records `rollout-undo` and rolls the Deployment
-  itself; kausa reports `observed`, which is true of the Pods, and names kurita only as the proposer
-  of record.
+  the reads of other namespaces' checks wait at most 625 seconds while the baselines are taken (315
+  with checks of 2 ReplicaSets) and 160 seconds a round after, with every `get` answered within
+  312.5 ms (point 2). With checks of 4 ReplicaSets a change is seen up to 1,240 seconds later, so it
+  can make a real undo on a check of another namespace with a window of 1,200 seconds end
+  `not-checkable` instead of `observed`; with slower answers the waits grow and more such checks end
+  `not-checkable`, a result lost, never a false one. Worst case: it records `rollout-undo` and rolls
+  the Deployment itself; kausa reports `observed`, which is true of the Pods, and names kurita only
+  as the proposer of record.
 - **A writer of Incidents in N** (0028's trust statement): deleting an Incident and creating
   another under its name makes kurita's record for it fail kausa's check (`incident-unknown`,
   0028's point 6), so the closing says `recorded: no` and no outcome check runs. The closing itself
@@ -606,11 +636,15 @@ What each principal gains:
   ReplicaSet kausa cannot read (none, or one with another UID: the lookup fails and `top_owner`
   keeps the reference, `src/owner.rs:67`) leaves `C` undecided while no other Pod decides it false,
   so the check ends `not-checkable`, never `observed`; each such name costs one `get` per round of
-  its check, within the 16 a tick. Whether the garbage collector deletes such a Pod, whose owner
-  does not exist, is under "Not verified". Outside N it gets nothing more: the run loop never waits
-  for these reads, the 16 a tick hold whatever it adds, and a round lists one name of each check, so
-  the checks of other namespaces wait at most 32 ticks, 160 seconds, for a read at 500 checks, as
-  without it. `edit` can also change the Deployment for real, so the forgery buys little.
+  its check, within the 16 a tick. A name that is not a DNS-1123 subdomain of at most 253 characters
+  gets it the same result with nothing more: no request and no entry in the list or the cache
+  (0028's lookup rule). Whether the garbage collector deletes such a Pod, whose owner does not
+  exist, is under "Not verified". Outside N it gets nothing more: the run loop never waits for these
+  reads, the 16 a tick hold whatever it adds, and a round lists one name of each check, so the
+  checks of other namespaces wait at most 32 ticks, 160 seconds, for a read at 500 checks, as
+  without it, with every `get` answered within 312.5 ms; slower answers are the API server's, or a
+  writer of ReplicaSets' (below). `edit` can also change the Deployment for real, so the forgery
+  buys little.
 - **Whoever can write ReplicaSets in N** (`edit` can): point 2 reads the revision from the
   `deployment.kubernetes.io/revision` annotation of each Pod's controller ReplicaSet, so it can set
   that annotation on the Pods' real ReplicaSets to numbers not in `B` and make `C` hold with no Pod
@@ -623,7 +657,10 @@ What each principal gains:
   "Not verified". Outside N, its ReplicaSets are read only in its own checks' turns: a `get` it
   could make slow, which 0028's "Not verified" asks of a ReplicaSet with about 1.5 MiB of metadata,
   holds the read slot up to 5 seconds a read, never the run loop, and delays the reads of other
-  namespaces' checks by that much per turn of its checks.
+  namespaces' checks by that much per turn of its checks. If every read it causes takes 5 seconds,
+  the slot ends about one read a tick, the waits of point 2 are multiplied by up to 16, and checks
+  of other namespaces end `not-checkable` where they would have been decided, never with a false
+  result.
 - **Whoever can write `pods/status` in N** (a kubelet, for the Pods of its node, and principals with
   a wildcard grant: high-privilege principals): it can keep the status of a genuine state incident's
   Pods clean, against the kubelet, for more than 330 seconds, and so forge its `closed`; and it can
@@ -640,12 +677,13 @@ What each principal gains:
 ### Costs, computed
 
 - **Writes:** 0. **New watches and verbs:** 0. **Reads:** with a `rollout-undo` check pending, the
-  read slot's metadata `get`s of `replicasets` (point 2): at most 16 started a tick, one in flight,
-  3.2 a second and 11,520 an hour, of which at most 4 forced at each acceptance; at 500 checks with
-  2 ReplicaSets each, 1,000 at acceptance and then 1,000 every 600 seconds, 1.7 a second, before the
-  cache shares entries. None with a switch off or with no such check pending, and the run loop never
-  waits for one. Not measured (bar 5). **The fact queue:** +0 bytes: the baseline is taken at
-  acceptance, and the container name is already in the fact statement.
+  read slot's metadata `get`s of `replicasets` (point 2): at most 16 started a tick and 312.5 ms
+  apart, one in flight, so at most 16 in any 5 seconds, 3.2 a second and 11,520 in any hour, of
+  which at most 4 forced at each acceptance; at 500 checks with 2 ReplicaSets each, 1,000 at
+  acceptance and then 1,000 every 600 seconds, 1.7 a second, before the cache shares entries. None
+  with a switch off or with no such check pending, and the run loop never waits for one. Not
+  measured (bar 5). **The fact queue:** +0 bytes: the baseline is taken at acceptance, and the
+  container name is already in the fact statement.
 - **Each entry of 0028's table, with `reportEnd` on:** +32 bytes, counted even where 0028 already
   keeps one of the values: the term number (`u32`), the accepted action (`u8`), the flags (`u8`:
   closing taken, outcome taken, a record accepted) and padding, 8; `proposedAt` in Unix seconds
@@ -664,11 +702,18 @@ What each principal gains:
   map's own overhead, about ten times as much, so the array it is.
 - **This ADR's share:** 16,000 + 40,000 + 4,848 = 60,848 bytes, under 64 KiB = 65,536 bytes by
   4,688 bytes (bar 4).
-- **The read list of point 2:** at most 16 names with their table index, 4,632 bytes, and the one
-  `get` in flight, held from one tick to the next while a `rollout-undo` check is pending. It is not
-  kept for the term, and bar 4, which measures what is, does not count it; with it, this ADR's
-  memory peaks at 60,848 + 4,632 = 65,480 bytes, 56 under 64 KiB, too close for a computed figure,
-  so bar 5 records the list's size apart.
+- **The read slot of point 2:** at most 16 names of at most 253 bytes with their table index, 4,584
+  bytes, the time of its last start, 16, and the index where the next list starts, 8: 4,608 bytes,
+  held while a `rollout-undo` check is pending. Bar 4, which measures what the table keeps, does not
+  count them; with them, this ADR's memory peaks at 60,848 + 4,608 = 65,456 bytes, 80 under 64 KiB,
+  too close for a computed figure, so bar 5 records the slot's size apart. Apart from those bytes,
+  the one `get` in flight decodes a ReplicaSet's metadata: an object near the API server's limit of
+  about 1.5 MiB took about 12 MiB once parsed (0028's Costs, from 0014's `Update 2026-10-28`), an
+  estimate for a metadata `get`, not measured. The read slot's decode can be alive together with
+  `on_pod`'s lookup and 0028's fact slot read, one `get` in flight each: 3 × 12 = 36 MiB computed,
+  18.75 % of the chart's memory limit of 192 MiB (`resources.limits.memory`,
+  `charts/kausa/values.yaml:155`). The exposure exists today with one, in `on_pod`; 0028 adds the
+  second and this ADR the third. Bar 5 measures it.
 - **CPU:** with at least one check pending, one pass over the Pods kausa holds at each 5-second
   tick, with one map lookup and one comparison of the namespace per Pod: 10,000 of each a tick at
   10,000 Pods. Hashing applies only to the containers of Pods with a check. Not measured (bar 5).
@@ -696,9 +741,14 @@ before this ADR is accepted, and after 0028's bars:
    `reportEnd` off, at most 64 KiB, with the drop times at 100 listed namespaces.
 5. **The tick in kind** with 10,000 Pods and 500 pending `rollout-undo` checks, accepted in one
    tick, takes less than 1 second. The `get`s of `replicasets` that point 2's read slot makes in
-   that hour are counted against its bound, at most 16 in any tick; the time from each tick to the
-   next stays the tick's own while they run, with the API server answering and with its answers held
-   past 5 seconds; and the read list's size is recorded.
+   that hour are counted against its bound, at most 16 in any 5 seconds, also after the run loop was
+   held; the time from each tick to the next stays the tick's own while they run, with the API
+   server answering and with its answers held past 5 seconds; and the read slot's size is recorded.
+   Again with 32 checks and every answer held 1, 2, 3 and 4 seconds, counting the `get`s per check:
+   every check is read at each round, none starves, and a check whose baseline is not taken 900
+   seconds after its acceptance ends `not-checkable`. And the peak memory with a ReplicaSet of about
+   1.5 MiB of metadata as one check's, read by the read slot, the fact slot and `on_pod` at once,
+   against the chart's limit.
 6. **500 Incidents closing within one minute**, in kind and on the Raspberry Pis: no watch error,
    relist or restart; the `closed` messages received, plus those counted `failed`, `capped` or
    `dropped`, plus the closings counted `no-incident`, equal the 500 emitted incidents the tracker
@@ -739,9 +789,10 @@ Each was read in source or documentation only, or not derived; the bar or test t
 - **That an in-place resize writes the Pod spec's limit, as the watch sees it.** Bar 7, row `D003`.
 - **How long the owner cache's stale revision delays `observed` after an undo,** at most 600 seconds
   and the wait for a read computed: one tick with one check, 320 seconds at 500 checks of 2
-  ReplicaSets (point 2). Bar 7, row `D001`, and a kind test that changes the revision of a running
-  Pod's ReplicaSet (an undo to the ReplicaSet of Pods still running) and measures when the check
-  sees it, with the `get`s it made.
+  ReplicaSets and 640 at 500 checks of 4, which passes the shortest window by 40 seconds (point 2).
+  Bar 7, row `D001`, and a kind test that changes the revision of a running Pod's ReplicaSet (an
+  undo to the ReplicaSet of Pods still running) and measures when the check sees it, with the `get`s
+  it made.
 - **That a write to `pods/status` cannot change a Pod's `metadata.ownerReferences` or its spec**
   (the trust statement's writer of `pods/status`): not read in the API server's source. In kind, a
   PATCH to a Pod's `/status` that changes `metadata.ownerReferences`, and one that changes a
@@ -796,8 +847,9 @@ Each was read in source or documentation only, or not derived; the bar or test t
 ## Consequences
 
 - **A receiver learns when kausa stopped seeing an incident**, and, after kurita proposed one of
-  three actions, whether the change it makes was seen, without kausa writing, reading or
-  executing anything more. Both are off by default; with them off nothing changes but `Pods now`.
+  three actions, whether the change it makes was seen, without kausa writing or executing anything
+  more or reading a new kind of object: it sends the owner lookup's `get` more often. Both are off
+  by default; with them off nothing changes but `Pods now`.
 - **0027's `Pods now` is corrected with every switch off:** it counts only the Pods of the owner's
   namespace, in the fact statement, the request to the model, the `incident` log line, the
   `Detected` Event and the webhook. It depends on nothing else here, so it can ship ahead of 0029,
