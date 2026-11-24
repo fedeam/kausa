@@ -1099,20 +1099,22 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 Update 2026-11-24: [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a proposed action was observed, never that the incident was resolved, off by default](0029-incident-end-report.md) is proposed, not accepted.
 It would amend points 1, 3, 4, 5, 6 and 9 of this ADR, its "Alternatives considered", its trust
 statement, its Costs and its "Not verified", all with `incidents.reportEnd` on but point 9, which it
-replaces. Point 1: each entry of the table of created Incidents gains 32 bytes (the term that
-created it, the action of the first Remediation that passed point 6's checks and its time, a keyed
-hash of the container's name, the closing and outcome marks and a pointer to a pending check of at
-most 80 bytes), within bar 3's 0.5 MiB, which is not raised; the gate, the 6-hour rule and the name
-do not change; and the `status` subresource stays declared and empty, so "it is the place of the
-outcome check (point 9)" no longer holds, nor, in "Alternatives considered", "The outcome check
-attaches to `Incident.status` instead (point 9)". Point 3: the owner cache gains a second reader,
-0029's read slot, which while a `rollout-undo` check is pending refreshes the entries of the
-ReplicaSets its Pods name, and reads them past a fresh entry at acceptance, with the same `get`, at
-most 16 in any 5 seconds and never in the run loop; so an entry the fact slot finds fresh may have
-been filled by it, and "At most one `get` per create attempted" counts the fact slot's reads only.
-Costs: "Reads" gains those `get`s, at most 3.2 a second and 11,520 in any hour, apart from the
-creates' 500 in any 6 hours, the read slot's 4,608 bytes held while a check is pending, and its one
-`get` in flight, whose decode can be alive together with the fact slot's; "The table of created
+replaces. Point 1: the table of created Incidents keeps each entry in one slot of an array of at
+most 500 from its create to its drop, so that a drop moves no other entry, and each entry gains 32
+bytes (the term that created it, the action of the first Remediation that passed point 6's checks
+and its time, a keyed hash of the container's name, the closing and outcome marks and a pointer to a
+pending check of at most 80 bytes), within bar 3's 0.5 MiB, which is not raised; the gate, the
+6-hour rule and the name do not change; and the `status` subresource stays declared and empty, so
+"it is the place of the outcome check (point 9)" no longer holds, nor, in "Alternatives considered",
+"The outcome check attaches to `Incident.status` instead (point 9)". Point 3: the owner cache gains
+a second reader, 0029's read slot, which while a `rollout-undo` check is pending refreshes the
+entries of the ReplicaSets its Pods name, and reads them past a fresh entry at acceptance, with the
+same `get`, started at least 312.5 ms apart and never in the run loop; so an entry the fact slot
+finds fresh may have been filled by it, and "At most one `get` per create attempted" counts the fact
+slot's reads only. Costs: "Reads" gains those `get`s, at most 3.2 a second and 11,520 in any
+half-open hour, apart from the creates' 500 in any 6 hours, the read slot's 4,608 bytes held while a
+check is pending, and its one `get` in flight, whose body can be in transit while the fact slot's
+answer is parsed, with at most one parse alive at a time (0029's Costs); "The table of created
 Incidents" gains point 1's 32 bytes an entry. The trust statement: for a writer of Pods or
 ReplicaSets in N, "Outside N, that wait is all it gets" no longer holds whole: its Pods and
 ReplicaSets also feed those reads, in its own checks' turns, and a `get` it could make slow delays

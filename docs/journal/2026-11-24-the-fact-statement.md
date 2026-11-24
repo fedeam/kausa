@@ -215,6 +215,12 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
   after the previous one, so its bound is 16 in any 5 seconds and 11,520 in any hour whatever the
   ticks do; changing the tick to `Delay` or `Skip` was not taken, since it would change the tick's
   other work with every switch off. Both are the ADR author's design, added after the fourth review.
+- In [0029](../adr/0029-incident-end-report.md), a forced read counts as done once its cache entry
+  was filled after the check's acceptance, the tick lists neither a name in flight nor one already
+  filled, and the read slot's next list starts at a position that a drop from 0028's table does not
+  shift, so no `get` is sent twice and every baseline completes at any pace. The manager's decision,
+  the fix both reviewers of the fifth review described. The position, a slot of 0028's table kept
+  from an entry's create to its drop, is the ADR author's choice.
 
 ### Next
 
