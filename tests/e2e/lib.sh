@@ -459,7 +459,8 @@ explanations_of() {
 # the fingerprint of an incident the log gives for that owner and rule, whose note is the logged
 # statement, starts with the detection's name and id, holds only letters, digits, spaces and
 # .,:()- and none of the namespace, the owner's name, the Pod's name and the image. crasher's
-# note is, byte for byte, the statement of its crash loop. With model, the Explained Event of each
+# note is, byte for byte, the statement of its crash loop, sampled while the container waits in
+# CrashLoopBackOff or while it is terminated with Error between restarts. With model, the Explained Event of each
 # workload follows the mark; with nomodel, kausa wrote no Event of any other reason.
 check_detected() {
   python3 -I -c '
@@ -471,9 +472,12 @@ WORKLOADS = (("Deployment", "crasher", "D001", "apps/v1"),
              ("Job", "policy-job", "D008", "batch/v1"),
              ("Deployment", "stranded", "D005", "apps/v1"),
              ("Deployment", "stalled", "D014", "apps/v1"))
-# What the ADR gives for crasher: a container that exits 2 at its flag, one Pod.
-CRASHER = ("crash loop (D001). Sample: container app, reason CrashLoopBackOff, exit code 2. "
-           "Pods seen failing: 1. Pods now: 1.")
+# What the ADR gives for crasher: a container that exits 2 at its flag, one Pod. The kubelet
+# reports it waiting in CrashLoopBackOff for part of each back-off and terminated with Error for
+# the rest, and src/detect.rs takes either as the crash loop, so the sample holds either reason.
+CRASHER = {"crash loop (D001). Sample: container app, reason %s, exit code 2. "
+           "Pods seen failing: 1. Pods now: 1." % reason
+           for reason in ("CrashLoopBackOff", "Error")}
 ALLOWED = re.compile(r"[A-Za-z0-9 .,:()-]+")
 NAME = re.compile(r"kausa\.detected\.([0-9a-f]{16})\.[0-9a-f]{8}")
 
@@ -536,7 +540,7 @@ for kind, name, rule, api_version in WORKLOADS:
         if related and related in note:
             fail("the note of the Detected Event about %s holds the Pod" % who)
         notes.add(note)
-    if name == "crasher" and CRASHER not in notes:
+    if name == "crasher" and not CRASHER & notes:
         fail("no Detected Event about crasher has the statement of its crash loop")
     if mode == "model":
         explained = [e for e in mine if e.get("reason") == "Explained"]
