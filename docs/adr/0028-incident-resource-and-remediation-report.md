@@ -226,10 +226,10 @@ spec:                       # required; CEL: self == oldSelf
     reason: the compiled list of src/fact.rs   # optional
     exitCode: int32                            # optional
     container: DNS label, at most 63           # optional
-    podsSeen: 1..100
+    podsSeen: 0..100        # 0 exactly for D008 and D011 to D014; capped at 100
     podsSeenIsMinimum: bool
     podsNow: 0..1000000
-  sample:                   # optional
+  sample:                   # optional; CEL: present exactly when podsSeen > 0
     pod: {name: Name, uid: UID}
     controller:             # optional: absent for a Pod with no controller ownerReference
       kind: ReplicaSet | Job | StatefulSet | DaemonSet | Other
@@ -287,17 +287,29 @@ is never kept and never sent:
   it, and an optional `uid` left out would say the object has none.
 - **The values kausa makes** fit by construction: `detection`, `fingerprint`, `settledAt`,
   `missing`, `sample.controller.kind` (any other kind is `Other`), and `facts`, since the fact
-  statement admits only a listed reason, an `i32` exit code, a container that is a DNS label and at
-  most 100 Pods seen (`src/fact.rs:115-139`, `src/incident.rs:458-460`); a `podsNow` above 1,000,000
-  is a no create, as above. `sample.pod` comes from a Pod's own metadata, whose name the API server
-  validates and whose UID it sets.
-- **Where it cannot hold as the sketch stands: `podsSeen`.** An incident with no Pod, `D008` and
-  `D011` to `D014`, has a `podsSeen` of 0 (`src/incident.rs:185-192` and `:236-245` give its signals
-  no Pod; a test at `:917`), which the fact statement leaves out (`src/fact.rs:166`) and which the
-  sketch's 1..100 refuses, as kurita's ADR 0008's "1 to 100" does. Under this rule those Incidents
-  are never created; without it the server refuses them. The fix, 0..100 or a `podsSeen` absent at
-  0, changes the contract on both sides and is not made here: it is open, for the maintainer, with
-  kurita's ADR 0008.
+  statement admits only a listed reason, an `i32` exit code and a container that is a DNS label
+  (`src/fact.rs:115-139`), and `podsSeen` is capped at 100 (next bullet); a `podsNow` above
+  1,000,000 is a no create, as above. `sample.pod` comes from a Pod's own metadata, whose name the
+  API server validates and whose UID it sets.
+- **`podsSeen`, 0 to 100, so the rule holds for it too.** 0 means that no Pod was seen: the incident
+  is about an object that is not a Pod, which is `D008` and `D011` to `D014` and only those
+  (`src/incident.rs:185-192` and `:236-245` give their signals no Pod; a test at `:917`). Each
+  detection is about a Pod or never is, since the kind of the object an Event is about is part of
+  each match (`src/detect.rs:235-294`), so every signal of `D001` to `D007`, `D009` and `D010` names
+  its Pod. The fact statement leaves a count of 0 out of its text (`src/fact.rs:166`); the Incident,
+  a typed record, keeps it, and a reader keeps one integer with no optional. The count can pass 100:
+  the set of Pods is capped at 100 while the incident is pending, and the Pods failing when it
+  settles are added past the cap (`src/incident.rs:485-487`; a test at `:1227-1234` has 101, and the
+  fact statement then reads "at least 101", `src/fact.rs:425-429`). The Incident holds the count up
+  to 100 and 100 above it, and `podsSeenIsMinimum` is the fact statement's own flag, true when the
+  count is 100 or more (`src/fact.rs:133`), so "at least 100" stays true. At 0 `podsSeenIsMinimum`
+  is false, by the same comparison. `sample` is absent exactly when `podsSeen` is 0: point 3 sets it
+  for every incident of `D001` to `D007`, `D009` and `D010`, whose set holds at least the sample's
+  Pod (the sample is taken from the group whose Pods `src/incident.rs:487` adds), and no other
+  incident has one; a CEL rule on `spec` checks it, within bar 7's cost. The range 0..100 is the
+  manager's decision, under the plan's authority to decide ADRs within its invariants, after the
+  eighth review; capping the count at 100 is the ADR author's. kurita's ADR 0008's "1 to 100"
+  becomes "0 to 100" in the change there.
 
 ### 3. The data kausa keeps for it
 
@@ -955,8 +967,8 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 - **That a `/status` write cannot change `metadata` or `spec`, and that root CEL rules run on
   `/status` writes:** checked in the source only. Test both in kind before the outcome check
   relies on them.
-- **The CEL cost of the per-detection rules.** Test: install both CustomResourceDefinitions on the
-  oldest supported k3s (bar 7).
+- **The CEL cost of the per-detection rules and of `sample`'s rule.** Test: install both
+  CustomResourceDefinitions on the oldest supported k3s (bar 7).
 - **That a forged Event yields an `inspect` that kurita's cluster window counts:** test in kind that
   a forged `D006` or `D012` about an object that really fails gives `inspect`, and that kurita's
   cluster window counts it in the same term.

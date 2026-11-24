@@ -150,12 +150,18 @@ kurita's `main` as `proposed`.
   read from the cluster that does not fit means no create, counted as a refusal. The owner lookup
   answers as a failed one, without a request or a cache entry, for a name that is not a DNS-1123
   subdomain of at most 253 characters, for every caller. Both rules are the ADR author's.
+- In 0028, `podsSeen` takes 0 to 100: 0 for `D008` and `D011` to `D014`, which have no Pod and no
+  `sample`, so that the rule above does not leave them without an Incident. This is the manager's
+  decision, under the plan's authority to decide ADRs within its invariants: the number is true, a
+  reader keeps one integer with no optional, and kurita's decision core does not read the field.
+  Leaving the field out at 0, as the fact statement does, was not taken: the statement is prose for
+  a person, the Incident a typed record. The count, which can pass 100 when the incident settles, is
+  capped at 100 with `podsSeenIsMinimum` true, the ADR author's choice. kurita's ADR 0008 changes "1
+  to 100" to "0 to 100" in the change there.
 
 ### Next
 
 - The implementation, behind `incidents.enabled` and `incidents.reportRemediations`, both off by
   default, with the reference pages that 0028 lists under Consequences.
-- `podsSeen` is 0 for an incident with no Pod, which the Incident's 1..100 refuses on both sides:
-  open, for the maintainer, with kurita's ADR 0008.
 - Measure bars 1 to 8, and settle what "Not verified" lists, first whether a metadata `get` of a
   ReplicaSet returns its annotations.
