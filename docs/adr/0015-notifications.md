@@ -254,6 +254,9 @@ webhook, within the `v2` of [0027](0027-fact-statement-for-the-detections.md): `
 remediation`, posted at most once per Incident kausa created, with `incidents.reportRemediations`
 on, when kurita records a proposal for it. Its action id and time come from kurita's Remediation
 after kausa's checks; its detection, object and fingerprint from kausa's own memory. It shares the
-receiver, the formats, the bound `--notify-max-per-hour` and the delivery rules decided here. This
+receiver, the formats and the delivery rules decided here, but not the bound: at most the value of
+`--notify-max-per-hour` of `remediation` messages start in any 60 minutes, counted apart from the
+`detected` ones; in the queue a `remediation` never evicts another message, and a `remediation`
+dropped or over its bound owes no `capped` message. This
 takes effect only when 0028 is accepted, which needs its bars measured and kurita's ADR 0008
 accepted; until then the text above holds.

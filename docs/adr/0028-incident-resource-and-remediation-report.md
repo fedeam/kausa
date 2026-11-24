@@ -1,9 +1,8 @@
 # 0028. Publish each incident as an immutable Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by default
 
 - Status: proposed. Acceptance needs the bars of "Conditions of acceptance" measured, and
-  [kurita's ADR 0008](https://github.com/fedeam/kurita/blob/main/docs/adr/0008-contract-with-kausa.md),
-  the other half of this contract, accepted. Until then kausa writes no Incident and reads no
-  Remediation, and the ADRs this one amends hold as written.
+  kurita's ADR 0008, "Contract with kausa", the other half of this contract, accepted. Until then
+  kausa writes no Incident and reads no Remediation, and the ADRs this one amends hold as written.
 - Date: 2026-11-24
 - Builds on: [0014. Keep each incident's full explanations in a namespaced Explanation resource,
   off by default](0014-explanation-history.md) (a resource of kausa's own, its sweep, its cap and
@@ -25,16 +24,18 @@
   endpoint](0008-data-leaving-the-cluster.md): nothing new goes to the model
 
 kurita is a separate project, a controller that proposes a remediation for an incident kausa
-reports ([kurita](https://github.com/fedeam/kurita)). Its ADR 0008, the contract with kausa, is
-written at the same time as this one and decides kurita's half; where this ADR restates that half,
-it is so that kausa's half can be read alone, and kurita's ADR 0008 holds. Every figure of memory,
+reports. Its ADR 0008, the contract with kausa, is written at the same time as this one and decides
+kurita's half; where this ADR restates that half, it is so that kausa's half can be read alone, and
+kurita's ADR 0008 holds. Every figure of memory,
 size, writes and latency below is **computed, not measured**, unless it says measured.
 
 ## Context
 
 Status as of 2026-11-24: `main` at `588f3b5`, v0.6.3 released. 0027 is `proposed` on `main`; the
-change that implements and accepts it is not merged that day, and the paths cited below
-(`src/report.rs`, `src/fact.rs`) are that change's. Nothing below is implemented.
+change that implements and accepts it is not merged that day, and every path and line cited below
+is that change's (`src/report.rs` and `src/fact.rs` are new there). Nothing below is
+implemented. kurita is not published as of 2026-11-24, so its ADRs are cited here by number and
+title, without links, until it is.
 
 **What another controller would need, and kausa has no way to give.** kausa reports an incident
 in its log, in a `Detected` Event and, with a webhook, in a `detected` message (0027). A
@@ -42,7 +43,8 @@ controller that proposes a remediation needs the same incident as typed data, fr
 only kausa can write. None of today's outputs is one:
 
 - **An Event is forgeable.** Whoever can create Events in a namespace, the built-in `edit` role
-  included, can write one that looks like kausa's (0027's `Update 2026-11-24`). Events are kept one
+  included, can write one that looks like kausa's (0027's acceptance `Update`, its item "A
+  `Detected` Event's name can be taken first"). Events are kept one
   hour by default (`kube-apiserver --event-ttl`), and their note is text.
 - **The log and the webhook leave the cluster** and are not a resource another controller reads.
 - **An Explanation** (0014) holds the model's text, exists only with a model, and is patched.
@@ -57,7 +59,7 @@ kurita's ADR 0008 also needs data kausa does not keep today (kausa's source as o
 - The owner of a Pod is found through a metadata `get` of its ReplicaSet or Job, cached by hop,
   namespace and name for 600 seconds (`src/run.rs:82`, `src/run.rs:1902-1953`).
 - The fact queue holds 1024 entries of 1,336 bytes, 1,368,064 bytes (1.30 MiB) when full, pinned
-  by a unit test (`src/report.rs:314-317`), against the bar of 0027's point 10 that a full queue
+  by a unit test (`src/report.rs:309-313`), against the bar of 0027's point 10 that a full queue
   adds at most 2 MiB.
 
 **How the design was reached.** Two complete designs were written against the same brief and fixed
@@ -65,7 +67,8 @@ limits, and a review chose between them point by point, checking each one's clai
 kausa's source, kurita's ADRs and the Kubernetes documentation and source. The design below is the
 result; "Alternatives considered" lists what was rejected and why. Two points the review left to
 the maintainer are decided: the webhook's `v2` is amended before its first release so that a new
-`type` fits in it (0027's `Update 2026-11-24`), and kurita compares the ReplicaSet's revision and
+`type` fits in it (0027's acceptance `Update`, its item "Within `v2` a value of `type` may be
+added"), and kurita compares the ReplicaSet's revision and
 UID for `D001` to `D005`, so kausa keeps no table of every Deployment.
 
 The fixed limits of that brief, which this ADR keeps: kausa stays read-only towards workloads and
@@ -96,7 +99,8 @@ string in either schema is an enum, or a pattern with a maximum length.
   chart ships the resource its controller writes.
 - **A table of every Deployment's generation and revision, kept by kausa.** It closes kurita's
   change check for `D001` to `D005` exactly, at a cost in memory proportional to the cluster (about
-  120 bytes a Deployment in the design that proposed it). Neither it nor the ReplicaSet revision of
+  120 bytes a Deployment, an estimate of the design that proposed it, not derived or measured
+  here). Neither it nor the ReplicaSet revision of
   point 3 gives a forger less or a controller fewer permissions, so the cost decided; kurita's ADR
   0008 (its point 4) states what the revision misses. Kept as the fallback of kurita's execution
   ADR.
@@ -118,7 +122,8 @@ string in either schema is an enum, or a pattern with a maximum length.
 - **`get`, `patch` or `watch` on incidents for kausa.** Not needed: kausa creates, sweeps, and
   finds its Incidents in its own memory (point 6).
 - **A new webhook version `v3` for the remediation message.** `v2` is not released, so its
-  compatibility text is amended instead (0027's `Update 2026-11-24`).
+  compatibility text is amended instead (0027's acceptance `Update`, its item "Within `v2` a value
+  of `type` may be added").
 - **ConfigMaps, or annotations on workloads.** kausa reads no ConfigMap and writes no workload.
 
 ## Decision
@@ -134,9 +139,11 @@ version `v1alpha1`, kind `Incident`:
 - **Namespaced**, in the namespace of the workload it is about, named
   `kausa.<fingerprint>.<firstSeenUnix>` (the 16 hexadecimal characters of the fingerprint and the
   incident's first-seen time in Unix seconds), so one name per occurrence.
-- **Immutable.** It is written by one `create` and never patched. A CEL rule `self == oldSelf` on
-  its `spec` refuses any change of the `spec`, for every writer. The `status` subresource is
-  declared and empty: it is the place of the outcome check (point 9).
+- **Immutable.** It is written by one `create` and never patched. `spec` is required at the root
+  of the schema, and a CEL rule `self == oldSelf` on it refuses any change of the `spec`, for every
+  writer. The `spec` must be required: a transition rule is not evaluated when there is no old
+  value, so without it an object created with no `spec` could be given one later. The `status`
+  subresource is declared and empty: it is the place of the outcome check (point 9).
 - **Created in the fact slot of 0027's point 3**, after the incident's `Detected` Event (at once
   with `--no-events`), within the 10 seconds a write has there, and never before the incident's
   `incident` log line. A failed create is logged and counted (this ADR proposes
@@ -144,14 +151,38 @@ version `v1alpha1`, kind `Incident`:
   retried.
 - **At most one create per fingerprint per `--dedup-hours`**, the window of 0027's point 5 (6 by
   default; with `0`, every occurrence). The gate reads kausa's own table of the Incidents it
-  created in this process (point 6), never a list of the resource, and a fingerprint is marked
+  created in this process (below), never a list of the resource, and a fingerprint is marked
   only after a create the server accepted. The table keys it by namespace and fingerprint, as
   kurita keys its budget (its ADR 0008, point 8): the fingerprint already hashes the namespace
   (`src/fingerprint.rs`), but it is not cryptographic. kurita proposes at most once per
-  fingerprint every 6 hours anyway, so more creates would be writes nobody uses.
+  fingerprint every 6 hours anyway, so more creates would be writes nobody uses. This table, not
+  0027's table of notified fingerprints (1024 entries), is the gate, and it holds at most 500
+  entries under the rule below: an entry younger than 6 hours is never dropped, so with
+  `--dedup-hours` at 6 or less the gate holds for the whole window; with more than 6, an entry
+  older than 6 hours can be dropped to make room, and then a second Incident for that fingerprint
+  inside the window is possible. kurita's budget per fingerprint absorbs it, as after a restart
+  (point 10).
+- **The table of created Incidents**, kept with incidents on, report or not: one entry per
+  Incident kausa created in this process, with the time it created it on kausa's own monotonic
+  clock, at most 500 entries. **It never drops an entry younger than 6 hours**, the window in
+  which kurita decides an Incident (its ADR 0008, point 3); an entry older than that is dropped,
+  oldest first, when room is needed. It is never seeded from a list of Incidents (point 10).
+- **While the table holds 500 entries younger than 6 hours, kausa creates no Incident.** The
+  occurrence is counted (this ADR proposes `kausa_incidents_refused_total`; the reference page
+  fixes it) and logged as `incident refused` at most once an hour; the incident's Events, its
+  `incident` log line and its `detected` message are not affected, and its fingerprint is not
+  marked, so a later occurrence creates one once there is room. So a process creates at most 500
+  Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table,
+  and the table holds at most 500.
 - **No `ownerReference`** to the workload or to anything else, and nothing points to it.
+- **Not with `--dry-run`**, as `--history`: kausa refuses to start with incidents on and
+  `--dry-run`, and the chart turns incidents off with `dryRun`.
 - **The chart ships the resource as a template**, as it ships Explanations: turning incidents off
-  or uninstalling deletes the resource and every Incident in the cluster.
+  or uninstalling deletes the resource and every Incident in the cluster. As 0014 decided for
+  Explanations, `incidents.installCRD` (true by default) says whether the release installs the
+  CustomResourceDefinition and the reader role of point 5; `false` when another release or a
+  cluster administrator installs them, as a namespaced install ([0013](0013-namespaced-install-mode.md))
+  needs.
 
 ### 2. Its schema is the second allowlist
 
@@ -159,7 +190,7 @@ The Incident's `spec`, structural, with no field kept unknown (a sketch; the ref
 with the code):
 
 ```yaml
-spec:                       # CEL: self == oldSelf
+spec:                       # required; CEL: self == oldSelf
   detection: D001..D014
   fingerprint: ^[0-9a-f]{16}$
   firstSeen: Time
@@ -195,6 +226,9 @@ a UID pattern of 36 characters; `Name` a DNS-1123 subdomain of at most 253. Ever
 enum, or a pattern with a maximum length; a test walks the schema to check it, and another checks
 that the `reason` enum equals the list compiled in `src/fact.rs`. At the longest names the `spec`
 is about 1.5 KB (an estimate; bar 6 measures the stored object).
+
+`facts` holds 0027's point 5 vocabulary but its `revision` (`src/fact.rs:101`), which only `D014`
+has: that revision travels in `deployment.revision`, with the generation, and not twice.
 
 The schema is kausa's second allowlist, beside invariant 12's fact statement: an Incident holds
 only the fact statement's facts and the typed values listed here, never a message, a note, a log
@@ -241,15 +275,26 @@ Deployments is added, and no Pod beyond the sample.
   never by `firstSeen`, which any writer of Incidents sets.
 - **One day covers kurita's window**: kurita decides an Incident only while it is younger than 6
   hours by `creationTimestamp` (its ADR 0008, point 3). The outcome check may raise the default.
+- **The cap of 500 is the sweep's target, and kausa's own creates are bounded apart.** The sweep
+  at start runs before the first create of the process. Between two sweeps one process creates at
+  most 500 Incidents (point 1: at most 500 in any 6 hours, and the sweeps are an hour apart), so
+  after a sweep that completes the count kausa causes stays at most 500 + 500 = 1,000 until the
+  next one. A restart or a failover empties the table, so each process start allows 500 more:
+  in a crash loop, each start whose sweep does not complete before the process ends can leave up
+  to 500 more Incidents, and the next sweep that completes trims the count to 500 again (bar 8
+  measures that it does within its 30 seconds). Incidents written by anyone else are not bounded
+  by this ADR, as for Explanations (0014).
 - **The cap is shared across namespaces**, as 0014 says of its own: it protects the datastore, not
-  fairness. A tenant whose workloads fail under many fingerprints, or anyone who can create
-  Incidents, can fill it, and then each sweep deletes the oldest Incidents of every namespace,
-  younger than 6 hours included. What that achieves: kurita proposes nothing for an Incident deleted
-  before kurita decided it, which happens only while kurita is down or behind; kausa still writes
-  its Events and posts its `detected` messages, a Remediation already made stays (no
-  `ownerReference`), and kausa still reports it, since it reports from its own memory. A
+  fairness. The sweep deletes the oldest Incidents beyond 500 whatever their namespace; only
+  Incidents written by someone other than kausa, or left by earlier processes, can push it to
+  delete ones younger than 6 hours, since one process holds at most 500 of those. kausa's own
+  table is per process and is the bound on creates: whoever makes kausa create 500 Incidents in 6
+  hours, a tenant whose workloads fail under that many fingerprints or a writer of Events (trust
+  statement), stops new Incidents in every namespace until the oldest entry passes 6 hours. That
+  moves kurita towards not proposing; kausa still writes its Events and posts its `detected`
+  messages, and a Remediation of an Incident already in the table is still reported. A
   ResourceQuota on `count/incidents.kausa.fedeam.com` in a namespace bounds what that namespace can
-  hold.
+  hold, against writers of Incidents; it does not bound kausa's table.
 
 ### 5. Permissions
 
@@ -291,8 +336,9 @@ object in the Incident's namespace, named `kurita.<fingerprint>.<firstSeenUnix>`
 With `incidents.reportRemediations` (off by default; it needs incidents and notifications on, and
 `dryRun` false), kausa watches `remediations` and posts to its webhook what kurita proposed:
 
-- **The lookup is in kausa's own memory.** kausa keeps a table of the Incidents it created in this
-  process: at most 500 entries, the cap of point 4, the oldest dropped first. For a Remediation in
+- **The lookup is in kausa's own memory**, the table of point 1: the Incidents kausa created in
+  this process, at most 500, none dropped before it is 6 hours old, kurita's whole window to
+  decide one. For a Remediation in
   namespace N named `kurita.<rest>`, kausa looks up `kausa.<rest>` in N in that table, and compares
   the UID the server gave its Incident with `incident.uid`. It reads no Incident: it has no `get`
   on them. This settles what kurita's ADR 0008 left to this ADR (its "Not verified").
@@ -305,15 +351,45 @@ With `incidents.reportRemediations` (off by default; it needs incidents and noti
   for that detection (`invalid`); `target` equals the object kausa holds for the Incident
   (`target-mismatch`); `proposedAt` is within `[firstSeen, now]` (`time-out-of-range`); and no
   message was sent for that Incident before (`duplicate`).
+- **kausa's copy of the actions each detection allows** is a table in kausa's source, a constant
+  of the pure module that parses Remediations (named with the code), listed on [Data sent in
+  notifications](../reference/data-sent-in-notifications.md) and pinned by a unit test: `none`
+  and `needs-human` for every detection; `inspect` for every detection but `D009` and `D014`;
+  `rollout-undo` for `D001` to `D005` and `D014`; `raise-memory-limit` for `D003`;
+  `set-image-pull-policy` for `D002`; `delete-evicted-pods` for none. It equals the CEL rules of
+  kurita's ADR 0008 (its point 2) and its `inspect.what` by detection. A new action id, or an
+  existing id for one more detection, is sent only after a kausa change adds it to that table and
+  to that page, under this repository's rule for what leaves the cluster; until then kausa counts
+  it (`unknown-action` or `invalid`) and sends nothing.
 - **`none` is never sent.** It means kurita found nothing to propose; `needs-human` and `inspect`
   are sent, since each tells a person something.
 - **At most one message per Incident.** The table marks an Incident once its message is queued.
-- **A record that fails a check is dropped**, logged as `remediation ignored` through `log.rs` with
-  its reason and its namespace and name, each checked against its pattern first, and counted in
-  `kausa_remediations_ignored_total{reason}` (the six reasons above). It is never retried, and no
-  part of it is sent.
-- **The bound is shared:** `remediation` messages count against `--notify-max-per-hour` with the
-  `detected` ones, and over it they are `capped` as those are (0027's point 5).
+- **A record that fails a check is dropped**, counted in `kausa_remediations_ignored_total{reason}`
+  (the six reasons above) and logged as `remediation ignored` through `log.rs` with its reason and
+  its namespace and name, each checked against its pattern first, at most once a minute per reason
+  (the others of that minute are counted, not logged). It is never retried, and no part of it is
+  sent. **The counter counts evaluations, not records:** a relist of the watch evaluates every
+  record again, so a record already sent or of an Incident not in the table counts once more
+  (`duplicate`, `incident-unknown`) at each relist. Writes by others are not bounded (Costs), and
+  the rate limit keeps them from flooding the log.
+- **`remediation` messages have their own bound and never cost a `detected` or an `explained`
+  message anything.** At most the value of `--notify-max-per-hour` of them start in any 60 minutes,
+  counted apart from the `detected` ones, which never include them; no new flag. Over it a
+  `remediation` message is not sent, counted in `kausa_notifications_total{outcome="capped"}` and
+  logged as `remediation capped` at most once an hour. In the notification queue of 16 entries
+  (`QUEUE_LIMIT`, `src/notify.rs:37`), a `remediation` message ranks below both others: when the
+  queue is full, the oldest queued `remediation` is dropped first; with none queued, a new
+  `remediation` is dropped itself; only then does the existing rule apply (the oldest `detected`,
+  else a new `detected`, else the oldest `explained`, `src/notify.rs:478-494`). So a `remediation`
+  never evicts a `detected` or an `explained` message, and either one evicts a queued
+  `remediation`. A dropped `remediation` is counted in
+  `kausa_notifications_total{outcome="dropped"}` and logged as `remediation dropped` at most once an hour. **Neither owes the `capped` message:**
+  its fixed text speaks of incidents not posted and of kausa's log having every one
+  (`src/notification.rs:170-175`), and a `remediation` is a notice about kurita, not an incident,
+  so it would mislead; the code's queue does not force it, since only its own drops call
+  `owe()`. At the default of 30, the webhook then carries in any 60 minutes at most 30 `detected`
+  messages, 30 `remediation` messages and 1 `capped` message, plus the `explained` messages, which
+  the call budget bounds (`--max-calls-per-hour`, 30 by default).
 
 **The message**, `type: remediation` within `v2` (0027's `Update 2026-11-24`: a value of `type`
 may be added within `v2`, and a receiver must ignore a message whose `type` it does not know):
@@ -382,10 +458,12 @@ one, attaches at `Remediation.status`, which kausa never writes. This ADR decide
 - **Within `v1alpha1` changes are additive only;** each side parses strictly and counts what it
   ignores.
 - **An action id kausa does not know** is counted as `unknown-action` and not sent, so kurita can
-  ship a new id without a kausa release.
+  ship a new id without breaking kausa; kausa sends it only once a kausa change adds it to its
+  table of point 6.
 - **After a restart or a failover** the table is empty, and it is never seeded from a list of
   Incidents (invariant 5): Remediations of earlier Incidents are not reported (`incident-unknown`),
-  and kausa may create a second Incident for the same fingerprint, under a new first-seen time;
+  the new process may create 500 Incidents more (point 4), and kausa may create a second Incident
+  for the same fingerprint, under a new first-seen time;
   kurita's budget per fingerprint absorbs it (`needs-human{cooldown}`). With `--leader-lease`,
   only the holder creates, sweeps and reports.
 
@@ -407,19 +485,49 @@ a new create, or a create with any valid `spec`.
 
 - **A writer of Incidents can:** make kurita check the live objects again, in N only; spend
   kurita's proposal budget; suppress an undo proposal, or let one through, by forging the
-  revisions of point 3; fill the cap of point 4; and make kausa send nothing about it, since kausa
-  reports only from what it holds in memory.
+  revisions of point 3; push the sweep of point 4 past its target, so that it deletes older
+  Incidents of every namespace, younger than 6 hours included; and make kausa send nothing about
+  it, since kausa reports only from what it holds in memory.
 - **A writer of Remediations in N can:** make kausa send one false "kurita proposed X", where X is
-  an action id allowed for a real incident kausa detected in N, at most once per Incident; and
-  take kurita's claim first, so that kurita's create answers `AlreadyExists` and kurita proposes
-  nothing for that Incident, unable to tell that the record is not its own. Outside N, it can
-  spend kurita's cluster budget, silence kurita by filling kurita's cap, or, by deleting records,
-  let kurita propose more than its budget allows in an hour (kurita's ADR 0008, its trust
+  an action id allowed for a real incident kausa detected in N, at most once per Incident and
+  within the `remediation` bound of point 6, which no `detected` or `explained` message shares;
+  and take kurita's claim first, so that kurita's create answers `AlreadyExists` and kurita
+  proposes nothing for that Incident, unable to tell that the record is not its own. Outside N, it
+  can spend kurita's cluster budget, silence kurita by filling kurita's cap, or, by deleting
+  records, let kurita propose more than its budget allows in an hour (kurita's ADR 0008, its trust
   statement); none of that makes kausa send anything.
+
+**Whoever can create Events in N**, which the built-in `edit` role in N can, writes no Incident but
+chooses, through kausa, what some of kausa's Incidents in N say. For an Event incident kausa takes
+the fingerprint from the Event's note (`src/fingerprint.rs:63-77`), so the writer chooses as many
+fingerprints as it likes, and:
+
+- for `D008`, `D011`, `D012` and `D013`, whose Event is about something other than a Pod, the
+  Incident's `object`, its UID included, comes from the Event's `regarding`
+  (`src/incident.rs:181-192`), except that for a Job or a ReplicaSet kausa reads with an owner,
+  the `object` is that owner as kausa reads it (`src/run.rs:1528-1550`); so the writer chooses the
+  object, existing or not, and its UID;
+- for `D006`, `D007` and `D010`, whose Event is about a Pod, the `object` is the owner kausa holds
+  for a Pod of N it has seen (`src/incident.rs:194-198`), so the writer chooses which one.
+
+What that achieves: Incidents in N with those objects, each spending kurita's budget for its
+namespace and fingerprint and the table of point 1, so that 500 of them in 6 hours stop new
+Incidents in every namespace for up to 6 hours; and, for the outcomes kurita gives without a live
+read that confirms the failure, a sent `remediation` message "kurita proposed needs-human" about an
+object the writer chose in N. Those outcomes are `needs-human{unconfirmable}` (kurita's ADR 0006,
+its point 5, and its ADR 0008, point 6): `D006` when no container with a readiness probe is
+running and not ready, and `D011` of a StatefulSet, a DaemonSet, a Job or a CronJob. Every other
+outcome needs a live read: one of an object that does not fail gives `none{not-reproduced}`,
+which is not sent, and a forged UID gives `none{target-replaced}`. What it cannot: an Event alone
+never yields an acting id or a proposal of an action, since kurita records an acting id only after
+a live read confirms the target's UID (its ADR 0008, point 2); it reaches nothing outside N; and
+it is bounded by the create gate of point 1, by the 500 Incidents in any 6 hours of point 1 and by
+the `remediation` bound of point 6.
 
 **Already true before this contract, and out of its scope:** editors of kausa's namespace can read
 the webhook's Secret (`charts/kausa/values.yaml:96-99`) and post anything to the receiver
-directly; and anyone who can create Events can make kausa detect a forged Event incident (0027).
+directly; and anyone who can create Events can make kausa detect a forged Event incident and post
+its `detected` message (0027). What this contract adds to that is the paragraph above.
 
 Checked in the Kubernetes documentation and source while this was designed: `edit` can create
 Events; `edit` can impersonate service accounts and create their tokens; a `*/status` rule reaches
@@ -438,33 +546,52 @@ bar 2, 3 or 6 measures it.
 - **The fact queue, incidents on, worst case:** about +320 bytes an entry, an estimate carried from
   the design review (dominated by a `regarding` name of up to 253 bytes; the UIDs kept as 16 binary
   bytes), not derived field by field here; bar 2 measures it. Then (1,336 + 320) × 1024 =
-  1,695,744 bytes = 1.62 MiB computed, and about 1.82 to 1.88 MiB resident, at the ratio of
-  measured to computed in 0027's prototype: in kind, the resident memory grew by 1.74 MiB for the
-  queue alone; the 1.80 MiB is for the queue and the table of notified fingerprints together, both
-  in kind (the control group's anonymous memory) and on the Raspberry Pis (`VmRSS`, 1,844 to 1,848
-  KiB); over 1,583 × 1024 = 1,620,992 bytes = 1.55 MiB computed for the queue, a ratio of 1.13 to
-  1.16 (1.74 / 1.55 and 1.80 / 1.55). The upper ratio counts the table (40 KiB computed) as if it
-  were the queue's, so it errs high, and 1.88 MiB overstates. On the Raspberry Pis the prototype
-  did not measure the queue alone ([The fact statement prototype,
-  measured](../research/2026-11-20-fact-statement-prototype.md)).
+  1,695,744 bytes = 1.617 MiB computed, and about 1.82 to 1.92 MiB resident, at the ratio of
+  measured to computed in 0027's prototype. The queue computed there is 1,583 × 1024 = 1,620,992
+  bytes = 1.546 MiB. In kind the resident memory grew by 1.74 MiB for the queue alone, a ratio of
+  1.74 / 1.546 = 1.126; the control group's anonymous memory grew by 1.80, 1.80 and 1.84 MiB for
+  the queue and the table of notified fingerprints together, and the highest reading gives
+  1.84 / 1.546 = 1.190 ([The fact statement prototype,
+  measured](../research/2026-11-20-fact-statement-prototype.md)). So 1.617 × 1.126 = 1.82 MiB and
+  1.617 × 1.190 = 1.92 MiB, under the bar of 2 MiB by 0.08 MiB at the highest reading, which
+  counts the table (40 KiB computed) as if it were the queue's and so errs high. The bar is not
+  raised. On the Raspberry Pis the prototype did not measure the queue alone.
 - **The table of created Incidents:** about 48 bytes an entry without the report and at most about
   750 bytes with it, estimates carried from the design review, not derived here; bar 3 measures
-  them. Then 500 × 48 = 24,000 bytes, about 23 KiB, and 500 × 750 = 375,000 bytes, 0.36 MiB.
+  them. Then 500 × 48 = 24,000 bytes, about 23 KiB, and 500 × 750 = 375,000 bytes, 0.36 MiB. The
+  rule of point 1 keeps a creation time in each entry, a monotonic instant of 16 bytes on a 64-bit
+  Linux target; whether the review's estimates count it is not known, so at most 500 × 16 = 8,000
+  bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry.
 - **The owner cache:** +8 bytes an entry, the revision.
 - **Writes per incident:** kausa +1 create and, later, +1 delete; kurita +1 create and +1 delete,
   besides its own Event. **Writes per change of an object:** 0; neither resource is patched.
 - **Stored objects:** an Incident at most about 2.5 KB (a `spec` of about 1.5 KB at the longest
   names, plus metadata) and a Remediation at most about 7 KB, estimates carried from the design
   review; bar 6 measures them with `managedFields`. At 500 of each: 500 × 2.5 KB = 1.25 MB of
-  Incidents and 500 × 7 KB = 3.5 MB of Remediations.
+  Incidents and 500 × 7 KB = 3.5 MB of Remediations. **At kausa's worst case between sweeps**
+  (point 4), 1,000 Incidents: 1,000 × 2.5 KB = 2.5 MB; each process start whose sweep does not
+  complete can add 500 × 2.5 KB = 1.25 MB more, until one does.
 - **Watches:** kausa 1 on `remediations`, across the cluster or 1 per listed namespace, only with
   the report on; kurita 1 on `incidents`, or 1 per listed namespace. kurita's share of the events
   on kausa's watch is one create and one delete per Incident kausa creates, for every outcome, so
   it follows kausa's rate of Incidents, which kausa's create gate (one per fingerprint per
-  `--dedup-hours`) and its cap of 500 bound. kurita never deletes a Remediation
-  younger than 6 hours and creates none while 500 exist, so kausa's watch sees at most 500 creates
-  by kurita in any 6 hours, plus the deletes of older records. Writes to `remediations` by anyone
+  `--dedup-hours`) and its table (at most 500 creates in any 6 hours per process, point 1)
+  bound. kurita never deletes a Remediation younger than 6 hours and creates none while 500 exist,
+  so kausa's watch sees at most 500 creates by kurita in any 6 hours, plus the deletes of older
+  records. Writes to `remediations` by anyone
   else are not bounded by this ADR or by kurita's.
+- **The memory of the `remediations` watch:** it starts from kausa's `watcher_config()`, as every
+  watch of kausa's does, so its initial list and each relist ask for pages of 50
+  (`LIST_PAGE_SIZE`, `src/run.rs:94`, used at `src/run.rs:395`), and kube decodes a whole page at
+  once. The schema bounds the `spec`, not `metadata`: annotations reach 256 KiB, and an object the
+  API server's limit, about 1.5 MiB in etcd. One object near that limit took about 12 MiB once
+  parsed (0014's `Update 2026-10-28`), so the worst transient page, computed, is 50 × 12 MiB =
+  600 MiB, past the chart's limit of 192Mi (`charts/kausa/values.yaml:155`): a writer of
+  Remediations, within the trust statement, could make kausa restart at each relist. The Events
+  watch has the same exposure today, to anyone who can create Events, and so do the Pod and
+  Deployment watches to their writers (`src/run.rs:638-647`; [List pages](../research/2026-11-02-list-pages.md),
+  its "Limits"); this watch adds writers of Remediations to them. "Not verified" lists the
+  measurement.
 - **Write latency, for reference:** 7.7 to 21 ms a write, **computed** from Event totals, not
   measured for these resources: 1024 `Detected` Events took 7,906 to 21,487 ms in all on three
   Raspberry Pi 4 Model B (0027's research note), and 7,906 / 1024 = 7.7 ms and 21,487 / 1024 =
@@ -481,25 +608,38 @@ before this ADR and kurita's ADR 0008 are accepted:
 3. The table of created Incidents at 500 entries is at most 0.5 MiB.
 4. 1024 `Detected` Events and 1024 Incident creates in a row: no watch error, relist or restart in
    kausa or kurita; the drain time recorded against the 7.9 to 21.5 seconds of Events alone.
-5. A sweep of 500 objects causes no relist.
+5. A sweep of 1,000 Incidents, kausa's worst case between two sweeps (point 4), deletes the 500
+   beyond the cap within its 30 seconds and causes no relist.
 6. The stored sizes of both resources, `managedFields` included, on k3s with its default
    datastore, recorded against the estimates of 2.5 KB and 7 KB above. Observational: it does not
    condition acceptance by itself, and a size over the estimate amends the costs.
 7. Both CustomResourceDefinitions are accepted within the CEL cost budget on the oldest supported
    k3s.
+8. More than 500 fingerprints settle inside an hour, in kind: creates stop at 500, each refusal is
+   counted, the incidents' Events and `detected` messages are all written and posted (within
+   `--notify-max-per-hour`), and after a restart that adds 500 more, one sweep returns the count
+   to 500 inside its 30 seconds.
 
-kurita's ADR 0008 adds two bars of its own (its 8 and 9), on its relist and its cap; the two ADRs
-are accepted together. If bar 2 fails after the trims of point 3, the maintainer chooses between
-dropping `regarding.name`, so that kurita gives `needs-human{unconfirmable}` again for `D008` with
-a controller and for `D011`, and changing 0027's point 10; both ADRs are amended accordingly.
+kurita's ADR 0008 adds two bars of its own (its 8 and 9, in its own numbering), on its relist and
+its cap; the two ADRs are accepted together. If bar 2 fails after the trims of point 3, the
+maintainer chooses between dropping `regarding.name`, so that kurita gives
+`needs-human{unconfirmable}` again for `D008` with a controller and for `D011`, and changing
+0027's point 10; both ADRs are amended accordingly.
 
 ### Not verified
 
 - **Whether the metadata `get` of a ReplicaSet returns its annotations,** where the revision is.
   Test: read a ReplicaSet with a metadata-only `get` in kind and check the
   `deployment.kubernetes.io/revision` annotation.
-- **The page size of kube-rs's watcher on its initial list.** Test: read its source, or count the
-  list requests against 500 Remediations in kind.
+- **The memory of a relist of the `remediations` watch with objects near the size limit** (Costs:
+  600 MiB computed for a page of 50). Test: in kind, create 50 Remediations with about 1.5 MiB of
+  `metadata` each, force a relist, and read kausa's peak memory; do the same with 50 such Warning
+  Events, the exposure that exists today.
+- **That one sweep deletes 500 Incidents within 30 seconds in pages of 2:** 0014 gives no time per
+  request. Computed: listing 1,000 objects in pages of 2 is 500 list requests, and 500 deletes at
+  7.7 to 21 ms each take 500 × 7.7 = 3,850 ms to 500 × 21 = 10,500 ms, which leaves 30 − 10.5 =
+  19.5 s to 30 − 3.85 = 26.15 s for the 500 lists, 39 to 52 ms each, a list latency not measured
+  anywhere here. Test: bars 5 and 8.
 - **That a `/status` write cannot change `metadata` or `spec`, and that root CEL rules run on
   `/status` writes:** checked in the source only. Test both in kind before the outcome check
   relies on them.
@@ -516,11 +656,22 @@ a controller and for `D011`, and changing 0027's point 10; both ADRs are amended
   report, one watch and one message per proposal. With the defaults nothing changes.
 - **kausa reads another project's resource** for the first time, `remediations`, and writes none.
   Every field of it that leaves is typed and checked; a writer of Remediations gains one false
-  notice per Incident at most.
+  notice per Incident at most, within the `remediation` bound, which never costs a `detected` or
+  an `explained` message.
+- **A writer of Events in a namespace gains, besides the forged detection it had,** Incidents about
+  objects of its choice there and, for the outcomes kurita gives without a live confirmation, a
+  sent "kurita proposed needs-human" about them; never an acting id, and nothing outside that
+  namespace.
 - **A restart loses notices, never invents them:** Remediations of Incidents created before it are
   not reported.
-- **The shared cap is not fair:** one tenant's volume, or a forger, can make the sweep delete other
-  namespaces' Incidents before kurita decides them; kausa's own Events and messages are unaffected.
+- **The bounds are not fair:** whoever makes kausa create 500 Incidents in 6 hours, one tenant's
+  volume or a writer of Events, stops new Incidents in every namespace until the oldest is 6 hours
+  old, and a writer of Incidents can make the sweep delete other namespaces' Incidents before
+  kurita decides them; both move kurita towards not proposing, and kausa's own Events and
+  `detected` messages are unaffected.
+- **A second Incident per fingerprint is possible** inside `--dedup-hours` when it is over 6 and
+  the table had to drop the entry, as after a restart; kurita's budget per fingerprint absorbs
+  it.
 - **Pages that change with the implementation**, not with this ADR: a new reference page for the
   Incident resource, `docs/reference/incident-resource.md`;
   [Permissions](../reference/permissions.md), [Helm chart](../reference/helm-chart.md)
@@ -530,7 +681,11 @@ a controller and for `D011`, and changing 0027's point 10; both ADRs are amended
   (the flags, log lines and metrics), [Alerts](../reference/alerts.md),
   [ARCHITECTURE.md](../../ARCHITECTURE.md) (invariants 2, 5, 11 and 12), the design principle of
   [README.md](../../README.md), the [Security policy](../../SECURITY.md),
-  [Architecture](../explanation/architecture.md) and [CHANGELOG.md](../../CHANGELOG.md); the
+  [Architecture](../explanation/architecture.md) (its read-only principle),
+  [AGENTS.md](../../AGENTS.md) (what kausa writes and reads), the introduction of [the
+  documentation front page](../index.md), [Install kausa with Helm](../how-to/install-with-helm.md),
+  [Set up a development environment and run the checks](../how-to/develop.md) and
+  [CHANGELOG.md](../../CHANGELOG.md); the
   chart's `values.yaml`, `templates/_helpers.tpl`, `templates/incident-crd.yaml`,
   `templates/incident-reader.yaml` and `files/incident-schema.json`; and the kind test,
   `tests/e2e/run.sh`.
