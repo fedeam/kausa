@@ -249,7 +249,12 @@ and invariant 12 says so (point 8). Within `v1alpha1` changes are additive only.
 
 Each entry of the fact queue gains one optional pointer, filled only with incidents on:
 
-- **The sample Pod's UID.**
+- **The sample Pod's UID**, from the record of the incident's sample Pod, taken in the tick that
+  emits the incident (`src/run.rs:1206-1220`). An incident born from a Pod's state or from an Event
+  about a Pod (`D001` to `D007`, `D009` and `D010`) is emitted only at a tick where each of its
+  signals comes from a Pod record kausa holds (`src/incident.rs:99`, `:194-197`), and every such
+  record has a UID (`src/record.rs:548`), so for those `sample.pod` is always set. `D008`, `D011` to
+  `D014` have no sample Pod, and no `sample`.
 - **The sample Pod's controller:** its kind, its UID from the Pod's own `ownerReference`, and, for a
   ReplicaSet, the revision in its `deployment.kubernetes.io/revision` annotation, read by the
   existing cached metadata `get` of the owner lookup. The controller's name is not kept: kurita
@@ -552,27 +557,28 @@ fingerprints as it likes, and:
 - for `D006`, `D007` and `D010`, whose Event is about a Pod, the `object` is the owner kausa holds
   for a Pod of N it has seen (`src/incident.rs:194-198`), so the writer chooses which one.
 
-What that achieves: Incidents in N with those objects, each making kurita record an outcome,
-which spends kurita's budget for its namespace and fingerprint only if that outcome counts
-(kurita's ADR 0008, point 8), and each taking a place in the table of point 1, so that 500 of
-them in 6 hours stop new Incidents in every namespace, for 6 hours after the last of them and for
-as long as the writer goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2
-seconds holds the stop (point 4); and, for the outcomes kurita gives without a live read that
-confirms the failure, a sent `remediation` message "kurita proposed needs-human" about an
-object the writer chose in N. Those outcomes are `needs-human{unconfirmable}`, which kurita gives
-whenever it cannot identify the object or no typed field can confirm the failure (kurita's ADR
-0006, its point 5, and its ADR 0008, point 6). For the Incidents such an Event shapes, that is:
-`D006` when no container with a readiness probe is running and not ready; `D011` whose `object`
-is a StatefulSet, a DaemonSet, a Job or a CronJob, or whose `regarding` is not a ReplicaSet;
-`D012` and `D013` whose `object` has no UID, which happens whenever the Event's `regarding` has
-none, since kausa then leaves the UID empty (`src/incident.rs:186-191`); and `D008` whose Job is
-its own owner and has no UID, for the same reason. Every other
-outcome needs a live read: one of an object that does not fail gives `none{not-reproduced}`,
-which is not sent, and a forged UID gives `none{target-replaced}`. What it cannot: an Event alone
-never yields an acting id or a proposal of an action, since kurita records an acting id only after
-a live read confirms the target's UID (its ADR 0008, point 2); it reaches nothing outside N; and
-it is bounded by the create gate of point 1, by the 500 Incidents in any 6 hours of point 1 and by
-the `remediation` bound of point 6.
+What that achieves: Incidents in N with those objects, each making kurita record an outcome, which
+spends kurita's budget for its namespace and fingerprint only if that outcome counts (kurita's ADR
+0008, point 8), and each taking a place in the table of point 1, so that 500 of them in 6 hours stop
+new Incidents in every namespace, for 6 hours after the last of them and for as long as the writer
+goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2 seconds holds the stop (point
+4); and, for the outcomes kurita gives without a live read that confirms the failure, a sent
+`remediation` message "kurita proposed needs-human" about an object the writer chose in N. Those
+outcomes are `needs-human{unconfirmable}`, which kurita gives without a live read whenever it cannot
+identify the object or no typed field can confirm the failure (kurita's ADR 0006, its point 5, and
+its ADR 0008, point 6); kurita's ADR 0008 lists the cases in its trust statement, and this ADR does
+not repeat the list. For kausa it means a `needs-human` message that kausa sends about an object the
+writer chose in N, within the bounds below. Among the cases an Event can reach: `D006` when no
+container with a readiness probe is running and not ready; `D011`, `D012` or `D013` whose `object`
+is of a kind or an apiVersion kurita does not recognise; `D012` and `D013` whose `object` has no
+UID, which happens whenever the Event's `regarding` has none, since kausa then leaves the UID empty
+(`src/incident.rs:186-191`); and `D008` whose Job is its own owner and has no UID, for the same
+reason. Every outcome but those needs a live read: one of an object that does not fail gives
+`none{not-reproduced}`, which is not sent, and a forged UID gives `none{target-replaced}`. What it
+cannot: an Event alone never yields an acting id or a proposal of an action, since kurita records an
+acting id only after a live read confirms the target's UID (its ADR 0008, point 2); it reaches
+nothing outside N; and it is bounded by the create gate of point 1, by the 500 Incidents in any 6
+hours of point 1 and by the `remediation` bound of point 6.
 
 **Already true before this contract, and out of its scope:** editors of kausa's namespace can read
 the webhook's Secret (`charts/kausa/values.yaml:96-99`) and post anything to the receiver
