@@ -162,7 +162,8 @@ version `v1alpha1`, kind `Incident`:
   room, and then a second Incident for that fingerprint inside the window is possible, as after a
   restart (point 10). kurita's budget per fingerprint absorbs it (`needs-human{cooldown}`) when the
   first Incident's record counts in that window, and otherwise kurita decides the second like any
-  other Incident; which records count is open in kurita's ADR 0008, point 8.
+  other Incident; a record counts when its action is `inspect` or an acting id (kurita's ADR 0008,
+  point 8).
 - **The table of created Incidents**, kept with incidents on, report or not: one entry per
   Incident kausa created in this process, with the time it created it on kausa's own monotonic
   clock, at most 500 entries. That time is taken when the server's answer accepting the create
@@ -222,8 +223,10 @@ spec:                       # required; CEL: self == oldSelf
     controller:             # optional: absent for a Pod with no controller ownerReference
       kind: ReplicaSet | Job | StatefulSet | DaemonSet | Other
       uid: UID
-      revision: int64 1..2^53   # optional: absent when missing names revision-lookup-failed;
-                                # CEL: only with kind ReplicaSet
+      revision: int64 1..2^53   # optional: absent when missing names owner-lookup-failed
+                                # (the get of the ReplicaSet failed) or revision-lookup-failed
+                                # (the get answered; the annotation absent or not a whole
+                                # number); CEL: only with kind ReplicaSet
   deployment: {generation: int64 >= 1, revision: int64 >= 1}   # CEL: D014 only
   regarding:                # an Event incident about something other than a Pod
     kind: Job | ReplicaSet | StatefulSet | DaemonSet | CronJob | PersistentVolumeClaim
@@ -268,8 +271,9 @@ Each entry of the fact queue gains one optional pointer, filled only with incide
   recreation also changes the UID, which it compares.
 - **`regarding`**: the kind, the name and, when the Event has one, the UID of the object an Event
   incident is about, when that object is not a Pod.
-- **`missing`**: which of the two lookups failed, `owner-lookup-failed` or
-  `revision-lookup-failed` (the annotation absent or not a whole number).
+- **`missing`**: which of the two lookups failed, `owner-lookup-failed` (a `get` of the owner chain
+  failed, the ReplicaSet's included, so a ReplicaSet controller then has no revision either) or
+  `revision-lookup-failed` (the `get` answered, and the annotation is absent or not a whole number).
 - **For `D014`**, the Deployment's `metadata.generation` and revision at detection, from the record
   kausa already holds while the rule matches.
 
@@ -532,11 +536,14 @@ The others who can write either resource in a namespace N:
 The schema bounds the `spec` for every writer. It does not bound `metadata`, a delete followed by
 a new create, or a create with any valid `spec`.
 
-- **A writer of Incidents can:** make kurita check the live objects again, in N only; spend
-  kurita's proposal budget; suppress an undo proposal, or let one through, by forging the
-  revisions of point 3; push the sweep of point 4 past its target, so that it deletes older
-  Incidents of every namespace, younger than 6 hours included; and make kausa send nothing about
-  it, since kausa reports only from what it holds in memory.
+- **A writer of Incidents can:** make kurita check the live objects again, in N only; spend kurita's
+  proposal budget; suppress an undo proposal, or let one through, by forging the revisions of point
+  3; push the sweep of point 4 past its target, so that it deletes older Incidents of every
+  namespace, younger than 6 hours included; make kausa send nothing about it, since kausa reports
+  only from what it holds in memory; and take an incident's name first: it creates
+  `kausa.<fingerprint>.<firstSeenUnix>` before kausa does, so kausa's create fails, is logged and
+  counted and is not retried (point 1), and kausa holds nothing and reports nothing about that
+  incident.
 - **A writer of Remediations in N can:** make kausa send one false "kurita proposed X", where X is
   an action id allowed for a real incident kausa detected in N, at most once per Incident and
   within the `remediation` bound of point 6, which no `detected` or `explained` message shares;
@@ -561,10 +568,11 @@ fingerprints as it likes, and:
 
 What that achieves: Incidents in N with those objects, each making kurita record an outcome, which
 spends kurita's budget for its namespace and fingerprint only if that outcome counts (kurita's ADR
-0008, point 8), and each taking a place in the table of point 1, so that 500 of them in 6 hours stop
-new Incidents in every namespace until the oldest of them passes 6 hours, and for as long as the
-writer goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2 seconds holds the stop
-(point 4); and, for the outcomes kurita gives without a live read that confirms the failure, a sent
+0008, point 8), which is when it is an `inspect` about a failing object kurita's live read
+confirmed, and each taking a place in the table of point 1, so that 500 of them in 6 hours stop new
+Incidents in every namespace until the oldest of them passes 6 hours, and for as long as the writer
+goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2 seconds holds the stop (point
+4); and, for the outcomes kurita gives without a live read that confirms the failure, a sent
 `remediation` message "kurita proposed needs-human" about an object the writer chose in N. Those
 outcomes are `needs-human{unconfirmable}`, which kurita gives without a live read that confirms the
 failure: before reading anything when it cannot identify the object, and after reading it when no
@@ -581,16 +589,17 @@ fail gives `none{not-reproduced}`, which is not sent, and a forged UID gives
 `none{target-replaced}`. What it cannot: an Event alone never yields an acting id or a proposal of
 an action, since kurita records an acting id only after a live read confirms the target's UID (its
 ADR 0008, point 2); what it chooses, the objects and the sent "kurita proposed needs-human", is in N
-only; outside N it has two effects, both towards silence: the stop of point 4, no new Incidents in
-any namespace, and so no proposals of kurita, for as long as it goes on; and the `remediation`
-bound of point 6, which is one for the process: 30 Incidents an hour whose outcome kurita gives
-before any live read, one forged Event every 3,600 / 30 = 120 seconds, well under the 43.2 seconds
-of the stop, fill it with sent "kurita proposed needs-human", and kausa then sends no `remediation`
-message about kurita's genuine proposals in any namespace for that hour (counted and logged as
-capped; each proposal stays in its Remediation and in kurita's Event, and nothing is executed).
-kausa still writes its Events and posts its `detected` messages. It is bounded by the create gate
-of point 1, by the 500 Incidents in any 6 hours of point 1 and by the `remediation` bound of point
-6.
+only; outside N it has two effects, both towards silence, and not a third on kurita's cluster
+window, since the `needs-human` outcomes kurita gives before a live read count in none of its
+windows (its ADR 0008, point 8): the stop of point 4, no new Incidents in any namespace, and so no
+proposals of kurita, for as long as it goes on; and the `remediation` bound of point 6, which is one
+for the process: 30 Incidents an hour whose outcome kurita gives before any live read, one forged
+Event every 3,600 / 30 = 120 seconds, well under the 43.2 seconds of the stop, fill it with sent
+"kurita proposed needs-human", and kausa then sends no `remediation` message about kurita's genuine
+proposals in any namespace for that hour (counted and logged as capped; each proposal stays in its
+Remediation and in kurita's Event, and nothing is executed). kausa still writes its Events and posts
+its `detected` messages. It is bounded by the create gate of point 1, by the 500 Incidents in any 6
+hours of point 1 and by the `remediation` bound of point 6.
 
 **Already true before this contract, and out of its scope:** editors of kausa's namespace can read
 the webhook's Secret (`charts/kausa/values.yaml:96-99`) and post anything to the receiver
@@ -739,11 +748,13 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 - **A writer of Events in a namespace gains, besides the forged detection it had,** Incidents about
   objects of its choice there and, for the outcomes kurita gives without a live confirmation, a sent
   "kurita proposed needs-human" about them, in that namespace only, and never an acting id. Outside
-  it, two effects, both towards silence: by the stop of point 4, no new Incidents in any namespace,
-  and so no proposals of kurita, for as long as it goes on; and, since the `remediation` bound of
-  point 6 is one for the process, one such Incident every 120 seconds (30 an hour) leaves no
-  `remediation` message for kurita's genuine proposals in any namespace for that hour, counted as
-  capped. kausa still writes its Events and posts its `detected` messages.
+  it, two effects, both towards silence (the `needs-human` outcomes kurita gives before a live read
+  count in none of kurita's windows, so they do not fill its cluster window): by the stop of point
+  4, no new Incidents in any namespace, and so no proposals of kurita, for as long as it goes on;
+  and, since the `remediation` bound of point 6 is one for the process, one such Incident every 120
+  seconds (30 an hour) leaves no `remediation` message for kurita's genuine proposals in any
+  namespace for that hour, counted as capped. kausa still writes its Events and posts its `detected`
+  messages.
 - **A restart loses notices, never invents them:** Remediations of Incidents created before it are
   not reported.
 - **The bounds are not fair:** whoever makes kausa create 500 Incidents in 6 hours, one tenant's
