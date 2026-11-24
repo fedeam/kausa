@@ -110,6 +110,11 @@ kurita's `main` as `proposed`.
   security round made `remediation` messages leave the queue only when no other message waits,
   gave them a counter of their own, and stated how long one forged Event every 43.2 seconds keeps
   new Incidents stopped.
+- While 0029 was reviewed, its author found that 0028 never said how the tick that emits an Incident
+  reads the sample's ReplicaSet revision: the tick makes no request, a Pod's owner is resolved once,
+  and its owner-cache entry is gone after 10 minutes, so for most long-running workloads the
+  revision would have been absent and kurita would almost never have proposed an undo. 0028 now
+  reads it in the fact slot, before the create.
 - Nothing is implemented, and nothing in it is measured.
 
 ### Decisions
@@ -117,6 +122,12 @@ kurita's `main` as `proposed`.
 - Proposed only: [0028](../adr/0028-incident-resource-and-remediation-report.md). It is accepted
   together with kurita's ADR 0008, once the bars of its "Conditions of acceptance" are measured on
   the Raspberry Pis and in kind.
+- In [0028](../adr/0028-incident-resource-and-remediation-report.md), the sample's ReplicaSet
+  revision is read in the fact slot, after the create gate and before the create, through the cached
+  owner lookup: at most 600 seconds old, at most one `get` per Incident created, and a failed read
+  is `revision-lookup-failed`. Keeping the revision with each Pod's resolved owner was rejected,
+  since it is as old as the Pod; a third value of `missing` alone, since it would leave undo
+  proposals rare. The design is the ADR author's, added after the design review.
 
 ### Next
 

@@ -124,6 +124,17 @@ string in either schema is an enum, or a pattern with a maximum length.
   compatibility text is amended instead (0027's acceptance `Update`, its item "Within `v2` a value
   of `type` may be added").
 - **ConfigMaps, or annotations on workloads.** kausa reads no ConfigMap and writes no workload.
+- **Keeping the revision with each Pod's resolved owner**, read when the owner is resolved, with
+  incidents on. 8 bytes a Pod, 80,000 bytes at 10,000 Pods, and no request at the create; but as old
+  as the Pod's last resolution, which for a running Pod is its creation, hours or days. A rollback
+  that reuses the Pod's ReplicaSet gives it a new revision, and every Incident about its older Pods
+  would then carry the old one, so kurita's equality would stop each undo proposal for as long as
+  those Pods live. The read in the fact slot (point 3) is at most 600 seconds old for at most one
+  `get` per Incident.
+- **A third value of `missing` for a revision with no fresh entry, and nothing else.** At the
+  emitting tick the entry of a Pod resolved more than 10 minutes earlier is usually gone (point 3),
+  so most Incidents about a long-running workload would carry no revision, and kurita would almost
+  never propose an undo for one, which is what the contract is for.
 
 ## Decision
 
@@ -144,7 +155,8 @@ version `v1alpha1`, kind `Incident`:
   value, so without it an object created with no `spec` could be given one later. The `status`
   subresource is declared and empty: it is the place of the outcome check (point 9).
 - **Created in the fact slot of 0027's point 3**, after the incident's `Detected` Event (at once
-  with `--no-events`), within the 10 seconds a write has there, and never before the incident's
+  with `--no-events`) and, for a sample Pod run by a ReplicaSet, after the read of its revision
+  (point 3), within the 10 seconds a write has there, and never before the incident's
   `incident` log line. A failed create is logged and counted (this ADR proposes
   `kausa_incident_write_errors_total`; the reference page fixes the name with the code) and not
   retried.
@@ -222,9 +234,9 @@ spec:                       # required; CEL: self == oldSelf
     controller:             # optional: absent for a Pod with no controller ownerReference
       kind: ReplicaSet | Job | StatefulSet | DaemonSet | Other
       uid: UID
-      revision: int64 1..2^53   # optional: absent when missing names owner-lookup-failed
-                                # (the get of the ReplicaSet failed) or revision-lookup-failed
-                                # (the get answered; the annotation absent or not a whole
+      revision: int64 1..2^53   # optional: absent exactly when missing names
+                                # revision-lookup-failed (the fact slot's read of point 3
+                                # failed, or found the annotation absent or not a whole
                                 # number); CEL: only with kind ReplicaSet
   deployment: {generation: int64 >= 1, revision: int64 >= 1}   # CEL: D014 only
   regarding:                # an Event incident about something other than a Pod
@@ -259,25 +271,59 @@ Each entry of the fact queue gains one optional pointer, filled only with incide
   signals comes from a Pod record kausa holds (`src/incident.rs:99`, `:194-197`), and every such
   record has a UID (`src/record.rs:548`), so for those `sample.pod` is always set. `D008`, `D011` to
   `D014` have no sample Pod, and no `sample`.
-- **The sample Pod's controller, when the Pod has a controller `ownerReference`:** its kind, its UID
-  from the Pod's own `ownerReference`, and, for a ReplicaSet, the revision in its
-  `deployment.kubernetes.io/revision` annotation, read by the existing cached metadata `get` of the
-  owner lookup. The controller's name is not kept: kurita finds the ReplicaSet by UID with its own
-  `list`. **The owner cache keys an entry by hop, namespace and name, not by UID, and keeps it 600
-  seconds**, so the revision in `sample.controller` can be older than the live one after a new
-  rollout, and newer after the ReplicaSet was deleted and recreated under the same name. kurita
-  compares for equality (its ADR 0008, point 4), so either difference stops an undo proposal; a
-  recreation also changes the UID, which it compares.
+- **The sample Pod's controller, when the Pod has a controller `ownerReference`:** its kind and its
+  UID, from the Pod's own `ownerReference`, and, for a ReplicaSet, its name and the revision in its
+  `deployment.kubernetes.io/revision` annotation, read in the fact slot as the next paragraph says.
+  The name is kept only until that read and is not written to the Incident: kurita finds the
+  ReplicaSet by UID with its own `list`. An entry holds a `sample` or a `regarding`, never both (an
+  incident born from a Pod has no `regarding`, one about another object no sample Pod), so this name
+  and `regarding`'s share one field.
 - **`regarding`**: the kind, the name and, when the Event has one, the UID of the object an Event
   incident is about, when that object is not a Pod.
-- **`missing`**: which of the two lookups failed, `owner-lookup-failed` (a `get` of the owner chain
-  failed, the ReplicaSet's included, so a ReplicaSet controller then has no revision either) or
-  `revision-lookup-failed` (the `get` answered, and the annotation is absent or not a whole number).
+- **`missing`**: which of the two reads failed. `owner-lookup-failed`: the sample Pod's owner lookup
+  failed when kausa resolved it, so the incident names the ReplicaSet or the Job in place of its
+  owner (the third value of a Pod's entry, `src/run.rs:1399-1401`), taken in the tick.
+  `revision-lookup-failed`: the read of the revision in the fact slot found none, because its `get`
+  failed or gave no answer within 5 seconds, or because it answered and the annotation is absent or
+  not a whole number. `sample.controller.revision` of a ReplicaSet is absent exactly when `missing`
+  names `revision-lookup-failed`.
 - **For `D014`**, the Deployment's `metadata.generation` and revision at detection, from the record
   kausa already holds while the rule matches.
 
 UIDs are kept as 16 binary bytes. Each owner-cache entry gains the revision, 8 bytes. No table of
 Deployments is added, and no Pod beyond the sample.
+
+**Where the revision comes from.** This paragraph was written after the design review, which left
+the read implicit: it is this ADR's own design, not one of the two compared. kausa reads a
+ReplicaSet's revision only through the owner lookup (`controller_of`, `src/run.rs:1909-1953`), whose
+cache entry holds it, and only from async code; the tick, which is synchronous (`src/run.rs:1636`),
+makes no request. The tick cannot use the entry either: a Pod's owner is resolved once and reused
+while its controller reference stays the same and the lookup worked (`src/run.rs:1448-1452`), and an
+entry is dropped at the first lookup after its 600 seconds (`OWNER_CACHE_TTL`, `:82`; `retain`,
+`:1950`), so at the tick that emits an incident about a Pod older than 10 minutes the sample's entry
+is usually expired or gone. The fact slot reads it instead: after the incident's `Detected` Event
+and the create gate of point 1, and before the create, it calls the lookup for the sample's
+ReplicaSet. A fresh entry answers with no request; an absent or expired one costs the existing
+metadata `get` of `replicasets`, with its timeout of 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`); a
+failed one is answered from the cache for 30 seconds (`OWNER_ERROR_TTL`, `:83`). The slot can reach
+the lookup as the code stands: the term's lookup (`src/run.rs:973`) is created before the slot's
+future (`:1005`) and outlives it; it is passed to `Reporter::report` as an argument, since the
+reporter outlives terms; and its cache is a `RefCell` (`:1904`) never borrowed across an `await`, so
+the slot and `on_pod` share it. So:
+
+- **Fresh at the create, within 600 seconds.** The owner cache keys an entry by hop, namespace and
+  name, not by UID, so the revision can be older than the live one after a rollout, or a rollback
+  that reuses the ReplicaSet, in the 600 seconds before the create, and newer after the ReplicaSet
+  was deleted and recreated under the same name. kurita compares for equality (its ADR 0008, point
+  4), so either difference stops an undo proposal, and a recreation also changes the UID, which it
+  compares; a failed read gives no revision, which stops it too. A stale revision can stop a
+  proposal and never allow one as long as a Deployment never gives one revision number to two of its
+  ReplicaSets ("Not verified"). A proposal is missed this way only when the ReplicaSet's revision
+  changed in the 600 seconds before the create.
+- **At most one `get` per Incident created**, none for a create the gate refuses: at most 500 in any
+  6 hours per process (point 1), each holding the fact slot at most 5 seconds, before the create and
+  its own 10 seconds. No new verb and no new watch.
+- **With incidents off,** no read is made and nothing is kept: the entry's pointer stays empty.
 
 ### 4. Retention
 
@@ -552,6 +598,17 @@ a new create, or a create with any valid `spec`.
   records, let kurita propose more than its budget allows in an hour (kurita's ADR 0008, its trust
   statement); none of that makes kausa send anything.
 
+**A writer of Pods or ReplicaSets in N**, which the built-in `edit` role in N is, writes no Incident
+but chooses what point 3 reads: a Pod's controller `ownerReference` names the ReplicaSet the fact
+slot reads, and that ReplicaSet's `deployment.kubernetes.io/revision` annotation is the revision it
+copies. So the writer can make an Incident in N about a failing Pod carry a revision of its choice,
+or none (a ReplicaSet that does not exist, or an annotation that is not a whole number, gives
+`revision-lookup-failed`), and so suppress kurita's undo proposal for a Deployment of N, or let one
+through, as a writer of Incidents can (above), on workloads it can already change itself. What it
+costs kausa is bounded by the create gate: the read is made once per Incident created, at most 500
+`get`s in any 6 hours, each holding the fact slot at most 5 seconds, by which the next facts' Events
+wait. Nothing outside N.
+
 **Whoever can create Events in N**, which the built-in `edit` role in N can, writes no Incident but
 chooses, through kausa, what some of kausa's Incidents in N say. For an Event incident kausa takes
 the fingerprint from the Event's note (`src/fingerprint.rs:63-77`), so the writer chooses as many
@@ -596,15 +653,16 @@ namespace, and so no proposals of kurita, for as long as it goes on; and the `re
 point 6, which is one for the process: 30 Incidents an hour whose outcome kurita gives before any
 live read, one forged Event every 3,600 / 30 = 120 seconds, 30 an hour, well under the 83.3 an hour,
 3,600 / 43.2, that hold the stop, fill it with sent "kurita proposed needs-human", and kausa then
-sends no `remediation` message about kurita's genuine proposals in any namespace for that hour
-(counted and logged as capped; each proposal stays in its Remediation and in kurita's Event, and
-nothing is executed); and, bounded, kurita's cluster window: the `inspect` outcomes on failures
-kurita's live read confirms count in it too, at most kurita's per-namespace limit an hour from N, so
-filling it takes that in as many namespaces as the ratio of the two limits, and genuine Incidents in
-every namespace then get `needs-human{budget}` (kurita's ADR 0008, point 8), while the `needs-human`
-outcomes kurita gives before a live read count in none of its windows. kausa still writes its Events
-and posts its `detected` messages. It is bounded by the create gate of point 1, by the 500 Incidents
-in any 6 hours of point 1 and by the `remediation` bound of point 6.
+sends no `remediation` message about kurita's genuine proposals in any namespace while the writer
+keeps that rate or a little above it (counted and logged as capped; each proposal stays in its
+Remediation and in kurita's Event, and nothing is executed); and, bounded, kurita's cluster window:
+the `inspect` outcomes on failures kurita's live read confirms count in it too, at most kurita's
+per-namespace limit an hour from N, so filling it takes that in as many namespaces as the ratio of
+the two limits, and genuine Incidents in every namespace then get `needs-human{budget}` (kurita's
+ADR 0008, point 8), while the `needs-human` outcomes kurita gives before a live read count in none
+of its windows. kausa still writes its Events and posts its `detected` messages. It is bounded by
+the create gate of point 1, by the 500 Incidents in any 6 hours of point 1 and by the `remediation`
+bound of point 6.
 
 **Already true before this contract, and out of its scope:** editors of kausa's namespace can read
 the webhook's Secret (`charts/kausa/values.yaml:96-99`) and post anything to the receiver
@@ -627,7 +685,11 @@ bar 2, 3 or 6 measures it.
   and 1,376,256 bytes (1.31 MiB) full: (1,336 + 8) × 1024.
 - **The fact queue, incidents on, worst case:** about +320 bytes an entry, an estimate carried from
   the design review (dominated by a `regarding` name of up to 253 bytes; the UIDs kept as 16 binary
-  bytes), not derived field by field here; bar 2 measures it. Then (1,336 + 320) × 1024 =
+  bytes), not derived field by field here; bar 2 measures it. The ReplicaSet's name of point 3
+  shares that field, since an entry holds a `sample` or a `regarding`, never both, and adds
+  nothing; kept in a field of its own it would add an empty string's 24 bytes to an entry with a
+  `regarding`, (1,336 + 344) × 1024 = 1,720,320 bytes = 1.641 MiB computed, 1.85 to 1.95 MiB
+  resident at the ratios below, still under the bar. Then (1,336 + 320) × 1024 =
   1,695,744 bytes = 1.617 MiB computed, and about 1.82 to 1.92 MiB resident, at the ratio of
   measured to computed in 0027's prototype. The queue computed there is 1,583 × 1024 = 1,620,992
   bytes = 1.5459 MiB (1,620,992 / 1,048,576). In kind the resident memory grew by 1.74 MiB for the
@@ -645,6 +707,10 @@ bar 2, 3 or 6 measures it.
   Linux target; whether the review's estimates count it is not known, so at most 500 × 16 = 8,000
   bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry.
 - **The owner cache:** +8 bytes an entry, the revision.
+- **Reads:** at most one metadata `get` of `replicasets` per Incident created, when the sample's
+  owner-cache entry is absent or expired at the create, so at most 500 in any 6 hours per process,
+  0.023 a second at the most; each holds the fact slot at most 5 seconds (point 3). None with
+  incidents off.
 - **Writes per incident:** kausa +1 create and, later, +1 delete; kurita +1 create and +1 delete,
   besides its own Event. **Writes per change of an object:** 0; neither resource is patched.
 - **Stored objects:** an Incident at most about 2.5 KB (a `spec` of about 1.5 KB at the longest
@@ -694,7 +760,8 @@ before this ADR and kurita's ADR 0008 are accepted:
 2. A full fact queue at the longest names adds at most 2 MiB (0027's point 10, unchanged).
 3. The table of created Incidents at 500 entries is at most 0.5 MiB.
 4. 1024 `Detected` Events and 1024 Incident creates in a row: no watch error, relist or restart in
-   kausa or kurita; the drain time recorded against the 7.9 to 21.5 seconds of Events alone.
+   kausa or kurita; the drain time recorded against the 7.9 to 21.5 seconds of Events alone, with
+   the `get`s of point 3's read counted and the time they held the slot.
 5. A sweep of 1,000 Incidents, kausa's worst case between two sweeps (point 4), deletes the 500
    beyond the cap within its 30 seconds and causes no relist.
 6. The stored sizes of both resources, `managedFields` included, on k3s with its default
@@ -718,6 +785,21 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 - **Whether the metadata `get` of a ReplicaSet returns its annotations,** where the revision is.
   Test: read a ReplicaSet with a metadata-only `get` in kind and check the
   `deployment.kubernetes.io/revision` annotation.
+- **How often the sample's owner-cache entry is absent or expired at the create,** so how many
+  `get`s point 3's read makes and for how long it holds the fact slot. Computed only as a bound, one
+  per Incident created. Test: bar 4, and an Incident about a Pod older than 10 minutes in kind,
+  whose `sample.controller.revision` must be set.
+- **That a Deployment never gives one revision number to two of its ReplicaSets,** on which point 3
+  rests the claim that a stale revision can stop an undo proposal and never allow one: a hypothesis
+  from the Deployment controller's known behaviour (a rollback gives the reused ReplicaSet the
+  highest revision plus one), not read in its source here. Test: read the controller's source, and
+  in kind roll a Deployment out and back and compare the revisions.
+- **That one forged Incident every 120 seconds exactly leaves no gap** in which a genuine
+  `remediation` message is sent: point 6's bound counts over a rolling 60 minutes, and whether a
+  message 3,600 seconds after the first of 30 counts in the window or out of it depends on the
+  bound's code, which is not written. Hence "at that rate or a little above it" in the trust
+  statement and Consequences. Test: read it against the bound's code once it exists, with a unit
+  test at exactly 120 seconds.
 - **The memory of a relist of the `remediations` watch with objects near the size limit** (Costs:
   600 MiB computed for a page of 50). Test: in kind, create 50 Remediations with about 1.5 MiB of
   `metadata` each, force a relist, and read kausa's peak memory; do the same with 50 such Warning
@@ -759,13 +841,13 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   true "kurita proposed inspect" messages, in that namespace only, and never an acting id. Outside
   it, three effects, all towards silence: by the stop of point 4, no new Incidents in any namespace,
   and so no proposals of kurita, for as long as it goes on; and, since the `remediation` bound of
-  point 6 is one for the process, one such Incident every 120 seconds (30 an hour) leaves no
-  `remediation` message for kurita's genuine proposals in any namespace for that hour, counted as
-  capped; and, bounded, its `inspect` outcomes on failures kurita's live read confirms count in
-  kurita's cluster window, at most kurita's per-namespace limit an hour from that namespace, so as
-  many such namespaces as the ratio of kurita's two limits fill it and genuine Incidents everywhere
-  get `needs-human{budget}` (kurita's ADR 0008, point 8). kausa still writes its Events and posts
-  its `detected` messages.
+  point 6 is one for the process, one such Incident every 120 seconds (30 an hour), or a little more
+  often, leaves no `remediation` message for kurita's genuine proposals in any namespace while it
+  goes on, counted as capped; and, bounded, its `inspect` outcomes on failures kurita's live read
+  confirms count in kurita's cluster window, at most kurita's per-namespace limit an hour from that
+  namespace, so as many such namespaces as the ratio of kurita's two limits fill it and genuine
+  Incidents everywhere get `needs-human{budget}` (kurita's ADR 0008, point 8). kausa still writes
+  its Events and posts its `detected` messages.
 - **A restart loses notices, never invents them:** Remediations of Incidents created before it are
   not reported.
 - **The bounds are not fair:** whoever makes kausa create 500 Incidents in 6 hours, one tenant's
