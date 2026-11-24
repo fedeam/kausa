@@ -425,7 +425,9 @@ kausa must:
   beside 10,000 Pods, 500 Deployments with 250 KiB of annotations each took the peak of the macOS
   binary to 161 to 170 MiB, against 591 to 608 MiB with pages of 500 ([List
   pages](docs/research/2026-11-02-list-pages.md)). That is under the chart's limit of 192Mi but
-  above a 75% margin, and objects nearer the size limit can take more.
+  above a 75% margin; the chart's Pod peaked at 122 to 128 MiB with the same objects, within
+  that margin ([The scale gate](docs/research/2026-11-24-the-scale-gate.md)). Objects nearer the
+  size limit can take more.
 - **The hard cost limit is the provider's.** kausa's caps hold per process, and only in memory.
   With `I = 3600 / callsPerHour` seconds, `K` the starts and takeovers in a span of `T` and `c(s)`
   the credit at its start (at most `callsPerHour`, at most 3 right after a start), a release

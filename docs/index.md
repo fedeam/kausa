@@ -126,7 +126,8 @@ checks](how-to/develop.md).
   model, calls and tokens counted; [Memory and CPU on a Raspberry Pi
   4](research/2026-10-26-resource-use-on-a-raspberry-pi.md); [Memory and CPU with
   explanations](research/2026-11-09-resource-use-with-explanations.md); [Seven days of v0.5.1 in
-  dry-run](research/2026-11-23-seven-days-in-dry-run.md); [Thousands of
+  dry-run](research/2026-11-23-seven-days-in-dry-run.md); [The scale
+  gate](research/2026-11-24-the-scale-gate.md); [Thousands of
   Pods](research/2026-10-28-thousands-of-pods.md); [Thirty-two
   namespaces](research/2026-10-28-32-namespaces.md); [Ninety-six
   watches](research/2026-10-29-96-watches.md); [Richer context,

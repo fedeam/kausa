@@ -3,8 +3,9 @@
 The dry-run soak of [Run the soak](../how-to/run-the-soak.md) ended on 2026-11-23: over 168 hours,
 two replicas of v0.5.1 that watched a whole three-node ARM cluster of about 100 Pods did not
 restart, stayed under 10 MiB of working set and did not grow. The soak gate of that page's
-decision rule passes in the terms a dry-run soak can check; the scale gate has not been run, so
-the chart's memory limit stays at `192Mi`.
+decision rule passes in the terms a dry-run soak can check; the scale gate, run the next day,
+failed ([The scale gate](2026-11-24-the-scale-gate.md)), so the chart's memory limit stays at
+`192Mi`.
 
 Measured from 2026-11-16T16:13:17Z to 2026-11-23T16:13:17Z, once, on one cluster: a data point,
 not a benchmark.
@@ -39,8 +40,9 @@ The working set by day of the window, median and highest, in MiB:
 | 7 | 5.7 | 6.4 | 1.2 | 1.9 |
 
 - **What it decides.** Of the rule's outcomes, "S1 INVALID → repeat the soak" and "Any FAIL →
-  keep `192Mi`" do not apply, so the scale gate (C1 and C2, in kind) is the next step. As of
-  2026-11-24 it has not been run, and the chart's limit stays at `192Mi` until it passes.
+  keep `192Mi`" do not apply, so the scale gate (C1 and C2, in kind) is the next step. It was
+  run on 2026-11-24 and C1 failed ([The scale gate](2026-11-24-the-scale-gate.md)), so the
+  chart's limit stays at `192Mi`.
 - **S1 is read as a dry-run soak reads it.** In dry-run kausa calls no model, so the breaker, the
   successful calls and the queue that S1 names were not checked ("A dry-run soak" in [Run the
   soak](../how-to/run-the-soak.md)): the queue's highest length was 0, the breaker was never
@@ -104,8 +106,8 @@ The working set by day of the window, median and highest, in MiB:
   watch that ends with an error now lists again, so on this cluster it lists Events more often
   than v0.5.1 did; its memory over days was not measured.
 - **A quiet, small cluster.** About 100 Pods, 13 incidents in a week and no seeded failures. The
-  peak with thousands of Pods is the scale gate's question ([List
-  pages](2026-11-02-list-pages.md)).
+  peak with thousands of Pods is the scale gate's question ([The scale
+  gate](2026-11-24-the-scale-gate.md)).
 - **5.7% of the window was not sampled**, nearly all of it in one gap. The working set in those
   hours is not known; no restart or OOM kill happened in them, since the restart counts did not
   change.

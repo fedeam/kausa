@@ -219,8 +219,9 @@ far, release by release, is in the [Changelog](CHANGELOG.md).
   did not restart, stayed under 10 MiB of working set and did not grow ([Seven days of v0.5.1 in
   dry-run](docs/research/2026-11-23-seven-days-in-dry-run.md)). They called no model, so how the
   call budget, the queue and the breaker behave over days is not measured, and neither is a
-  later release. The peak at scale that decides the chart's memory limit has not been measured
-  either ([Run the soak](docs/how-to/run-the-soak.md)).
+  later release. The peak at scale kept the chart's memory limit at `192Mi`: with 10,000
+  unschedulable Pods the chart's Pod peaked at 120 MiB, too close to `128Mi` ([The scale
+  gate](docs/research/2026-11-24-the-scale-gate.md)).
 - **Argo CD and the standby replica.** With `replicaCount: 2`, Argo CD's default
   `resource.exclusions` skip `coordination.k8s.io/Lease`, so an Application of the chart never
   creates the Lease and neither replica leads. The fix, released in v0.6.2

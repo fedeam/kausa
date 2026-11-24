@@ -8,6 +8,10 @@ a page of Deployments as large as the API server allows, for 500 (kube-runtime 4
 start burst of three, and let incidents wait for it in the queue, so that a restart does not refill
 it](../adr/0021-refill-the-call-budget.md).
 
+Status as of 2026-11-24: the chart's Pod was measured with pages of 50 in [The scale
+gate](2026-11-24-the-scale-gate.md): a peak of 116 to 120 MiB at 10,000 Pods, and of 122 to
+128 MiB with the forged page.
+
 Once per setting (twice for 500 and 50 with the forged page), in a kind cluster on the
 maintainer's machine: a first data point, not a benchmark.
 
