@@ -464,7 +464,10 @@ add to the text above:
   call already spent and is sent once, while a `detected` message's facts stay in its Event and
   in the log, and a burst of failing Pods in one namespace must not evict the explanations of
   others. Messages dropped when kausa stops or its lease term ends owe nothing. The bounds on
-  memory are unchanged, so the measurements of point 10 stand.
+  memory are unchanged, so the measurements of point 10 stand. With the wider rule the
+  message's text changed from the one point 5 gives; as text, kausa sends `kausa: not every
+  incident is posted here (more than <limit> in an hour, or more at once than kausa queues);
+  kausa's log has every one`.
 - **Within `v2` a value of `type` may be added**, as a field may, and a receiver must ignore a
   message whose `type` it does not know; point 5's `v2` adds no other rule ([Data sent in
   notifications](../reference/data-sent-in-notifications.md#compatibility)).
