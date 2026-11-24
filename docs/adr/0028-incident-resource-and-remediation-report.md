@@ -159,8 +159,10 @@ version `v1alpha1`, kind `Incident`:
   entries under the rule below: an entry younger than 6 hours is never dropped, so with
   `--dedup-hours` at 6 or less the gate holds for the whole window; with more than 6, an entry
   older than 6 hours can be dropped to make room, and then a second Incident for that fingerprint
-  inside the window is possible. kurita's budget per fingerprint absorbs it, as after a restart
-  (point 10).
+  inside the window is possible, as after a restart (point 10). kurita's budget per fingerprint
+  absorbs it (`needs-human{cooldown}`) when the first Incident's record counts in that window, and
+  otherwise kurita decides the second like any other Incident; which records count is open in
+  kurita's ADR 0008, point 8.
 - **The table of created Incidents**, kept with incidents on, report or not: one entry per
   Incident kausa created in this process, with the time it created it on kausa's own monotonic
   clock, at most 500 entries. That time is taken when the server's answer accepting the create
@@ -503,8 +505,9 @@ one, attaches at `Remediation.status`, which kausa never writes. This ADR decide
   Incidents (invariant 5): Remediations of earlier Incidents are not reported (`incident-unknown`),
   the new process may create 500 Incidents more (point 4), and kausa may create a second Incident
   for the same fingerprint, under a new first-seen time;
-  kurita's budget per fingerprint absorbs it (`needs-human{cooldown}`). With `--leader-lease`,
-  only the holder creates, sweeps and reports.
+  kurita's budget per fingerprint absorbs it (`needs-human{cooldown}`) when the first Incident's
+  record counts in that window, and otherwise kurita decides the second like any other Incident
+  (point 1). With `--leader-lease`, only the holder creates, sweeps and reports.
 
 ### Trust statement
 
@@ -549,12 +552,13 @@ fingerprints as it likes, and:
 - for `D006`, `D007` and `D010`, whose Event is about a Pod, the `object` is the owner kausa holds
   for a Pod of N it has seen (`src/incident.rs:194-198`), so the writer chooses which one.
 
-What that achieves: Incidents in N with those objects, each spending kurita's budget for its
-namespace and fingerprint and the table of point 1, so that 500 of them in 6 hours stop new
-Incidents in every namespace, for 6 hours after the last of them and for as long as the writer
-goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2 seconds holds the stop
-(point 4); and, for the outcomes kurita gives without a live
-read that confirms the failure, a sent `remediation` message "kurita proposed needs-human" about an
+What that achieves: Incidents in N with those objects, each making kurita record an outcome,
+which spends kurita's budget for its namespace and fingerprint only if that outcome counts
+(kurita's ADR 0008, point 8), and each taking a place in the table of point 1, so that 500 of
+them in 6 hours stop new Incidents in every namespace, for 6 hours after the last of them and for
+as long as the writer goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2
+seconds holds the stop (point 4); and, for the outcomes kurita gives without a live read that
+confirms the failure, a sent `remediation` message "kurita proposed needs-human" about an
 object the writer chose in N. Those outcomes are `needs-human{unconfirmable}`, which kurita gives
 whenever it cannot identify the object or no typed field can confirm the failure (kurita's ADR
 0006, its point 5, and its ADR 0008, point 6). For the Incidents such an Event shapes, that is:
@@ -727,7 +731,8 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   kurita towards not proposing, and kausa's own Events and `detected` messages are unaffected.
 - **A second Incident per fingerprint is possible** inside `--dedup-hours` when it is over 6 and
   the table had to drop the entry, as after a restart; kurita's budget per fingerprint absorbs
-  it.
+  it when the first Incident's record counts in that window, and otherwise kurita decides the
+  second like any other Incident.
 - **Pages that change with the implementation**, not with this ADR: a new reference page for the
   Incident resource, `docs/reference/incident-resource.md`;
   [Permissions](../reference/permissions.md), [Helm chart](../reference/helm-chart.md)
