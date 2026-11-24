@@ -41,10 +41,11 @@ and time below is **computed, not measured**, unless it says measured.
 
 ## Context
 
-Status as of 2026-11-24: `main` at `4b85369`, after the merge that implements and accepts 0027, and
-v0.6.3 released; every path and line cited below is `main`'s. 0028 is `proposed`, with kurita's ADR
-0008, "Contract with kausa", as its other half. Nothing below is implemented. kurita is not
-published as of 2026-11-24, so its ADRs are cited by number and title, without links.
+Status as of 2026-11-24: `main` at `dae8379`, the merge of 0028, which changed documentation only:
+`src/` is as at `4b85369`, the merge that implements and accepts 0027, after v0.6.3 was released.
+Every path and line cited below is `main`'s. 0028 is `proposed`, with kurita's ADR 0008, "Contract
+with kausa", as its other half. Nothing below is implemented. kurita is not published as of
+2026-11-24, so its ADRs are cited by number and title, without links.
 
 **What kausa does today when a failure stops.** Nothing visible. The tracker forgets a key at the
 tick where it drops it from `pending` (`Tracker::tick`, `src/incident.rs:383-387`): a state key
@@ -179,14 +180,18 @@ An incident is **closed** at the tick where `Tracker::tick` drops its key from `
 - the detection is not `D008`.
 
 `tick` returns those keys with their `first_seen` and `last_signal_at`, which `Pending` already
-holds. **What the match uses is frozen at emission:** `observe` stops lowering `first_seen` once
-the entry is emitted, where today it lowers it at every signal (`entry.first_seen =
-entry.first_seen.min(first)`, `src/incident.rs:452`), so a later signal of the same key with an
-earlier time (another Pod of the owner, or an Event whose `lastTimestamp` its writer set earlier,
-`src/incident.rs:175`) no longer moves it away from the Incident's `firstSeenUnix`. Nothing of
-0027 changes: an emitted entry's `first_seen` is read by no one but this match, since `emit` runs
-only for an entry not emitted (`src/incident.rs:397`, `:421`). No field is added. A test pins it: a
-later Event of the same key with an earlier `lastTimestamp`, then the closing, which matches.
+holds: `Tracker::tick` (`src/incident.rs:369`), which returns `Vec<Incident>` today, returns the
+incidents and these closings, `(Vec<Incident>, Vec<Closing>)`, a `Closing` being the key,
+`first_seen` and `last_signal_at`, and stays pure (invariant 7); the run loop's `tick`
+(`src/run.rs:1636`), which calls it, returns both to the run loop. **What the match uses is frozen
+at emission:** `observe` stops lowering `first_seen` once the entry is emitted, where today it
+lowers it at every signal (`entry.first_seen = entry.first_seen.min(first)`, `src/incident.rs:452`),
+so a later signal of the same key with an earlier time (another Pod of the owner, or an Event whose
+`lastTimestamp` its writer set earlier, `src/incident.rs:175`) no longer moves it away from the
+Incident's `firstSeenUnix`. Nothing of 0027 changes: an emitted entry's `first_seen` is read by no
+one but this match, since `emit` runs only for an entry not emitted (`src/incident.rs:397`, `:421`).
+No field is added. A test pins it: a later Event of the same key with an earlier `lastTimestamp`,
+then the closing, which matches.
 
 **A closing with no match** (an emitted entry dropped by `tick` whose key and `first_seen` match no
 entry of the current term: an incident held back by the gate, refused while 500 Incidents are
@@ -199,20 +204,27 @@ Incident. At most one closing per Incident: the table entry marks it.
 
 | Detection | `basis` | Closes when | The closing tick comes |
 |---|---|---|---|
-| `D001` to `D005` | `state` | No tick counted the state for more than 330 s | 330 to 335 s after the last signal, the last tick that counted the state |
-| `D014` | `state` | The Deployment's record was dropped because the rule stopped matching (progress, a new rollout, a pause, the deadline removed, the Deployment deleted), then 330 s | 330 to 335 s after the last signal |
-| `D009` | `recent-state` | No Pod of the owner held that failed by eviction in the last 10 minutes, then 330 s | 330 to 335 s after the last signal; from the last eviction at most 600 + 335 = 935 s, and no minimum beyond the 330: deleting the evicted Pods ends the signal at once |
-| `D006`, `D007`, `D010` to `D013` | `event` | The first tick with no fresh matching Event: its last occurrence 10 minutes old or more, the Event gone, or the Pod it is about gone | At most 600 + 5 = 605 s after the Event's last occurrence; at the next tick, within 5 s, when the Event or the Pod is gone |
+| `D001` to `D005` | `state` | No tick counted the state for more than 330 s | More than 330 s and at most 335 s after the last signal, the last tick that counted the state |
+| `D014` | `state` | The Deployment's record was dropped because the rule stopped matching (progress, a new rollout, a pause, the deadline removed, the Deployment deleted), then 330 s | More than 330 s and at most 335 s after the last signal |
+| `D009` | `recent-state` | No Pod of the owner held that failed by eviction in the last 10 minutes, then 330 s | More than 330 s and at most 335 s after the last signal; from the last eviction at most 600 + 335 = 935 s, and no minimum beyond the 330: deleting the evicted Pods ends the signal at once |
+| `D006`, `D007`, `D010` to `D013` | `event` | The first tick with no fresh matching Event: its last occurrence more than 10 minutes old, the Event gone, or the Pod it is about gone | At most 600 + 5 = 605 s after the Event's last occurrence; at the next tick, within 5 s, when the Event or the Pod is gone |
 | `D008` | none | No closing: a failed Job is a terminal fact | n/a |
 | `D014` handled (yields to another incident) | none | No Incident, so no match: counted `no-incident` (`src/incident.rs:424-430`) | n/a |
 
-The tick is 5 seconds (`TICK`, `src/run.rs:75`). **How it closed:** `source-lost` when a watch
-that covers the Incident's namespace dropped its records on a `403` at a time after
-`last_signal_at` (`on_watch_error`, `src/run.rs:1603-1624`, which drops them only for `forbidden`
-errors); otherwise `stopped-observing`. The watch is the Pods watch for `D001` to `D005` and
-`D009`, the Deployments watch for `D014` and the Events watch for the `event` basis. kausa keeps,
-for the term, the time of the last such drop per kind and per watch, in a fixed array indexed by
-the watch's position: 3 kinds × (1 + n) watches at most, for n listed namespaces.
+The tick is 5 seconds (`TICK`, `src/run.rs:75`). A state key is kept while its last signal is at
+most 330 seconds old (`<=`, `src/incident.rs:383-387`) and an Event while its last occurrence is at
+most 600 seconds old (`src/incident.rs:178`), so the closing comes at the first tick past those
+ages; the upper bounds in this table, and the times derived from them below, assume ticks 5 seconds
+apart, and a tick that comes late (point 2: tokio's `Burst`) moves the closing as late. **How it
+closed:** `source-lost` when a watch that covers the Incident's namespace dropped its records on a
+`403` at a time after `last_signal_at` (`on_watch_error`, `src/run.rs:1603-1624`, which drops them
+only for `forbidden` errors); otherwise `stopped-observing`. The watch is the Pods watch for `D001`
+to `D005` and `D009`, the Deployments watch for `D014` and the Events watch for the `event` basis,
+with the Pods watch as well for `D006`, `D007` and `D010`: their Events are about a Pod and give a
+signal only while kausa holds that Pod (`src/incident.rs:194-197`), so a drop of either watch closes
+them `source-lost`, while the Pod deleted closes them `stopped-observing`. kausa keeps, for the
+term, the time of the last such drop per kind and per watch, in a fixed array indexed by the watch's
+position: 3 kinds × (1 + n) watches at most, for n listed namespaces.
 
 **The gate of 0028's point 1 against this match.** 0028 creates at most one Incident per
 fingerprint per `--dedup-hours`, and a second Incident is possible as it states. So:
@@ -250,12 +262,14 @@ changes a workload: `rollout-undo`, `raise-memory-limit` or `set-image-pull-poli
 
 **The Pods of the owner** are the Pods kausa holds **in the Incident's namespace** whose resolved
 top-level owner has the Incident's `object.uid`. This changes `pods_of` (`src/run.rs:1744-1749`),
-which today filters by UID alone over the Pods of every watched namespace: `top_owner` keeps a
-controller `ownerReference` that is neither a ReplicaSet nor a Job as the Pod carries it, UID
-included (`src/owner.rs:61-63`), and so does a lookup that finds no controller or fails
-(`:66-67`), so a Pod in another namespace could name the owner's UID. The same set gives
-`closed.pods_now`. An owner with no UID gives `not-checkable`. **Non-terminal:** `phase` is
-neither `Failed` nor `Succeeded`; Pending Pods count.
+which today takes the owner alone and filters by UID over the Pods of every watched namespace; it
+takes the namespace too, `pods_of(&self, namespace: &str, owner: &OwnerRef)`, compares it with each
+Pod record's `namespace`, and its two callers (`:1208`, `:1692`) pass the incident key's namespace.
+Today, `top_owner` keeps a controller `ownerReference` that is neither a ReplicaSet nor a Job as the
+Pod carries it, UID included (`src/owner.rs:61-63`), and so does a lookup that finds no controller
+or fails (`:66-67`), so a Pod in another namespace could name the owner's UID. The same set gives
+`closed.pods_now`. An owner with no UID gives `not-checkable`. **Non-terminal:** `phase` is neither
+`Failed` nor `Succeeded`; Pending Pods count.
 
 **The correction of 0027's `Pods now`, unconditional.** `pods_of` also gives 0027's `Pods now`
 (`src/run.rs:1208`, `:1692`), which counts the same way today, so a Pod of another namespace that
@@ -336,8 +350,17 @@ seconds each with an API server that does not answer. So:
   500 checks of 4 ReplicaSets take with every `get` answered within 312.5 ms and the run loop's own
   work under 312.5 ms a tick, and above the 770 seconds they take with bar 5's tick of 1 second
   (below). This deadline is the ADR author's design, added after the fourth review. So `B` is as of
-  a read made after kausa accepted the record, never a cached value up to 600 seconds older: a
-  rollback made before that read is in `B`, and an `observed` is a change seen after `t_a`.
+  a read that ended after kausa accepted the record, never a cached value up to 600 seconds older: a
+  rollback made before that read is in `B`, and an `observed` is a change seen after `t_a`. That
+  read can have started before the acceptance, by `on_pod`, the fact slot, or the read slot for
+  another check, since a cache entry keeps the `Instant` of its insert (`:1951`), not of its `get`'s
+  start; its answer can then predate the acceptance by at most `OWNER_LOOKUP_TIMEOUT`, 5 seconds
+  (`:89`), which bounds the whole `get`, its body included (`:1941`), and a rollback made in those
+  seconds, after the API server answered, is not in `B` and can be reported `observed`. That window
+  is accepted, the ADR author's choice: `observed` says a change was seen after `t_a`, not when it
+  was made or by whom, and taking only a `get` started after acceptance would need each owner cache
+  entry, which `on_pod` and the fact slot share, to keep its `get`'s start too, 16 bytes more an
+  entry. The 5-second bound is read in source only ("Not verified").
 - **`C` decided, or not.** At a tick `C` holds when every non-terminal Pod's revision is known and
   not in `B`. It is decided false when no Pod is non-terminal, when one has a controller reference
   that is not a ReplicaSet, or when one's known revision is in `B`; otherwise it is not decided,
@@ -386,13 +409,17 @@ acceptance, or for `rollout-undo` the first tick after its forced reads:
 | Detection | Action | Baseline `B` | Condition `C` at a tick |
 |---|---|---|---|
 | `D001` to `D005`, `D014` | `rollout-undo` | The revisions of the controller ReplicaSets of the non-terminal Pods, from the forced reads after acceptance (above); at most 4 ReplicaSets | At least one non-terminal Pod, and **every** one has a controller ReplicaSet with a known revision not in `B` (decided or not, above) |
-| `D003` | `raise-memory-limit` | A keyed SipHash (a random key per process) of the `memory_limit` string of the container named by the fact statement, equal in every non-terminal Pod that has that container | At least one non-terminal Pod with that container, and **every** one has a limit whose hash differs: the limit "differs as written" |
+| `D003` | `raise-memory-limit` | A keyed SipHash (a random key per process) of the `memory_limit` string of the container named by the fact statement, equal in every non-terminal Pod that has that container (no limit: `not-checkable`, below) | At least one non-terminal Pod with that container, and **every** one has a limit whose hash differs: the limit "differs as written" |
 | `D002` | `set-image-pull-policy` | That container's policy is `Never` in every non-terminal Pod that has it | At least one such Pod, and **every** one has `Always` or `IfNotPresent` |
 | any other pair | none | none | No outcome: `none`, `needs-human` and `inspect` act on nothing, and 0028 allows `delete-evicted-pods` for no detection |
 
 `memory_limit` is the Pod spec's `resources.limits` quantity, kept as written, at most 32 bytes
-(`MAX_QUANTITY_BYTES`, `src/record.rs:39`; read at `src/record.rs:627`), and `image_pull_policy` is
-`None` for any value but the three known ones (`src/record.rs:489-490`).
+(`MAX_QUANTITY_BYTES`, `src/record.rs:39`; read at `src/record.rs:627`). It is an `Option<String>`,
+`None` when the container sets no memory limit or one kausa does not keep (over 32 bytes, or not a
+quantity, `src/record.rs:59-61`): a baseline with `None` in any of those Pods is `not-checkable`,
+since there is no limit as written to compare, and in `C` a Pod with `None` has no limit, so a limit
+removed is never `observed`. `image_pull_policy` is `None` for any value but the three known ones
+(`src/record.rs:489-490`).
 
 **The results**, a closed vocabulary that only kausa writes:
 
@@ -403,12 +430,12 @@ acceptance, or for `rollout-undo` the first tick after its forced reads:
   It does not say that nobody acted, or that the failure goes on.
 - `no-pods`: the window ended with no non-terminal Pod of the owner held. It does not say the owner
   was deleted.
-- `not-checkable`: at acceptance there was no single baseline: no Pod, no such container, values
-  that differ between Pods, more than 4 ReplicaSets or revisions, a revision kausa could not read, a
-  policy other than `Never`, or an owner with no UID, decided at once (for `rollout-undo`, when its
-  forced reads answer); or, for `rollout-undo`, its forced reads not all ended 900 seconds after
-  acceptance, decided then, or `C` not decided at any tick of the window's last 600 seconds, decided
-  at its end.
+- `not-checkable`: at acceptance there was no single baseline: no Pod, no such container, a
+  container with no memory limit kausa keeps, values that differ between Pods, more than 4
+  ReplicaSets or revisions, a revision kausa could not read, a policy other than `Never`, or an
+  owner with no UID, decided at once (for `rollout-undo`, when its forced reads answer); or, for
+  `rollout-undo`, its forced reads not all ended 900 seconds after acceptance, decided then, or `C`
+  not decided at any tick of the window's last 600 seconds, decided at its end.
 - `source-lost`: the Pods watch that covers the namespace dropped its records on a `403` after
   `t_a`. Decided at once.
 
@@ -721,8 +748,11 @@ What each principal gains:
   `t_a` is taken, so the 900 seconds of point 2 and its forced reads' "done" need no field of their
   own (`proposedAt` cannot serve: its writer chooses it, and it is only reported), the baseline (4 ×
   `u64`, a length and a tag, padded: 40), whose 4 places take the forced reads' answers as they are
-  found, and the action (1): 16 + 40 + 1 = 57 bytes, padded to 64, at most 80 with the allocator's
-  header and rounding. At most one per Incident, so 500 × 80 = 40,000 bytes.
+  found, the action (1), and the flags (`u8`, 1: `C` decided at a tick of the window's last 600
+  seconds; `no-pods` and `source-lost` hold no state, decided at the window's end from the Pods held
+  and at once from point 1's drop times against `t_a`): 16 + 40 + 1 + 1 = 58 bytes, padded to 64, at
+  most 80 with the allocator's header and rounding. At most one per Incident, so 500 × 80 = 40,000
+  bytes.
 - **The table, at 500 entries:** 383,000 bytes (0028's estimate) + 16,000 + 40,000 = 439,000
   bytes, 439,000 / 1,048,576 = 0.419 MiB, under 0028's bar 3 of 0.5 MiB = 524,288 bytes by
   524,288 − 439,000 = 85,288 bytes. The bar is not raised.
@@ -792,17 +822,19 @@ before this ADR is accepted, and after 0028's bars:
    messages sent in that hour equal those of the same scenario with `reportEnd` off.
 7. **One kind scenario per acting row,** with `W` at 20: `D001` undone by hand gives `observed`,
    with an `ended_at` at most 600 seconds plus one tick plus the rollout's time after the undo, left
-   alone `not-observed`, and rolled back just before its Remediation is accepted `not-observed`, not
-   `observed` (point 2's forced read); `D003` raised by a rollout, and again by an in-place resize,
-   gives `observed`; `D002` with its policy changed gives `observed`; `D014` undone gives
-   `observed`; the owner scaled to 0 gives `no-pods`; `D009` closes with `recent-state` and no
-   outcome; `D008` gives no `closed`; `D011` on a ReplicaSet whose Event stops gives `basis: event`.
-8. **A revoked Pods permission** in a listed namespace closes its open state incidents with
-   `source-lost`, and its pending checks end `source-lost`.
+   alone `not-observed`, and rolled back more than 5 seconds before its Remediation is accepted
+   `not-observed`, not `observed` (point 2's forced read); `D003` raised by a rollout, and again by
+   an in-place resize, gives `observed`; `D002` with its policy changed gives `observed`; `D014`
+   undone gives `observed`; the owner scaled to 0 gives `no-pods`; `D009` closes with `recent-state`
+   and no outcome; `D008` gives no `closed`; `D011` on a ReplicaSet whose Event stops gives `basis:
+   event`.
+8. **A revoked Pods permission** in a listed namespace closes its open state incidents, and its open
+   `D006`, `D007` and `D010` incidents, with `source-lost`, and its pending checks end
+   `source-lost`.
 9. **Killing the leader** during an open `D001` with a pending check gives no `closed` and no
-   `outcome` for that Incident. The failure goes on into the new term, whose leader creates its
-   own Incident of the same fingerprint; then the Deployment is fixed by hand, and 330 to 335
-   seconds after its last signal the new Incident gets one `closed`.
+   `outcome` for that Incident. The failure goes on into the new term, whose leader creates its own
+   Incident of the same fingerprint; then the Deployment is fixed by hand, and more than 330 and at
+   most 335 seconds after its last signal the new Incident gets one `closed`.
 10. **31 acting Remediations within an hour,** written by a test principal, give 30 `outcome`
     messages and 1 counted `capped`, and change no `detected` count. The scenario: `W` at 20; 31
     `D001` Incidents created before the hour, whose failures go on through it, so that no
@@ -855,6 +887,10 @@ Each was read in source or documentation only, or not derived; the bar or test t
   [Detection and redaction rules](../reference/rules.md); the cause a hypothesis). Bar 7, row
   `D011`.
 - **That a `403` drop and its relist behave as `on_watch_error` says.** Bar 8.
+- **That a forced read's answer predates the acceptance by at most 5 seconds,** read in source only:
+  `OWNER_LOOKUP_TIMEOUT` wraps the whole `get_metadata` (`src/run.rs:1941`), and kube-client 4.2.0
+  collects the body inside it (`src/client/mod.rs:298`). A unit test of the read slot with a lookup
+  whose `get` starts before the acceptance and answers after it, and bar 7's row `D001`.
 - **That the garbage collector leaves a Pod in N whose controller `ownerReference` names the
   Deployment with its real UID,** since the owner exists, so that such a Pod lasts until someone
   deletes it; and, a hypothesis that bar 12 does not need, that it treats a reference to an owner

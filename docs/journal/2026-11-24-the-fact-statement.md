@@ -221,6 +221,13 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
   shift, so no `get` is sent twice and every baseline completes at any pace. The manager's decision,
   the fix both reviewers of the fifth review described. The position, a slot of 0028's table kept
   from an entry's create to its drop, is the ADR author's choice.
+- In [0029](../adr/0029-incident-end-report.md), after the review of its pull request: an `event`
+  incident about a Pod (`D006`, `D007`, `D010`) closes `source-lost` when the Pods watch drops its
+  records on a `403`, as when the Events watch does, since its signal needs the Pod; a forced read
+  whose `get` started before the acceptance counts, so `B` can predate the acceptance by at most 5
+  seconds, a window accepted rather than keeping each cache entry's start; and a container with no
+  memory limit kausa keeps makes a `raise-memory-limit` check `not-checkable`. The three are the ADR
+  author's choices.
 
 ### Next
 
