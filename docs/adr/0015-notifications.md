@@ -278,6 +278,7 @@ order, after every `detected` and `explained` message; `kausa_notifications_tota
 and they owe no `capped` message. With 0029, the sentence of 0028's `Update` above, "in the queue a
 `remediation` never evicts another message and is taken only when no other message is queued", no
 longer holds as written: a `remediation` evicts the oldest end message when the queue is full, and
-it is taken when no `detected` and no `explained` message is queued, before a later end message.
-This takes effect only when 0029 is accepted, which needs its bars measured and 0028 accepted; until
-then the text above holds.
+it is taken when no `detected` and no `explained` message is queued, before a later end message. Any
+message that arrives with the queue full, a `detected` one included, evicts a queued end message
+first. This takes effect only when 0029 is accepted, which needs its bars measured and 0028
+accepted; until then the text above holds.

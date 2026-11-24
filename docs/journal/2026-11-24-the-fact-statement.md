@@ -126,6 +126,10 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
   matches no Incident is counted; the Pods of the owner are only those of the Incident's
   namespace, which also corrects 0027's `Pods now`; and in the queue an end message never evicts a
   `remediation`.
+- A second review of 0029 made the correction of 0027's `Pods now` unconditional, gave the `event`
+  closing a text true whether the Event aged, was deleted or lost its Pod, and said how the check
+  reads a ReplicaSet's revision without a request at the tick: the run loop refreshes the owner
+  cache's entries while a `rollout-undo` check is pending.
 - While 0029 was reviewed, its author found that 0028 never said how the tick that emits an Incident
   reads the sample's ReplicaSet revision: the tick makes no request, a Pod's owner is resolved once,
   and its owner-cache entry is gone after 10 minutes, so for most long-running workloads the
@@ -183,6 +187,9 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
   `Incident.status` was rejected. The review read in the Kubernetes source, not yet checked in
   kind, that on a `/status` patch the API server ignores the UID and that a `status: null` patch
   skips rules on `status`; not writing `status` is the smaller design either way.
+- In 0029, the count of 0027's `Pods now` is corrected with every switch off, not behind
+  `incidents.reportEnd`: keeping a count known to be wrong as the default was the worse choice. It
+  is the one change of 0029 with every switch off, and can ship ahead of it in its own change.
 
 ### Next
 
