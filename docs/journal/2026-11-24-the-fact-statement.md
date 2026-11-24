@@ -158,10 +158,19 @@ kurita's `main` as `proposed`.
   a person, the Incident a typed record. The count, which can pass 100 when the incident settles, is
   capped at 100 with `podsSeenIsMinimum` true, the ADR author's choice. kurita's ADR 0008 changes "1
   to 100" to "0 to 100" in the change there.
+- In 0028, `kausa_incidents_refused_total` takes a label `reason`, `table-full` or `schema`, and the
+  `incident refused` line is at most one an hour for each reason, naming for `schema` the field and
+  the namespace, never the value: one refusal of the schema an hour, which a writer in N can cause,
+  would otherwise hide the stop of the table, which holds Incidents back in every namespace. The
+  manager's decision, taken from the security reader's ninth review.
 
 ### Next
 
 - The implementation, behind `incidents.enabled` and `incidents.reportRemediations`, both off by
   default, with the reference pages that 0028 lists under Consequences.
+- In 0028, whether the Incident takes as its sample the first signal whose values fit, refusing only
+  when none fits, so that a signal a writer in N places first does not leave a genuine incident
+  without an Incident; its cost is a sample that can differ from the fact statement's. Open for the
+  implementation.
 - Measure bars 1 to 8, and settle what "Not verified" lists, first whether a metadata `get` of a
   ReplicaSet returns its annotations.

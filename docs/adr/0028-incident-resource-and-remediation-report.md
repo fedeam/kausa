@@ -138,8 +138,12 @@ string in either schema is an enum, or a pattern with a maximum length.
 
 ## Decision
 
-Proposed on 2026-11-24. Both switches are off by default, and with the defaults kausa writes,
-reads and sends what it does today.
+Proposed on 2026-11-24. Both switches are off by default, and with the defaults kausa writes, reads
+and sends what it does today, but for two changes, both from the owner lookup's rule on names of
+point 3, which holds with incidents off too: kausa sends no `get` for a name that is not a DNS-1123
+subdomain of at most 253 characters, so it reads less; and an incident whose owner has such a name,
+which today could resolve to another object, names the `ownerReference` or the Event's object as
+given instead, in its Events, its `incident` log line and its `detected` message.
 
 ### 1. The Incident
 
@@ -190,12 +194,17 @@ version `v1alpha1`, kind `Incident`:
   which kurita decides an Incident (its ADR 0008, point 3); an entry older than that is dropped,
   oldest first, when room is needed. It is never seeded from a list of Incidents (point 10).
 - **While the table holds 500 entries younger than 6 hours, kausa creates no Incident.** The
-  occurrence is counted (this ADR proposes `kausa_incidents_refused_total`; the reference page
-  fixes it) and logged as `incident refused` at most once an hour; the incident's Events, its
-  `incident` log line and its `detected` message are not affected, and its fingerprint is not
-  marked, so a later occurrence creates one once there is room. So a process creates at most 500
-  Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table,
-  and the table holds at most 500.
+  occurrence is counted (this ADR proposes `kausa_incidents_refused_total`, with a label `reason` of
+  two values, `table-full` for this stop and `schema` for point 2's rule; the reference page fixes
+  the names) and logged as `incident refused` at most once an hour for each reason; the incident's
+  Events, its `incident` log line and its `detected` message are not affected, and its fingerprint
+  is not marked, so a later occurrence creates one once there is room. So a process creates at most
+  500 Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table,
+  and the table holds at most 500. The label is the manager's decision, from the security reader's
+  ninth review: with one counter and one line an hour, one refusal of point 2's rule an hour, which
+  a writer of Pods or Events in N can cause, would take the line and hide this stop, which holds
+  Incidents back in every namespace. The label's values are a closed set and name nothing of the
+  cluster, as 0027's counters do, and both series show 0 from the start with incidents on.
 - **No `ownerReference`** to the workload or to anything else, and nothing points to it.
 - **Not with `--dry-run`**, as `--history`: kausa refuses to start with incidents on and
   `--dry-run`, and the chart turns incidents off with `dryRun`.
@@ -281,10 +290,12 @@ is never kept and never sent:
   (`src/fact.rs:135-138`); and `firstSeen`, which also sets the name. An owner's name the lookup
   refused (point 3) is one of these. One that does not fit means no create: the incident's Events,
   its `incident` log line and its `detected` message are not affected; the occurrence is counted and
-  logged as a refusal of point 1 (`kausa_incidents_refused_total`, `incident refused` at most once
-  an hour, naming the field); no `get` is made for it; and its fingerprint is not marked, so a later
-  occurrence is checked again, at no request. None is left out instead: `missing` has no code for
-  it, and an optional `uid` left out would say the object has none.
+  logged as a refusal of point 1 with the reason `schema`
+  (`kausa_incidents_refused_total{reason="schema"}`, `incident refused` at most once an hour for
+  that reason, naming the field and the namespace, never the value); no `get` is made for it; and
+  its fingerprint is not marked, so a later occurrence is checked again, at no request. None is left
+  out instead: `missing` has no code for it, and an optional `uid` left out would say the object has
+  none.
 - **The values kausa makes** fit by construction: `detection`, `fingerprint`, `settledAt`,
   `missing`, `sample.controller.kind` (any other kind is `Other`), and `facts`, since the fact
   statement admits only a listed reason, an `i32` exit code and a container that is a DNS label
@@ -354,20 +365,21 @@ Pod beyond the sample.
 eighth review, and it is the lookup's own, so it holds for every caller and with incidents off too:
 `on_pod`'s resolution of a Pod's owner and of an Event's object (`src/run.rs:1463`, `:1542`) and the
 fact slot's read of the revision below. At `4b85369` the name comes from an `ownerReference` or an
-Event's `regarding`, copied unbounded (`src/record.rs:239-244`); `controller_of`
-(`src/run.rs:1909-1953`) keys its cache by it and passes it to `get_metadata`, which in kube-core
-4.2.0 refuses only an empty name (`validate_name`, `src/request.rs:338-343`) and puts it in the path
-unencoded (`src/request.rs:274`); and the API server asks an ownerReference's name, by a reviewer's
-reading not re-read here, only to be non-empty. So a writer of Pods in N chooses a string of any
-length with `/`, `..` or `?` that kausa keeps as a key and sends in a URL. Under this rule a name
-that is not a DNS-1123 subdomain of at most 253 characters is never looked up and never kept: the
-lookup answers as a failed one without a request and without a cache entry. For the owner, that
-gives `owner-lookup-failed`, and the incident's `object` is the `ownerReference` as the Pod gives
-it, as after any failed lookup (`top_owner`, `src/owner.rs:67`), with its Events and its log line as
-today; its name does not fit `Name`, so point 2's rule creates no Incident for it. For the revision
-it gives `revision-lookup-failed`, and the name is not kept in the fact queue entry. A name that
-passes has no `/`, no `?` and no `..` segment. That no Secret or ConfigMap can be read through such
-a path today rests on RBAC, which grants kausa no verb on them
+Event's `regarding`, copied unbounded (an `ownerReference` at `src/record.rs:228-235`, a `regarding`
+at `src/run.rs:1534-1539`); `controller_of` (`src/run.rs:1909-1953`) keys its cache by it and passes
+it to `get_metadata`, which in kube-core 4.2.0 refuses only an empty name (`validate_name`,
+`src/request.rs:338-343`) and puts it in the path unencoded (`src/request.rs:274`); and the API
+server asks an ownerReference's name, by a reviewer's reading not re-read here, only to be
+non-empty. So a writer of Pods in N chooses a string of any length with `/`, `..` or `?` that kausa
+keeps as a key and sends in a URL. Under this rule a name that is not a DNS-1123 subdomain of at
+most 253 characters is never looked up and never kept: the lookup answers as a failed one without a
+request and without a cache entry. For the owner, that gives `owner-lookup-failed`, and the
+incident's `object` is the `ownerReference` as the Pod gives it, as after any failed lookup
+(`top_owner`, `src/owner.rs:67`), with its Events and its log line as today; its name does not fit
+`Name`, so point 2's rule creates no Incident for it. For the revision it gives
+`revision-lookup-failed`, and the name is not kept in the fact queue entry. A name that passes has
+no `/`, no `?` and no `..` segment. That no Secret or ConfigMap can be read through such a path
+today rests on RBAC, which grants kausa no verb on them
 ([Permissions](../reference/permissions.md)), not on the code.
 
 **Where the revision comes from.** This paragraph was written after the design review, which left
@@ -706,20 +718,38 @@ copies. So the writer can make an Incident in N about a failing Pod carry a revi
 or none (a ReplicaSet that does not exist, an annotation that is not a whole number in 1..2^53, or a
 reference that pairs one ReplicaSet's name with another's UID gives `revision-lookup-failed`), and
 so suppress kurita's undo proposal for a Deployment of N, or let one through, as a writer of
-Incidents can (above), on workloads it can already change itself. With an `ownerReference` whose
-kind, name or UID does not fit the Incident's schema, it can make kausa create no Incident about a
-Pod of N, at no request (point 2's rule). A name that is not a DNS-1123 subdomain of at most 253
-characters gets it nothing more: no request and no cache entry (point 3). What it costs kausa: the
-read is made only for a create kausa will send, once per create attempted, at most 500 `get`s in any
-6 hours for creates the server accepts (point 3 bounds the failed ones; under point 2's rule no
-value this writer chooses reaches the server and fails there, so they come from a writer of
-Incidents, which can take an Incident's name first, or from the API server), each holding the fact
-slot at most 5 seconds, by which the next facts' Events wait. Outside N, that wait is all it gets:
-the incident's own `Detected` Event is written before the read, and the facts of other namespaces
-wait at most 5 seconds per create attempted, which for the creates the server accepts is 500 × 5 =
-2,500 seconds in any 6 hours (11.6 % of 21,600), and only while the API server answers those `get`s
-slowly. That the writer cannot lengthen a metadata `get` by itself, and that the wait does not fill
-the fact queue for other namespaces, are under "Not verified".
+Incidents can (above), on workloads it can already change itself. With a controller `ownerReference`
+whose apiVersion, kind, name or UID does not fit the Incident's schema, on a failing Pod named to
+sort first, it can make kausa create no Incident, at no request (point 2's rule), for an incident of
+any workload of N whose sample is that Pod, also one whose other Pods it does not write: an
+incident's key is its namespace, its owner's kind and name and its detection (`src/incident.rs:33`,
+`:256-263`), its sample the first signal by Pod, container, reason and message (`:477-489`), and its
+`object` the sample's owner (`:492`); a reference naming the real Deployment, which kausa does not
+hop from (`src/owner.rs:22-28`, `:61-62`), or the real ReplicaSet, which the lookup resolves by name
+to its Deployment while the reference's UID stays the sample's `controller.uid`, puts the Pod in
+that incident. That the API server accepts such a reference, and how long its garbage collector
+leaves the Pod, are under "Not verified". What is seen then: kurita gets no Incident and proposes
+nothing, not even `inspect`; the reader of notifications gets the `detected` message and never
+"kurita proposed"; and the refusal is counted and logged with the reason `schema` (point 1). Nothing
+outside N, no request and no memory. What is new is small: with a false but well-formed UID the same
+writer already got `none{target-replaced}` from kurita (below). A name that is not a DNS-1123
+subdomain of at most 253 characters gets it nothing more: no request and no cache entry (point 3).
+What it costs kausa: the read is made only for a create kausa will send, once per create attempted,
+at most 500 `get`s in any 6 hours for creates the server accepts (point 3 bounds the failed ones;
+under point 2's rule no value this writer chooses reaches the server and fails there, so they come
+from a writer of Incidents, which can take an Incident's name first, or from the API server), each
+holding the fact slot at most 5 seconds, by which the next facts' Events wait. Outside N, that wait
+is all it gets: the incident's own `Detected` Event is written before the read, and the facts of
+other namespaces wait at most 5 seconds per create attempted, which for the creates the server
+accepts is 500 × 5 = 2,500 seconds in any 6 hours (11.6 % of 21,600), and only while the API server
+answers those `get`s slowly. That the writer cannot lengthen a metadata `get` by itself, and that
+the wait does not fill the fact queue for other namespaces, are under "Not verified".
+
+**A writer of Deployments in N**, which `edit` is, writes no Incident, but can set its Deployment's
+`deployment.kubernetes.io/revision` annotation to 0 or past 2^53, which the fact statement parses as
+any `u64` (`src/fact.rs:134-138`), so that the `D014` of that Deployment gets no Incident, at no
+request (point 2's rule). What is seen is as for the writer of Pods above, about a Deployment it
+already writes.
 
 **Whoever can create Events in N**, which the built-in `edit` role in N can, writes no Incident but
 chooses, through kausa, what some of kausa's Incidents in N say. For an Event incident kausa takes
@@ -733,6 +763,15 @@ fingerprints as it likes, and:
   object, existing or not, and its UID;
 - for `D006`, `D007` and `D010`, whose Event is about a Pod, the `object` is the owner kausa holds
   for a Pod of N it has seen (`src/incident.rs:194-198`), so the writer chooses which one.
+
+With a `regarding` whose `uid` or `apiVersion` does not fit the schema, naming the object of an
+incident of a genuine Event, an Event with the same reason and an empty note falls in that
+incident's key and sorts first: kausa copies the `regarding` (`src/run.rs:1534-1539`), keeps it as
+the owner when it is not a kind it hops from (`src/owner.rs:61-62`) and otherwise resolves it by
+name, while the Incident's `regarding` keeps the Event's values, and sorts an empty message first
+(`src/incident.rs:477-489`). So kausa creates no Incident for that incident, also when its other
+Events are genuine, at no request. What is seen is as for the writer of Pods above. That the API
+server accepts such an Event is under "Not verified".
 
 What that achieves: Incidents in N with those objects, each making kurita record an outcome, which
 spends kurita's budget for its namespace and fingerprint, and the cluster's, only if that outcome
@@ -822,7 +861,13 @@ bar 2, 3 or 6 measures it.
   with incidents on, 24 bytes more for each entry of a ReplicaSet whose `get` answered, the revision
   (8) and the UID its `get` returned (16), plus the allocator's overhead, not counted. The name in
   an entry's key is at most 253 bytes under the lookup's rule (point 3); at `4b85369` it has no
-  bound.
+  bound. That rule bounds the cache's key, not the name itself: an `ownerReference`'s or an Event's
+  `regarding`'s name of any length still enters 0027's fact queue as the incident's object, and its
+  `incident` log line, as it does at `4b85369`; this ADR's part of the entry holds only values that
+  fit (point 2).
+- **The refusals' counter and log line:** two series of `kausa_incidents_refused_total`, one per
+  reason, and one more hour mark for the second reason's line, a monotonic instant of 16 bytes on a
+  64-bit Linux target (point 1).
 - **The table of Events:** one flag an entry, whether the owner lookup of the Event's object failed
   (point 3's `missing`), kept with incidents off too: at most 8 bytes an entry with alignment, an
   estimate; bar 1 measures it.
@@ -973,6 +1018,25 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   a forged `D006` or `D012` about an object that really fails gives `inspect`, and that kurita's
   cluster window counts it in the same term.
 - **Nothing above is measured.** The Event latency is computed from measured totals.
+- **That the API server accepts an Event whose `regarding.uid` is `x`,** on which the Events
+  writer's paragraph of the trust statement rests. Test: in kind, create an Event with
+  `regarding.uid: x` and the reason of a real incident's Event, about the same object, and check
+  that it is accepted.
+- **Whether `object.kind`'s pattern `^[A-Z][A-Za-z0-9]*$` admits every real kind.** A recollection
+  from the ninth review, not read in source: the validation of a CustomResourceDefinition's names
+  asks only that its kind, lowercased, be a DNS-1035 label, which would admit a kind that starts in
+  lower case or holds `-`. Meanwhile an incident whose top owner has such a kind gets no Incident,
+  counted and logged with the reason `schema` (point 2's rule), and its Events, its log line and its
+  `detected` message are not affected. Test: read `ValidateCustomResourceDefinitionNames` in the
+  apiextensions source, or, in kind, create a CustomResourceDefinition with `kind: fooBar` and a
+  failing Pod, or a ReplicaSet, whose controller `ownerReference` is an object of it; a Deployment
+  it owns would not do, since kausa follows only a ReplicaSet's and a Job's controller
+  (`src/owner.rs:22-28`).
+- **Whether the Incident should take as its sample the first signal of the group whose values fit,**
+  and refuse only when none fits, so that a signal a writer in N places first does not leave a
+  genuine incident without an Incident (the trust statement). Open for the implementation; the
+  sample is not chosen differently here. Its cost: the Incident's sample could then differ from the
+  one 0027's fact statement describes.
 
 ## Consequences
 
