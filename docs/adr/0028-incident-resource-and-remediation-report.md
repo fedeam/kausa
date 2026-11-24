@@ -164,7 +164,16 @@ version `v1alpha1`, kind `Incident`:
   (point 10).
 - **The table of created Incidents**, kept with incidents on, report or not: one entry per
   Incident kausa created in this process, with the time it created it on kausa's own monotonic
-  clock, at most 500 entries. **It never drops an entry younger than 6 hours**, the window in
+  clock, at most 500 entries. That time is taken when the server's answer accepting the create
+  arrives, never before the request: kurita measures its 6 hours from `creationTimestamp`, which
+  the server sets while it handles the create and truncates to the second, so kausa's 6 hours
+  start no earlier than kurita's and end later by the time the answer took, at most the 10 seconds
+  of the write, plus the truncation, under 1 second. The difference errs towards keeping an entry
+  a few seconds longer than kurita can use it, which costs at most a slot for those seconds and
+  loses no notice; taken before the request, kausa's 6 hours could end first, and a Remediation
+  kurita created in those last seconds could find the entry dropped and go unreported
+  (`incident-unknown`). A clock of kurita's behind the API server's moves its own window later, out
+  of kausa's reach. **It never drops an entry younger than 6 hours**, the window in
   which kurita decides an Incident (its ADR 0008, point 3); an entry older than that is dropped,
   oldest first, when room is needed. It is never seeded from a list of Incidents (point 10).
 - **While the table holds 500 entries younger than 6 hours, kausa creates no Incident.** The
@@ -289,8 +298,12 @@ Deployments is added, and no Pod beyond the sample.
   Incidents written by someone other than kausa, or left by earlier processes, can push it to
   delete ones younger than 6 hours, since one process holds at most 500 of those. kausa's own
   table is per process and is the bound on creates: whoever makes kausa create 500 Incidents in 6
-  hours, a tenant whose workloads fail under that many fingerprints or a writer of Events (trust
-  statement), stops new Incidents in every namespace until the oldest entry passes 6 hours. That
+  hours, a tenant whose workloads fail that often or a writer of Events (trust statement), stops
+  new Incidents in every namespace until the oldest entry passes 6 hours, and for as long as it
+  goes on: holding the stop takes one create every 6 × 3,600 / 500 = 43.2 seconds, so one forged
+  Event with a new fingerprint every 43.2 seconds holds it indefinitely. With `--dedup-hours` at 6
+  or more, 500 creates take 500 different fingerprints; with less, fewer, down to one fingerprint
+  that recurs at `0`, since the gate of point 1 then lets each occurrence create. That
   moves kurita towards not proposing; kausa still writes its Events and posts its `detected`
   messages, and a Remediation of an Incident already in the table is still reported. A
   ResourceQuota on `count/incidents.kausa.fedeam.com` in a namespace bounds what that namespace can
@@ -375,24 +388,51 @@ With `incidents.reportRemediations` (off by default; it needs incidents and noti
 - **`remediation` messages have their own bound and never cost a `detected` or an `explained`
   message anything.** At most the value of `--notify-max-per-hour` of them start in any 60 minutes,
   counted apart from the `detected` ones, which never include them; no new flag. Over it a
-  `remediation` message is not sent, counted in `kausa_notifications_total{outcome="capped"}` and
-  logged as `remediation capped` at most once an hour. In the notification queue of 16 entries
-  (`QUEUE_LIMIT`, `src/notify.rs:37`), a `remediation` message ranks below both others: when the
-  queue is full, the oldest queued `remediation` is dropped first; with none queued, a new
-  `remediation` is dropped itself; only then does the existing rule apply (the oldest `detected`,
-  else a new `detected`, else the oldest `explained`, `src/notify.rs:478-494`). So a `remediation`
-  never evicts a `detected` or an `explained` message, and either one evicts a queued
-  `remediation`. A dropped `remediation` is counted in
-  `kausa_notifications_total{outcome="dropped"}` and logged as `remediation dropped` at most once an hour. **Neither owes the `capped` message:**
-  its fixed text speaks of incidents not posted and of kausa's log having every one
-  (`src/notification.rs:170-175`), and a `remediation` is a notice about kurita, not an incident,
-  so it would mislead; the code's queue does not force it, since only its own drops call
-  `owe()`. At the default of 30, the webhook then carries in any 60 minutes at most 30 `detected`
+  `remediation` message is not sent, counted and logged as `remediation capped` at most once an
+  hour. At the default of 30, the webhook then carries in any 60 minutes at most 30 `detected`
   messages, 30 `remediation` messages and 1 `capped` message, plus the `explained` messages, which
   the call budget bounds (`--max-calls-per-hour`, 30 by default).
+- **Their own counter.** `kausa_notifications_total` never counts a `remediation` message, in any
+  outcome, so its `capped` and `dropped` keep meaning `detected` and `explained` messages
+  ([Alerts](../reference/alerts.md)), and a writer of Remediations cannot inflate them. This ADR
+  proposes `kausa_remediation_notifications_total{outcome}`, with the outcomes `sent`, `failed`,
+  `dropped` and `capped` of the existing counter; the reference page fixes the name with the code.
+  `kausa_notifications_retried_total` does not count them either: a `remediation` message's
+  second attempt is not counted apart, only its final outcome.
+- **Last in the queue, on the way in.** In the notification queue of 16 entries (`QUEUE_LIMIT`,
+  `src/notify.rs:37`), when the queue is full, the oldest queued `remediation` is dropped first;
+  with none queued, a new `remediation` is dropped itself; only then does the existing rule apply
+  (the oldest `detected`, else a new `detected`, else the oldest `explained`,
+  `src/notify.rs:478-494`). So a `remediation` never evicts a `detected` or an `explained`
+  message, and either one evicts a queued `remediation`. A dropped `remediation` is counted and
+  logged as `remediation dropped` at most once an hour.
+- **Last in the queue, on the way out.** Today `take_next` takes messages in arrival order
+  (`pop_front`, `src/notify.rs:524-557`), after the owed `capped` message when it is due. With the
+  report it takes, after that `capped` message, the oldest queued message that is not a
+  `remediation`, and the oldest `remediation` only when no `detected` and no `explained` message is
+  queued. So a `detected` or an `explained` message waits for a `remediation` only when one is
+  already being sent as it arrives: one send, bounded by one attempt of at most 10 seconds
+  (`TIMEOUT`, `src/notify.rs:57`), the wait of 30 seconds before the one retry (`RETRY_WAIT`,
+  `src/notify.rs:70`, which is `explain::RETRY_DELAY`, `src/explain.rs:107`) and a second attempt
+  of at most 10 seconds: 10 + 30 + 10 = 50 seconds at most, and 1 second (3 with Telegram) when the
+  receiver answers at once. The cost falls on the `remediation` messages, and is intended: they
+  wait behind every `detected` and `explained` message, and under sustained load they go out late
+  or are dropped by the rule above. What kurita proposed stays in its Remediation and in kurita's
+  own Event either way.
+- **Neither a dropped nor a capped `remediation` owes the `capped` message:** its fixed text speaks
+  of incidents not posted and of kausa's log having every one (`src/notification.rs:170-175`), and
+  a `remediation` is a notice about kurita, not an incident, so it would mislead; the code's queue
+  does not force it, since only its own drops call `owe()`.
+- **The `sent` check of `detected` messages does not apply to them.** `enqueue` and `take_next`
+  drop a message with no `explanation` whose fingerprint `sent.holds` (`src/notify.rs:474`, `:539`),
+  and an incident's `detected` message has nearly always been sent by the time kurita proposes,
+  so a `remediation` queued as such an item would be dropped silently. A `remediation` message is
+  its own kind of item, and only point 6's `duplicate` check applies to it. A test shows it: a
+  `remediation` message for a fingerprint whose `detected` message was sent is sent.
 
-**The message**, `type: remediation` within `v2` (0027's `Update 2026-11-24`: a value of `type`
-may be added within `v2`, and a receiver must ignore a message whose `type` it does not know):
+**The message**, `type: remediation` within `v2` (0027's acceptance `Update`, its item "Within
+`v2` a value of `type` may be added": a receiver must ignore a message whose `type` it does not
+know):
 
 ```json
 {
@@ -512,7 +552,9 @@ fingerprints as it likes, and:
 
 What that achieves: Incidents in N with those objects, each spending kurita's budget for its
 namespace and fingerprint and the table of point 1, so that 500 of them in 6 hours stop new
-Incidents in every namespace for up to 6 hours; and, for the outcomes kurita gives without a live
+Incidents in every namespace, for 6 hours after the last of them and for as long as the writer
+goes on: one Event with a new fingerprint every 6 × 3,600 / 500 = 43.2 seconds holds the stop
+(point 4); and, for the outcomes kurita gives without a live
 read that confirms the failure, a sent `remediation` message "kurita proposed needs-human" about an
 object the writer chose in N. Those outcomes are `needs-human{unconfirmable}` (kurita's ADR 0006,
 its point 5, and its ADR 0008, point 6): `D006` when no container with a readiness probe is
@@ -590,8 +632,11 @@ bar 2, 3 or 6 measures it.
   Remediations, within the trust statement, could make kausa restart at each relist. The Events
   watch has the same exposure today, to anyone who can create Events, and so do the Pod and
   Deployment watches to their writers (`src/run.rs:638-647`; [List pages](../research/2026-11-02-list-pages.md),
-  its "Limits"); this watch adds writers of Remediations to them. "Not verified" lists the
-  measurement.
+  its "Limits"); this watch adds writers of Remediations to them. The page stays 50. Pages of 2,
+  as 0014's sweep reads, would bound this watch's page to 2 × 12 MiB = 24 MiB at about 500 / 2 =
+  250 list requests per relist of 500 records, but would remove nothing: whoever can write
+  Remediations, within the trust statement, can also create Events, and the Events watch's pages
+  stay 50. "Not verified" lists the measurement.
 - **Write latency, for reference:** 7.7 to 21 ms a write, **computed** from Event totals, not
   measured for these resources: 1024 `Detected` Events took 7,906 to 21,487 ms in all on three
   Raspberry Pi 4 Model B (0027's research note), and 7,906 / 1024 = 7.7 ms and 21,487 / 1024 =
@@ -639,7 +684,12 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   request. Computed: listing 1,000 objects in pages of 2 is 500 list requests, and 500 deletes at
   7.7 to 21 ms each take 500 × 7.7 = 3,850 ms to 500 × 21 = 10,500 ms, which leaves 30 − 10.5 =
   19.5 s to 30 − 3.85 = 26.15 s for the 500 lists, 39 to 52 ms each, a list latency not measured
-  anywhere here. Test: bars 5 and 8.
+  anywhere here. Test: bars 5 and 8. A sweep that stops at its deadline still deletes as it
+  goes: past the first 500 objects it has listed, each one more pushes the oldest it holds out of
+  its heap, and that one is deleted at once (`src/history/pure.rs:480-519`, as 0014's). So a
+  sweep that lists k objects deletes k − 500 by the cap, and the count still comes down over the
+  hourly sweeps if each lists more than 500 + 84 = 584, since one process creates at most
+  500 / 6 = 83.3 Incidents an hour on average over 6 hours (point 1); not measured either.
 - **That a `/status` write cannot change `metadata` or `spec`, and that root CEL rules run on
   `/status` writes:** checked in the source only. Test both in kind before the outcome check
   relies on them.
@@ -666,9 +716,9 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   not reported.
 - **The bounds are not fair:** whoever makes kausa create 500 Incidents in 6 hours, one tenant's
   volume or a writer of Events, stops new Incidents in every namespace until the oldest is 6 hours
-  old, and a writer of Incidents can make the sweep delete other namespaces' Incidents before
-  kurita decides them; both move kurita towards not proposing, and kausa's own Events and
-  `detected` messages are unaffected.
+  old, and for as long as it keeps up one create every 43.2 seconds; and a writer of Incidents
+  can make the sweep delete other namespaces' Incidents before kurita decides them; both move
+  kurita towards not proposing, and kausa's own Events and `detected` messages are unaffected.
 - **A second Incident per fingerprint is possible** inside `--dedup-hours` when it is over 6 and
   the table had to drop the entry, as after a restart; kurita's budget per fingerprint absorbs
   it.
@@ -678,7 +728,12 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   (`incidents.enabled`, `incidents.days`, `incidents.installCRD`,
   `incidents.readers.aggregate`, `incidents.reportRemediations`), [Data sent in
   notifications](../reference/data-sent-in-notifications.md), [Command line](../reference/command-line.md)
-  (the flags, log lines and metrics), [Alerts](../reference/alerts.md),
+  (the flags, log lines and metrics, `kausa_remediation_notifications_total` among them, and the
+  meaning of `kausa_notifications_total`, which counts no `remediation` message),
+  [Alerts](../reference/alerts.md) and [Detection and redaction rules](../reference/rules.md) (what
+  `kausa_notifications_total{outcome="capped"}` and `{outcome="dropped"}` count),
+  [Send notifications to Slack, Telegram or a webhook](../how-to/send-notifications.md) (the
+  `remediation` message, its bound, its counter and its place in the queue),
   [ARCHITECTURE.md](../../ARCHITECTURE.md) (invariants 2, 5, 11 and 12), the design principle of
   [README.md](../../README.md), the [Security policy](../../SECURITY.md),
   [Architecture](../explanation/architecture.md) (its read-only principle),

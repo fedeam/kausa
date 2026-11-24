@@ -256,7 +256,8 @@ on, when kurita records a proposal for it. Its action id and time come from kuri
 after kausa's checks; its detection, object and fingerprint from kausa's own memory. It shares the
 receiver, the formats and the delivery rules decided here, but not the bound: at most the value of
 `--notify-max-per-hour` of `remediation` messages start in any 60 minutes, counted apart from the
-`detected` ones; in the queue a `remediation` never evicts another message, and a `remediation`
-dropped or over its bound owes no `capped` message. This
-takes effect only when 0028 is accepted, which needs its bars measured and kurita's ADR 0008
-accepted; until then the text above holds.
+`detected` ones; in the queue a `remediation` never evicts another message and is taken only when
+no other message is queued; `kausa_notifications_total` never counts one, which has a counter of
+its own; and a `remediation` dropped or over its bound owes no `capped` message. This takes effect
+only when 0028 is accepted, which needs its bars measured and kurita's ADR 0008 accepted; until
+then the text above holds.

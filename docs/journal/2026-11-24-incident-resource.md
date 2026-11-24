@@ -21,7 +21,10 @@ kurita's `main` as `proposed`.
   an hourly bound of their own, so they never cost a `detected` or an `explained` message; the
   table of created Incidents never drops an entry younger than 6 hours, and kausa creates no
   Incident while 500 such entries exist; the trust statement gained whoever can create Events;
-  the Incident's `spec` is required, so that its immutability rule always runs.
+  the Incident's `spec` is required, so that its immutability rule always runs. A second
+  security round made `remediation` messages leave the queue only when no other message waits,
+  gave them a counter of their own, and stated how long one forged Event every 43.2 seconds keeps
+  new Incidents stopped.
 - Nothing is implemented, and nothing in it is measured.
 
 ## Decisions
