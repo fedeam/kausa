@@ -415,7 +415,7 @@ With `incidents.reportRemediations` (off by default; it needs incidents and noti
   message, and either one evicts a queued `remediation`. A dropped `remediation` is counted and
   logged as `remediation dropped` at most once an hour.
 - **Last in the queue, on the way out.** Today `take_next` takes messages in arrival order
-  (`pop_front`, `src/notify.rs:524-557`), after the owed `capped` message when it is due. With the
+  (`pop_front`, `src/notify.rs:524-559`), after the owed `capped` message when it is due. With the
   report it takes, after that `capped` message, the oldest queued message that is not a
   `remediation`, and the oldest `remediation` only when no `detected` and no `explained` message is
   queued. So a `detected` or an `explained` message waits for a `remediation` only when one is
