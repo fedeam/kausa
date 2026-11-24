@@ -502,3 +502,13 @@ measures, about 320 bytes with them on, and a table of the Incidents kausa creat
 entries, none dropped before it is 6 hours old, is a new bounded structure; the bar of 2 MiB for a
 full fact queue does not change. This takes effect only when 0028 is accepted, which needs its bars
 measured and kurita's ADR 0008 accepted; until then the text above holds.
+
+Update 2026-11-24: [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a proposed action was observed, never that the incident was resolved, off by default](0029-incident-end-report.md) is proposed, not accepted. It would amend point 5 and the acceptance
+item on `capped`. Point 5: the webhook gains the `closed` and `outcome` values of `type`, within
+`v2`, with one hourly bound for the two that the `detected` count never includes; in the queue they
+rank with `remediation`, taken only when no `detected` and no `explained` message is queued; the
+`sent` check of `detected` messages does not apply to them. The `capped` message stays owed only for
+incidents: an end message dropped or over its bound owes none, and `kausa_notifications_total` never
+counts one. The tracker gains no field: a closing is read from the key it drops and the `first_seen`
+and `last_signal_at` its entry already holds. This takes effect only when 0029 is accepted, which
+needs its bars measured and 0028 accepted; until then the text above holds.

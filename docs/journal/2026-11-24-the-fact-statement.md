@@ -90,7 +90,9 @@ three bars hold, and implement its points 1 to 8 from the prototype, with tests 
 Write the ADR that records kausa's half of the contract with kurita, a controller that proposes
 remediations for kausa's incidents: an `Incident` resource that only kausa writes, and the report
 by webhook of what kurita proposed. Docs only; kurita's ADR 0008, its other half, was already on
-kurita's `main` as `proposed`.
+kurita's `main` as `proposed`. Then write the ADR that says how kausa reports the end of an
+incident, which the maintainer asked for: kausa detects and reports, kurita proposes, and kausa says
+whether it was resolved, which kausa cannot know.
 
 ### What was done
 
@@ -110,6 +112,15 @@ kurita's `main` as `proposed`.
   security round made `remediation` messages leave the queue only when no other message waits,
   gave them a counter of their own, and stated how long one forged Event every 43.2 seconds keeps
   new Incidents stopped.
+- [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a
+  proposed action was observed, never that the incident was resolved, off by
+  default](../adr/0029-incident-end-report.md), `proposed`, on top of 0028. It records the design a
+  review chose from two proposals: a `closed` message when the tracker drops an incident kausa
+  created an Incident for (never for `D008`), and an `outcome` message saying whether the typed
+  change of an accepted `rollout-undo`, `raise-memory-limit` or `set-image-pull-policy` was seen on
+  every non-terminal Pod of the owner within a window, 60 minutes by default. Both by webhook and
+  log, off by default; `Incident.status` stays declared, empty and reserved, and no permission
+  changes. `Update 2026-11-24` paragraphs at the end of 0015, 0026, 0027 and 0028.
 - While 0029 was reviewed, its author found that 0028 never said how the tick that emits an Incident
   reads the sample's ReplicaSet revision: the tick makes no request, a Pod's owner is resolved once,
   and its owner-cache entry is gone after 10 minutes, so for most long-running workloads the
@@ -126,7 +137,7 @@ kurita's `main` as `proposed`.
   says kausa never sends a create the schema would refuse, and that the owner lookup never looks up
   nor keeps a name that is not a DNS-1123 subdomain of at most 253 characters, which at `4b85369` it
   sends unencoded in a URL.
-- Nothing is implemented, and nothing in it is measured.
+- Nothing is implemented, and nothing in them is measured.
 
 ### Decisions
 
@@ -163,6 +174,9 @@ kurita's `main` as `proposed`.
   the namespace, never the value: one refusal of the schema an hour, which a writer in N can cause,
   would otherwise hide the stop of the table, which holds Incidents back in every namespace. The
   manager's decision, taken from the security reader's ninth review.
+- Proposed only: [0029](../adr/0029-incident-end-report.md), after 0028. A write of the end to
+  `Incident.status` was rejected: on a `/status` patch the API server ignores the UID, and a
+  `status: null` patch skips rules on `status`.
 
 ### Next
 
@@ -174,3 +188,4 @@ kurita's `main` as `proposed`.
   implementation.
 - Measure bars 1 to 8, and settle what "Not verified" lists, first whether a metadata `get` of a
   ReplicaSet returns its annotations.
+- Implement 0029 after 0028, behind `incidents.reportEnd`, and measure its bars 1 to 11.

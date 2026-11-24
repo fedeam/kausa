@@ -1095,3 +1095,18 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   chart's `values.yaml`, `templates/_helpers.tpl`, `templates/incident-crd.yaml`,
   `templates/incident-reader.yaml` and `files/incident-schema.json`; and the kind test,
   `tests/e2e/run.sh`.
+
+Update 2026-11-24: [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a proposed action was observed, never that the incident was resolved, off by default](0029-incident-end-report.md) is proposed, not accepted.
+It would amend four points of this ADR, all with `incidents.reportEnd` on. Point 1: each entry of
+the table of created Incidents gains 32 bytes (the term that created it, the accepted action and its
+time, a keyed hash of the container's name, the closing and outcome marks and a pointer to a pending
+check of at most 80 bytes), within bar 3's 0.5 MiB, which is not raised; the gate, the 6-hour rule
+and the name do not change; and the `status` subresource stays declared and empty, no longer the
+place of the outcome check. Point 4: the outcome check does not raise the default of
+`incidents.days`, since it reads no Incident. Point 5: `incidents/status` keeps no verb. Point 9:
+the later ADR it names is 0029, which reports the end of an incident by webhook and log and neither
+writes `Incident.status` nor moves `incidents.days`; the slot stays reserved. The checks of point 6
+do not change; the `closed` and `outcome` messages rank with `remediation` in the queue and have a
+bound and a counter of their own. "Not verified" no longer needs the two `/status` tests before an
+outcome check. This takes effect only when 0029 is accepted, which needs its bars measured and 0028
+accepted; until then the text above holds.

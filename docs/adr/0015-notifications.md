@@ -261,3 +261,17 @@ no other message is queued; `kausa_notifications_total` never counts one, which 
 its own; and a `remediation` dropped or over its bound owes no `capped` message. This takes effect
 only when 0028 is accepted, which needs its bars measured and kurita's ADR 0008 accepted; until
 then the text above holds.
+
+Update 2026-11-24: [0029. Report when kausa stopped seeing an incident's failure, and whether the change of a proposed action was observed, never that the incident was resolved, off by default](0029-incident-end-report.md) is proposed, not accepted. It would add two more kinds of message to the
+webhook, within the `v2` of [0027](0027-fact-statement-for-the-detections.md), with
+`incidents.reportEnd` on: `type: closed`, at most once per Incident kausa created, when kausa stops
+counting its detection's signal, and `type: outcome`, at most once per Incident whose accepted
+Remediation names an action that changes a workload, saying whether that change was seen on every
+non-terminal Pod of the owner within a window. Every field comes from kausa's own memory and its own
+watches, except the action id and time that 0028 already lets out. They share the receiver, the
+formats and the delivery rules decided here, but not the bound: at most the value of
+`--notify-max-per-hour` of the two together start in any 60 minutes, counted apart from the
+`detected` and the `remediation` messages; in the queue they rank with `remediation`;
+`kausa_notifications_total` never counts one; and they owe no `capped` message. This takes effect
+only when 0029 is accepted, which needs its bars measured and 0028 accepted; until then the text
+above holds.
