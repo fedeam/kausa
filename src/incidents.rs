@@ -1189,6 +1189,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_sweep_deletes_by_age_after_the_incident_days_not_after_one_day() {
+        // With `--incident-days 3`: two days old is kept, four days old is deleted.
+        let objects = vec![listed(0, 2 * DAY), listed(1, 4 * DAY)];
+        let (url, requests) = sweep_server(objects, |_| deleted_answer());
+        let rt = runtime();
+        let settings = Settings {
+            days: 3,
+            ..SETTINGS
+        };
+        let (ended, incidents) = rt.block_on(async {
+            let incidents = Incidents::new(client(&url), settings, metrics());
+            let ended = incidents.sweep(&[], &Term::unbounded()).await;
+            (ended.expect("a log"), incidents)
+        });
+        assert_eq!(ended, Ended::Completed);
+        let deleted: Vec<String> = sent(&requests)
+            .into_iter()
+            .filter(|r| r.method == "DELETE")
+            .map(|r| item(&r.path).to_owned())
+            .collect();
+        assert_eq!(deleted, ["incident-0001"]);
+        assert_eq!(
+            (
+                incidents.deleted(Reason::Age),
+                incidents.deleted(Reason::Cap)
+            ),
+            (1, 0)
+        );
+        assert_eq!(incidents.sweep_errors(), 0);
+    }
+
+    #[test]
     fn a_failed_sweep_goes_on_and_sets_the_flag() {
         // A list refused in one namespace ends that namespace only; a delete refused, that
         // delete only.
