@@ -29,10 +29,10 @@ impl Hop {
 }
 
 /// The longest name Kubernetes accepts for the objects kausa looks up (a DNS-1123 subdomain).
-const MAX_NAME_LEN: usize = 253;
+pub(crate) const MAX_NAME_LEN: usize = 253;
 
 /// The longest namespace Kubernetes accepts (a DNS-1123 label).
-const MAX_NAMESPACE_LEN: usize = 63;
+pub(crate) const MAX_NAMESPACE_LEN: usize = 63;
 
 /// What a lookup answers for a name that is not a DNS-1123 subdomain or a namespace that is not a
 /// DNS-1123 label: it is never sent, so the answer is a failed lookup that quotes nothing from the

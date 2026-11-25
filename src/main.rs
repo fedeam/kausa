@@ -18,6 +18,8 @@ mod fact;
 mod fingerprint;
 mod history;
 mod incident;
+#[cfg(test)]
+mod incident_resource;
 mod leader;
 mod log;
 mod metrics;

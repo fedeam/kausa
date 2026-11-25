@@ -153,7 +153,10 @@ version `v1alpha1`, kind `Incident`:
 
 - **Namespaced**, in the namespace of the workload it is about, named
   `kausa.<fingerprint>.<firstSeenUnix>` (the 16 hexadecimal characters of the fingerprint and the
-  incident's first-seen time in Unix seconds), so one name per occurrence.
+  incident's first-seen time in Unix seconds), so one name per occurrence. The seconds have 1 to 10
+  digits, as kurita parses the name, `^kausa\.[0-9a-f]{16}\.[0-9]{1,10}$`: a `firstSeen` before
+  1970-01-01T00:00:00Z, or at or after 2286-11-20T17:46:40Z (10^10 seconds), gets no Incident, a
+  refusal with the reason `schema` (point 2).
 - **Immutable.** It is written by one `create` and never patched. `spec` is required at the root
   of the schema, and a CEL rule `self == oldSelf` on it refuses any change of the `spec`, for every
   writer. The `spec` must be required: a transition rule is not evaluated when there is no old
@@ -249,7 +252,7 @@ spec:                       # required; CEL: self == oldSelf
                                 # failed, answered with another UID than the Pod's
                                 # ownerReference, or found the annotation absent or not a
                                 # whole number in 1..2^53); CEL: only with kind ReplicaSet
-  deployment: {generation: int64 >= 1, revision: int64 >= 1}   # CEL: D014 only
+  deployment: {generation: int64 >= 1, revision: int64 1..2^53}   # CEL: exactly for D014
   regarding:                # an Event incident about something other than a Pod
     kind: Job | ReplicaSet | StatefulSet | DaemonSet | CronJob | PersistentVolumeClaim
           | HorizontalPodAutoscaler
@@ -258,11 +261,11 @@ spec:                       # required; CEL: self == oldSelf
   missing: at most 2 of owner-lookup-failed | revision-lookup-failed, a set
 ```
 
-`Time` is the pattern `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$` with at most 20 characters; `UID`
-a UID pattern of 36 characters; `Name` a DNS-1123 subdomain of at most 253. Every string is an
-enum, or a pattern with a maximum length; a test walks the schema to check it, and another checks
-that the `reason` enum equals the list compiled in `src/fact.rs`. At the longest names the `spec`
-is about 1.5 KB (an estimate; bar 6 measures the stored object).
+`Time` is the pattern `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$` with at most 20
+characters; `UID` a UID pattern of 36 characters; `Name` a DNS-1123 subdomain of at most 253. Every
+string is an enum, or a pattern with a maximum length; a test walks the schema to check it, and
+another checks that the `reason` enum equals the list compiled in `src/fact.rs`. At the longest
+names the `spec` is about 1.5 KB (an estimate; bar 6 measures the stored object).
 
 `facts` holds 0027's point 5 vocabulary but its `revision` (`src/fact.rs:101`), which only `D014`
 has: that revision travels in `deployment.revision`, with the generation, and not twice.
@@ -287,8 +290,9 @@ is never kept and never sent:
   `revision-lookup-failed` when the annotation is absent or not a whole number in 1..2^53 (point 3).
 - **Every other value read from the cluster**, required or optional: `object`'s `apiVersion`,
   `kind`, `name` and `uid`; `sample.controller.uid`; `regarding`'s `kind`, `name` and `uid`;
-  `deployment.revision` of `D014`, which the fact statement parses as any `u64`
-  (`src/fact.rs:135-138`); and `firstSeen`, which also sets the name. An owner's name the lookup
+  `deployment.generation` of `D014`, so a `D014` with no generation is refused, and its
+  `deployment.revision`, which the fact statement parses as any `u64` (`src/fact.rs:135-138`); and
+  `firstSeen`, which also sets the name. An owner's name the lookup
   refused (point 3) is one of these. One that does not fit means no create: the incident's Events,
   its `incident` log line and its `detected` message are not affected; the occurrence is counted and
   logged as a refusal of point 1 with the reason `schema`
