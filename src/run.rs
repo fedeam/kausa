@@ -1438,6 +1438,10 @@ fn log_incident(incident: &Incident, pods_total: usize, statement: &str) -> io::
 /// leaves the ReplicaSet or Job as a stand-in, retried on the Pod's next update).
 type PodEntry = (PodRecord, OwnerRef, bool);
 
+/// An Event's record, the top-level owner of the object it is about when that is not a Pod, and
+/// whether that owner's lookup failed.
+type EventEntry = (EventRecord, Option<OwnerRef>, bool);
+
 /// The records kausa keeps, keyed by UID.
 #[derive(Default)]
 struct State {
@@ -1446,7 +1450,7 @@ struct State {
     /// event is about when that is not a Pod (the Job's for `D008`, the controller's for `D011`,
     /// the claim or the autoscaler itself for `D012` and `D013`), and whether that owner's lookup
     /// failed.
-    events: HashMap<String, (EventRecord, Option<OwnerRef>, bool)>,
+    events: HashMap<String, EventEntry>,
     /// The UIDs seen during the open relist of each watch, to drop the ones that disappeared
     /// from that watch.
     pod_relist: HashMap<WatchKey, HashSet<String>>,
@@ -3749,6 +3753,10 @@ mod tests {
         let today = std::mem::size_of::<(Result<Option<OwnerRef>, String>, Instant)>();
         assert_eq!(std::mem::size_of::<CachedLookup>(), today + 8);
         assert_eq!(std::mem::size_of::<ReplicaSetRead>(), 24);
+        // The table of Events: the flag of a failed lookup takes an entry from 368 to 376 bytes,
+        // with incidents off too.
+        let today = std::mem::size_of::<(EventRecord, Option<OwnerRef>)>();
+        assert_eq!((today, std::mem::size_of::<EventEntry>()), (368, 376));
     }
 
     #[test]
