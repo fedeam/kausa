@@ -583,6 +583,14 @@ impl Hourly {
     }
 }
 
+/// Whether [`Outbox::enqueue_low`] queued its message or dropped it on arrival.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LowEnqueued {
+    Queued,
+    Dropped,
+}
+
 /// The webhook and what its messages share across terms: the queue (emptied when a term ends),
 /// the table of `detected` messages sent and the cap, which live as long as the process.
 pub struct Outbox<'a> {
@@ -875,13 +883,15 @@ impl Outbox<'_> {
 
     /// Queues `item` of a lower class at `now`. When the queue is full, the oldest queued message
     /// of the lowest class goes, if it ranks no higher than `item`; with none, `item` is dropped
-    /// itself. It never evicts a `detected` or an `explained` message.
-    pub fn enqueue_low(&self, item: Low, now: Instant) -> io::Result<()> {
+    /// itself. It never evicts a `detected` or an `explained` message. Says which of the two
+    /// became of `item`: only a queued message marks its Incident as reported.
+    pub fn enqueue_low(&self, item: Low, now: Instant) -> io::Result<LowEnqueued> {
         if self.evict_low(Some(item.class()), now)? {
             self.lower.borrow_mut().queue.push_back(item);
-            return Ok(());
+            return Ok(LowEnqueued::Queued);
         }
-        Self::dropped(&mut self.lower.borrow_mut(), &item, now)
+        Self::dropped(&mut self.lower.borrow_mut(), &item, now)?;
+        Ok(LowEnqueued::Dropped)
     }
 
     /// The next message of a lower class to send, only when no `detected` or `explained` message
@@ -2946,6 +2956,47 @@ mod tests {
         assert_eq!(
             low(&outbox),
             [(LowClass::Remediation, LowOutcome::Capped, 2)]
+        );
+    }
+
+    #[test]
+    fn enqueue_low_says_whether_it_queued_or_dropped_the_message() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        let now = Instant::now();
+        assert_eq!(
+            outbox
+                .enqueue_low(remediation_for("fp-r"), now)
+                .expect("the log"),
+            LowEnqueued::Queued
+        );
+        assert_eq!(outbox.low_queue(), [remediation_for("fp-r")]);
+        // A remediation that evicts an older one is queued itself.
+        for i in 1..QUEUE_LIMIT {
+            outbox
+                .enqueue(detected_for(&format!("fp-{i}")))
+                .expect("the log");
+        }
+        assert_eq!(
+            outbox
+                .enqueue_low(remediation_for("fp-newer"), now)
+                .expect("the log"),
+            LowEnqueued::Queued
+        );
+        assert_eq!(outbox.low_queue(), [remediation_for("fp-newer")]);
+        // With no remediation to evict, the new one is dropped on arrival.
+        outbox.enqueue(detected_for("fp-last")).expect("the log");
+        assert!(outbox.low_queue().is_empty());
+        assert_eq!(
+            outbox
+                .enqueue_low(remediation_for("fp-late"), now)
+                .expect("the log"),
+            LowEnqueued::Dropped
+        );
+        assert!(outbox.low_queue().is_empty());
+        assert_eq!(
+            low(&outbox),
+            [(LowClass::Remediation, LowOutcome::Dropped, 3)]
         );
     }
 
