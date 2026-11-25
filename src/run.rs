@@ -6766,6 +6766,34 @@ mod tests {
         assert_eq!(gauge(&text, LAST_SUCCESS), Some(0), "{text}");
     }
 
+    /// The options of `kausa run` with no flag: no model and no dry run, the `Detected` Events,
+    /// the Deployment watch, no webhook, no Lease and no incidents.
+    fn default_options() -> Options {
+        let mut defaults = options(false, 30);
+        defaults.explain = None;
+        defaults.detected = Some("kausa".to_owned());
+        defaults
+    }
+
+    #[test]
+    fn the_start_exposition_with_the_defaults_is_the_golden_file() {
+        // Rendered by the code before incidents could be turned on, and kept byte for byte: a
+        // feature that is off by default shows nothing new (tests/golden/metrics-start.prom).
+        let golden = include_str!("../tests/golden/metrics-start.prom");
+        let metrics = Metrics::default();
+        show_start(&metrics, &default_options(), None, Instant::now());
+        // A fixed version and prompt version, so that a release does not change the file.
+        let version = concat!("version=\"", env!("CARGO_PKG_VERSION"), "\"");
+        let prompt = format!("prompt_version=\"{}\"", prompt::PROMPT_VERSION);
+        let text = metrics
+            .render()
+            .replace(version, "version=\"0.0.0-golden\"")
+            .replace(&prompt, "prompt_version=\"0\"");
+        if text != golden {
+            panic!("the start exposition differs from tests/golden/metrics-start.prom:\n{text}");
+        }
+    }
+
     #[test]
     fn the_gate_that_holds_names_the_wait_and_only_the_budget_waits_for_budget() {
         let until = Instant::now() + Duration::from_secs(60);
