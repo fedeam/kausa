@@ -21,7 +21,7 @@ mod fingerprint;
 #[path = "../../src/incident.rs"]
 mod incident;
 
-#[allow(dead_code)]
+#[allow(dead_code)] // floor-ok: the mod holds more than the fuzz target uses, like its neighbours
 #[path = "../../src/owner.rs"]
 mod owner;
 
