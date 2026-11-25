@@ -9,6 +9,7 @@
 
 use crate::detect::Detection;
 use crate::incident::{Incident, MAX_PODS};
+use crate::owner::is_dns_label;
 
 /// The bound of a statement, in bytes. `LONGEST_STATEMENT_BYTES` is the longest one possible.
 pub const MAX_STATEMENT_BYTES: usize = 512;
@@ -21,9 +22,6 @@ const _: () = assert!(LONGEST_STATEMENT_BYTES < MAX_STATEMENT_BYTES);
 // The fuzz target (fuzz/fuzz_targets/fact.rs) has no events.rs.
 #[cfg(not(fuzzing))]
 const _: () = assert!(MAX_STATEMENT_BYTES <= crate::events::MAX_NOTE_BYTES);
-
-/// The longest container name a statement prints: a DNS label.
-const MAX_LABEL_BYTES: usize = 63;
 
 /// The reasons a statement of `detection` may print: those of docs/reference/rules.md, and `Error`
 /// for a crash loop found by its restart count. Any other value is left out and counted.
@@ -69,18 +67,6 @@ fn reasons(detection: Detection) -> &'static [&'static str] {
     }
 }
 
-/// Whether `name` is a DNS label as Kubernetes defines one: 1 to 63 bytes of lowercase letters,
-/// digits and `-`, starting and ending with a letter or a digit.
-fn is_dns_label(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    let alphanumeric = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    !bytes.is_empty()
-        && bytes.len() <= MAX_LABEL_BYTES
-        && bytes.iter().all(|b| alphanumeric(b) || *b == b'-')
-        && bytes.first().is_some_and(alphanumeric)
-        && bytes.last().is_some_and(alphanumeric)
-}
-
 /// The values a statement is rendered from: only what its allowlist let through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Facts {
@@ -95,7 +81,8 @@ pub struct Facts {
     /// Whether `pods_seen` is a lower bound: the set holds `MAX_PODS` names or more, and the first
     /// `MAX_PODS` seen while the incident was pending are a cap.
     pub pods_seen_is_minimum: bool,
-    /// The Pods kausa holds with the incident's owner (`pods_total` of the `incident` line).
+    /// The Pods kausa holds with the incident's owner, in its namespace (`pods_total` of the
+    /// `incident` line).
     pub pods_now: usize,
     /// For `D014`, the revision of the Deployment's `revision <n>`.
     pub revision: Option<u64>,
@@ -111,7 +98,8 @@ pub struct Statement {
     pub reason_omitted: bool,
 }
 
-/// The fact statement of `incident`, with `pods_total` Pods held for its owner.
+/// The fact statement of `incident`, with `pods_total` Pods held for its owner in the incident's
+/// namespace.
 pub fn statement(incident: &Incident, pods_total: usize) -> Statement {
     let detection = incident.key.detection;
     let sample = &incident.sample;
@@ -454,7 +442,7 @@ mod tests {
     fn longest(detection: Detection, reason: &'static str) -> Facts {
         Facts {
             detection,
-            container: Some("a".repeat(MAX_LABEL_BYTES)),
+            container: Some("a".repeat(63)),
             reason: Some(reason),
             exit_code: Some(i32::MIN),
             pods_seen: usize::MAX,

@@ -71,8 +71,24 @@ the request to the model provider; the only change in that request is `D013`'s n
   Hub page, the crate and the image) now puts the facts first and the model's explanation as
   optional (0026).
 
+### Fixed
+
+- `Pods now` counts only the Pods of the incident's namespace. A Pod of another namespace that named
+  the owner's UID in a controller reference kausa does not follow (a StatefulSet's, say) was
+  counted, so the count was too high in the fact statement, the request to the model
+  (`pods_total`), the `incident` log line, the `Detected` Event and the webhook.
+
 ### Security
 
+- The owner lookup sends no `get` for a name that is not a DNS-1123 subdomain of at most 253
+  characters, or a namespace that is not a DNS-1123 label of at most 63. The name comes from an
+  `ownerReference` or an Event's `regarding`, which any writer of those objects chooses; kausa
+  already drops an Event whose `regarding.namespace` is not the Event's own, and the namespace
+  check makes the lookup hold the rule itself, whoever calls it. Both were kept as a cache key and
+  put in the URL path unencoded. Such a name or namespace is never looked up and never cached: the
+  lookup fails as any failed one does, so the incident names the `ownerReference` or the Event's
+  object as given, and the `owner lookup failed` line, whose name and namespace are now cut at 253
+  characters, says why.
 - The Slack and Telegram texts replace each control character and each line or paragraph
   separator in the owner's kind and name with U+FFFD. An ownerReference or an Event's `regarding`
   with a line break in them could forge lines of the text, such as `Facts:` or the mark; the

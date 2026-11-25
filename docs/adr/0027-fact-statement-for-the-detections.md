@@ -523,3 +523,11 @@ its entry already holds; and `observe` stops lowering an entry's `first_seen` on
 emitted, which changes nothing this ADR emits, since only an entry not yet emitted is emitted. This
 takes effect only when 0029 is accepted, which needs its bars measured and 0028 accepted, or, for
 the correction of point 1, when the change that ships it is merged; until then the text above holds.
+
+Update 2026-11-24: the correction of point 1's `Pods now` shipped ahead of 0029, in its own
+change, with every switch off: `Pods now` counts only the Pods of the incident's namespace, in the
+fact statement, the request to the model, the `incident` log line, the `Detected` Event and the
+webhook. In the same release the owner lookup refuses a name that is not a DNS-1123 subdomain, and
+a namespace that is not a DNS-1123 label, with every switch off (0028's point 3): it sends no
+`get` for it, and an incident whose owner has such a name names the `ownerReference` or the
+Event's object as given.

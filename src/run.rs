@@ -63,7 +63,9 @@ use crate::leader::{self, KubeLease, LEASE_ERROR_PERIOD, LeaseApi, LeaseErrors, 
 use crate::log;
 use crate::metrics::{self, Metrics};
 use crate::notify::{Notifier, Outbox};
-use crate::owner::{Hop, OwnerLookup, top_owner};
+use crate::owner::{
+    Hop, OwnerLookup, REFUSED, bounded_name, is_dns_label, is_dns_subdomain, top_owner,
+};
 use crate::prompt;
 use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
 use crate::report::{self, Fact, Reporter};
@@ -1205,7 +1207,7 @@ async fn lead<C: Cluster>(
                 }
                 for incident in state.tick(&mut tracker, now) {
                     metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
-                    let pods_total = state.pods_of(&incident.owner);
+                    let pods_total = state.pods_of(&incident.key.namespace, &incident.owner);
                     let statement = fact::statement(&incident, pods_total);
                     if statement.reason_omitted {
                         metrics.inc("kausa_fact_reasons_omitted_total", &[]);
@@ -1365,6 +1367,20 @@ fn show_budget(metrics: &Metrics, budget: &Budget, now: Instant) {
     let name = "kausa_budget_calls_remaining";
     metrics.set_gauge(name, &[("window", "hour")], hour);
     metrics.set_gauge(name, &[("window", "day")], day);
+}
+
+/// The fields of the `owner lookup failed` line of an event about `object`: the namespace and the
+/// name come from an Event's `regarding`, unbounded, so each is cut at 253 characters.
+fn owner_lookup_failed_fields(
+    namespace: &str,
+    object: &OwnerRef,
+    error: &str,
+) -> serde_json::Value {
+    json!({
+        "namespace": bounded_name(namespace),
+        object.kind.to_ascii_lowercase(): bounded_name(&object.name),
+        "error": error,
+    })
 }
 
 fn log_incident(incident: &Incident, pods_total: usize, statement: &str) -> io::Result<()> {
@@ -1541,10 +1557,9 @@ impl State {
                     let (owner, error) =
                         top_owner(lookup, &namespace, Some(&object), &object).await;
                     if let Some(error) = error {
-                        let field = object.kind.to_ascii_lowercase();
                         log::warn(
                             "owner lookup failed",
-                            json!({"namespace": namespace, field: object.name, "error": error}),
+                            owner_lookup_failed_fields(&namespace, &object, &error),
                         )?;
                     }
                     Some(owner)
@@ -1689,7 +1704,7 @@ impl State {
             .flatten();
         Work {
             gathered: Gathered {
-                pods_total: self.pods_of(&incident.owner),
+                pods_total: self.pods_of(&incident.key.namespace, &incident.owner),
                 incident,
                 pods,
                 events,
@@ -1741,10 +1756,13 @@ impl State {
         })
     }
 
-    fn pods_of(&self, owner: &OwnerRef) -> usize {
+    /// The Pods kausa holds in the incident's `namespace` whose top-level owner has `owner`'s UID.
+    /// A controller reference kausa does not follow is kept as the Pod carries it, UID included
+    /// (`owner.rs`), so the UID alone would count a Pod of another namespace that names it.
+    fn pods_of(&self, namespace: &str, owner: &OwnerRef) -> usize {
         self.pods
             .values()
-            .filter(|(_, o, _)| o.uid == owner.uid)
+            .filter(|(record, o, _)| record.namespace == namespace && o.uid == owner.uid)
             .count()
     }
 }
@@ -1912,6 +1930,13 @@ impl OwnerLookup for KubeLookup {
         namespace: &str,
         name: &str,
     ) -> Result<Option<OwnerRef>, String> {
+        // The name comes from an `ownerReference` or an Event's `regarding`, unbounded, and the
+        // namespace from an Event's `regarding` (a Pod's is its own): both go into the URL path.
+        // No request, and no cache entry, for a name that is not a DNS-1123 subdomain or a
+        // namespace that is not a DNS-1123 label, whoever calls.
+        if !is_dns_subdomain(name) || !is_dns_label(namespace) {
+            return Err(REFUSED.to_owned());
+        }
         let fresh = |answer: &Result<Option<OwnerRef>, String>, at: &Instant| {
             let ttl = if answer.is_ok() {
                 OWNER_CACHE_TTL
@@ -3182,6 +3207,223 @@ mod tests {
         assert_eq!(incident.owner.uid, "uid-orphan-5d4c3b2a1");
     }
 
+    /// A `KubeLookup` whose client points at a local listener that counts the connections it gets:
+    /// a request would show as one.
+    struct Spy {
+        accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        lookup: KubeLookup,
+        runtime: tokio::runtime::Runtime,
+    }
+
+    impl Spy {
+        fn new() -> Spy {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
+            let addr = listener.local_addr().expect("an address");
+            let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = accepted.clone();
+            // Accept each connection and close it at once, so a request fails fast.
+            std::thread::spawn(move || {
+                // Count before the stream is closed: the client sees the connection fail only
+                // after that, so a lookup that sent a request cannot return before it is counted.
+                while let Ok((stream, _)) = listener.accept() {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(stream);
+                }
+            });
+            let url = format!("http://{}", addr);
+            let config = kube::Config::new(url.parse().expect("a URL"));
+            // The client spawns its worker on the runtime it is built in.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let client = {
+                let _guard = runtime.enter();
+                Client::try_from(config).expect("a client")
+            };
+            Spy {
+                accepted,
+                lookup: KubeLookup {
+                    client,
+                    cache: RefCell::new(HashMap::new()),
+                },
+                runtime,
+            }
+        }
+
+        fn run<F: Future>(&self, future: F) -> F::Output {
+            self.runtime.block_on(future)
+        }
+
+        /// The connections counted so far (each is counted, then closed, so a `get` that returned
+        /// had its connection counted). No wait: for a lookup that did send a request.
+        fn connections(&self) -> usize {
+            self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// The connections counted after a short wait, for a test that asserts none arrived. A
+        /// refused lookup returns without awaiting anything, so the wait only gives a stray
+        /// connection a moment to show: it can show a request that was sent, not prove that
+        /// none ever will be (the cache's count and the refusal's constant error are the proof).
+        fn connections_after_a_wait(&self) -> usize {
+            std::thread::sleep(Duration::from_millis(100));
+            self.connections()
+        }
+    }
+
+    #[test]
+    fn the_owner_lookup_failed_line_cuts_the_namespace_and_the_name_it_prints() {
+        let object = OwnerRef {
+            api_version: "apps/v1".into(),
+            kind: "ReplicaSet".into(),
+            name: "n".repeat(300),
+            uid: "uid".into(),
+        };
+        let fields = owner_lookup_failed_fields(&"s".repeat(300), &object, REFUSED);
+        assert_eq!(fields["namespace"], "s".repeat(253));
+        assert_eq!(fields["replicaset"], "n".repeat(253));
+        assert_eq!(fields["error"], REFUSED);
+        // A valid one is printed as it is.
+        let object = OwnerRef {
+            name: "web".into(),
+            ..object
+        };
+        let fields = owner_lookup_failed_fields("shop", &object, "boom");
+        assert_eq!(
+            (&fields["namespace"], &fields["replicaset"]),
+            (&json!("shop"), &json!("web"))
+        );
+    }
+
+    #[test]
+    fn the_owner_lookup_sends_no_request_and_keeps_nothing_for_a_name_that_is_not_a_subdomain() {
+        let spy = Spy::new();
+        let too_long = "a".repeat(254);
+        for name in ["a/b", "../x", "a?x=1", "Web", "", "a\nb", too_long.as_str()] {
+            for hop in [Hop::ReplicaSet, Hop::Job] {
+                let answer = spy.run(spy.lookup.controller_of(hop, "shop", name));
+                assert_eq!(answer, Err(REFUSED.to_owned()), "{name:?}");
+            }
+        }
+        // A good name in a bad namespace is refused too.
+        let long_namespace = "a".repeat(64);
+        for namespace in [
+            "a/b",
+            "..",
+            ".",
+            "",
+            "Shop",
+            "a\nb",
+            long_namespace.as_str(),
+        ] {
+            let answer = spy.run(spy.lookup.controller_of(Hop::Job, namespace, "web"));
+            assert_eq!(answer, Err(REFUSED.to_owned()), "{namespace:?}");
+        }
+        assert_eq!(spy.lookup.cached(), 0);
+        assert_eq!(spy.connections_after_a_wait(), 0);
+        // The shortest and the longest valid names are sent, and kept (the failure too).
+        let longest = "a".repeat(253);
+        for name in ["a", longest.as_str()] {
+            let answer = spy.run(spy.lookup.controller_of(Hop::ReplicaSet, "shop", name));
+            assert!(answer.is_err_and(|e| e != REFUSED), "{name:?}");
+        }
+        // The longest namespace too.
+        let answer = spy.run(spy.lookup.controller_of(Hop::Job, &"a".repeat(63), "web"));
+        assert!(answer.is_err_and(|e| e != REFUSED));
+        assert_eq!(spy.lookup.cached(), 3);
+        assert_eq!(spy.connections(), 3);
+    }
+
+    #[test]
+    fn a_pod_whose_owner_has_a_bad_name_is_grouped_under_the_owner_as_given() {
+        let spy = Spy::new();
+        let mut state = State::default();
+        let mut first = pod("shop", "web-1");
+        first.metadata.owner_references = Some(vec![
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "../secrets?x=1",
+                "uid": "uid-rs", "controller": true
+            }))
+            .expect("an owner reference"),
+        ]);
+        spy.run(state.on_pod(&CLUSTER, watcher::Event::Apply(first), &spy.lookup))
+            .expect("the log is written");
+        let (_, owner, resolved) = state.pods.values().next().expect("the Pod is kept");
+        assert_eq!(
+            (owner.kind.as_str(), owner.name.as_str(), *resolved),
+            ("ReplicaSet", "../secrets?x=1", false)
+        );
+        assert_eq!(
+            (spy.lookup.cached(), spy.connections_after_a_wait()),
+            (0, 0)
+        );
+
+        // A Pod's namespace is its own, set by the API server, and nothing in kausa ties it to
+        // a shape; the lookup refuses a bad one all the same.
+        let mut other = pod("a/b", "web-2");
+        other.metadata.owner_references = Some(vec![
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "web-7d9c8b6f4d",
+                "uid": "uid-rs2", "controller": true
+            }))
+            .expect("an owner reference"),
+        ]);
+        spy.run(state.on_pod(&CLUSTER, watcher::Event::Apply(other), &spy.lookup))
+            .expect("the log is written");
+        let (_, owner, resolved) = state
+            .pods
+            .get(&pod_uid("a/b", "web-2"))
+            .expect("the Pod is kept");
+        assert_eq!((owner.name.as_str(), *resolved), ("web-7d9c8b6f4d", false));
+        assert_eq!(
+            (spy.lookup.cached(), spy.connections_after_a_wait()),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn an_event_about_an_object_with_a_bad_name_is_about_the_object_as_given() {
+        let spy = Spy::new();
+        let mut state = State::default();
+        let about = ("apps/v1", "ReplicaSet", "a/b");
+        spy.run(state.on_event(
+            &CLUSTER,
+            watcher::Event::Apply(event_about(about, "FailedCreate")),
+            &spy.lookup,
+        ))
+        .expect("the log is written");
+        let (_, owner) = state.events.values().next().expect("the Event is kept");
+        let owner = owner.as_ref().expect("an owner");
+        assert_eq!(
+            (owner.kind.as_str(), owner.name.as_str()),
+            ("ReplicaSet", "a/b")
+        );
+        assert_eq!(
+            (spy.lookup.cached(), spy.connections_after_a_wait()),
+            (0, 0)
+        );
+
+        // A good name in a bad namespace. `record.rs` keeps an Event only when its own namespace
+        // equals `regarding.namespace`, so both carry it.
+        let mut event = event_about(("apps/v1", "ReplicaSet", "web-7d9c8b6f4d"), "FailedCreate");
+        event.metadata.namespace = Some("a/b".into());
+        event.regarding.as_mut().expect("regarding").namespace = Some("a/b".into());
+        spy.run(state.on_event(&CLUSTER, watcher::Event::Apply(event), &spy.lookup))
+            .expect("the log is written");
+        let owners: Vec<_> = state
+            .events
+            .values()
+            .filter(|(record, _)| record.regarding.namespace == "a/b")
+            .collect();
+        assert_eq!(owners.len(), 1);
+        let owner = owners[0].1.as_ref().expect("an owner");
+        assert_eq!(owner.name, "web-7d9c8b6f4d");
+        assert_eq!(
+            (spy.lookup.cached(), spy.connections_after_a_wait()),
+            (0, 0)
+        );
+    }
+
     // Acceptance tests for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code: the
     // Deployment watch, on unless `--no-rollouts`. `State` keeps a Deployment's record only while
     // `detect_rollout` matches it, by UID; relists and `403`s work per watch as for Pods and
@@ -3579,6 +3821,40 @@ mod tests {
             .expect("an owner reference"),
         ]);
         pod
+    }
+
+    #[test]
+    fn pods_now_counts_only_the_pods_of_the_owners_namespace() {
+        // A controller reference kausa does not follow is kept as the Pod carries it, so a Pod of
+        // another namespace can name the owner's UID.
+        let owned = |namespace: &str, name: &str| {
+            let mut pod = pod(namespace, name);
+            pod.metadata.owner_references = Some(vec![
+                serde_json::from_value(json!({
+                    "apiVersion": "apps/v1", "kind": "StatefulSet", "name": "db",
+                    "uid": "uid-db", "controller": true
+                }))
+                .expect("an owner reference"),
+            ]);
+            pod
+        };
+        let mut state = State::default();
+        for (namespace, name) in [("a", "db-0"), ("a", "db-1"), ("b", "db-0")] {
+            on_pod(
+                &mut state,
+                &CLUSTER,
+                watcher::Event::Apply(owned(namespace, name)),
+            );
+        }
+        let owner = OwnerRef {
+            api_version: "apps/v1".into(),
+            kind: "StatefulSet".into(),
+            name: "db".into(),
+            uid: "uid-db".into(),
+        };
+        assert_eq!(state.pods_of("a", &owner), 2);
+        assert_eq!(state.pods_of("b", &owner), 1);
+        assert_eq!(state.pods_of("c", &owner), 0);
     }
 
     #[test]
