@@ -860,6 +860,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn under_a_closed_term_a_fact_with_no_read_sends_nothing() {
+        let (url, requests) = api_server(|_| created());
+        let lookup = Revisions::of(UID_RS, 7);
+        let rt = runtime();
+        let incidents = rt.block_on(async { started(&url) });
+        create(&rt, &incidents, &stateful_fact(), &lookup, &Term::closed());
+        assert!(sent(&requests).is_empty());
+        assert!(lookup.read.borrow().is_empty());
+        assert_eq!(incidents.write_errors(), 1);
+        assert_eq!(incidents.table().len(), 0);
+    }
+
+    #[test]
+    fn under_a_closed_term_a_fact_with_a_read_reads_nothing() {
+        let (url, requests) = api_server(|_| created());
+        let lookup = Revisions::of(UID_RS, 7);
+        let rt = runtime();
+        let incidents = rt.block_on(async { started(&url) });
+        create(&rt, &incidents, &sample_fact(), &lookup, &Term::closed());
+        assert!(lookup.read.borrow().is_empty(), "the lookup was read");
+        assert!(sent(&requests).is_empty());
+        assert_eq!(incidents.write_errors(), 1);
+    }
+
+    #[test]
     fn an_answer_at_the_cap_is_read() {
         let answer = |size: usize| {
             let mut body = json!({"metadata": {"uid": UID_CREATED}, "padding": ""});

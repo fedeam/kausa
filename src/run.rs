@@ -3725,6 +3725,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_term_that_ends_during_the_replica_set_read_sends_no_create() {
+        use crate::incident_resource::tests::{UID_RS, sample_fact};
+        use crate::incidents::tests::{api_server, client, created, reply, runtime, sent};
+        let (held, hold) = crate::leader::hold::new();
+        let held = std::sync::Mutex::new(Some(held));
+        let (url, requests) = api_server(move |request| match request.method.as_str() {
+            "GET" => {
+                if let Some(held) = held.lock().expect("the hold").take() {
+                    held.wait();
+                }
+                reply(200, replica_set_metadata(Some(UID_RS), Some("7")))
+            }
+            _ => created(),
+        });
+        let on = Options {
+            detected: Some(ME.into()),
+            incidents: Some(INCIDENTS),
+            ..options(false, 10)
+        };
+        let term = Term::unbounded();
+        let write_errors = runtime().block_on(async {
+            let client = client(&url);
+            let incidents = incidents_of(&client, &on).expect("the incidents");
+            incidents.table_mut().start_sweep_ended();
+            let lookup = KubeCluster::new(client, &on).lookup();
+            let fact = sample_fact();
+            let (created, ()) = futures::join!(
+                incidents.create(&fact, &lookup, &term),
+                hold.end(&term)
+            );
+            created.expect("a log");
+            assert_eq!(incidents.table().len(), 0);
+            incidents.write_errors()
+        });
+        let requests = sent(&requests);
+        let methods: Vec<&str> = requests.iter().map(|r| r.method.as_str()).collect();
+        assert_eq!(methods, ["GET"], "{requests:?}");
+        assert_eq!(write_errors, 1);
+    }
+
     /// One term of `lead` with the fact path of `options` and an outbox, over a crashing Pod,
     /// against a fake API server that echoes each Event and never answers a list of Incidents,
     /// until the Pod's `Detected` Event was written and its `detected` message queued: the
