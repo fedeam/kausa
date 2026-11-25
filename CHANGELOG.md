@@ -77,6 +77,12 @@ the request to the model provider; the only change in that request is `D013`'s n
   the owner's UID in a controller reference kausa does not follow (a StatefulSet's, say) was
   counted, so the count was too high in the fact statement, the request to the model
   (`pods_total`), the `incident` log line, the `Detected` Event and the webhook.
+- The owner lookup sends no `get` for a name that is not a DNS-1123 subdomain of at most 253
+  characters. The name comes from an `ownerReference` or an Event's `regarding`, which any writer
+  of those objects chooses, and was kept as a cache key and put in the URL path unencoded. Such a
+  name is never looked up and never cached: the lookup fails as any failed one does, so the
+  incident names the `ownerReference` or the Event's object as given, and the `owner lookup
+  failed` line, whose name is now cut at 253 characters, says why.
 
 ### Security
 

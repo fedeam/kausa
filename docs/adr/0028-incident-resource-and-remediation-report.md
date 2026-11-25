@@ -140,7 +140,7 @@ string in either schema is an enum, or a pattern with a maximum length.
 
 Proposed on 2026-11-24. Both switches are off by default, and with the defaults kausa writes, reads
 and sends what it does today, but for two changes, both from the owner lookup's rule on names of
-point 3, which holds with incidents off too: kausa sends no `get` for a name that is not a DNS-1123
+point 3, which holds with incidents off too (**Update 2026-11-24:** it shipped ahead, in its own change): kausa sends no `get` for a name that is not a DNS-1123
 subdomain of at most 253 characters, so it reads less; and an incident whose owner has such a name,
 which today could resolve to another object, names the `ownerReference` or the Event's object as
 given instead, in its Events, its `incident` log line and its `detected` message.

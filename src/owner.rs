@@ -28,7 +28,40 @@ impl Hop {
     }
 }
 
-/// Reads the controller owner of a ReplicaSet or a Job.
+/// The longest name Kubernetes accepts for the objects kausa looks up (a DNS-1123 subdomain).
+const MAX_NAME_LEN: usize = 253;
+
+/// What a lookup answers for a name that is not a DNS-1123 subdomain: it is never sent, so the
+/// answer is a failed lookup that quotes nothing from the cluster.
+pub(crate) const REFUSED_NAME: &str = "owner name is not a DNS subdomain; not looked up";
+
+/// Whether `name` is a DNS-1123 subdomain as Kubernetes defines one (`IsDNS1123Subdomain`): 1 to
+/// 253 bytes, dot-separated labels of lowercase letters, digits and `-`, each starting and ending
+/// with a letter or a digit. Such a name has no `/`, no `?`, no `..` segment and no control
+/// character, so it is safe in a URL path.
+pub(crate) fn is_dns_subdomain(name: &str) -> bool {
+    name.len() <= MAX_NAME_LEN
+        && name.split('.').all(|label| {
+            let bytes = label.as_bytes();
+            let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+            !bytes.is_empty()
+                && bytes.first().is_some_and(edge)
+                && bytes.last().is_some_and(edge)
+                && bytes.iter().all(|b| edge(b) || *b == b'-')
+        })
+}
+
+/// `name` cut at 253 characters, for a log line: the name of an Event's object is unbounded, and
+/// the log serializer escapes it but does not shorten it. A name that passes `is_dns_subdomain`
+/// is unchanged.
+pub(crate) fn bounded_name(name: &str) -> String {
+    name.chars().take(MAX_NAME_LEN).collect()
+}
+
+/// Reads the controller owner of a ReplicaSet or a Job. The name comes from an `ownerReference`
+/// or an Event's `regarding`, which any writer of those objects chooses; an implementation that
+/// sends it to the API server answers `Err(REFUSED_NAME)`, with no request and no cache entry,
+/// when `is_dns_subdomain` is false for it.
 pub(crate) trait OwnerLookup {
     /// The controller owner reference of `name` in `namespace`, `Ok(None)` when it has none.
     fn controller_of(
@@ -107,6 +140,53 @@ mod tests {
             .build()
             .expect("a runtime")
             .block_on(future)
+    }
+
+    #[test]
+    fn only_a_dns_subdomain_is_a_name_to_look_up() {
+        let longest = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
+        assert_eq!(longest.len(), 253);
+        for valid in [
+            "a",
+            "0",
+            "a-b",
+            "web-7d9c8b6f4d",
+            "a.b",
+            "a".repeat(253).as_str(),
+            &longest,
+        ] {
+            assert!(is_dns_subdomain(valid), "{valid}");
+        }
+        let too_long = "a".repeat(254);
+        for refused in [
+            "",
+            "a/b",
+            "../x",
+            "a..b",
+            "a.",
+            ".a",
+            "a?x=1",
+            "a#b",
+            "a%2fb",
+            "A",
+            "web_1",
+            "-a",
+            "a-",
+            "a b",
+            "a\nb",
+            "a\0b",
+            "é",
+            too_long.as_str(),
+        ] {
+            assert!(!is_dns_subdomain(refused), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_in_a_log_line_is_cut_at_253_characters() {
+        assert_eq!(bounded_name("web"), "web");
+        assert_eq!(bounded_name(&"a".repeat(253)).len(), 253);
+        assert_eq!(bounded_name(&"é".repeat(300)).chars().count(), 253);
     }
 
     #[test]

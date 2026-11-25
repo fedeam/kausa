@@ -63,7 +63,7 @@ use crate::leader::{self, KubeLease, LEASE_ERROR_PERIOD, LeaseApi, LeaseErrors, 
 use crate::log;
 use crate::metrics::{self, Metrics};
 use crate::notify::{Notifier, Outbox};
-use crate::owner::{Hop, OwnerLookup, top_owner};
+use crate::owner::{Hop, OwnerLookup, REFUSED_NAME, bounded_name, is_dns_subdomain, top_owner};
 use crate::prompt;
 use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
 use crate::report::{self, Fact, Reporter};
@@ -1544,7 +1544,7 @@ impl State {
                         let field = object.kind.to_ascii_lowercase();
                         log::warn(
                             "owner lookup failed",
-                            json!({"namespace": namespace, field: object.name, "error": error}),
+                            json!({"namespace": namespace, field: bounded_name(&object.name), "error": error}),
                         )?;
                     }
                     Some(owner)
@@ -1915,6 +1915,11 @@ impl OwnerLookup for KubeLookup {
         namespace: &str,
         name: &str,
     ) -> Result<Option<OwnerRef>, String> {
+        // The name comes from an `ownerReference` or an Event's `regarding`, unbounded: no
+        // request, and no cache entry, for one that is not a DNS-1123 subdomain, whoever calls.
+        if !is_dns_subdomain(name) {
+            return Err(REFUSED_NAME.to_owned());
+        }
         let fresh = |answer: &Result<Option<OwnerRef>, String>, at: &Instant| {
             let ttl = if answer.is_ok() {
                 OWNER_CACHE_TTL
@@ -3183,6 +3188,123 @@ mod tests {
             ("ReplicaSet", "orphan-5d4c3b2a1")
         );
         assert_eq!(incident.owner.uid, "uid-orphan-5d4c3b2a1");
+    }
+
+    /// A `KubeLookup` whose client points at a local listener that counts the connections it gets:
+    /// a request would show as one.
+    struct Spy {
+        accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        lookup: KubeLookup,
+        runtime: tokio::runtime::Runtime,
+    }
+
+    impl Spy {
+        fn new() -> Spy {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
+            let addr = listener.local_addr().expect("an address");
+            let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = accepted.clone();
+            // Accept each connection and close it at once, so a request fails fast.
+            std::thread::spawn(move || {
+                while listener.accept().is_ok() {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            let url = format!("http://{}", addr);
+            let config = kube::Config::new(url.parse().expect("a URL"));
+            // The client spawns its worker on the runtime it is built in.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let client = {
+                let _guard = runtime.enter();
+                Client::try_from(config).expect("a client")
+            };
+            Spy {
+                accepted,
+                lookup: KubeLookup {
+                    client,
+                    cache: RefCell::new(HashMap::new()),
+                },
+                runtime,
+            }
+        }
+
+        fn run<F: Future>(&self, future: F) -> F::Output {
+            self.runtime.block_on(future)
+        }
+
+        /// The connections the lookup opened (each is closed at once, so its `get` fails).
+        fn connections(&self) -> usize {
+            // Let the accepting thread see a connection that was just made.
+            std::thread::sleep(Duration::from_millis(100));
+            self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn the_owner_lookup_sends_no_request_and_keeps_nothing_for_a_name_that_is_not_a_subdomain() {
+        let spy = Spy::new();
+        let too_long = "a".repeat(254);
+        for name in ["a/b", "../x", "a?x=1", "Web", "", "a\nb", too_long.as_str()] {
+            for hop in [Hop::ReplicaSet, Hop::Job] {
+                let answer = spy.run(spy.lookup.controller_of(hop, "shop", name));
+                assert_eq!(answer, Err(REFUSED_NAME.to_owned()), "{name:?}");
+            }
+        }
+        assert_eq!(spy.lookup.cached(), 0);
+        assert_eq!(spy.connections(), 0);
+        // The shortest and the longest valid names are sent, and kept (the failure too).
+        let longest = "a".repeat(253);
+        for name in ["a", longest.as_str()] {
+            let answer = spy.run(spy.lookup.controller_of(Hop::ReplicaSet, "shop", name));
+            assert!(answer.is_err_and(|e| e != REFUSED_NAME), "{name:?}");
+        }
+        assert_eq!(spy.lookup.cached(), 2);
+        assert_eq!(spy.connections(), 2);
+    }
+
+    #[test]
+    fn a_pod_whose_owner_has_a_bad_name_is_grouped_under_the_owner_as_given() {
+        let spy = Spy::new();
+        let mut state = State::default();
+        let mut pod = pod("shop", "web-1");
+        pod.metadata.owner_references = Some(vec![
+            serde_json::from_value(json!({
+                "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "../secrets?x=1",
+                "uid": "uid-rs", "controller": true
+            }))
+            .expect("an owner reference"),
+        ]);
+        spy.run(state.on_pod(&CLUSTER, watcher::Event::Apply(pod), &spy.lookup))
+            .expect("the log is written");
+        let (_, owner, resolved) = state.pods.values().next().expect("the Pod is kept");
+        assert_eq!(
+            (owner.kind.as_str(), owner.name.as_str(), *resolved),
+            ("ReplicaSet", "../secrets?x=1", false)
+        );
+        assert_eq!((spy.lookup.cached(), spy.connections()), (0, 0));
+    }
+
+    #[test]
+    fn an_event_about_an_object_with_a_bad_name_is_about_the_object_as_given() {
+        let spy = Spy::new();
+        let mut state = State::default();
+        let about = ("apps/v1", "ReplicaSet", "a/b");
+        spy.run(state.on_event(
+            &CLUSTER,
+            watcher::Event::Apply(event_about(about, "FailedCreate")),
+            &spy.lookup,
+        ))
+        .expect("the log is written");
+        let (_, owner) = state.events.values().next().expect("the Event is kept");
+        let owner = owner.as_ref().expect("an owner");
+        assert_eq!(
+            (owner.kind.as_str(), owner.name.as_str()),
+            ("ReplicaSet", "a/b")
+        );
+        assert_eq!((spy.lookup.cached(), spy.connections()), (0, 0));
     }
 
     // Acceptance tests for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code: the
