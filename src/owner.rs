@@ -31,9 +31,13 @@ impl Hop {
 /// The longest name Kubernetes accepts for the objects kausa looks up (a DNS-1123 subdomain).
 const MAX_NAME_LEN: usize = 253;
 
-/// What a lookup answers for a name that is not a DNS-1123 subdomain: it is never sent, so the
-/// answer is a failed lookup that quotes nothing from the cluster.
-pub(crate) const REFUSED_NAME: &str = "owner name is not a DNS subdomain; not looked up";
+/// The longest namespace Kubernetes accepts (a DNS-1123 label).
+const MAX_NAMESPACE_LEN: usize = 63;
+
+/// What a lookup answers for a name that is not a DNS-1123 subdomain or a namespace that is not a
+/// DNS-1123 label: it is never sent, so the answer is a failed lookup that quotes nothing from the
+/// cluster.
+pub(crate) const REFUSED: &str = "owner name or namespace is not a valid DNS name; not looked up";
 
 /// Whether `name` is a DNS-1123 subdomain as Kubernetes defines one (`IsDNS1123Subdomain`): 1 to
 /// 253 bytes, dot-separated labels of lowercase letters, digits and `-`, each starting and ending
@@ -51,6 +55,18 @@ pub(crate) fn is_dns_subdomain(name: &str) -> bool {
         })
 }
 
+/// Whether `namespace` is a DNS-1123 label as Kubernetes defines one: 1 to 63 bytes of lowercase
+/// letters, digits and `-`, starting and ending with a letter or a digit. It has no `/`, no `.`
+/// and no control character, so it is safe in a URL path.
+pub(crate) fn is_dns_label(namespace: &str) -> bool {
+    let bytes = namespace.as_bytes();
+    let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    (1..=MAX_NAMESPACE_LEN).contains(&bytes.len())
+        && bytes.first().is_some_and(edge)
+        && bytes.last().is_some_and(edge)
+        && bytes.iter().all(|b| edge(b) || *b == b'-')
+}
+
 /// `name` cut at 253 characters, for a log line: the name of an Event's object is unbounded, and
 /// the log serializer escapes it but does not shorten it. A name that passes `is_dns_subdomain`
 /// is unchanged.
@@ -60,8 +76,8 @@ pub(crate) fn bounded_name(name: &str) -> String {
 
 /// Reads the controller owner of a ReplicaSet or a Job. The name comes from an `ownerReference`
 /// or an Event's `regarding`, which any writer of those objects chooses; an implementation that
-/// sends it to the API server answers `Err(REFUSED_NAME)`, with no request and no cache entry,
-/// when `is_dns_subdomain` is false for it.
+/// sends it to the API server answers `Err(REFUSED)`, with no request and no cache entry, when
+/// `is_dns_subdomain` is false for it or `is_dns_label` is false for the namespace.
 pub(crate) trait OwnerLookup {
     /// The controller owner reference of `name` in `namespace`, `Ok(None)` when it has none.
     fn controller_of(
@@ -179,6 +195,31 @@ mod tests {
             too_long.as_str(),
         ] {
             assert!(!is_dns_subdomain(refused), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_dns_label_is_a_namespace_to_look_up() {
+        for valid in ["a", "0", "a-b", "shop", "a".repeat(63).as_str()] {
+            assert!(is_dns_label(valid), "{valid}");
+        }
+        let too_long = "a".repeat(64);
+        for refused in [
+            "",
+            "a/b",
+            "..",
+            ".",
+            "a.b",
+            "a?x=1",
+            "Shop",
+            "-a",
+            "a-",
+            "a_b",
+            "a\nb",
+            "é",
+            too_long.as_str(),
+        ] {
+            assert!(!is_dns_label(refused), "{refused:?}");
         }
     }
 

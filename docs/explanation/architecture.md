@@ -152,9 +152,9 @@ produces the same incident, the same fingerprint and the same request bytes.
   resolved again when its controller reference changes. A lookup that fails (a deleted ReplicaSet,
   an API error, a timeout) stops the chain at the ReplicaSet or Job, is logged, and is retried on
   the Pod's next update after 30 seconds. A name that is not a DNS-1123 subdomain of at most 253
-  characters (an `ownerReference` or an Event's `regarding` can carry any string) is never looked
-  up and never cached: the lookup fails at once, without a request, and the incident names the
-  reference or the Event's object as given.
+  characters, or a namespace that is not a DNS-1123 label (an `ownerReference` or an Event's
+  `regarding` can carry any string), is never looked up and never cached: the lookup fails at
+  once, without a request, and the incident names the reference or the Event's object as given.
   Pods of the same owner with the same detection form one incident: three crashing replicas are
   one explanation, not three.
 - **Fingerprint.** A hash of the detection, the owner and the normalized message (the image, for

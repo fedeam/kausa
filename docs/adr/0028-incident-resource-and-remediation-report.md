@@ -140,10 +140,11 @@ string in either schema is an enum, or a pattern with a maximum length.
 
 Proposed on 2026-11-24. Both switches are off by default, and with the defaults kausa writes, reads
 and sends what it does today, but for two changes, both from the owner lookup's rule on names of
-point 3, which holds with incidents off too (**Update 2026-11-24:** it shipped ahead, in its own change): kausa sends no `get` for a name that is not a DNS-1123
-subdomain of at most 253 characters, so it reads less; and an incident whose owner has such a name,
-which today could resolve to another object, names the `ownerReference` or the Event's object as
-given instead, in its Events, its `incident` log line and its `detected` message.
+point 3, which holds with incidents off too (**Update 2026-11-24:** it shipped ahead, in its own
+change): kausa sends no `get` for a name that is not a DNS-1123 subdomain of at most 253 characters,
+or for a namespace that is not a DNS-1123 label, so it reads less; and an incident whose owner has
+such a name, which today could resolve to another object, names the `ownerReference` or the Event's
+object as given instead, in its Events, its `incident` log line and its `detected` message.
 
 ### 1. The Incident
 
@@ -372,13 +373,14 @@ it to `get_metadata`, which in kube-core 4.2.0 refuses only an empty name (`vali
 server asks an ownerReference's name, by a reviewer's reading not re-read here, only to be
 non-empty. So a writer of Pods in N chooses a string of any length with `/`, `..` or `?` that kausa
 keeps as a key and sends in a URL. Under this rule a name that is not a DNS-1123 subdomain of at
-most 253 characters is never looked up and never kept: the lookup answers as a failed one without a
-request and without a cache entry. For the owner, that gives `owner-lookup-failed`, and the
-incident's `object` is the `ownerReference` as the Pod gives it, as after any failed lookup
-(`top_owner`, `src/owner.rs:67`), with its Events and its log line as today; its name does not fit
-`Name`, so point 2's rule creates no Incident for it. For the revision it gives
-`revision-lookup-failed`, and the name is not kept in the fact queue entry. A name that passes has
-no `/`, no `?` and no `..` segment. That no Secret or ConfigMap can be read through such a path
+most 253 characters, or a namespace that is not a DNS-1123 label (an Event's `regarding.namespace`
+is the other half of the same path), is never looked up and never kept: the lookup answers as a
+failed one without a request and without a cache entry. For the owner, that gives
+`owner-lookup-failed`, and the incident's `object` is the `ownerReference` as the Pod gives it, as
+after any failed lookup (`top_owner`, `src/owner.rs:67`), with its Events and its log line as today;
+its name does not fit `Name`, so point 2's rule creates no Incident for it. For the revision it
+gives `revision-lookup-failed`, and the name is not kept in the fact queue entry. A name that passes
+has no `/`, no `?` and no `..` segment. That no Secret or ConfigMap can be read through such a path
 today rests on RBAC, which grants kausa no verb on them
 ([Permissions](../reference/permissions.md)), not on the code.
 
