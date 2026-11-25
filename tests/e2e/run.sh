@@ -1654,6 +1654,14 @@ if [ "$REPLICAS" = 1 ]; then
     incident_where=(-A)
     incident_elsewhere=()
   fi
+  # allowed, with a check and a place each given as one string ("verb resource [flag]", "-n ns"
+  # or -A), split into words without globbing, so that no call leaves them unquoted.
+  allowed_in() {
+    local -a words place
+    read -ra words <<<"$1"
+    read -ra place <<<"$2"
+    allowed "${words[@]}" "${place[@]}"
+  }
   incident_granted=("create $INCIDENTS" "list $INCIDENTS" "delete $INCIDENTS")
   # Point 5's "never", in either state: the read and write verbs kausa has no use for, the status
   # subresource, any verb on Remediations and on CustomResourceDefinitions, Secrets and ConfigMaps.
@@ -1671,22 +1679,19 @@ if [ "$REPLICAS" = 1 ]; then
     for check in "${incident_granted[@]}"; do
       if [ "$1" = on ]; then
         for where in "${incident_where[@]}"; do
-          # shellcheck disable=SC2086
-          allowed $check $where || fail "kausa cannot $check $where with incidents on"
+          allowed_in "$check" "$where" || fail "kausa cannot $check $where with incidents on"
         done
         places=("${incident_elsewhere[@]}")
       else
         places=("${everywhere[@]}")
       fi
       for where in "${places[@]}"; do
-        # shellcheck disable=SC2086
-        if allowed $check $where; then fail "kausa can $check $where with incidents $1"; fi
+        if allowed_in "$check" "$where"; then fail "kausa can $check $where with incidents $1"; fi
       done
     done
     for check in "${incident_never[@]}"; do
       for where in "${everywhere[@]}"; do
-        # shellcheck disable=SC2086
-        if allowed $check $where; then fail "kausa can $check $where with incidents $1"; fi
+        if allowed_in "$check" "$where"; then fail "kausa can $check $where with incidents $1"; fi
       done
     done
   }
@@ -1695,24 +1700,20 @@ if [ "$REPLICAS" = 1 ]; then
     if [ "$SCOPE" = namespaced ]; then
       for check in "${granted[@]}"; do
         for where in "-n $TARGET" "-n $DENIED"; do
-          # shellcheck disable=SC2086
-          allowed $check $where || fail "kausa cannot $check $where after incidents"
+          allowed_in "$check" "$where" || fail "kausa cannot $check $where after incidents"
         done
         for where in "-n $OTHER" "-n $NAMESPACE" -A; do
-          # shellcheck disable=SC2086
-          if allowed $check $where; then fail "kausa can $check $where after incidents"; fi
+          if allowed_in "$check" "$where"; then fail "kausa can $check $where after incidents"; fi
         done
       done
     else
       for check in "${granted[@]}"; do
-        # shellcheck disable=SC2086
-        allowed $check -A || fail "kausa cannot $check after incidents"
+        allowed_in "$check" -A || fail "kausa cannot $check after incidents"
       done
     fi
     for check in "${refused[@]}"; do
       for where in "${everywhere[@]}"; do
-        # shellcheck disable=SC2086
-        if allowed $check $where; then fail "kausa can $check $where after incidents"; fi
+        if allowed_in "$check" "$where"; then fail "kausa can $check $where after incidents"; fi
       done
     done
   }
@@ -2138,8 +2139,8 @@ print(json.dumps([item["metadata"], item["spec"], item.get("status") or {}], sor
     for check in "create $INCIDENTS" "update $INCIDENTS" "patch $INCIDENTS" "delete $INCIDENTS" \
       "deletecollection $INCIDENTS" "get $INCIDENTS --subresource=status" \
       "patch $INCIDENTS --subresource=status" "update $INCIDENTS --subresource=status"; do
-      # shellcheck disable=SC2086
-      if [ "$(k auth can-i --as="$as" $check -n "$TARGET" 2>/dev/null)" = yes ]; then
+      read -ra check_words <<<"$check"
+      if [ "$(k auth can-i --as="$as" "${check_words[@]}" -n "$TARGET" 2>/dev/null)" = yes ]; then
         fail "$as can $check in $TARGET"
       fi
     done
