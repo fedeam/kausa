@@ -42,11 +42,12 @@ pub(crate) const LABEL_PATTERN: &str = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$";
 pub(crate) const KIND_PATTERN: &str = "^[A-Z][A-Za-z0-9]*$";
 pub(crate) const KIND_LEN: usize = 63;
 
-/// An apiVersion, of at most `MAX_NAME_LEN` characters: a version that is a DNS-1123 label, after
-/// a group that is a DNS-1123 subdomain and a `/`, or alone, as the core group's `v1`.
+/// An apiVersion, of at most `MAX_NAME_LEN` characters: a group that is a DNS-1123 subdomain and
+/// a `/` before a version, or a version alone, as the core group's `v1`. The version starts with a
+/// letter and has no limit of its own: kurita's pattern, byte for byte.
 pub(crate) const API_VERSION_PATTERN: &str = concat!(
     "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?",
-    "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+    "[a-z]([-a-z0-9]*[a-z0-9])?$"
 );
 
 /// The Incident's name: `kausa.`, the fingerprint, `.` and the first-seen time in Unix seconds, of
@@ -335,10 +336,17 @@ pub(crate) fn is_kind(text: &str) -> bool {
 
 /// Whether `text` fits `API_VERSION_PATTERN` within `MAX_NAME_LEN`.
 pub(crate) fn is_api_version(text: &str) -> bool {
+    let is_version = |version: &str| {
+        let bytes = version.as_bytes();
+        let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+        bytes.first().is_some_and(u8::is_ascii_lowercase)
+            && bytes.last().is_some_and(edge)
+            && bytes.iter().all(|b| edge(b) || *b == b'-')
+    };
     text.len() <= MAX_NAME_LEN
         && match text.split_once('/') {
-            Some((group, version)) => is_dns_subdomain(group) && is_dns_label(version),
-            None => is_dns_label(text),
+            Some((group, version)) => is_dns_subdomain(group) && is_version(version),
+            None => is_version(text),
         }
 }
 
@@ -1029,6 +1037,9 @@ mod tests {
                     "v".repeat(63),
                     format!("{}/{}", "g".repeat(189), "v".repeat(63)),
                     format!("{}/v1", "g".repeat(250)),
+                    "v".repeat(64),
+                    "v".repeat(MAX_NAME_LEN),
+                    format!("g/{}", "v".repeat(MAX_NAME_LEN - 2)),
                 ],
             ),
         ];
@@ -1073,6 +1084,34 @@ mod tests {
                     "{pattern} and its checker differ on {text:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn an_api_version_is_read_as_kurita_reads_one() {
+        // kurita's `object.apiVersion`, byte for byte.
+        assert_eq!(
+            API_VERSION_PATTERN,
+            concat!(
+                r"^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?",
+                r"[a-z]([-a-z0-9]*[a-z0-9])?$"
+            )
+        );
+        let regex = Regex::new(API_VERSION_PATTERN).expect("the pattern compiles");
+        // A version starts with a letter, and has no limit of its own inside 253.
+        for (text, valid) in [
+            ("1", false),
+            ("1v", false),
+            ("apps/1", false),
+            ("apps/1beta1", false),
+            ("a.b/v", true),
+            (&"v".repeat(64), true),
+            (&format!("apps/{}", "v".repeat(100)), true),
+            (&"v".repeat(MAX_NAME_LEN), true),
+            (&"v".repeat(MAX_NAME_LEN + 1), false),
+        ] {
+            assert_eq!(is_api_version(text), valid, "{text}");
+            assert_eq!(fits(&regex, MAX_NAME_LEN, text), valid, "{text}");
         }
     }
 

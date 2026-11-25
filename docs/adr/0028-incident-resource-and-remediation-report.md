@@ -233,7 +233,8 @@ spec:                       # required; CEL: self == oldSelf
   firstSeen: Time
   settledAt: Time
   object:                   # the incident's top-level owner
-    apiVersion: at most 253, a group/version pattern
+    apiVersion: at most 253, a group/version pattern: a group and a version, or a version
+                alone; the version starts with a letter
     kind: ^[A-Z][A-Za-z0-9]*$, at most 63
     name: Name
     uid: UID                # optional: an Event incident's owner may have none
