@@ -86,6 +86,25 @@ pub struct Notice {
     pub confidence: String,
 }
 
+/// What a `remediation` message says (docs/adr/0028-incident-resource-and-remediation-report.md,
+/// point 6): the detection, the object and the fingerprint of kausa's own Incident, and the
+/// action and the time of kurita's record, as fixed words and kausa's own values.
+#[cfg(any(test, fuzzing))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remediation {
+    pub detection_id: &'static str,
+    pub detection_name: &'static str,
+    pub api_version: String,
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+    pub fingerprint: String,
+    /// One of kurita's action ids.
+    pub action: &'static str,
+    /// `proposedAt`, `YYYY-MM-DDTHH:MM:SSZ`.
+    pub time: String,
+}
+
 /// Telegram's `chat_id`: an integer, sent as a number, or a channel's username, kept with its
 /// `@` and sent as a string.
 #[derive(Clone, Debug, PartialEq, Eq)]
