@@ -1228,6 +1228,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_term_that_ends_between_a_list_and_its_deletes_sends_no_delete() {
+        // Every listed Incident is older than the day; the list is answered after the term ended.
+        let objects: Vec<Value> = (0..3).map(|i| listed(i, DAY * 2)).collect();
+        let (held, hold) = crate::leader::hold::new();
+        let held = Mutex::new(Some(held));
+        let (url, requests) = api_server(move |request| match request.method.as_str() {
+            "GET" => {
+                if let Some(held) = held.lock().expect("the hold").take() {
+                    held.wait();
+                }
+                page(&objects, &request.path)
+            }
+            _ => deleted_answer(),
+        });
+        let term = Term::unbounded();
+        let (ended, incidents) = runtime().block_on(async {
+            let incidents = Incidents::new(client(&url), SETTINGS);
+            let (ended, ()) = futures::join!(incidents.sweep(&[], &term), hold.end(&term));
+            (ended.expect("a log"), incidents)
+        });
+        assert_eq!(ended, Ended::Cut);
+        let methods: Vec<String> = sent(&requests).into_iter().map(|r| r.method).collect();
+        assert_eq!(methods, ["GET"]);
+        assert!(!incidents.table().sweep_ended());
+    }
+
+    #[test]
     fn a_list_with_no_answer_stops_the_sweep_at_the_write_bound_and_sets_the_flag() {
         let (url, requests) = api_server(|_| Answer::Hang);
         let start = Instant::now();
