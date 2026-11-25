@@ -476,7 +476,7 @@ impl LowClass {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Low {
     /// kurita's proposal for one of kausa's Incidents.
-    Remediation(notification::Remediation),
+    Remediation(crate::remediation::Proposal),
 }
 
 #[cfg(test)]
@@ -490,7 +490,7 @@ impl Low {
     /// The fingerprint of kausa's own incident the message is about.
     fn fingerprint(&self) -> &str {
         match self {
-            Low::Remediation(r) => &r.fingerprint,
+            Low::Remediation(r) => r.fingerprint(),
         }
     }
 }
@@ -987,6 +987,7 @@ mod tests {
     use crate::notification::{self, ChatId, Facts, Message, Notice, parse_chat_id};
     use crate::prompt::{self, Explanation};
     use crate::record::{ContainerRecord, EventRecord, OwnerRef, PodRecord, Regarding};
+    use crate::remediation::{self, Action};
 
     const VERSION: &str = env!("CARGO_PKG_VERSION");
     const FINGERPRINT: &str = "5d0c2b7e9a1f4c38";
@@ -2516,19 +2517,28 @@ mod tests {
 
     // --- The lower classes: remediation messages ---------------------------------------------
 
-    /// The `remediation` message of the incident with `fingerprint`.
-    fn remediation_for(fingerprint: &str) -> Low {
-        Low::Remediation(notification::Remediation {
-            detection_id: "D001",
-            detection_name: "crash loop",
-            api_version: "apps/v1".into(),
-            kind: "Deployment".into(),
-            namespace: "shop".into(),
-            name: "web".into(),
-            fingerprint: fingerprint.into(),
-            action: "rollout-undo",
-            time: "2026-10-28T12:00:12Z".into(),
-        })
+    /// The fingerprint `label` names: `label` itself when it is one (16 lowercase hex digits),
+    /// otherwise its 64-bit FNV-1a hash, since an entry takes only a fingerprint.
+    fn fp(label: &str) -> String {
+        if label.len() == 16
+            && label
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return label.to_owned();
+        }
+        let hash = label.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, b| {
+            (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+        format!("{hash:016x}")
+    }
+
+    /// The `remediation` message, a rollback of a crash loop of `shop/web`, of the incident with
+    /// the fingerprint `label` names, built from an entry as every one is.
+    fn remediation_for(label: &str) -> Low {
+        let entry = remediation::example_entry(Detection::CrashLoop, &fp(label));
+        let at = "2026-11-24T10:00:12Z".parse().expect("a timestamp");
+        Low::Remediation(remediation::Proposal::new(&entry, Action::RolloutUndo, at))
     }
 
     /// The `remediation` outcomes recorded since the last call.
@@ -2578,8 +2588,8 @@ mod tests {
             .expect("the log");
         let queue = low_fingerprints(&outbox);
         assert_eq!(queue.len(), QUEUE_LIMIT);
-        assert_eq!(queue.first().map(String::as_str), Some("fp-1"));
-        assert_eq!(queue.last().map(String::as_str), Some("fp-16"));
+        assert_eq!(queue.first(), Some(&fp("fp-1")));
+        assert_eq!(queue.last(), Some(&fp("fp-16")));
         assert_eq!(
             low(&outbox),
             [(LowClass::Remediation, LowOutcome::Dropped, 1)]
@@ -2637,11 +2647,7 @@ mod tests {
             assert_eq!(outbox.queue().len(), 1, "admitted");
             let queue = low_fingerprints(&outbox);
             assert_eq!(queue.len(), QUEUE_LIMIT - 1);
-            assert_eq!(
-                queue.first().map(String::as_str),
-                Some("fp-r1"),
-                "the oldest left"
-            );
+            assert_eq!(queue.first(), Some(&fp("fp-r1")), "the oldest left");
             assert_eq!(
                 low(&outbox),
                 [(LowClass::Remediation, LowOutcome::Dropped, 1)]

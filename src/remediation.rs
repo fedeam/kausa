@@ -10,7 +10,7 @@
 //! `64d8a358d765157dc4b68c08d8f33f9a0fa31646`), and keeps nothing else in any type: not its
 //! `reason`, its parameters, its `preconditions`, its `decider` or any other field. A reportable
 //! record gives only its action, its `proposedAt` and the table's entry it is about: the message
-//! takes the detection, the object and the fingerprint from that entry ([`Report::notice`]),
+//! takes the detection, the object and the fingerprint from that entry ([`Report::proposal`]),
 //! never from the record.
 //!
 //! The checks, in this order; a record gets the reason of the first one that fails, and only
@@ -42,7 +42,6 @@ use crate::incident_resource::table::{Entry, Slot, Table, Target as Held};
 use crate::incident_resource::{
     DETECTIONS, Uid, is_api_version, is_fingerprint, is_kind, is_time, time,
 };
-use crate::notification;
 use crate::owner::{is_dns_label, is_dns_subdomain};
 
 /// The start of a Remediation's name: kurita names it after its Incident, with `kurita.` in place
@@ -324,22 +323,120 @@ impl Report<'_> {
 
     /// The `remediation` message: the detection, the object and the fingerprint of kausa's own
     /// entry, the action and the time of the record.
-    pub(crate) fn notice(&self) -> notification::Remediation {
-        let entry = self.entry;
-        let detection = entry.detection();
+    pub(crate) fn proposal(&self) -> Proposal {
+        Proposal::new(self.entry, self.action, self.proposed_at)
+    }
+}
+
+/// What a `remediation` message says: the detection, the object and the fingerprint of kausa's
+/// own entry, and the action and the time of kurita's record, as fixed words and kausa's own
+/// values. Its fields are private, so it is built only from a table's [`Entry`]: no value of a
+/// record can reach a message but its action and its checked time. The bodies are built by
+/// `notification.rs`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Proposal {
+    detection: Detection,
+    api_version: String,
+    kind: String,
+    namespace: String,
+    name: String,
+    fingerprint: String,
+    action: Action,
+    /// `proposedAt`, `YYYY-MM-DDTHH:MM:SSZ`.
+    time: String,
+}
+
+impl Proposal {
+    /// The message about `entry`, with the record's `action` and `proposed_at`.
+    pub(crate) fn new(entry: &Entry, action: Action, proposed_at: Timestamp) -> Self {
         let target = entry.target();
-        notification::Remediation {
-            detection_id: detection.id(),
-            detection_name: detection.name(),
+        Self {
+            detection: entry.detection(),
             api_version: target.api_version().to_owned(),
             kind: target.kind().to_owned(),
             namespace: entry.namespace().to_owned(),
             name: target.name().to_owned(),
             fingerprint: entry.fingerprint(),
-            action: self.action.as_str(),
-            time: time(self.proposed_at),
+            action,
+            time: time(proposed_at),
         }
     }
+
+    pub(crate) fn detection_id(&self) -> &'static str {
+        self.detection.id()
+    }
+
+    pub(crate) fn detection_name(&self) -> &'static str {
+        self.detection.name()
+    }
+
+    pub(crate) fn api_version(&self) -> &str {
+        &self.api_version
+    }
+
+    pub(crate) fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub(crate) fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// One of kurita's action ids.
+    pub(crate) fn action(&self) -> &'static str {
+        self.action.as_str()
+    }
+
+    pub(crate) fn time(&self) -> &str {
+        &self.time
+    }
+}
+
+/// The entry of an Incident of `detection` of the Deployment `shop/web` (one Pod seen, no rollout),
+/// with `fingerprint`, first seen at 2026-11-24T10:00:00Z, for the tests of the message and its
+/// queue in other modules, which can build a [`Proposal`] only from an entry.
+#[cfg(test)]
+pub(crate) fn example_entry(detection: Detection, fingerprint: &str) -> Entry {
+    use crate::incident_resource::{Facts, Missing, Object, Sample, Spec};
+    let at = |text: &str| text.parse::<Timestamp>().expect("a timestamp");
+    let spec = Spec {
+        detection,
+        fingerprint: fingerprint.into(),
+        first_seen: at("2026-11-24T10:00:00Z"),
+        settled_at: at("2026-11-24T10:01:00Z"),
+        object: Object {
+            api_version: "apps/v1".into(),
+            kind: "Deployment".into(),
+            name: "web".into(),
+            uid: Some("00000000-0000-4000-8000-000000000003".into()),
+        },
+        facts: Facts {
+            reason: None,
+            exit_code: None,
+            container: None,
+            pods_seen: 1,
+            pods_seen_is_minimum: false,
+            pods_now: 1,
+        },
+        sample: Some(Sample {
+            pod_name: "web-7d4b9c6f5d-abcde".into(),
+            pod_uid: "00000000-0000-4000-8000-000000000001".into(),
+            controller: None,
+        }),
+        deployment: None,
+        regarding: None,
+        missing: Missing::default(),
+    };
+    let uid = Uid::parse("00000000-0000-4000-8000-0000000000aa").expect("a UID");
+    Entry::new("shop", &spec, uid, Instant::now()).expect("an entry")
 }
 
 /// The result of the checks.
@@ -766,18 +863,54 @@ mod tests {
             .expect("the entry");
         assert_eq!(report.key(), (slot, incident));
         assert_eq!(
-            report.notice(),
-            notification::Remediation {
-                detection_id: "D001",
-                detection_name: "crash loop",
+            report.proposal(),
+            Proposal {
+                detection: Detection::CrashLoop,
                 api_version: "apps/v1".into(),
                 kind: "Deployment".into(),
                 namespace: NAMESPACE.into(),
                 name: "web".into(),
                 fingerprint: FP.into(),
-                action: "rollout-undo",
+                action: Action::RolloutUndo,
                 time: PROPOSED_AT.into(),
             }
+        );
+        let proposal = report.proposal();
+        assert_eq!(
+            (proposal.detection_id(), proposal.detection_name()),
+            ("D001", "crash loop")
+        );
+        assert_eq!(proposal.action(), "rollout-undo");
+        assert_eq!(proposal.time(), PROPOSED_AT);
+    }
+
+    #[test]
+    fn the_remediation_text_keeps_its_line_and_escapes_as_the_others() {
+        // The kind and the name come from kausa's Incident, bounded by their patterns; were they
+        // not, they could not break the line, and Slack's characters are escaped. Built here, in
+        // the module that holds its private fields, since no entry holds such names.
+        use crate::notification::{
+            ChatId, remediation_slack_body, remediation_telegram_body, remediation_text,
+        };
+        let entry = example_entry(Detection::OutOfMemory, FP);
+        let mut r = Proposal::new(&entry, Action::RaiseMemoryLimit, at(PROPOSED_AT));
+        r.kind = "Deploy\nment".into();
+        r.name = "<@here>&/x".into();
+        let line = remediation_text(&r);
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+        let slack = remediation_slack_body(&r);
+        assert!(
+            slack["text"]
+                .as_str()
+                .expect("a text")
+                .ends_with("Deploy\u{fffd}ment &lt;@\u{2060}here&gt;&amp;/x")
+        );
+        let telegram = remediation_telegram_body(&r, &ChatId::Username("@kausa_alerts".into()));
+        assert!(
+            telegram["text"]
+                .as_str()
+                .expect("a text")
+                .ends_with("<@\u{2060}here>&/\u{2060}x")
         );
     }
 

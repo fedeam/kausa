@@ -86,25 +86,6 @@ pub struct Notice {
     pub confidence: String,
 }
 
-/// What a `remediation` message says (docs/adr/0028-incident-resource-and-remediation-report.md,
-/// point 6): the detection, the object and the fingerprint of kausa's own Incident, and the
-/// action and the time of kurita's record, as fixed words and kausa's own values.
-#[cfg(any(test, fuzzing))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Remediation {
-    pub detection_id: &'static str,
-    pub detection_name: &'static str,
-    pub api_version: String,
-    pub kind: String,
-    pub namespace: String,
-    pub name: String,
-    pub fingerprint: String,
-    /// One of kurita's action ids.
-    pub action: &'static str,
-    /// `proposedAt`, `YYYY-MM-DDTHH:MM:SSZ`.
-    pub time: String,
-}
-
 /// Telegram's `chat_id`: an integer, sent as a number, or a channel's username, kept with its
 /// `@` and sent as a string.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,52 +122,54 @@ pub fn parse_chat_id(text: &str) -> Option<ChatId> {
 
 /// The `json` body of a `remediation` message
 /// (docs/adr/0028-incident-resource-and-remediation-report.md, point 6): these fields and nothing
-/// else. `result` is kausa's fixed word, since kurita only proposes.
-#[cfg(any(test, fuzzing))]
-pub fn remediation_json_body(r: &Remediation, kausa_version: &str) -> Value {
+/// else. `result` is kausa's fixed word, since kurita only proposes. The message,
+/// [`Proposal`](crate::remediation::Proposal), is built only from kausa's own entry; it lives in
+/// `src/remediation.rs` so that this file still builds alone in the `notification` fuzz target.
+#[cfg(test)]
+pub fn remediation_json_body(r: &crate::remediation::Proposal, kausa_version: &str) -> Value {
     json!({
         "schema": SCHEMA,
         "type": "remediation",
         "kausa_version": kausa_version,
-        "detection": {"id": r.detection_id, "name": r.detection_name},
+        "detection": {"id": r.detection_id(), "name": r.detection_name()},
         "object": {
-            "apiVersion": r.api_version,
-            "kind": r.kind,
-            "namespace": r.namespace,
-            "name": r.name,
+            "apiVersion": r.api_version(),
+            "kind": r.kind(),
+            "namespace": r.namespace(),
+            "name": r.name(),
         },
-        "fingerprint": r.fingerprint,
-        "remediation": {"action": r.action, "result": "proposed", "time": r.time},
+        "fingerprint": r.fingerprint(),
+        "remediation": {"action": r.action(), "result": "proposed", "time": r.time()},
     })
 }
 
 /// The one line of a `remediation` message's text formats. Its values are fixed words and the
 /// names of kausa's own Incident, bounded by their patterns, so it needs no cut; the kind and the
 /// name go through [`one_line`] as in every other header.
-#[cfg(any(test, fuzzing))]
-pub fn remediation_text(r: &Remediation) -> String {
+#[cfg(test)]
+pub fn remediation_text(r: &crate::remediation::Proposal) -> String {
     format!(
         "kausa: kurita proposed {} for {} ({}) in {}, {} {}",
-        r.action,
-        r.detection_name,
-        r.detection_id,
-        r.namespace,
-        one_line(&r.kind),
-        one_line(&r.name)
+        r.action(),
+        r.detection_name(),
+        r.detection_id(),
+        r.namespace(),
+        one_line(r.kind()),
+        one_line(r.name())
     )
 }
 
 /// The `slack` body of a `remediation` message: its line with a `JOINER` after every `@`, then
 /// escaped, as every `slack` body.
-#[cfg(any(test, fuzzing))]
-pub fn remediation_slack_body(r: &Remediation) -> Value {
+#[cfg(test)]
+pub fn remediation_slack_body(r: &crate::remediation::Proposal) -> Value {
     slack_json(join(remediation_text(r), |c| c == '@'))
 }
 
 /// The `telegram` body of a `remediation` message: its line with a `JOINER` after every `@` and
 /// every `/`, as every `telegram` body.
-#[cfg(any(test, fuzzing))]
-pub fn remediation_telegram_body(r: &Remediation, chat: &ChatId) -> Value {
+#[cfg(test)]
+pub fn remediation_telegram_body(r: &crate::remediation::Proposal, chat: &ChatId) -> Value {
     telegram_json(join(remediation_text(r), |c| matches!(c, '@' | '/')), chat)
 }
 
@@ -462,6 +445,8 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detect::Detection;
+    use crate::remediation::{self, Action, Proposal};
     use serde_json::{Value, json};
 
     /// The examples of docs/reference/data-sent-in-notifications.md, which holds each of them
@@ -1412,19 +1397,11 @@ mod tests {
         }
     }
 
-    /// The example of 0028, point 6.
-    fn remediation() -> Remediation {
-        Remediation {
-            detection_id: "D003",
-            detection_name: "out of memory",
-            api_version: "apps/v1".into(),
-            kind: "Deployment".into(),
-            namespace: "shop".into(),
-            name: "web".into(),
-            fingerprint: "5d0c2b7e9a1f4c38".into(),
-            action: "raise-memory-limit",
-            time: "2026-11-24T10:00:12Z".into(),
-        }
+    /// The example of 0028, point 6, built from an entry as every message is.
+    fn remediation() -> Proposal {
+        let entry = remediation::example_entry(Detection::OutOfMemory, "5d0c2b7e9a1f4c38");
+        let at = "2026-11-24T10:00:12Z".parse().expect("a timestamp");
+        Proposal::new(&entry, Action::RaiseMemoryLimit, at)
     }
 
     #[test]
@@ -1492,31 +1469,6 @@ mod tests {
                 "text": line,
                 "link_preview_options": {"is_disabled": true},
             })
-        );
-    }
-
-    #[test]
-    fn the_remediation_text_keeps_its_line_and_escapes_as_the_others() {
-        // The kind and the name come from kausa's Incident, bounded by their patterns; were they
-        // not, they could not break the line, and Slack's characters are escaped.
-        let mut r = remediation();
-        r.kind = "Deploy\nment".into();
-        r.name = "<@here>&/x".into();
-        let line = remediation_text(&r);
-        assert_eq!(line.lines().count(), 1);
-        let slack = remediation_slack_body(&r);
-        assert!(
-            slack["text"]
-                .as_str()
-                .expect("a text")
-                .ends_with("Deploy\u{fffd}ment &lt;@\u{2060}here&gt;&amp;/x")
-        );
-        let telegram = remediation_telegram_body(&r, &ChatId::Username("@kausa_alerts".into()));
-        assert!(
-            telegram["text"]
-                .as_str()
-                .expect("a text")
-                .ends_with("<@\u{2060}here>&/\u{2060}x")
         );
     }
 }

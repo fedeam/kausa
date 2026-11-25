@@ -1,8 +1,9 @@
 //! The parse and the checks of a kurita Remediation (src/remediation.rs), of any JSON: they must
 //! never panic, a reported record's message holds only the values of kausa's own Incident and a
-//! fixed action word, which its bodies carry in a text of one line, and the `remediation ignored`
-//! line gives a namespace and a name only when each fits its pattern
-//! (docs/adr/0028-incident-resource-and-remediation-report.md, point 6).
+//! fixed action word, and the `remediation ignored` line gives a namespace and a name only when
+//! each fits its pattern (docs/adr/0028-incident-resource-and-remediation-report.md, point 6).
+//! The seeds in fuzz/seeds/remediation/ hold the record that is reported and one per reason a
+//! record is ignored.
 #![no_main]
 
 #[allow(dead_code)] // floor-ok: the mod holds more than the fuzz target uses, like its neighbours
@@ -32,10 +33,6 @@ mod fact;
 #[allow(dead_code)] // floor-ok: the mod holds more than the fuzz target uses, like its neighbours
 #[path = "../../src/incident_resource.rs"]
 mod incident_resource;
-
-#[allow(dead_code)] // floor-ok: the mod holds more than the fuzz target uses, like its neighbours
-#[path = "../../src/notification.rs"]
-mod notification;
 
 #[allow(dead_code)] // floor-ok: the mod holds more than the fuzz target uses, like its neighbours
 #[path = "../../src/remediation.rs"]
@@ -113,22 +110,16 @@ fuzz_target!(|data: &[u8]| {
         Outcome::Report(report) => {
             assert!(parsed.is_some());
             assert_ne!(report.action(), Action::None);
-            let notice = report.notice();
-            assert_eq!(notice.detection_id, "D001");
-            assert_eq!(notice.namespace, NAMESPACE);
-            assert_eq!(notice.fingerprint, FINGERPRINT);
-            assert_eq!(notice.api_version, "apps/v1");
-            assert_eq!(notice.kind, "Deployment");
-            assert_eq!(notice.name, "web");
-            assert!(Action::ALL.iter().any(|a| a.as_str() == notice.action));
-            assert_eq!(notice.time, time(report.proposed_at()));
+            let proposal = report.proposal();
+            assert_eq!(proposal.detection_id(), "D001");
+            assert_eq!(proposal.namespace(), NAMESPACE);
+            assert_eq!(proposal.fingerprint(), FINGERPRINT);
+            assert_eq!(proposal.api_version(), "apps/v1");
+            assert_eq!(proposal.kind(), "Deployment");
+            assert_eq!(proposal.name(), "web");
+            assert_eq!(proposal.action(), report.action().as_str());
+            assert_eq!(proposal.time(), time(report.proposed_at()));
             assert!(report.proposed_at() <= now);
-            // The message's bodies take the same values; its text is one line.
-            let body = notification::remediation_json_body(&notice, "0.0.0");
-            assert_eq!(body["remediation"]["action"], notice.action);
-            assert_eq!(body["fingerprint"], FINGERPRINT);
-            assert_eq!(notification::remediation_text(&notice).lines().count(), 1);
-            let _ = notification::remediation_slack_body(&notice);
         }
         Outcome::Nothing => assert!(parsed.is_some()),
         Outcome::Ignored(reason) => {
