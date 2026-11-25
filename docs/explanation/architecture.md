@@ -409,12 +409,12 @@ and without any model:
   UID, the sample Pod's and controller's, a ReplicaSet's revision), never a model's text. A gate
   in memory allows one create per fingerprint per `--dedup-hours`, a table in memory bounds one
   process to 500 creates in any 6 hours, each value is checked against the schema before the
-  request, and a sweep at the start of each term and then hourly deletes them after `--incident-days` or beyond 500
-  objects. kausa never reads one back: it lists only to sweep, keeping the name, UID, version and
-  creation time ([Incident resource](../reference/incident-resource.md), [0028. Publish each
-  incident as an immutable Incident that only kausa writes, and report by webhook what kurita
-  proposed for it, both off by default](../adr/0028-incident-resource-and-remediation-report.md),
-  `proposed`).
+  request, and a sweep at the start of each term and then hourly deletes them after
+  `--incident-days` or beyond 500 objects. kausa never reads one back: it lists only to sweep,
+  keeping the name, UID, version and creation time ([Incident
+  resource](../reference/incident-resource.md), [0028. Publish each incident as an immutable
+  Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by
+  default](../adr/0028-incident-resource-and-remediation-report.md), `proposed`).
 
 ## Configuration and modes
 
@@ -557,7 +557,8 @@ Summarised here, and in full in the [Security policy](../../SECURITY.md):
 - **Read-only, except Events** (a `Detected` Event even without a model). No Secrets, no ConfigMaps, no write verbs but Events
   ([0009. Run with read-only permissions that never include
   Secrets](../adr/0009-least-privilege-rbac.md)), kausa's own Explanations with the history, its
-  own Incidents (`create`, and `delete` to sweep) with the Incidents on, and, with a standby, a merge patch of the `spec` of its one Lease.
+  own Incidents (`create`, and `delete` to sweep) with the Incidents on, and, with a standby, a
+  merge patch of the `spec` of its one Lease.
 - **Nothing unredacted reaches the model**, and nothing goes anywhere but the configured
   endpoint and, with notifications on, the configured webhook, which gets only the fields of
   [Data sent in notifications](../reference/data-sent-in-notifications.md).

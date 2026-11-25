@@ -168,21 +168,22 @@ kausa must:
   Deployment watch is on (no `get`, no write, nothing on StatefulSets or DaemonSets), `get` on
   `pods/log` only while log collection is on, `list`, `create`, `patch` and `delete` on its own `explanations` only while it writes
   history, `create`, `list` and `delete` on `incidents` only while it writes Incidents (never
-  `get`, `watch`, `patch`, `update`, `deletecollection` or `incidents/status`), and `get` and `patch` on its one Lease, `<full name>-leader` in its own namespace,
-  only with `replicaCount: 2` (the same Role in both scopes; never `create`, `update`, `list`,
-  `watch` or `delete` on Leases, and no other Lease). Never any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never
-  does. Never Secrets, never ConfigMaps, no other write verb, no `exec`, no wildcards
+  `get`, `watch`, `patch`, `update`, `deletecollection` or `incidents/status`), and `get` and
+  `patch` on its one Lease, `<full name>-leader` in its own namespace, only with `replicaCount: 2`
+  (the same Role in both scopes; never `create`, `update`, `list`, `watch` or `delete` on Leases,
+  and no other Lease). Never any verb on CustomResourceDefinitions: the chart installs the CRD,
+  kausa never does. Never Secrets, never ConfigMaps, no other write verb, no `exec`, no wildcards
   ([Permissions](docs/reference/permissions.md), [0009. Run with read-only permissions that never
   include Secrets](docs/adr/0009-least-privilege-rbac.md)), in every namespace with
-  `rbac.scope=cluster`, or only in the namespaces of `rbac.namespaces` with
-  `rbac.scope=namespaced`, where the chart creates nothing cluster-scoped. `rbac.scope` has no
-  default, so an upgrade that resets the values fails instead of widening a namespaced install to
-  the whole cluster: keep the `rbac` values in a values file passed on every upgrade, or upgrade
-  with `--reuse-values`. Pod and Deployment objects arrive whole from the API
-  server, inline environment values and arguments included; kausa reduces each to the small record
-  in [Architecture](docs/explanation/architecture.md) at once, and never logs, formats or returns
-  a raw object. A Deployment's record keeps no template, label, other annotation or condition
-  message, and is kept only while the Deployment is stalled.
+  `rbac.scope=cluster`, or only in the namespaces of `rbac.namespaces` with `rbac.scope=namespaced`,
+  where the chart creates nothing cluster-scoped. `rbac.scope` has no default, so an upgrade that
+  resets the values fails instead of widening a namespaced install to the whole cluster: keep the
+  `rbac` values in a values file passed on every upgrade, or upgrade with `--reuse-values`. Pod and
+  Deployment objects arrive whole from the API server, inline environment values and arguments
+  included; kausa reduces each to the small record in
+  [Architecture](docs/explanation/architecture.md) at once, and never logs, formats or returns a raw
+  object. A Deployment's record keeps no template, label, other annotation or condition message, and
+  is kept only while the Deployment is stalled.
 - **Never send anything unredacted to the model, and only to the configured places.** A request carries only the fields in
   [Data sent to the provider](docs/reference/data-sent-to-the-provider.md), with names replaced by
   pseudonyms and free text passed through the redaction rules

@@ -7,11 +7,12 @@ Incident never holds, the refusals, the counters and who can read it.
 Status as of 2026-11-25: in `main` for the release after v0.6.3, not released; off by default
 (`--incidents`, the chart's `incidents.enabled`). The decision, [0028. Publish each incident as an
 immutable Incident that only kausa writes, and report by webhook what kurita proposed for it, both
-off by default](../adr/0028-incident-resource-and-remediation-report.md), is `proposed`; this page describes
-its points 1 to 5 as the code implements them, and nothing of its remediation report (point 6),
-which is not implemented: kausa reads no `remediations` and has no flag or chart value for them.
-The kind test (`tests/e2e/run.sh`) has cases that install the resource with `incidents.enabled=true`
-in both `rbac.scope`s and read the Incidents back; as of 2026-11-25 they have never run.
+off by default](../adr/0028-incident-resource-and-remediation-report.md), is `proposed`; this page
+describes its points 1 to 5 as the code implements them, and nothing of its remediation report
+(point 6), which is not implemented: kausa reads no `remediations` and has no flag or chart value
+for them. The kind test (`tests/e2e/run.sh`) has cases that install the resource with
+`incidents.enabled=true` in both `rbac.scope`s and read the Incidents back; as of 2026-11-25 they
+have never run.
 
 ## The CustomResourceDefinition
 
@@ -206,7 +207,8 @@ the exposition has no line of them ([Command line and log format](command-line.m
 ## Who can read it
 
 kausa itself has `create`, `list` and `delete` on `incidents`, only with incidents on, and never
-`get`, `watch`, `patch`, `update`, `deletecollection` or `incidents/status` ([Permissions](permissions.md)).
+`get`, `watch`, `patch`, `update`, `deletecollection` or `incidents/status`
+([Permissions](permissions.md)).
 
 With `incidents.installCRD` and `incidents.readers.aggregate` (both true by default), the chart
 also installs a ClusterRole `<full name>-incident-reader` with `get`, `list` and `watch` on

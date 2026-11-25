@@ -11,8 +11,8 @@ since v0.4.0), and, only with `replicaCount: 2`, `get` and `patch` on one Lease 
 kausa's own namespace ([In kausa's own namespace, with two
 replicas](#in-kausas-own-namespace-with-two-replicas); since v0.4.0), and the `incidents` row only
 while kausa creates Incidents (`incidents.enabled`, no `dryRun`; in `main` for the release after
-v0.6.3) ([Helm chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
-namespaces only (`namespaced`, since v0.3.0; see [Where the permissions
+v0.6.3) ([Helm chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or
+in the listed namespaces only (`namespaced`, since v0.3.0; see [Where the permissions
 apply](#where-the-permissions-apply)). Why it is this list: [0009. Run with read-only permissions
 that never include Secrets](../adr/0009-least-privilege-rbac.md); why there are two scopes: [0013.
 Offer a namespaced install mode: one watch pair and one Role per listed namespace, and nothing
@@ -23,17 +23,16 @@ needs a Lease: [0019. Offer an optional standby replica that takes over through 
 Lease, elected by kausa's own code](../adr/0019-high-availability.md); why kausa may create and
 delete its own Incidents, a decision still `proposed`: [0028. Publish each incident as an immutable
 Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by
-default](../adr/0028-incident-resource-and-remediation-report.md), point 5. The kind test (`tests/e2e/run.sh`) checks
-the installed role against this table with `kubectl auth can-i`, both what it allows and a list
-of what it must refuse, in each scope; both scopes passed on 2026-10-28 on the maintainer's
-machine. Its cases for the `incidents` row, with incidents on and off, had never run as of
-2026-11-25. As of 2026-10-26,
-`kausa run` uses every row: the Pod and event watches, the metadata `get` of ReplicaSets and Jobs,
-`pods/log` for the detections that read logs, and `create` and `patch` on Events for its
-`Detected` Events (with or without `--endpoint`) and its explanations (with `--endpoint`), unless
-`--no-events`. On 2026-10-26 it
-ran against a live cluster through a `kubectl proxy` that let only these reads through, plus
-`POST` and `PATCH` on Events in one test namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a local
+default](../adr/0028-incident-resource-and-remediation-report.md), point 5. The kind test
+(`tests/e2e/run.sh`) checks the installed role against this table with `kubectl auth can-i`, both
+what it allows and a list of what it must refuse, in each scope; both scopes passed on 2026-10-28 on
+the maintainer's machine. Its cases for the `incidents` row, with incidents on and off, had never
+run as of 2026-11-25. As of 2026-10-26, `kausa run` uses every row: the Pod and event watches, the
+metadata `get` of ReplicaSets and Jobs, `pods/log` for the detections that read logs, and `create`
+and `patch` on Events for its `Detected` Events (with or without `--endpoint`) and its explanations
+(with `--endpoint`), unless `--no-events`. On 2026-10-26 it ran against a live cluster through a
+`kubectl proxy` that let only these reads through, plus `POST` and `PATCH` on Events in one test
+namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a local
 model](../how-to/try-with-a-local-model.md)).
 
 Notifications (`--notify-url-file`, the chart's `notifications.enabled`; since v0.3.0)

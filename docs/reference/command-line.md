@@ -3,39 +3,40 @@
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
 Status as of 2026-11-25: what v0.6.3 does, and the `Detected` Event, the `detected` messages and
-the Incidents (`--incidents`, `--incident-days`) of the release after it, with the namespaced mode, the explanation history and the notifications of
-v0.3.0 (`--namespace`, `--history`, `--history-days` and the `--notify-*` flags) and the Deployment
-watch and the standby of v0.4.0 (`--no-rollouts` and `--leader-lease`). `kausa run` detects and
-groups failures, logs incidents and writes each one's facts as a `Detected` Event; with `--endpoint`
-it explains each one within a call budget, reuses explanations of repeated incidents, and writes the
-explanation as an Event on the failing workload; with `--dry-run` it logs the request instead; with
-`--metrics-address` it serves Prometheus metrics ([0001. Build a small, read-only explainer that
-writes one redacted explanation per incident](../adr/0001-scope-and-positioning.md)); with
-`--namespace` it watches only the namespaces given ([0013. Offer a namespaced install mode: one
-watch pair and one Role per listed namespace, and nothing
-cluster-wide](../adr/0013-namespaced-install-mode.md)); with `--history` it also keeps each
-explained incident's full explanations in an Explanation object in its namespace ([0014. Keep each
-incident's full explanations in a namespaced Explanation resource, off by
+the Incidents (`--incidents`, `--incident-days`) of the release after it, with the namespaced mode,
+the explanation history and the notifications of v0.3.0 (`--namespace`, `--history`,
+`--history-days` and the `--notify-*` flags) and the Deployment watch and the standby of v0.4.0
+(`--no-rollouts` and `--leader-lease`). `kausa run` detects and groups failures, logs incidents and
+writes each one's facts as a `Detected` Event; with `--endpoint` it explains each one within a call
+budget, reuses explanations of repeated incidents, and writes the explanation as an Event on the
+failing workload; with `--dry-run` it logs the request instead; with `--metrics-address` it serves
+Prometheus metrics ([0001. Build a small, read-only explainer that writes one redacted explanation
+per incident](../adr/0001-scope-and-positioning.md)); with `--namespace` it watches only the
+namespaces given ([0013. Offer a namespaced install mode: one watch pair and one Role per listed
+namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)); with `--history` it
+also keeps each explained incident's full explanations in an Explanation object in its namespace
+([0014. Keep each incident's full explanations in a namespaced Explanation resource, off by
 default](../adr/0014-explanation-history.md)); with `--notify-url-file` it also posts each new
-explanation, and each settled incident as below, to one webhook ([0015. Post each new explanation to one optional webhook, as JSON, Slack
-or Telegram](../adr/0015-notifications.md)). v0.4.0 adds a watch on Deployments for stalled rollouts
-(`D014`), on unless `--no-rollouts` ([0018. Explain a Deployment past its progress deadline (`D014`)
-from a Deployment watch that is on by default, and add nothing for StatefulSets or
-DaemonSets](../adr/0018-stuck-rollouts.md)), and `--leader-lease`, which makes a replica act only
-while it holds a Lease, for a standby beside it ([0019. Offer an optional standby replica that takes
-over through a chart-created Lease, elected by kausa's own code](../adr/0019-high-availability.md)).
-Since v0.5.0, `kausa check-endpoint` sends one synthetic request to the model endpoint on demand,
-`--model-timeout` sets a call's timeout, and `kausa run` holds its calls behind a breaker while the
-endpoint fails ([0020. Check the model endpoint on demand with `kausa check-endpoint` and `helm
-test`, and hold calls behind a breaker while it fails](../adr/0020-check-the-endpoint.md)). Since
-the release after v0.6.3, `kausa run` writes a `Detected` Event with the incident's fact statement
-for each settled incident, with or without `--endpoint`, and with `--notify-url-file` posts it to
-the webhook, with no model needed ([0027. Report each settled incident as a fact statement in its
-own `Detected` Event and webhook message, with or without a model, and mark the model's text as a
-model's](../adr/0027-fact-statement-for-the-detections.md)). In `main` for the release after
-v0.6.3, `--incidents` also keeps each settled incident's facts in an immutable Incident object in
-its namespace, with or without `--endpoint` ([0028. Publish each incident as an immutable Incident
-that only kausa writes, and report by webhook what kurita proposed for it, both off by
+explanation, and each settled incident as below, to one webhook ([0015. Post each new explanation to
+one optional webhook, as JSON, Slack or Telegram](../adr/0015-notifications.md)). v0.4.0 adds a
+watch on Deployments for stalled rollouts (`D014`), on unless `--no-rollouts` ([0018. Explain a
+Deployment past its progress deadline (`D014`) from a Deployment watch that is on by default, and
+add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md)), and `--leader-lease`,
+which makes a replica act only while it holds a Lease, for a standby beside it ([0019. Offer an
+optional standby replica that takes over through a chart-created Lease, elected by kausa's own
+code](../adr/0019-high-availability.md)). Since v0.5.0, `kausa check-endpoint` sends one synthetic
+request to the model endpoint on demand, `--model-timeout` sets a call's timeout, and `kausa run`
+holds its calls behind a breaker while the endpoint fails ([0020. Check the model endpoint on demand
+with `kausa check-endpoint` and `helm test`, and hold calls behind a breaker while it
+fails](../adr/0020-check-the-endpoint.md)). Since the release after v0.6.3, `kausa run` writes a
+`Detected` Event with the incident's fact statement for each settled incident, with or without
+`--endpoint`, and with `--notify-url-file` posts it to the webhook, with no model needed ([0027.
+Report each settled incident as a fact statement in its own `Detected` Event and webhook message,
+with or without a model, and mark the model's text as a
+model's](../adr/0027-fact-statement-for-the-detections.md)). In `main` for the release after v0.6.3,
+`--incidents` also keeps each settled incident's facts in an immutable Incident object in its
+namespace, with or without `--endpoint` ([0028. Publish each incident as an immutable Incident that
+only kausa writes, and report by webhook what kurita proposed for it, both off by
 default](../adr/0028-incident-resource-and-remediation-report.md), `proposed`; [Incident
 resource](incident-resource.md)).
 

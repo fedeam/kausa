@@ -76,11 +76,11 @@ The RBAC objects come from `templates/rbac.yaml`, and their rules from the `kaus
 goes there only, so that both scopes grant the same. The history's rule (`list`, `create`,
 `patch` and `delete` on `explanations` in `kausa.fedeam.com`) is appended after the others, only
 while the release writes history, and the Incidents' rule (`create`, `list` and `delete` on
-`incidents` in `kausa.fedeam.com`) last, only while the release creates Incidents. The Deployment watch's rule (`list` and `watch` on `deployments` in
-`apps`) comes right after the `replicasets` rule, only while `rollouts` is on; with `rollouts:
-false` the rules are v0.3.0's, byte for byte. The one exception is the standby's Role
-`<full name>-leader` (`templates/leader-election.yaml`), which is not about the watched namespaces
-but about kausa's own Lease, and is the same in both scopes.
+`incidents` in `kausa.fedeam.com`) last, only while the release creates Incidents. The Deployment
+watch's rule (`list` and `watch` on `deployments` in `apps`) comes right after the `replicasets`
+rule, only while `rollouts` is on; with `rollouts: false` the rules are v0.3.0's, byte for byte. The
+one exception is the standby's Role `<full name>-leader` (`templates/leader-election.yaml`), which
+is not about the watched namespaces but about kausa's own Lease, and is the same in both scopes.
 
 ## Values
 

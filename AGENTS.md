@@ -104,8 +104,8 @@ The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.r
 tested without a cluster, and so are `src/budget.rs`,
 `src/metrics.rs` (except its listener) and the building of Events in `src/events.rs`;
 `src/run.rs`, `src/explain.rs`, `src/events.rs`, `src/report.rs` (whose fact queue is pure and
-tested without a cluster), `src/history.rs`, `src/incidents.rs` and `src/leader.rs` talk to the API server,
-`src/model.rs` and `src/check.rs` to the model endpoint and `src/notify.rs` to the webhook.
+tested without a cluster), `src/history.rs`, `src/incidents.rs` and `src/leader.rs` talk to the API
+server, `src/model.rs` and `src/check.rs` to the model endpoint and `src/notify.rs` to the webhook.
 `kausa check-endpoint` needs no cluster: `tests/cli.rs` runs it against a local fake server.
 
 ## Verification (same as CI)

@@ -154,15 +154,15 @@ accepted ADR, and most should never change.
    panics on any input; the fuzz targets check it. The endpoint's error body and its
    `Retry-After` header are untrusted: kausa reads the body only by fixed keys, compares what it
    reads with fixed lists, and derives only a cause it defines and a clamped delay; the start of
-   the body stays in kausa's log only ([0020](docs/adr/0020-check-the-endpoint.md)). Nothing read back from an Explanation, an Incident or the Lease is logged,
-   sent or reused (the Lease's holder is only compared with kausa's own identity, and its version
-   echoed as the next precondition; of an Incident the sweep lists, the namespace and name only
-   build its delete's path, the UID and `resourceVersion` are echoed only as that delete's
-   preconditions, and its `creationTimestamp` only ranks it; the list's `continue` token is only
-   sent back to ask for the next page). The
+   the body stays in kausa's log only ([0020](docs/adr/0020-check-the-endpoint.md)). Nothing read
+   back from an Explanation, an Incident or the Lease is logged, sent or reused (the Lease's holder
+   is only compared with kausa's own identity, and its version echoed as the next precondition; of
+   an Incident the sweep lists, the namespace and name only build its delete's path, the UID and
+   `resourceVersion` are echoed only as that delete's preconditions, and its `creationTimestamp`
+   only ranks it; the list's `continue` token is only sent back to ask for the next page). The
    `metadata.uid` of the answer to kausa's own create of an Incident is the one exception: it is
-   parsed as a UID and kept, as 16 bytes, only in the table of created Incidents, never logged,
-   sent or reused otherwise; the rest of that answer is read under a cap of 64 KiB and dropped
+   parsed as a UID and kept, as 16 bytes, only in the table of created Incidents, never logged, sent
+   or reused otherwise; the rest of that answer is read under a cap of 64 KiB and dropped
    ([0028](docs/adr/0028-incident-resource-and-remediation-report.md), point 8, `proposed`).
 6. **One call per incident per process, within the budget, and one explanation at a time;
    nothing the cluster, the endpoint or the webhook does may stop the watches without
