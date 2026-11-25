@@ -4,10 +4,10 @@
 //! `incident.rs`, which groups signals into incidents, nor `incident_resource.rs`, the pure part:
 //! the `spec`, its check and the table of created Incidents.
 //!
-//! Only with the internal option `Options.incidents`, which nothing sets yet: its counts are kept
-//! here, readable by the tests, and are not rendered.
+//! Only with `--incidents`, which sets `Options.incidents`; its counts are the
+//! `kausa_incident*` counters of `metrics.rs`, which only then have a series.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -28,18 +28,23 @@ use crate::incident_resource::{Draft, Uid};
 use crate::leader::Term;
 use crate::leader::pure::WRITE_BOUND;
 use crate::log;
+use crate::metrics::Metrics;
 use crate::owner::{OwnerLookup, is_dns_label};
 use crate::report::Fact;
 
-/// What turns incidents on, internal for now: the window of the gate, `--dedup-hours`.
+/// What `--incidents` sets: the window of the gate, `--dedup-hours`, and the days after which the
+/// sweep deletes an Incident by its `creationTimestamp`, `--incident-days` (1 to 30, default 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub window: Duration,
+    pub days: u32,
 }
 
-/// The days after which the sweep deletes an Incident, by its `creationTimestamp`: point 4's
-/// default, an internal value until its flag comes.
-const DAYS: u32 = 1;
+/// The counters of `metrics::INCIDENT_COUNTERS`, in its order.
+pub(crate) const REFUSED: &str = "kausa_incidents_refused_total";
+pub(crate) const WRITE_ERRORS: &str = "kausa_incident_write_errors_total";
+pub(crate) const DELETED: &str = "kausa_incidents_deleted_total";
+pub(crate) const SWEEP_ERRORS: &str = "kausa_incident_sweep_errors_total";
 
 /// The most bytes of the create's answer kausa reads: the object the server stored, whose `spec`
 /// the schema bounds (about 3 KiB at most) and whose `metadata` the server fills. An answer that
@@ -83,36 +88,28 @@ fn resource() -> ApiResource {
 }
 
 /// The Incidents of one process: its client, the table of the Incidents it created, the hour
-/// marks of the `incident refused` line and the counts. None of it is ever borrowed across an
-/// `await`.
-pub struct Incidents {
+/// marks of the `incident refused` line and the metrics it counts in. None of it is ever borrowed
+/// across an `await`.
+pub struct Incidents<'a> {
     client: Client,
     resource: ApiResource,
     window: Duration,
+    days: u32,
     table: RefCell<Table>,
     limiter: RefCell<Limiter>,
-    /// Creates refused, by `Refusal` (`kausa_incidents_refused_total{reason}` when rendered).
-    refused: [Cell<u64>; Refusal::ALL.len()],
-    /// Creates that failed (`kausa_incident_write_errors_total` when rendered).
-    write_errors: Cell<u64>,
-    /// Incidents the sweep deleted, by `Reason`: age, then cap.
-    deleted: [Cell<u64>; 2],
-    /// Lists and deletes of the sweep the server refused.
-    sweep_errors: Cell<u64>,
+    metrics: &'a Metrics,
 }
 
-impl Incidents {
-    pub fn new(client: Client, settings: Settings) -> Incidents {
+impl<'a> Incidents<'a> {
+    pub fn new(client: Client, settings: Settings, metrics: &'a Metrics) -> Incidents<'a> {
         Incidents {
             client,
             resource: resource(),
             window: settings.window,
+            days: settings.days,
             table: RefCell::new(Table::default()),
             limiter: RefCell::new(Limiter::default()),
-            refused: Default::default(),
-            write_errors: Cell::new(0),
-            deleted: Default::default(),
-            sweep_errors: Cell::new(0),
+            metrics,
         }
     }
 
@@ -228,8 +225,7 @@ impl Incidents {
     /// Counts a refusal and logs it, at most once an hour for its reason, naming its field (for
     /// `schema`) and its namespace, never a value.
     fn refuse(&self, reason: Refusal, fact: &Fact, field: Option<&str>) -> io::Result<()> {
-        let count = &self.refused[reason as usize];
-        count.set(count.get() + 1);
+        self.metrics.inc(REFUSED, &[("reason", reason.as_str())]);
         if self.limiter.borrow_mut().allow(reason, Instant::now()) {
             let namespace = is_dns_label(&fact.namespace).then_some(fact.namespace.as_str());
             log::warn(
@@ -246,14 +242,14 @@ impl Incidents {
     }
 
     fn write_failed(&self, fact: &Fact, error: String) -> io::Result<()> {
-        self.write_errors.set(self.write_errors.get() + 1);
+        self.metrics.inc(WRITE_ERRORS, &[]);
         log::warn(
             "incident write failed",
             json!({"fingerprint": fact.fingerprint, "namespace": fact.namespace, "error": error}),
         )
     }
 
-    /// One sweep, 0014's applied to Incidents: deletes those created more than `DAYS` days ago and,
+    /// One sweep, 0014's applied to Incidents: deletes those created more than `days` days ago and,
     /// oldest first, those beyond `MAX_OBJECTS`, by `creationTimestamp` only. It lists every
     /// Incident, with no label selector, in pages of `SWEEP_PAGE`, across the cluster when
     /// `namespaces` is empty or in each listed namespace in order, keeps only five fields of each
@@ -274,7 +270,7 @@ impl Incidents {
     async fn sweep_calls(&self, namespaces: &[String], term: &Term) -> io::Result<Ended> {
         let deadline = tokio::time::Instant::now() + SWEEP_TIME;
         let call_end = || deadline.min(tokio::time::Instant::now() + WRITE_BOUND);
-        let (_, cutoff) = times(Timestamp::now(), DAYS);
+        let (_, cutoff) = times(Timestamp::now(), self.days);
         let mut plan = SweepPlan::incidents(&cutoff);
         let (mut by_age, mut by_cap) = (0_u64, 0_u64);
         let mut ended = Ended::Completed;
@@ -286,7 +282,7 @@ impl Incidents {
         'scopes: for scope in scopes {
             // The log names the namespace of the flag (null in cluster scope), never a listed one.
             let failed = |error: String| {
-                self.sweep_errors.set(self.sweep_errors.get() + 1);
+                self.metrics.inc(SWEEP_ERRORS, &[]);
                 log::warn(
                     "incident sweep failed",
                     json!({"namespace": scope, "error": error}),
@@ -352,8 +348,8 @@ impl Incidents {
                     };
                     match answer {
                         Ok(_) => {
-                            let count = &self.deleted[delete.reason as usize];
-                            count.set(count.get() + 1);
+                            self.metrics
+                                .inc(DELETED, &[("reason", delete.reason.label())]);
                             match delete.reason {
                                 Reason::Age => by_age += 1,
                                 Reason::Cap => by_cap += 1,
@@ -382,22 +378,23 @@ impl Incidents {
 
     #[cfg(test)]
     pub(crate) fn refused(&self, reason: Refusal) -> u64 {
-        self.refused[reason as usize].get()
+        self.metrics
+            .counter(REFUSED, &[("reason", reason.as_str())])
     }
 
     #[cfg(test)]
     pub(crate) fn write_errors(&self) -> u64 {
-        self.write_errors.get()
+        self.metrics.counter(WRITE_ERRORS, &[])
     }
 
     #[cfg(test)]
     pub(crate) fn deleted(&self, reason: Reason) -> u64 {
-        self.deleted[reason as usize].get()
+        self.metrics.counter(DELETED, &[("reason", reason.label())])
     }
 
     #[cfg(test)]
     pub(crate) fn sweep_errors(&self) -> u64 {
-        self.sweep_errors.get()
+        self.metrics.counter(SWEEP_ERRORS, &[])
     }
 
     #[cfg(test)]
@@ -594,11 +591,17 @@ pub(crate) mod tests {
 
     pub(crate) const SETTINGS: Settings = Settings {
         window: Duration::from_secs(24 * 3600),
+        days: 1,
     };
 
+    /// Metrics of their own for one test's Incidents, which live as long as the test process.
+    pub(crate) fn metrics() -> &'static Metrics {
+        Box::leak(Box::default())
+    }
+
     /// The Incidents of the fake server at `url`, past their first sweep.
-    pub(crate) fn started(url: &str) -> Incidents {
-        let incidents = Incidents::new(client(url), SETTINGS);
+    pub(crate) fn started(url: &str) -> Incidents<'static> {
+        let incidents = Incidents::new(client(url), SETTINGS, metrics());
         incidents.table_mut().start_sweep_ended();
         incidents
     }
@@ -763,7 +766,7 @@ pub(crate) mod tests {
         // Before a sweep of this process ended.
         let (url, requests) = api_server(|_| created());
         let rt = runtime();
-        let incidents = rt.block_on(async { Incidents::new(client(&url), SETTINGS) });
+        let incidents = rt.block_on(async { Incidents::new(client(&url), SETTINGS, metrics()) });
         refused(
             &rt,
             &incidents,
@@ -1100,11 +1103,11 @@ pub(crate) mod tests {
     }
 
     /// A sweep of the Incidents at `url`, never started before: how it ended, and the Incidents.
-    fn sweep(url: &str, namespaces: &[&str], term: &Term) -> (Ended, Incidents) {
+    fn sweep(url: &str, namespaces: &[&str], term: &Term) -> (Ended, Incidents<'static>) {
         let rt = runtime();
         let namespaces: Vec<String> = namespaces.iter().map(|n| (*n).to_owned()).collect();
         rt.block_on(async {
-            let incidents = Incidents::new(client(url), SETTINGS);
+            let incidents = Incidents::new(client(url), SETTINGS, metrics());
             let ended = incidents.sweep(&namespaces, term).await.expect("a log");
             (ended, incidents)
         })
@@ -1250,7 +1253,7 @@ pub(crate) mod tests {
         // Nor does a create get through after it: it is refused `starting`.
         let rt = runtime();
         let (url, requests) = api_server(|_| created());
-        let incidents = rt.block_on(async { Incidents::new(client(&url), SETTINGS) });
+        let incidents = rt.block_on(async { Incidents::new(client(&url), SETTINGS, metrics()) });
         let lookup = Revisions::of(UID_RS, 7);
         create(&rt, &incidents, &sample_fact(), &lookup, &Term::unbounded());
         assert_eq!(incidents.refused(Refusal::Starting), 1);
@@ -1274,7 +1277,7 @@ pub(crate) mod tests {
         });
         let term = Term::unbounded();
         let (ended, incidents) = runtime().block_on(async {
-            let incidents = Incidents::new(client(&url), SETTINGS);
+            let incidents = Incidents::new(client(&url), SETTINGS, metrics());
             let (ended, ()) = futures::join!(incidents.sweep(&[], &term), hold.end(&term));
             (ended.expect("a log"), incidents)
         });
@@ -1372,7 +1375,7 @@ pub(crate) mod tests {
             _ => created(),
         });
         let rt = runtime();
-        let incidents = rt.block_on(async { Incidents::new(client(&url), SETTINGS) });
+        let incidents = rt.block_on(async { Incidents::new(client(&url), SETTINGS, metrics()) });
         for namespaces in [vec![], vec!["shop".to_owned()]] {
             let ended = rt.block_on(incidents.sweep(&namespaces, &Term::unbounded()));
             assert_eq!(ended.expect("a log"), Ended::Completed);

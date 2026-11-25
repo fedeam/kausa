@@ -317,12 +317,12 @@ pub fn enqueue(
 }
 
 /// What the fact slot works with, across terms: the Event writer, unless `--no-events`, the
-/// outbox, with `--notify-url-file`, and the Incidents, with the internal option of
-/// docs/adr/0028-incident-resource-and-remediation-report.md.
+/// outbox, with `--notify-url-file`, and the Incidents, with `--incidents`
+/// (docs/adr/0028-incident-resource-and-remediation-report.md).
 pub struct Reporter<'a> {
     pub writer: Option<Writer>,
     pub outbox: Option<&'a Outbox<'a>>,
-    pub incidents: Option<&'a Incidents>,
+    pub incidents: Option<&'a Incidents<'a>>,
     pub metrics: &'a Metrics,
     pub term: &'a Term,
 }

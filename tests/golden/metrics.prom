@@ -100,6 +100,21 @@ kausa_facts_dropped_total 0
 # HELP kausa_fact_reasons_omitted_total Fact statements that left out a reason outside the list of known reasons.
 # TYPE kausa_fact_reasons_omitted_total counter
 kausa_fact_reasons_omitted_total 0
+# HELP kausa_incidents_refused_total Incident objects not created, by reason (table-full, schema, starting).
+# TYPE kausa_incidents_refused_total counter
+kausa_incidents_refused_total{reason="schema"} 0
+kausa_incidents_refused_total{reason="starting"} 2
+kausa_incidents_refused_total{reason="table-full"} 1
+# HELP kausa_incident_write_errors_total Incident objects that could not be created.
+# TYPE kausa_incident_write_errors_total counter
+kausa_incident_write_errors_total 1
+# HELP kausa_incidents_deleted_total Incident objects deleted by the sweep, by reason (age, cap).
+# TYPE kausa_incidents_deleted_total counter
+kausa_incidents_deleted_total{reason="age"} 3
+kausa_incidents_deleted_total{reason="cap"} 0
+# HELP kausa_incident_sweep_errors_total Failed list or delete calls of the incident sweep.
+# TYPE kausa_incident_sweep_errors_total counter
+kausa_incident_sweep_errors_total 0
 # HELP kausa_leader 1 while this process acts (it holds the Lease, or runs without --leader-lease), 0 as a standby.
 # TYPE kausa_leader gauge
 kausa_leader 1

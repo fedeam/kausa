@@ -59,7 +59,8 @@ use crate::explain::{self, LogSource, Next, QUEUE_LIMIT, Settings, Shared, Work}
 use crate::fact;
 use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals, rollout_signals};
-use crate::incidents::Incidents;
+use crate::incident_resource::table::Refusal;
+use crate::incidents::{self, Incidents};
 use crate::leader::pure::{TIMINGS, Timings};
 use crate::leader::{self, KubeLease, LEASE_ERROR_PERIOD, LeaseApi, LeaseErrors, Lost, Term};
 use crate::log;
@@ -121,10 +122,9 @@ pub struct Options {
     /// With `--notify-url-file`, the webhook and the bounds of its `detected` messages
     /// (docs/adr/0015-notifications.md, docs/adr/0027-fact-statement-for-the-detections.md).
     pub notify: Option<Notify>,
-    /// With incidents on, each settled fact keeps what its Incident needs, the fact slot creates
+    /// With `--incidents`, each settled fact keeps what its Incident needs, the fact slot creates
     /// it and a slot of its own sweeps them
-    /// (docs/adr/0028-incident-resource-and-remediation-report.md, points 1, 3 and 4). Internal:
-    /// no flag sets it yet.
+    /// (docs/adr/0028-incident-resource-and-remediation-report.md, points 1, 3 and 4).
     pub incidents: Option<crate::incidents::Settings>,
 }
 
@@ -565,7 +565,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         outbox: outbox.as_ref(),
         term: &term,
     });
-    let incidents = incidents_of(&client, &options);
+    let incidents = incidents_of(&client, &options, &metrics);
     let reporter = reporter(
         &client,
         &options,
@@ -637,10 +637,14 @@ struct Watched {
 
 /// The Incidents and their table, across terms, only with `options.incidents`
 /// (docs/adr/0028-incident-resource-and-remediation-report.md, point 1).
-fn incidents_of(client: &Client, options: &Options) -> Option<Incidents> {
+fn incidents_of<'a>(
+    client: &Client,
+    options: &Options,
+    metrics: &'a Metrics,
+) -> Option<Incidents<'a>> {
     options
         .incidents
-        .map(|settings| Incidents::new(client.clone(), settings))
+        .map(|settings| Incidents::new(client.clone(), settings, metrics))
 }
 
 /// The fact path: its Events, its `detected` messages, its Incidents, or any of them; `None` with
@@ -649,7 +653,7 @@ fn reporter<'a>(
     client: &Client,
     options: &Options,
     outbox: Option<&'a Outbox<'a>>,
-    incidents: Option<&'a Incidents>,
+    incidents: Option<&'a Incidents<'a>>,
     metrics: &'a Metrics,
     term: &'a Term,
 ) -> Option<Reporter<'a>> {
@@ -1360,7 +1364,8 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
         &["pods", "events"]
     };
     let settings = options.explain.as_ref();
-    let counters: [(&'static str, &str, &[&str], bool); 8] = [
+    let refusals = Refusal::ALL.map(Refusal::as_str);
+    let counters: [(&'static str, &str, &[&str], bool); 10] = [
         ("kausa_watch_errors_total", "watch", watches, true),
         ("kausa_watch_relists_total", "watch", watches, true),
         ("kausa_watch_restarts_total", "watch", watches, true),
@@ -1394,6 +1399,20 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
             &["Detected"],
             options.detected.is_some(),
         ),
+        // The counters of the Incidents (docs/adr/0028-incident-resource-and-remediation-report.md)
+        // have no line at all with incidents off.
+        (
+            incidents::REFUSED,
+            "reason",
+            &refusals,
+            options.incidents.is_some(),
+        ),
+        (
+            incidents::DELETED,
+            "reason",
+            &["age", "cap"],
+            options.incidents.is_some(),
+        ),
     ];
     for (name, label, values, shown) in counters {
         if shown {
@@ -1401,6 +1420,10 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
                 metrics.add(name, &[(label, value)], 0);
             }
         }
+    }
+    if options.incidents.is_some() {
+        metrics.add(incidents::WRITE_ERRORS, &[], 0);
+        metrics.add(incidents::SWEEP_ERRORS, &[], 0);
     }
 }
 
@@ -2195,6 +2218,7 @@ mod tests {
     /// Incidents on, with the gate's default window of 24 hours.
     const INCIDENTS: crate::incidents::Settings = crate::incidents::Settings {
         window: Duration::from_secs(24 * 3600),
+        days: 1,
     };
 
     /// Every Pod in these tests has no owner, so no lookup is made; a lookup is an error.
@@ -3673,7 +3697,7 @@ mod tests {
         let term = Term::unbounded();
         rt.block_on(async {
             let client = client(&url);
-            let incidents = incidents_of(&client, options);
+            let incidents = incidents_of(&client, options, &metrics);
             if let Some(incidents) = &incidents {
                 incidents.table_mut().start_sweep_ended();
             }
@@ -3726,6 +3750,41 @@ mod tests {
     }
 
     #[test]
+    fn with_no_events_and_no_webhook_an_incident_is_still_created() {
+        // `--incidents --no-events` and no webhook: the Incidents alone make the fact path.
+        let only_incidents = Options {
+            detected: None,
+            notify: None,
+            incidents: Some(INCIDENTS),
+            ..options(false, 10)
+        };
+        let requests = report_through_run(&only_incidents);
+        assert_eq!(
+            requests,
+            [
+                (
+                    "GET".to_owned(),
+                    "/apis/apps/v1/namespaces/shop/replicasets/web-7d4b9c6f5d".to_owned()
+                ),
+                ("POST".to_owned(), crate::incidents::tests::PATH.to_owned()),
+            ]
+        );
+        // With none of the three, there is no fact path at all.
+        let none = Options {
+            detected: None,
+            notify: None,
+            ..options(false, 10)
+        };
+        let metrics = Metrics::default();
+        let term = Term::unbounded();
+        let rt = crate::incidents::tests::runtime();
+        let _guard = rt.enter();
+        let client = crate::incidents::tests::client("http://127.0.0.1:9");
+        assert!(incidents_of(&client, &none, &metrics).is_none());
+        assert!(reporter(&client, &none, None, None, &metrics, &term).is_none());
+    }
+
+    #[test]
     fn a_term_that_ends_during_the_replica_set_read_sends_no_create() {
         use crate::incident_resource::tests::{UID_RS, sample_fact};
         use crate::incidents::tests::{api_server, client, created, reply, runtime, sent};
@@ -3745,10 +3804,10 @@ mod tests {
             incidents: Some(INCIDENTS),
             ..options(false, 10)
         };
-        let term = Term::unbounded();
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
         let write_errors = runtime().block_on(async {
             let client = client(&url);
-            let incidents = incidents_of(&client, &on).expect("the incidents");
+            let incidents = incidents_of(&client, &on, &metrics).expect("the incidents");
             incidents.table_mut().start_sweep_ended();
             let lookup = KubeCluster::new(client, &on).lookup();
             let fact = sample_fact();
@@ -3769,7 +3828,6 @@ mod tests {
     /// until the Pod's `Detected` Event was written and its `detected` message queued: the
     /// requests, as method and path, how long that took, and the `starting` refusals.
     fn lead_with_a_hung_sweep(options: &Options) -> (Vec<(String, String)>, Duration, u64) {
-        use crate::incident_resource::table::Refusal;
         use crate::incidents::tests::{Answer, api_server, client, sent};
         let (url, requests) = api_server(|request| match request.method.as_str() {
             "POST" if request.path.contains("/events") => Answer::Reply(201, request.body.clone()),
@@ -3794,7 +3852,7 @@ mod tests {
         };
         let (took, refused) = runtime().block_on(async {
             let client = client(&url);
-            let incidents = incidents_of(&client, options);
+            let incidents = incidents_of(&client, options, &metrics);
             let reporter = reporter(
                 &client,
                 options,
@@ -3912,7 +3970,7 @@ mod tests {
         };
         runtime().block_on(async {
             let client = client(&url);
-            let incidents = incidents_of(&client, &on);
+            let incidents = incidents_of(&client, &on, &metrics);
             let reporter = reporter(&client, &on, None, incidents.as_ref(), &metrics, &term)
                 .expect("a reporter");
             let leading = lead(
@@ -6773,6 +6831,42 @@ mod tests {
         defaults.explain = None;
         defaults.detected = Some("kausa".to_owned());
         defaults
+    }
+
+    #[test]
+    fn the_start_shows_the_incident_counters_at_0_only_with_incidents_on() {
+        let off = Metrics::default();
+        show_start(&off, &default_options(), None, Instant::now());
+        let on = Metrics::default();
+        let with_incidents = Options {
+            incidents: Some(INCIDENTS),
+            ..default_options()
+        };
+        show_start(&on, &with_incidents, None, Instant::now());
+        let (off, on) = (off.render(), on.render());
+        // `kausa_incidents_total`, the settled incidents, is an older counter and stays.
+        let names = metrics::INCIDENT_COUNTERS.map(|(name, _)| name);
+        let of_incidents = |line: &str| names.iter().any(|name| line.contains(name));
+        assert!(!off.lines().any(of_incidents), "{off}");
+        let series: Vec<&str> = on
+            .lines()
+            .filter(|l| of_incidents(l) && !l.starts_with('#'))
+            .collect();
+        assert_eq!(
+            series,
+            [
+                "kausa_incidents_refused_total{reason=\"schema\"} 0",
+                "kausa_incidents_refused_total{reason=\"starting\"} 0",
+                "kausa_incidents_refused_total{reason=\"table-full\"} 0",
+                "kausa_incident_write_errors_total 0",
+                "kausa_incidents_deleted_total{reason=\"age\"} 0",
+                "kausa_incidents_deleted_total{reason=\"cap\"} 0",
+                "kausa_incident_sweep_errors_total 0",
+            ]
+        );
+        // Nothing else differs.
+        let rest: Vec<&str> = on.lines().filter(|l| !of_incidents(l)).collect();
+        assert_eq!(rest, off.lines().collect::<Vec<_>>());
     }
 
     #[test]

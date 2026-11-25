@@ -120,6 +120,29 @@ pub const COUNTERS: [(&str, &str); 25] = [
     ),
 ];
 
+/// The counters of the Incident objects (docs/adr/0028-incident-resource-and-remediation-report.md,
+/// points 1 and 4), rendered after the other counters and, unlike them, only once a series was
+/// set: `kausa run` sets each at 0 at start with incidents on, so that with incidents off the
+/// exposition has no line of them.
+pub const INCIDENT_COUNTERS: [(&str, &str); 4] = [
+    (
+        "kausa_incidents_refused_total",
+        "Incident objects not created, by reason (table-full, schema, starting).",
+    ),
+    (
+        "kausa_incident_write_errors_total",
+        "Incident objects that could not be created.",
+    ),
+    (
+        "kausa_incidents_deleted_total",
+        "Incident objects deleted by the sweep, by reason (age, cap).",
+    ),
+    (
+        "kausa_incident_sweep_errors_total",
+        "Failed list or delete calls of the incident sweep.",
+    ),
+];
+
 /// The gauges kausa exports, with their help text, rendered after the counters
 /// (docs/adr/0019-high-availability.md). `kausa_leader` is always rendered; the budget and queue
 /// gauges (docs/adr/0021-refill-the-call-budget.md) and the endpoint gauges
@@ -260,6 +283,16 @@ impl Metrics {
         self.add(name, labels, 1);
     }
 
+    /// The value of the counter series `name` with the given labels, 0 when never set.
+    #[cfg(test)]
+    pub fn counter(&self, name: &'static str, labels: &[(&str, &str)]) -> u64 {
+        let counters = self.counters.borrow();
+        counters
+            .get(&(name, label_set(labels)))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Marks kausa ready: every watch has listed once.
     pub fn set_ready(&self) {
         self.ready.set(true);
@@ -287,6 +320,14 @@ impl Metrics {
             out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
             if !push_series(&mut out, name, &counters) {
                 out.push_str(&format!("{name} 0\n"));
+            }
+        }
+        for (name, help) in INCIDENT_COUNTERS {
+            // A counter never set is not rendered at all.
+            let mut series = String::new();
+            if push_series(&mut series, name, &counters) {
+                out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
+                out.push_str(&series);
             }
         }
         let gauges = self.gauges.borrow();
@@ -724,6 +765,37 @@ mod tests {
         assert!(m.render().ends_with(&gauge(0)));
         m.set_leading(true);
         assert!(m.render().ends_with(&gauge(1)));
+    }
+
+    #[test]
+    fn the_incident_counters_have_no_line_until_set_and_come_after_the_others() {
+        // docs/adr/0028-incident-resource-and-remediation-report.md: with incidents off, the
+        // exposition has none of them.
+        let m = Metrics::default();
+        let off = m.render();
+        for (name, _) in INCIDENT_COUNTERS {
+            assert!(!off.contains(name), "{name}: {off}");
+            assert!(COUNTERS.iter().all(|(other, _)| *other != name), "{name}");
+        }
+        m.add("kausa_incidents_refused_total", &[("reason", "schema")], 0);
+        m.add("kausa_incident_sweep_errors_total", &[], 0);
+        let on = m.render();
+        let block = "# HELP kausa_incidents_refused_total Incident objects not created, by reason \
+                     (table-full, schema, starting).\n\
+                     # TYPE kausa_incidents_refused_total counter\n\
+                     kausa_incidents_refused_total{reason=\"schema\"} 0\n\
+                     # HELP kausa_incident_sweep_errors_total Failed list or delete calls of the \
+                     incident sweep.\n\
+                     # TYPE kausa_incident_sweep_errors_total counter\n\
+                     kausa_incident_sweep_errors_total 0\n";
+        assert_eq!(on.replacen(block, "", 1), off, "{on}");
+        let last_counter = COUNTERS[COUNTERS.len() - 1].0;
+        let counter_at = on.find(&format!("\n{last_counter} ")).expect("the counter");
+        let block_at = on.find(block).expect("the block");
+        let gauge_at = on.find("# TYPE kausa_leader gauge").expect("the gauge");
+        assert!(counter_at < block_at && block_at < gauge_at, "{on}");
+        assert!(!on.contains("kausa_incident_write_errors_total"), "{on}");
+        assert!(!on.contains("kausa_incidents_deleted_total"), "{on}");
     }
 
     #[test]
@@ -1466,6 +1538,25 @@ mod tests {
                 vec![("watch", "deployments")],
                 0,
             ),
+            (
+                "kausa_incidents_refused_total",
+                vec![("reason", "table-full")],
+                1,
+            ),
+            (
+                "kausa_incidents_refused_total",
+                vec![("reason", "schema")],
+                0,
+            ),
+            (
+                "kausa_incidents_refused_total",
+                vec![("reason", "starting")],
+                2,
+            ),
+            ("kausa_incident_write_errors_total", vec![], 1),
+            ("kausa_incidents_deleted_total", vec![("reason", "age")], 3),
+            ("kausa_incidents_deleted_total", vec![("reason", "cap")], 0),
+            ("kausa_incident_sweep_errors_total", vec![], 0),
         ] {
             m.add(name, &labels, by);
         }
@@ -1527,7 +1618,11 @@ mod tests {
             );
         }
         // Every counter, gauge and histogram of the lists has a series in it.
-        for (name, _) in COUNTERS.iter().chain(GAUGES.iter()) {
+        for (name, _) in COUNTERS
+            .iter()
+            .chain(INCIDENT_COUNTERS.iter())
+            .chain(GAUGES.iter())
+        {
             assert!(
                 golden.contains(&format!("\n{name}{{")) || golden.contains(&format!("\n{name} ")),
                 "{name} has no series in the golden file"

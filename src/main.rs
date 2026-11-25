@@ -1,6 +1,7 @@
 //! kausa: a tiny Kubernetes controller that explains failing workloads with an LLM. It reads the
 //! cluster and writes nothing but its own Events and, with `--history`, its own Explanation
-//! objects, and, with `--leader-lease`, the spec of its one Lease.
+//! objects, with `--incidents`, its own Incident objects, and, with `--leader-lease`, the spec of
+//! its one Lease.
 //!
 //! Pre-alpha. `kausa run` watches the cluster and logs incidents and, with `--endpoint` or
 //! `--dry-run`, sends or logs a redacted request for each; with `--endpoint`, the explanation is
@@ -48,6 +49,10 @@ const VERSION_LINE: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_
 /// The default settle window: a failure has to persist this long to be an incident.
 const DEFAULT_SETTLE_SECONDS: u32 = 60;
 
+/// How many days `kausa run --incidents` keeps an Incident without `--incident-days`
+/// (docs/adr/0028-incident-resource-and-remediation-report.md, point 4).
+const DEFAULT_INCIDENT_DAYS: u32 = 1;
+
 /// How many days `kausa run --history` keeps an explanation without `--history-days`
 /// (docs/adr/0014-explanation-history.md).
 const DEFAULT_HISTORY_DAYS: u32 = 7;
@@ -63,7 +68,7 @@ const MODEL_TIMEOUTS: std::ops::RangeInclusive<u64> = 10..=600;
 
 /// The flags of `kausa run` that `kausa check-endpoint` refuses by name: every flag of `run` but
 /// the six model flags they share ([`ModelFlags`]).
-const RUN_ONLY_FLAGS: [&str; 20] = [
+const RUN_ONLY_FLAGS: [&str; 22] = [
     "--settle-seconds",
     "--namespace",
     "--no-rollouts",
@@ -72,6 +77,8 @@ const RUN_ONLY_FLAGS: [&str; 20] = [
     "--no-events",
     "--history",
     "--history-days",
+    "--incidents",
+    "--incident-days",
     "--notify-url-file",
     "--notify-format",
     "--notify-telegram-chat-id",
@@ -124,6 +131,9 @@ const HELP: &str = concat!(
     "  --history              Keep each incident's explanations in an Explanation\n",
     "                         object in its namespace (needs the CRD)\n",
     "  --history-days <N>     Delete history older than N days (1-30, default 7)\n",
+    "  --incidents            Keep each settled incident's facts in an Incident\n",
+    "                         object in its namespace (needs the CRD)\n",
+    "  --incident-days <N>    Delete Incidents older than N days (1-30, default 1)\n",
     "  --notify-url-file <PATH>  Post each detection and each new explanation to the\n",
     "                            webhook whose URL is in this file\n",
     "  --notify-format <FORMAT>  json (default), slack or telegram\n",
@@ -163,10 +173,11 @@ const HELP: &str = concat!(
     "  be written.\n",
     "\n",
     "By design, kausa never reads Secrets or ConfigMaps, writes nothing but Events\n",
-    "and, with --history, its own Explanation objects, and, with --leader-lease, the\n",
-    "spec of its one Lease, and sends nothing unredacted to the model. With\n",
-    "--notify-url-file, only the documented fields of each detection and each new\n",
-    "explanation go to the webhook.\n",
+    "and, with --history, its own Explanation objects, with --incidents, its own\n",
+    "Incident objects, and, with --leader-lease, the spec of its one Lease, and\n",
+    "sends nothing unredacted to the model. With --notify-url-file, only the\n",
+    "documented fields of each detection and each new explanation go to the\n",
+    "webhook.\n",
     "\n",
     "Exit status: 0 on success or a clean stop, 1 when it cannot start or a watch\n",
     "ends (watch errors are logged and retried), 2 on a usage error or when stdout\n",
@@ -211,6 +222,8 @@ fn run_command(args: &[OsString]) -> ExitCode {
     let mut no_rollouts = false;
     let mut history = false;
     let mut history_days: Option<u32> = None;
+    let mut incidents = false;
+    let mut incident_days: Option<u32> = None;
     let mut metrics_address: Option<String> = None;
     let mut namespaces: Vec<String> = Vec::new();
     let mut leader_lease: Option<(String, String)> = None;
@@ -335,7 +348,19 @@ fn run_command(args: &[OsString]) -> ExitCode {
                 },
                 Err(code) => return code,
             },
+            "--incident-days" => match value() {
+                Ok(v) => match v.parse::<u32>() {
+                    Ok(n) if (1..=30).contains(&n) => incident_days = Some(n),
+                    _ => {
+                        return usage_error(&format!(
+                            "--incident-days takes a whole number of days from 1 to 30, not '{v}'"
+                        ));
+                    }
+                },
+                Err(code) => return code,
+            },
             "--history" => history = true,
+            "--incidents" => incidents = true,
             "--no-events" => no_events = true,
             "--no-rollouts" => no_rollouts = true,
             "--dry-run" => dry_run = true,
@@ -360,6 +385,9 @@ fn run_command(args: &[OsString]) -> ExitCode {
     }
     let endpoint = model_flags.endpoint.is_some();
     if let Err(message) = check_history(history, history_days, dry_run, endpoint) {
+        return usage_error(message);
+    }
+    if let Err(message) = check_incidents(incidents, incident_days, dry_run) {
         return usage_error(message);
     }
     let notifier = match check_notify(notify_flags, notify_max_per_hour.is_some(), dry_run) {
@@ -411,8 +439,9 @@ fn run_command(args: &[OsString]) -> ExitCode {
                 .unwrap_or_else(|| "kausa".to_owned())
         }),
         notify,
-        // docs/adr/0028-incident-resource-and-remediation-report.md: not reachable yet.
-        incidents: None,
+        // docs/adr/0028-incident-resource-and-remediation-report.md, point 1: the gate's window is
+        // --dedup-hours.
+        incidents: incident_settings(incidents, incident_days, &limits),
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -508,6 +537,19 @@ fn check_history(
     }
     if history && !endpoint {
         return Err("--history needs --endpoint");
+    }
+    Ok(())
+}
+
+/// Checks `--incidents` and `--incident-days` against the other flags, in this order: the days
+/// need `--incidents`, which is not used with `--dry-run`
+/// (docs/adr/0028-incident-resource-and-remediation-report.md, point 1).
+fn check_incidents(incidents: bool, days: Option<u32>, dry_run: bool) -> Result<(), &'static str> {
+    if days.is_some() && !incidents {
+        return Err("--incident-days needs --incidents");
+    }
+    if incidents && dry_run {
+        return Err("--incidents is not used with --dry-run: no Incident is written");
     }
     Ok(())
 }
@@ -635,7 +677,8 @@ struct Limits {
 }
 
 impl Limits {
-    /// `--dedup-hours` as a duration: the explanation cache's and the `detected` messages' window.
+    /// `--dedup-hours` as a duration: the explanation cache's and the `detected` messages' window,
+    /// and the window of the incidents' gate.
     fn dedup_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.dedup_hours as u64 * 3600)
     }
@@ -650,6 +693,19 @@ impl Default for Limits {
             dedup_hours: 6,
         }
     }
+}
+
+/// `Options.incidents`: set by `--incidents` only, with `--incident-days` or its default, and the
+/// gate's window of `--dedup-hours`.
+fn incident_settings(
+    incidents: bool,
+    days: Option<u32>,
+    limits: &Limits,
+) -> Option<incidents::Settings> {
+    incidents.then(|| incidents::Settings {
+        window: limits.dedup_ttl(),
+        days: days.unwrap_or(DEFAULT_INCIDENT_DAYS),
+    })
 }
 
 fn explain_settings(
@@ -917,6 +973,49 @@ fn write_stdout(text: &str) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incidents_are_off_unless_the_switch_is_given() {
+        let limits = Limits::default();
+        assert_eq!(incident_settings(false, None, &limits), None);
+        // The days alone never turn incidents on (the usage error comes first).
+        assert_eq!(incident_settings(false, Some(7), &limits), None);
+        let six_hours = std::time::Duration::from_secs(6 * 3600);
+        assert_eq!(
+            incident_settings(true, None, &limits),
+            Some(incidents::Settings {
+                window: six_hours,
+                days: 1
+            })
+        );
+        let twelve = Limits {
+            dedup_hours: 12,
+            ..Limits::default()
+        };
+        assert_eq!(
+            incident_settings(true, Some(30), &twelve),
+            Some(incidents::Settings {
+                window: std::time::Duration::from_secs(12 * 3600),
+                days: 30
+            })
+        );
+    }
+
+    #[test]
+    fn check_incidents_refuses_in_order() {
+        assert_eq!(check_incidents(false, None, false), Ok(()));
+        assert_eq!(check_incidents(false, None, true), Ok(()));
+        assert_eq!(check_incidents(true, None, false), Ok(()));
+        assert_eq!(check_incidents(true, Some(30), false), Ok(()));
+        assert_eq!(
+            check_incidents(false, Some(1), true),
+            Err("--incident-days needs --incidents")
+        );
+        assert_eq!(
+            check_incidents(true, Some(1), true),
+            Err("--incidents is not used with --dry-run: no Incident is written")
+        );
+    }
 
     #[test]
     fn the_help_line_names_the_namespace_cap() {
