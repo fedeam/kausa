@@ -610,10 +610,19 @@ mod tests {
         no_uid.object.uid = None;
         let e = Entry::new("shop", &no_uid, uid(5), t0).expect("an entry");
         assert_eq!(e.target().uid(), None);
-        // No entry for a spec the check refuses, or a namespace that is not a DNS label.
-        let mut refused = spec(5);
-        refused.fingerprint = "X".repeat(16);
-        assert_eq!(Entry::new("shop", &refused, uid(5), t0), None);
+        // No entry for a spec the check refuses, or a namespace that is not a DNS label. A kind
+        // in lower case and too many Pods are refused by the check alone; a fingerprint that is
+        // not one fails its parse too.
+        let mut kind = spec(5);
+        kind.object.kind = "pod".into();
+        let mut pods = spec(5);
+        pods.facts.pods_now = super::super::MAX_PODS_NOW + 1;
+        let mut fingerprint = spec(5);
+        fingerprint.fingerprint = "X".repeat(16);
+        for refused in [kind, pods, fingerprint] {
+            assert!(refused.check().is_err());
+            assert_eq!(Entry::new("shop", &refused, uid(5), t0), None);
+        }
         for namespace in ["", "Shop", "a.b", &"a".repeat(MAX_NAMESPACE_LEN + 1)] {
             assert_eq!(
                 Entry::new(namespace, &spec(5), uid(5), t0),
