@@ -381,8 +381,10 @@ after any failed lookup (`top_owner`, `src/owner.rs:67`), with its Events and it
 its name does not fit `Name`, so point 2's rule creates no Incident for it. For the revision it
 gives `revision-lookup-failed`, and the name is not kept in the fact queue entry. A name that passes
 has no `/`, no `?` and no `..` segment. That no Secret or ConfigMap can be read through such a path
-today rests on RBAC, which grants kausa no verb on them
-([Permissions](../reference/permissions.md)), not on the code.
+rests on the code, which refuses the name and the namespace (**Update 2026-11-24:** shipped ahead),
+and on RBAC, which grants kausa no verb on them ([Permissions](../reference/permissions.md))
+besides. What the `owner lookup failed` line prints of the name and the namespace is cut at 253
+characters.
 
 **Where the revision comes from.** This paragraph was written after the design review, which left
 the read implicit: it is this ADR's own design, not one of the two compared. kausa reads a

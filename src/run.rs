@@ -1756,8 +1756,8 @@ impl State {
         })
     }
 
-    /// The Pods kausa holds in `namespace` whose top-level owner has `owner`'s UID. A controller
-    /// reference kausa does not follow is kept as the Pod carries it, UID included
+    /// The Pods kausa holds in the incident's `namespace` whose top-level owner has `owner`'s UID.
+    /// A controller reference kausa does not follow is kept as the Pod carries it, UID included
     /// (`owner.rs`), so the UID alone would count a Pod of another namespace that names it.
     fn pods_of(&self, namespace: &str, owner: &OwnerRef) -> usize {
         self.pods

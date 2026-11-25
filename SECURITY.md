@@ -401,6 +401,11 @@ kausa must:
   Telegram texts replace each control character and each line or paragraph separator in the kind
   and the name with U+FFFD; the `json` body, the Events and the log escape the value as JSON and
   keep it.
+- **A name kausa sends in a request is a DNS name.** The name of an owner is sent to the API
+  server, in the metadata `get` of a ReplicaSet or a Job, only when it is a DNS-1123 subdomain of
+  at most 253 characters and its namespace a DNS-1123 label; any other is never looked up, never
+  cached and, in the `owner lookup failed` line, cut at 253 characters, so a writer of Pods or
+  Events cannot put `/`, `..` or `?` in the path of kausa's read.
 - **The budget is shared.** The call budget and the queue are one per release, shared by every
   namespace it watches (the whole cluster, or the listed namespaces), so a tenant that makes
   many workloads fail can use up the budget and, by flooding the queue, push other namespaces'

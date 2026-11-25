@@ -84,8 +84,9 @@ read the source: three departures, each with its reason. The closing's match use
 that the tracker stops lowering once the entry is emitted, since `observe` lowered it at every later
 signal (`src/incident.rs:452`) and a late Event with an earlier time made the closing match nothing,
 uncounted; and a closing that matches nothing is counted (point 1). The Pods of the owner are those
-of the Incident's namespace, since `pods_of` filters by UID alone over every watched namespace
-(`src/run.rs:1744-1749`) and a Pod in another namespace could name the owner's UID (point 2). And in
+of the Incident's namespace, since `pods_of` filtered by UID alone over every watched namespace
+(`src/run.rs:1744-1749` at `4b85369`) and a Pod in another namespace could name the owner's UID
+(point 2); that correction has shipped. And in
 the queue an end message never evicts a `remediation`, since whoever writes Events can cause
 closings, while a `remediation` rests on a record only the two controllers write (point 4). None
 raises a bar or adds a byte to the costs. The second one changes 0027's `Pods now` with every switch
@@ -261,28 +262,28 @@ changes a workload: `rollout-undo`, `raise-memory-limit` or `set-image-pull-poli
   field of the Remediation is read, and none of its parameters.
 
 **The Pods of the owner** are the Pods kausa holds **in the Incident's namespace** whose resolved
-top-level owner has the Incident's `object.uid`. This changes `pods_of` (`src/run.rs:1744-1749`),
-which today takes the owner alone and filters by UID over the Pods of every watched namespace; it
-takes the namespace too, `pods_of(&self, namespace: &str, owner: &OwnerRef)`, compares it with each
-Pod record's `namespace`, and its two callers (`:1208`, `:1692`) pass the incident key's namespace.
-Today, `top_owner` keeps a controller `ownerReference` that is neither a ReplicaSet nor a Job as the
-Pod carries it, UID included (`src/owner.rs:61-63`), and so does a lookup that finds no controller
-or fails (`:66-67`), so a Pod in another namespace could name the owner's UID. The same set gives
-`closed.pods_now`. An owner with no UID gives `not-checkable`. **Non-terminal:** `phase` is neither
-`Failed` nor `Succeeded`; Pending Pods count.
+top-level owner has the Incident's `object.uid`. This changed `pods_of` (`src/run.rs:1744-1749` at
+`4b85369`), which took the owner alone and filtered by UID over the Pods of every watched namespace:
+it takes the namespace too, `pods_of(&self, namespace: &str, owner: &OwnerRef)`, compares it with
+each Pod record's `namespace`, and its two callers (`:1208`, `:1692` at `4b85369`) pass the incident
+key's namespace; this has shipped. At `4b85369`, `top_owner` kept a controller `ownerReference` that
+is neither a ReplicaSet nor a Job as the Pod carries it, UID included (`src/owner.rs:61-63`), and so
+does a lookup that finds no controller or fails (`:66-67`), so a Pod in another namespace could name
+the owner's UID. The same set gives `closed.pods_now`. An owner with no UID gives `not-checkable`.
+**Non-terminal:** `phase` is neither `Failed` nor `Succeeded`; Pending Pods count.
 
 **The correction of 0027's `Pods now`, unconditional.** `pods_of` also gives 0027's `Pods now`
-(`src/run.rs:1208`, `:1692`), which counts the same way today, so a Pod of another namespace that
-names the owner's UID inflates it. The change applies with every switch off, not only with
+(`src/run.rs:1208`, `:1692` at `4b85369`), which counted the same way, so a Pod of another namespace
+that named the owner's UID inflated it. The change applies with every switch off, not only with
 `incidents.reportEnd`: keeping a count known to be wrong as the default is worse than changing it.
 It is the one thing this ADR changes with every switch off: `Pods now` counts only the Pods of the
-owner's namespace, in the fact statement, the request to the model (`pods_total`,
+incident's namespace, in the fact statement, the request to the model (`pods_total`,
 `src/context.rs:120`), the `pods_total` field of the `incident` log line (`log_incident`, called at
 `src/run.rs:1213`, the field at `:1384`), the `Detected` Event, the webhook's `facts.podsNow` and
 0028's `facts.podsNow`; no new watch, verb, write, table field or message. It changes the count only
-for an owner whose UID a Pod of another namespace names, and it can ship ahead of the rest of this
-ADR, in its own change, since it depends on nothing else here. **Update 2026-11-24:** this change
-shipped ahead, in its own change, with `pods_of` taking the namespace.
+for an owner whose UID a Pod of another namespace names, and it could ship ahead of the rest of this
+ADR, in its own change, since it depends on nothing else here. **Update 2026-11-24:** it shipped
+ahead, in its own change, with `pods_of` taking the namespace.
 
 **Where a Pod's revision comes from.** As 0028 decides it (its point 3, "Where the revision comes
 from"): a ReplicaSet's revision, with the UID its `get` returned, is held in the owner cache's
@@ -345,7 +346,8 @@ seconds each with an API server that does not answer. So:
   4 places at the first tick that finds each one done, and `t_a` is the first tick after the last of
   them. A read that fails, or answers with another UID than the Pod's `ownerReference` or with no
   whole-number revision, makes the check `not-checkable`. A name the owner lookup refuses (0028's
-  point 3: not a DNS-1123 subdomain of at most 253 characters) is never listed and is a read that
+  point 3: not a DNS-1123 subdomain of at most 253 characters, or in a namespace that is not a
+  DNS-1123 label) is never listed and is a read that
   fails, with no request. A check whose forced reads have not all ended 900 seconds after its
   acceptance is `not-checkable` then, with no `t_a`: 900 is above the 625 seconds the baselines of
   500 checks of 4 ReplicaSets take with every `get` answered within 312.5 ms and the run loop's own
@@ -588,7 +590,7 @@ in their own counter, not in `kausa_notifications_total`.
 | `incidents.outcomeWindowMinutes` | `--outcome-window-minutes` | `60` (20 to 360) | `reportEnd` and `incidents.reportRemediations` | outcome checks and `outcome` messages |
 
 With every switch at its default nothing changes but `Pods now`, which counts only the Pods of the
-owner's namespace (point 2): no new watch, verb, write, table field or message. kausa refuses to
+incident's namespace (point 2): no new watch, verb, write, table field or message. kausa refuses to
 start with `--report-end` and `--dry-run`, as with incidents.
 
 Closings exist only for the Incidents of the current term, and checks live in it (the tracker is
@@ -925,8 +927,8 @@ Each was read in source or documentation only, or not derived; the bar or test t
   by default; with them off nothing changes but `Pods now`.
 - **0027's `Pods now` is corrected with every switch off:** it counts only the Pods of the owner's
   namespace, in the fact statement, the request to the model, the `incident` log line, the
-  `Detected` Event and the webhook. It depends on nothing else here, so it can ship ahead of 0029,
-  in its own change.
+  `Detected` Event and the webhook. It depends on nothing else here, so it shipped ahead of 0029,
+  in its own change (2026-11-24).
 - **kausa still never says "resolved".** Its two new statements are about its own observation and
   about a typed field of the Pods; the banned-word test keeps them so.
 - **A missing `closed` is not an open failure:** a restart, a failover, a table entry dropped

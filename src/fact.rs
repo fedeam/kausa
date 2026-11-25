@@ -81,7 +81,8 @@ pub struct Facts {
     /// Whether `pods_seen` is a lower bound: the set holds `MAX_PODS` names or more, and the first
     /// `MAX_PODS` seen while the incident was pending are a cap.
     pub pods_seen_is_minimum: bool,
-    /// The Pods kausa holds with the incident's owner (`pods_total` of the `incident` line).
+    /// The Pods kausa holds with the incident's owner, in its namespace (`pods_total` of the
+    /// `incident` line).
     pub pods_now: usize,
     /// For `D014`, the revision of the Deployment's `revision <n>`.
     pub revision: Option<u64>,
@@ -97,7 +98,8 @@ pub struct Statement {
     pub reason_omitted: bool,
 }
 
-/// The fact statement of `incident`, with `pods_total` Pods held for its owner.
+/// The fact statement of `incident`, with `pods_total` Pods held for its owner in the incident's
+/// namespace.
 pub fn statement(incident: &Incident, pods_total: usize) -> Statement {
     let detection = incident.key.detection;
     let sample = &incident.sample;

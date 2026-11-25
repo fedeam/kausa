@@ -240,3 +240,39 @@ says whether it was resolved. kausa cannot know that, so the ADR decides what it
 - Measure bars 1 to 8, and settle what "Not verified" lists, first whether a metadata `get` of a
   ReplicaSet returns its annotations.
 - Implement 0029 after 0028, behind `incidents.reportEnd`, and measure its bars 1 to 12.
+
+## The two corrections that hold with every switch off
+
+### Request
+
+Ship ahead of 0028 and 0029 the two fixes of what kausa does today that do not depend on the rest of
+either ADR, as one pull request.
+
+### What was done
+
+- `Pods now` counts only the Pods of the incident's namespace: `pods_of` takes the namespace and
+  compares it with each Pod record's, so a Pod of another namespace that names the owner's UID no
+  longer inflates the count.
+- The owner lookup (`KubeLookup::controller_of`) sends no `get` and keeps no cache entry for a name
+  that is not a DNS-1123 subdomain of at most 253 characters, or a namespace that is not a DNS-1123
+  label of at most 63. The check is the lookup's own, so every caller has it. The `owner lookup
+  failed` line cuts the name and the namespace it prints at 253 characters.
+- One definition of each DNS predicate in the crate, in `src/owner.rs`; `src/main.rs`,
+  `src/fact.rs` and the lookup call it. The copies were identical, so no caller accepts anything
+  new. The fuzz target `fact` includes `src/owner.rs` and its ClusterFuzzLite paths list it.
+- Tests count the connections a local listener accepts, so "no request" is observed, not assumed.
+
+### Decisions
+
+- The two corrections ship ahead as fixes, with every switch off; 0027, 0028 and 0029 say so in an
+  `Update` or in place.
+- The namespace is held to a DNS-1123 label too: kausa already drops an Event whose
+  `regarding.namespace` is not the Event's own, but a Pod's namespace is set by the API server and
+  nothing in kausa tied it to a shape, and the rule belongs to the lookup, whoever calls it.
+
+### Follow-ups
+
+- The owner's name still reaches the `incident` log line, the `Detected` Event, the notification
+  and the statement unbounded when the lookup is refused or fails; it was so before this change.
+- `on_pod` writes `owner lookup failed` on every update of a Pod whose lookup is unresolved; the
+  cache's error TTL bounded the request, never the line.

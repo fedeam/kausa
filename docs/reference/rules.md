@@ -402,7 +402,7 @@ rollout does not progress (D014). Sample: reason ProgressDeadlineExceeded. Revis
 | Reason | The sample's reason | It equals a reason of the rule's trigger in [Detection rules](#detection-rules), or `Error` for a crash loop found by its restart count. Any other value is left out and counted in `kausa_fact_reasons_omitted_total` |
 | Exit code | The sample's exit code | An integer, in decimal |
 | Pods seen failing | How many Pods the incident holds | More than zero. `at least <a>` when it holds 100 or more, since it keeps the first 100 |
-| Pods now | The Pods kausa holds with the incident's owner, in the owner's namespace | Whenever `Pods seen failing` is printed |
+| Pods now | The Pods kausa holds with the incident's owner, in the incident's namespace | Whenever `Pods seen failing` is printed |
 | Revision | The Deployment's revision | `D014` only |
 
 - **Never in a statement:** the sample's message, an event's note, a log line, the image, a
