@@ -532,8 +532,8 @@ struct Lower {
     queue: VecDeque<Low>,
     caps: [Cap; LowClass::ALL.len()],
     outcomes: [[u64; LowOutcome::ALL.len()]; LowClass::ALL.len()],
-    dropped_logged: [Option<Instant>; LowClass::ALL.len()],
-    capped_logged: [Option<Instant>; LowClass::ALL.len()],
+    dropped_line: [Hourly; LowClass::ALL.len()],
+    capped_line: [Hourly; LowClass::ALL.len()],
 }
 
 #[cfg(test)]
@@ -543,8 +543,8 @@ impl Lower {
             queue: VecDeque::new(),
             caps: std::array::from_fn(|_| Cap::new(max_per_hour)),
             outcomes: [[0; LowOutcome::ALL.len()]; LowClass::ALL.len()],
-            dropped_logged: [None; LowClass::ALL.len()],
-            capped_logged: [None; LowClass::ALL.len()],
+            dropped_line: [Hourly::default(); LowClass::ALL.len()],
+            capped_line: [Hourly::default(); LowClass::ALL.len()],
         }
     }
 
@@ -554,15 +554,33 @@ impl Lower {
     }
 }
 
-/// Whether a line last logged at `last` may be logged again at `now`, at most once an hour; if
-/// it may, `now` is noted.
+/// A line logged at most once an hour: when it was last due, and how many times it was written.
 #[cfg(test)]
-fn hourly(last: &mut Option<Instant>, now: Instant) -> bool {
-    let due = last.is_none_or(|at| now.saturating_duration_since(at) >= CAP_WINDOW);
-    if due {
-        *last = Some(now);
+#[derive(Clone, Copy, Debug, Default)]
+struct Hourly {
+    last: Option<Instant>,
+    written: u64,
+}
+
+#[cfg(test)]
+impl Hourly {
+    /// Whether the line may be logged again at `now`, an hour or more after it last was; if it
+    /// may, `now` is noted.
+    fn due(&mut self, now: Instant) -> bool {
+        let due = self
+            .last
+            .is_none_or(|at| now.saturating_duration_since(at) >= CAP_WINDOW);
+        if due {
+            self.last = Some(now);
+        }
+        due
     }
-    due
+
+    /// Writes the line, a warning, and counts it: the count is of the lines written.
+    fn warn(&mut self, message: &str, fields: Value) -> io::Result<()> {
+        self.written = self.written.saturating_add(1);
+        log::warn(message, fields)
+    }
 }
 
 /// The webhook and what its messages share across terms: the queue (emptied when a term ends),
@@ -845,8 +863,9 @@ impl Outbox<'_> {
     fn dropped(lower: &mut Lower, dropped: &Low, now: Instant) -> io::Result<()> {
         let class = dropped.class();
         lower.count(class, LowOutcome::Dropped);
-        if hourly(&mut lower.dropped_logged[class as usize], now) {
-            log::warn(
+        let line = &mut lower.dropped_line[class as usize];
+        if line.due(now) {
+            line.warn(
                 class.dropped_line(),
                 json!({"fingerprint": dropped.fingerprint(), "reason": "the queue is full"}),
             )?;
@@ -893,8 +912,9 @@ impl Outbox<'_> {
             }
             let limit = cap.limit();
             lower.count(highest, LowOutcome::Capped);
-            if hourly(&mut lower.capped_logged[highest as usize], now) {
-                log::warn(
+            let line = &mut lower.capped_line[highest as usize];
+            if line.due(now) {
+                line.warn(
                     highest.capped_line(),
                     json!({"fingerprint": item.fingerprint(), "limit": limit}),
                 )?;
@@ -2854,51 +2874,49 @@ mod tests {
 
     #[test]
     fn the_dropped_and_capped_lines_are_logged_at_most_once_an_hour() {
-        let mut last = None;
+        let mut line = Hourly::default();
         let now = Instant::now();
-        assert!(hourly(&mut last, now));
-        assert!(!hourly(&mut last, now));
-        assert!(!hourly(
-            &mut last,
-            now + CAP_WINDOW - Duration::from_millis(1)
-        ));
-        assert!(hourly(&mut last, now + CAP_WINDOW));
-        assert_eq!(last, Some(now + CAP_WINDOW));
+        assert!(line.due(now));
+        assert!(!line.due(now));
+        assert!(!line.due(now + CAP_WINDOW - Duration::from_millis(1)));
+        assert!(line.due(now + CAP_WINDOW));
+        assert_eq!(line.last, Some(now + CAP_WINDOW));
+        assert_eq!(line.written, 0, "only a line written is counted");
 
         let metrics = Metrics::default();
         let term = Term::unbounded();
         let outbox = Outbox::new(nowhere(), TTL, 1, &metrics, &term);
         let class = LowClass::Remediation as usize;
-        let dropped_logged = || outbox.lower.borrow().dropped_logged[class];
-        let capped_logged = || outbox.lower.borrow().capped_logged[class];
+        let dropped = || outbox.lower.borrow().dropped_line[class].written;
+        let capped = || outbox.lower.borrow().capped_line[class].written;
         for i in 0..QUEUE_LIMIT + 3 {
             outbox
                 .enqueue_low(remediation_for(&format!("fp-{i}")), now)
                 .expect("the log");
         }
-        assert_eq!(dropped_logged(), Some(now), "logged once for three drops");
+        assert_eq!(dropped(), 1, "one line for three drops");
         let later = now + CAP_WINDOW - Duration::from_secs(1);
         outbox
             .enqueue_low(remediation_for("fp-later"), later)
             .expect("the log");
-        assert_eq!(dropped_logged(), Some(now));
+        assert_eq!(dropped(), 1, "none more inside the hour");
         outbox
             .enqueue_low(remediation_for("fp-hour"), now + CAP_WINDOW)
             .expect("the log");
-        assert_eq!(dropped_logged(), Some(now + CAP_WINDOW));
+        assert_eq!(dropped(), 2, "a second line at the hour");
         assert_eq!(
             low(&outbox),
             [(LowClass::Remediation, LowOutcome::Dropped, 5)]
         );
 
         assert!(outbox.take_low(now).expect("the log").is_some());
-        assert_eq!(capped_logged(), None);
+        assert_eq!(capped(), 0);
         outbox
             .enqueue_low(remediation_for("fp-one"), now)
             .expect("the log");
-        // The cap admits one an hour: the rest of the queue is capped at `now`, logged once.
+        // The cap admits one an hour: the rest of the queue is capped at `now`, one line for all.
         assert_eq!(outbox.take_low(now).expect("the log"), None);
-        assert_eq!(capped_logged(), Some(now));
+        assert_eq!(capped(), 1, "one line for the whole queue");
         assert_eq!(
             low(&outbox),
             [(
@@ -2906,6 +2924,28 @@ mod tests {
                 LowOutcome::Capped,
                 QUEUE_LIMIT as u64
             )]
+        );
+        outbox
+            .enqueue_low(remediation_for("fp-capped"), later)
+            .expect("the log");
+        assert_eq!(outbox.take_low(later).expect("the log"), None);
+        assert_eq!(capped(), 1, "none more inside the hour");
+        // At the hour the cap admits one again, and the next one capped writes a second line.
+        let hour = now + CAP_WINDOW;
+        for label in ["fp-admitted", "fp-capped-again"] {
+            outbox
+                .enqueue_low(remediation_for(label), hour)
+                .expect("the log");
+        }
+        assert_eq!(
+            outbox.take_low(hour).expect("the log"),
+            Some(remediation_for("fp-admitted"))
+        );
+        assert_eq!(outbox.take_low(hour).expect("the log"), None);
+        assert_eq!(capped(), 2, "a second line at the hour");
+        assert_eq!(
+            low(&outbox),
+            [(LowClass::Remediation, LowOutcome::Capped, 2)]
         );
     }
 
