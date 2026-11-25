@@ -1425,6 +1425,8 @@ mod tests {
 
     #[test]
     fn the_limiter_logs_once_a_minute_per_reason_and_counts_the_others() {
+        // The minute of ADR 0028, point 6; the instants below are computed from it.
+        assert_eq!(IGNORED_LOG_PERIOD, Duration::from_secs(60));
         let mut limiter = Limiter::default();
         let t0 = Instant::now();
         let r = record();
