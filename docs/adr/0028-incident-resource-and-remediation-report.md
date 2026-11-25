@@ -482,30 +482,32 @@ so the slot and `on_pod` share it. So:
 | Age, by `metadata.creationTimestamp` | `incidents.days`, 1 to 30 | 1 |
 | Incidents per kausa | constant, the same as 0014's `MAX_OBJECTS` | 500 |
 
-- **0014's sweep, applied to Incidents**: at start and hourly, for at most 30 seconds, in pages of
-  2 (0014's `Update 2026-10-28`), dropping the `metadata` it does not read before it reduces each
+- **0014's sweep, applied to Incidents**: at start and hourly, for at most 30 seconds, in pages of 2
+  (0014's `Update 2026-10-28`), dropping the `metadata` it does not read before it reduces each
   object. It deletes, with UID and `resourceVersion` preconditions, the Incidents older than
-  `incidents.days` and, through a bounded heap, the oldest beyond 500. Which slot runs it is
-  decided with the code, under invariant 6: a fact never waits for it longer than for a write.
+  `incidents.days` and, through a bounded heap, the oldest beyond 500. It runs in a slot of its own,
+  at the start of each term and then hourly (`src/run.rs:1062-1085`, the condition at `:1079`),
+  under invariant 6: a fact never waits for it longer than for a write.
 - **"Oldest" is by `metadata.creationTimestamp`**, which the API server sets and no writer can,
   never by `firstSeen`, which any writer of Incidents sets.
 - **One day covers kurita's window**: kurita decides an Incident only while it is younger than 6
   hours by `creationTimestamp` (its ADR 0008, point 3). The outcome check may raise the default.
-- **The cap of 500 is the sweep's target, and kausa's own creates are bounded apart.** The sweep
-  at start ends before the first create of the process: a create that arrives before it ended,
-  completed or stopped at its 30 seconds, does not wait for it, and is refused with the reason
-  `starting` (point 1), counted and logged as the other refusals, its fingerprint not marked, so a
-  later occurrence creates one. A sweep that failed, a list or a delete refused by the server (the
-  CustomResourceDefinition missing among them), has ended too and lets creates through: the count
-  is then not trimmed, and the process's own 500 in any 6 hours (point 1) still bounds its
-  creates. A sweep cut by the loss of the term has not ended, and the next term's sweep counts.
-  Between two sweeps one process creates at most 500 Incidents (point 1: at most 500 in any 6 hours,
-  and the sweeps are an hour apart), so after a sweep that completes the count kausa causes stays at
-  most 500 + 500 = 1,000 until the next one. A restart or a failover empties the table, so each
-  process start allows 500 more: in a crash loop, each start whose sweep does not complete before
-  the process ends can leave up to 500 more Incidents, and the next sweep that completes trims the
-  count to 500 again (bar 8 measures that it does within its 30 seconds). Incidents written by
-  anyone else are not bounded by this ADR, as for Explanations (0014).
+- **The cap of 500 is the sweep's target, and kausa's own creates are bounded apart.** The sweep at
+  start ends before the first create of the process: a create that arrives before it ended,
+  completed or stopped (at its 30 seconds, or at a list or a delete with no answer within the 10
+  seconds of a write, an ending that lets creates through as well), does not wait for it, and is
+  refused with the reason `starting` (point 1), counted and logged as the other refusals, its
+  fingerprint not marked, so a later occurrence creates one. A sweep that failed, a list or a delete
+  refused by the server (the CustomResourceDefinition missing among them), has ended too and lets
+  creates through: the count is then not trimmed, and the process's own 500 in any 6 hours (point 1)
+  still bounds its creates. A sweep cut by the loss of the term has not ended, and the next term's
+  sweep counts. Between two sweeps one process creates at most 500 Incidents (point 1: at most 500
+  in any 6 hours, and the sweeps are an hour apart), so after a sweep that completes the count kausa
+  causes stays at most 500 + 500 = 1,000 until the next one. A restart or a failover empties the
+  table, so each process start allows 500 more: in a crash loop, each start whose sweep does not
+  complete before the process ends can leave up to 500 more Incidents, and the next sweep that
+  completes trims the count to 500 again (bar 8 measures that it does within its 30 seconds).
+  Incidents written by anyone else are not bounded by this ADR, as for Explanations (0014).
 - **The cap is shared across namespaces**, as 0014 says of its own: it protects the datastore, not
   fairness. The sweep deletes the oldest Incidents beyond 500 whatever their namespace; only
   Incidents written by someone other than kausa, or left by earlier processes, can push it to
