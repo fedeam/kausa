@@ -13,7 +13,8 @@ clone and remotes are described apart, under [Remotes, merges and CI](#remotes-m
 ## What this repo is
 
 kausa: a small Kubernetes controller in Rust (kube-rs), read-only except for its own Events,
-with `--history` its own Explanations and, with `--leader-lease`, the `spec` of its one Lease,
+with `--history` its own Explanations, with `--incidents` its own Incidents and, with
+`--leader-lease`, the `spec` of its one Lease,
 that watches Warning events, Pod status and Deployments, groups the failures of one workload into one incident with deterministic rules, reports each settled incident as a fact statement in a `Detected` Event, with or without a model, sends
 a redacted context to one OpenAI-compatible model endpoint within a call and token budget, and
 writes the explanation as a Kubernetes Event on the failing object and, optionally, posts it to one
@@ -103,7 +104,7 @@ The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.r
 tested without a cluster, and so are `src/budget.rs`,
 `src/metrics.rs` (except its listener) and the building of Events in `src/events.rs`;
 `src/run.rs`, `src/explain.rs`, `src/events.rs`, `src/report.rs` (whose fact queue is pure and
-tested without a cluster), `src/history.rs` and `src/leader.rs` talk to the API server,
+tested without a cluster), `src/history.rs`, `src/incidents.rs` and `src/leader.rs` talk to the API server,
 `src/model.rs` and `src/check.rs` to the model endpoint and `src/notify.rs` to the webhook.
 `kausa check-endpoint` needs no cluster: `tests/cli.rs` runs it against a local fake server.
 
@@ -154,7 +155,9 @@ after each sync, is linux/arm64.
   crates through `Cargo.lock` and `--locked`. Take digests and SHAs from the registry or the forge
   API and verify them; never type them from memory.
 - **kausa never reads Secrets or ConfigMaps, never writes anything but Events, with
-  `--history` its own Explanations and, with `--leader-lease`, the `spec` of its one Lease
+  `--history` its own Explanations, with `--incidents` its own Incidents (`create`, and a `delete`
+  with UID and `resourceVersion` preconditions) and, with `--leader-lease`, the `spec` of its one
+  Lease
   (invariant 2 of [ARCHITECTURE.md](ARCHITECTURE.md)), sends nothing
   unredacted to the model, and nothing to any host but the API server, the configured endpoint
   and, when notifications are on, the configured webhook, which receives only the fields of [Data
