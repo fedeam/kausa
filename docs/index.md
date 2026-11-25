@@ -153,6 +153,8 @@ checks](how-to/develop.md).
   webhook](how-to/send-notifications.md).
 - [Explanation resource](reference/explanation-resource.md): what the history keeps, for how
   long, and what it never stores.
+- [Incident resource](reference/incident-resource.md): the Incident object of each settled
+  incident, off by default: what it holds, who may read it, and when kausa deletes it.
 - [Try kausa against a cluster with a local model](how-to/try-with-a-local-model.md): a
   read-only run with Ollama.
 - [Add a detection or redaction rule](how-to/add-a-rule.md): the files, tests and docs to change.
