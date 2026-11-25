@@ -16,6 +16,7 @@ on:
       - 'src/notification.rs'
       - 'src/model/pure.rs'
       - 'src/fact.rs'
+      - 'src/owner.rs'
       - 'src/incident.rs'
       - 'src/detect.rs'
       - 'src/record.rs'

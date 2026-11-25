@@ -9,6 +9,7 @@
 
 use crate::detect::Detection;
 use crate::incident::{Incident, MAX_PODS};
+use crate::owner::is_dns_label;
 
 /// The bound of a statement, in bytes. `LONGEST_STATEMENT_BYTES` is the longest one possible.
 pub const MAX_STATEMENT_BYTES: usize = 512;
@@ -21,9 +22,6 @@ const _: () = assert!(LONGEST_STATEMENT_BYTES < MAX_STATEMENT_BYTES);
 // The fuzz target (fuzz/fuzz_targets/fact.rs) has no events.rs.
 #[cfg(not(fuzzing))]
 const _: () = assert!(MAX_STATEMENT_BYTES <= crate::events::MAX_NOTE_BYTES);
-
-/// The longest container name a statement prints: a DNS label.
-const MAX_LABEL_BYTES: usize = 63;
 
 /// The reasons a statement of `detection` may print: those of docs/reference/rules.md, and `Error`
 /// for a crash loop found by its restart count. Any other value is left out and counted.
@@ -67,18 +65,6 @@ fn reasons(detection: Detection) -> &'static [&'static str] {
         ],
         Detection::RolloutStalled => &["ProgressDeadlineExceeded"],
     }
-}
-
-/// Whether `name` is a DNS label as Kubernetes defines one: 1 to 63 bytes of lowercase letters,
-/// digits and `-`, starting and ending with a letter or a digit.
-fn is_dns_label(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    let alphanumeric = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    !bytes.is_empty()
-        && bytes.len() <= MAX_LABEL_BYTES
-        && bytes.iter().all(|b| alphanumeric(b) || *b == b'-')
-        && bytes.first().is_some_and(alphanumeric)
-        && bytes.last().is_some_and(alphanumeric)
 }
 
 /// The values a statement is rendered from: only what its allowlist let through.
@@ -454,7 +440,7 @@ mod tests {
     fn longest(detection: Detection, reason: &'static str) -> Facts {
         Facts {
             detection,
-            container: Some("a".repeat(MAX_LABEL_BYTES)),
+            container: Some("a".repeat(63)),
             reason: Some(reason),
             exit_code: Some(i32::MIN),
             pods_seen: usize::MAX,

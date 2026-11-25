@@ -39,6 +39,8 @@ use std::time::Duration;
 use k8s_openapi::jiff::SignedDuration;
 use serde_json::json;
 
+use owner::{is_dns_label, is_dns_subdomain};
+
 const VERSION_LINE: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"), "\n");
 
 /// The default settle window: a failure has to persist this long to be an incident.
@@ -617,30 +619,6 @@ fn read_secret_file(flag: &str, path: &OsString) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-/// A DNS-1123 label, what Kubernetes takes as a namespace name: 1 to 63 characters out of
-/// `[a-z0-9-]`, starting and ending with a letter or digit.
-fn is_dns_label(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    (1..=63).contains(&bytes.len())
-        && bytes.first().is_some_and(edge)
-        && bytes.last().is_some_and(edge)
-        && bytes.iter().all(|b| edge(b) || *b == b'-')
-}
-
-/// A DNS-1123 subdomain, what Kubernetes takes as the name of a Lease: 1 to 253 characters, dot
-/// separated parts out of `[a-z0-9-]`, each starting and ending with a letter or digit.
-fn is_dns_subdomain(name: &str) -> bool {
-    let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    name.len() <= 253
-        && name.split('.').all(|part| {
-            let bytes = part.as_bytes();
-            bytes.first().is_some_and(edge)
-                && bytes.last().is_some_and(edge)
-                && bytes.iter().all(|b| edge(b) || *b == b'-')
-        })
-}
-
 /// The explanation settings from the flags: `None` when neither `--endpoint` nor `--dry-run` is
 /// given (kausa then only logs incidents). The API key comes from `--api-key-file` or the
 /// environment variable `KAUSA_API_KEY`, never from an argument.
@@ -935,27 +913,6 @@ fn write_stdout(text: &str) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_lease_name_is_a_dns_subdomain() {
-        let longest = format!("{}.{}", "a".repeat(126), "b".repeat(126));
-        for name in [
-            "a",
-            "0",
-            "kausa-leader",
-            "kausa.leader",
-            "a-b.c-d.e",
-            &longest,
-        ] {
-            assert!(is_dns_subdomain(name), "{name}");
-        }
-        let too_long = format!("{longest}c");
-        for name in [
-            "", ".", "a..b", "a-.b", "a.-b", "A", "a_b", "a/b", &too_long,
-        ] {
-            assert!(!is_dns_subdomain(name), "{name:?}");
-        }
-    }
 
     #[test]
     fn the_help_line_names_the_namespace_cap() {

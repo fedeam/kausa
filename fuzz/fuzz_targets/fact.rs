@@ -22,6 +22,10 @@ mod fingerprint;
 mod incident;
 
 #[allow(dead_code)]
+#[path = "../../src/owner.rs"]
+mod owner;
+
+#[allow(dead_code)]
 #[path = "../../src/fact.rs"]
 mod fact;
 

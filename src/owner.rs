@@ -159,6 +159,27 @@ mod tests {
     }
 
     #[test]
+    fn a_lease_name_is_a_dns_subdomain() {
+        let longest = format!("{}.{}", "a".repeat(126), "b".repeat(126));
+        for name in [
+            "a",
+            "0",
+            "kausa-leader",
+            "kausa.leader",
+            "a-b.c-d.e",
+            &longest,
+        ] {
+            assert!(is_dns_subdomain(name), "{name}");
+        }
+        let too_long = format!("{longest}c");
+        for name in [
+            "", ".", "a..b", "a-.b", "a.-b", "A", "a_b", "a/b", &too_long,
+        ] {
+            assert!(!is_dns_subdomain(name), "{name:?}");
+        }
+    }
+
+    #[test]
     fn only_a_dns_subdomain_is_a_name_to_look_up() {
         let longest = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
         assert_eq!(longest.len(), 253);

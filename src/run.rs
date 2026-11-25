@@ -1369,6 +1369,20 @@ fn show_budget(metrics: &Metrics, budget: &Budget, now: Instant) {
     metrics.set_gauge(name, &[("window", "day")], day);
 }
 
+/// The fields of the `owner lookup failed` line of an event about `object`: the namespace and the
+/// name come from an Event's `regarding`, unbounded, so each is cut at 253 characters.
+fn owner_lookup_failed_fields(
+    namespace: &str,
+    object: &OwnerRef,
+    error: &str,
+) -> serde_json::Value {
+    json!({
+        "namespace": bounded_name(namespace),
+        object.kind.to_ascii_lowercase(): bounded_name(&object.name),
+        "error": error,
+    })
+}
+
 fn log_incident(incident: &Incident, pods_total: usize, statement: &str) -> io::Result<()> {
     let sample = &incident.sample;
     log::info(
@@ -1543,14 +1557,9 @@ impl State {
                     let (owner, error) =
                         top_owner(lookup, &namespace, Some(&object), &object).await;
                     if let Some(error) = error {
-                        let field = object.kind.to_ascii_lowercase();
                         log::warn(
                             "owner lookup failed",
-                            json!({
-                                "namespace": bounded_name(&namespace),
-                                field: bounded_name(&object.name),
-                                "error": error,
-                            }),
+                            owner_lookup_failed_fields(&namespace, &object, &error),
                         )?;
                     }
                     Some(owner)
@@ -3214,8 +3223,11 @@ mod tests {
             let count = accepted.clone();
             // Accept each connection and close it at once, so a request fails fast.
             std::thread::spawn(move || {
-                while listener.accept().is_ok() {
+                // Count before the stream is closed: the client sees the connection fail only
+                // after that, so a lookup that sent a request cannot return before it is counted.
+                while let Ok((stream, _)) = listener.accept() {
                     count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(stream);
                 }
             });
             let url = format!("http://{}", addr);
@@ -3243,12 +3255,44 @@ mod tests {
             self.runtime.block_on(future)
         }
 
-        /// The connections the lookup opened (each is closed at once, so its `get` fails).
+        /// The connections counted so far (each is counted, then closed, so a `get` that returned
+        /// had its connection counted). No wait: for a lookup that did send a request.
         fn connections(&self) -> usize {
-            // Let the accepting thread see a connection that was just made.
-            std::thread::sleep(Duration::from_millis(100));
             self.accepted.load(std::sync::atomic::Ordering::SeqCst)
         }
+
+        /// The connections counted after a short wait, for a test that asserts none arrived. A
+        /// refused lookup returns without awaiting anything, so the wait only gives a stray
+        /// connection a moment to show: it can show a request that was sent, not prove that
+        /// none ever will be (the cache's count and the refusal's constant error are the proof).
+        fn connections_after_a_wait(&self) -> usize {
+            std::thread::sleep(Duration::from_millis(100));
+            self.connections()
+        }
+    }
+
+    #[test]
+    fn the_owner_lookup_failed_line_cuts_the_namespace_and_the_name_it_prints() {
+        let object = OwnerRef {
+            api_version: "apps/v1".into(),
+            kind: "ReplicaSet".into(),
+            name: "n".repeat(300),
+            uid: "uid".into(),
+        };
+        let fields = owner_lookup_failed_fields(&"s".repeat(300), &object, REFUSED);
+        assert_eq!(fields["namespace"], "s".repeat(253));
+        assert_eq!(fields["replicaset"], "n".repeat(253));
+        assert_eq!(fields["error"], REFUSED);
+        // A valid one is printed as it is.
+        let object = OwnerRef {
+            name: "web".into(),
+            ..object
+        };
+        let fields = owner_lookup_failed_fields("shop", &object, "boom");
+        assert_eq!(
+            (&fields["namespace"], &fields["replicaset"]),
+            (&json!("shop"), &json!("web"))
+        );
     }
 
     #[test]
@@ -3276,7 +3320,7 @@ mod tests {
             assert_eq!(answer, Err(REFUSED.to_owned()), "{namespace:?}");
         }
         assert_eq!(spy.lookup.cached(), 0);
-        assert_eq!(spy.connections(), 0);
+        assert_eq!(spy.connections_after_a_wait(), 0);
         // The shortest and the longest valid names are sent, and kept (the failure too).
         let longest = "a".repeat(253);
         for name in ["a", longest.as_str()] {
@@ -3309,7 +3353,10 @@ mod tests {
             (owner.kind.as_str(), owner.name.as_str(), *resolved),
             ("ReplicaSet", "../secrets?x=1", false)
         );
-        assert_eq!((spy.lookup.cached(), spy.connections()), (0, 0));
+        assert_eq!(
+            (spy.lookup.cached(), spy.connections_after_a_wait()),
+            (0, 0)
+        );
 
         // A Pod's namespace is its own, set by the API server, and nothing in kausa ties it to
         // a shape; the lookup refuses a bad one all the same.
@@ -3328,7 +3375,10 @@ mod tests {
             .get(&pod_uid("a/b", "web-2"))
             .expect("the Pod is kept");
         assert_eq!((owner.name.as_str(), *resolved), ("web-7d9c8b6f4d", false));
-        assert_eq!((spy.lookup.cached(), spy.connections()), (0, 0));
+        assert_eq!(
+            (spy.lookup.cached(), spy.connections_after_a_wait()),
+            (0, 0)
+        );
     }
 
     #[test]
@@ -3348,7 +3398,10 @@ mod tests {
             (owner.kind.as_str(), owner.name.as_str()),
             ("ReplicaSet", "a/b")
         );
-        assert_eq!((spy.lookup.cached(), spy.connections()), (0, 0));
+        assert_eq!(
+            (spy.lookup.cached(), spy.connections_after_a_wait()),
+            (0, 0)
+        );
 
         // A good name in a bad namespace. `record.rs` keeps an Event only when its own namespace
         // equals `regarding.namespace`, so both carry it.
@@ -3365,7 +3418,10 @@ mod tests {
         assert_eq!(owners.len(), 1);
         let owner = owners[0].1.as_ref().expect("an owner");
         assert_eq!(owner.name, "web-7d9c8b6f4d");
-        assert_eq!((spy.lookup.cached(), spy.connections()), (0, 0));
+        assert_eq!(
+            (spy.lookup.cached(), spy.connections_after_a_wait()),
+            (0, 0)
+        );
     }
 
     // Acceptance tests for `D014` (docs/adr/0018-stuck-rollouts.md), written before the code: the
