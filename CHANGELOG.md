@@ -122,6 +122,10 @@ the request to the model provider; the only change in that request is `D013`'s n
   separator in the owner's kind and name with U+FFFD. An ownerReference or an Event's `regarding`
   with a line break in them could forge lines of the text, such as `Facts:` or the mark; the
   `json` body escaped them already.
+- `kube` 4.2.1, for RUSTSEC-2026-0600: with a cluster CA configured, the `openssl-tls` connector
+  of `kube-client` 4.2.0 also trusted OpenSSL's default CA store. kausa builds `kube` with
+  `rustls-tls` and without `openssl-tls`, so its connections were not affected; the only source
+  change between the two releases is in that connector.
 
 ## [0.6.3] - 2026-11-20
 
