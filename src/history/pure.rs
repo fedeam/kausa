@@ -11,6 +11,7 @@ use std::collections::BinaryHeap;
 
 use serde_json::{Value, json};
 
+use crate::owner::{is_dns_label, is_dns_subdomain};
 use crate::prompt::{
     self, Explanation, MAX_CAUSE, MAX_STEP, MAX_STEPS, MAX_SUMMARY, PROMPT_VERSION,
 };
@@ -554,7 +555,7 @@ impl SweepPlan {
     /// A listed object as a tuple: its time is `status.lastTime` if it is in the one format and
     /// not after now, else `metadata.creationTimestamp` if that is in the one format.
     /// An Incident's time is its `metadata.creationTimestamp` if that is in the one format, and it
-    /// needs a UID.
+    /// needs a UID, a namespace that is a DNS label and a name that is a DNS subdomain.
     fn reduce(&self, item: &Value) -> Option<Held> {
         let metadata = item.get("metadata")?;
         let string = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
@@ -565,8 +566,9 @@ impl SweepPlan {
                     .and_then(Value::as_str)
                     .filter(|t| is_time(t))?
                     .to_owned(),
-                namespace: string(metadata.get("namespace"))?,
-                name: string(metadata.get("name"))?,
+                // Both go into the delete's path: only names the API server can give an object.
+                namespace: string(metadata.get("namespace")).filter(|n| is_dns_label(n))?,
+                name: string(metadata.get("name")).filter(|n| is_dns_subdomain(n))?,
                 resource_version: string(metadata.get("resourceVersion"))?,
                 uid: Some(string(metadata.get("uid"))?),
             });
@@ -1933,6 +1935,35 @@ mod tests {
         object["metadata"]["creationTimestamp"] = json!("2026-10-01T00:00:00.5Z");
         assert_eq!(plan.page(&[object]), []);
         assert_eq!(plan.held(), 0);
+    }
+
+    #[test]
+    fn an_incident_whose_namespace_or_name_could_not_be_stored_is_neither_counted_nor_deleted() {
+        // Each goes into the delete's path: a namespace that is not a DNS label, or a name that
+        // is not a DNS subdomain, is held by nothing, however old.
+        let mut plan = SweepPlan::incidents(CUTOFF);
+        for (field, value) in [
+            ("namespace", "Shop"),
+            ("namespace", "shop/../kube-system"),
+            ("namespace", "shop?x=1"),
+            ("namespace", "a.b"),
+            ("namespace", &*"a".repeat(64)),
+            ("name", "Incident"),
+            ("name", "x/../../namespaces/kube-system/pods/api-1"),
+            ("name", "x?dryRun=All"),
+            ("name", ""),
+            ("name", &*"a".repeat(254)),
+        ] {
+            let mut object = incident("shop", 1, OLD);
+            object["metadata"][field] = json!(value);
+            assert_eq!(plan.page(&[object]), [], "{field}: {value}");
+        }
+        assert_eq!(plan.held(), 0);
+        // The longest of each is still held, and deleted.
+        let mut object = incident("shop", 1, OLD);
+        object["metadata"]["namespace"] = json!("a".repeat(63));
+        object["metadata"]["name"] = json!(format!("{}.{}", "a".repeat(63), "b".repeat(189)));
+        assert_eq!(plan.page(&[object]).len(), 1);
     }
 
     #[test]
