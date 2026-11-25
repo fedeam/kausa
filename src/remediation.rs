@@ -234,7 +234,7 @@ fn rest_of(name: &str) -> Option<&str> {
     name.strip_prefix(NAME_PREFIX).filter(|rest| is_rest(rest))
 }
 
-/// The detection whose id is `id`: the enum of kurita's schema (`:112-128`).
+/// The detection whose id is `id`: the enum of kurita's schema (`:112-127`).
 fn detection(id: &str) -> Option<Detection> {
     DETECTIONS
         .into_iter()
@@ -737,6 +737,7 @@ mod tests {
     /// The rules of kurita's schema that bound the actions, and its action and detection enums,
     /// copied from `charts/kurita/files/remediation-schema.json` at kurita's commit
     /// `64d8a358d765157dc4b68c08d8f33f9a0fa31646` (`:25-27`, `:57-76`, `:112-127`, `:176-184`).
+    /// Two rows are longer than 100 characters: they are kurita's rules byte for byte.
     const KURITA_RULES: &str = r#"{
       "rules": [
         "has(self.inspect) == (self.action == 'inspect')",
@@ -1077,7 +1078,8 @@ mod tests {
 
     #[test]
     fn an_api_version_that_fails_is_api_version_is_invalid() {
-        // Values that fail kausa's pattern and kurita's both (the ruling of 2026-11-25).
+        // Values that fail both kausa's apiVersion pattern and kurita's (`:150`), which differ, so
+        // that the test holds whichever of the two `is_api_version` follows.
         for api_version in [
             "Apps/v1".to_owned(),
             "apps/V1".to_owned(),
