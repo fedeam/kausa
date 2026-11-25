@@ -868,6 +868,35 @@ mod tests {
     }
 
     #[test]
+    fn detections_lists_every_variant_of_detection() {
+        // A new variant breaks this match, a reminder to add it to `DETECTIONS` too.
+        for detection in DETECTIONS {
+            match detection {
+                Detection::CrashLoop
+                | Detection::ImagePull
+                | Detection::OutOfMemory
+                | Detection::ContainerCreate
+                | Detection::Unschedulable
+                | Detection::ProbeFailure
+                | Detection::VolumeFailure
+                | Detection::JobFailed
+                | Detection::PodEvicted
+                | Detection::SandboxCreate
+                | Detection::PodCreate
+                | Detection::ClaimProvisioning
+                | Detection::AutoscalerMetrics
+                | Detection::RolloutStalled => {}
+            }
+        }
+        // Each variant once, in the order of the enum, up to its last.
+        let discriminants: Vec<usize> = DETECTIONS.iter().map(|&d| d as usize).collect();
+        assert_eq!(
+            discriminants,
+            (0..=Detection::RolloutStalled as usize).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn the_enums_equal_kausa_s_vocabularies() {
         let detections: Vec<String> = DETECTIONS.iter().map(|d| d.id().to_owned()).collect();
         let ids: Vec<String> = (1..=14).map(|i| format!("D{i:03}")).collect();
