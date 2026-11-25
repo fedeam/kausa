@@ -23,11 +23,13 @@ the binary and in the chart, without changing anything with the defaults, and do
   `incidents.readers.aggregate`. One helper, `kausa.writesIncidents`, gives the flags, the rule
   (`create`, `list` and `delete` on `incidents`, last in kausa's rules) and the
   CustomResourceDefinition, so no value grants the rule to a kausa that does not use it. With
-  `dryRun` nothing of it renders. The `ci` target of the `Dockerfile` and `tests/chart/render.sh`
-  check the renders on and off and that the CustomResourceDefinition's schema equals
-  `charts/kausa/files/incident-schema.json`.
+  `dryRun` nothing of it renders. `tests/chart/render.sh` checks the renders on and off and that
+  the CustomResourceDefinition's schema equals `charts/kausa/files/incident-schema.json`; the `ci`
+  target of the `Dockerfile` is written to check them too, but it was never built (below).
 - **The kind test** gained the Incident cases of point 8 (`tests/e2e/run.sh`). **They have never
-  run**: no cluster and no Docker were used in this session.
+  run**: no cluster and no Docker were used in this session. Nor were the image build (`docker
+  build --target ci .`, with the chart renders and the checks it runs inside) and the three
+  `promtool` commands of `AGENTS.md`: `promtool` is not installed on the machine used.
 - **Two edits to 0028** where the code showed its text wrong: the `starting` refusal applies until
   any sweep of the process has ended, and the unverified parts (the hourly sweep rests on a pure
   test; a success answer other than `201` that carries a UID is taken as a create) are listed.
@@ -39,6 +41,21 @@ the binary and in the chart, without changing anything with the defaults, and do
   checks](../how-to/develop.md), the README, the [Security policy](../../SECURITY.md),
   [Architecture](../explanation/architecture.md), the front page, `AGENTS.md`, invariants 2, 5 and
   12 of [ARCHITECTURE.md](../../ARCHITECTURE.md) and the changelog.
+
+- **A correction round after review**, the same day:
+  - a test of the sweep with `--incident-days 3`, which fails if the age rule uses one day;
+  - the chart refuses a `budget.dedupHours` that is not a whole number from 0 to 1000000 whenever
+    it passes `--dedup-hours`, naming the value;
+  - `NOTES.txt` gains an Incidents paragraph, rendered only while the release writes Incidents;
+  - the pages name the three uses of the one `--dedup-hours` window, and say that a
+    `budget.dedupHours` set without an endpoint now applies, with incidents on, to the `detected`
+    notifications and to the gate;
+  - the kind restart case tells the new process's Incidents by `metadata.uid`, and each subject
+    of the new `can-i` cases answers yes once before its "never" rows;
+  - invariant 5 names what the sweep does with the listed namespace, name and `continue` token;
+  - 0028's "Not verified" cites `sweep_due` at its line and lists two assumptions of the kind
+    cases; the front page links the Incident resource; long lines are rewrapped.
+  The image build, `promtool` and the kind cases still did not run.
 
 ## Decisions
 
