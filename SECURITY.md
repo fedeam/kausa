@@ -40,7 +40,9 @@ These are vulnerabilities, not ordinary bugs:
   or `facts` of a notification) that holds a byte outside letters, digits, spaces and `.,:()-`, a
   value that kausa did not fix or check, or any text a model or a tenant wrote;
 - kausa reading, or asking for permission to read, Secrets or ConfigMaps, or writing anything but
-  Events, with `--history` its own Explanations and, with `--leader-lease`, the `spec` (and the
+  Events, with `--history` its own Explanations, with `--incidents` its own Incidents (`create`,
+  and a `delete` with UID and `resourceVersion` preconditions; never a `get`, `watch`, `patch`,
+  `update` or a write of `incidents/status`), and, with `--leader-lease`, the `spec` (and the
   `resourceVersion` precondition) of its one Lease; or asking for any verb on Leases but `get` and
   `patch` on that one Lease in its own namespace;
 - a value read from kausa's Lease (its holder, times or labels) reaching kausa's log, a request to
@@ -92,6 +94,13 @@ model's](docs/adr/0027-fact-statement-for-the-detections.md))), and serves metri
 keeps each explained incident's full explanations in an Explanation object in that namespace and
 deletes old ones ([0014. Keep each incident's full explanations in a namespaced Explanation
 resource, off by default](docs/adr/0014-explanation-history.md)), since v0.3.0. With
+`--incidents` (off by default; the chart's `incidents.enabled`; in `main` for the release after
+v0.6.3), it also creates one immutable Incident object per settled incident in that namespace,
+holding only what a fact statement may hold and the typed values of its schema, and deletes old
+ones ([0028. Publish each incident as an immutable Incident that only kausa writes, and report by
+webhook what kurita proposed for it, both off by
+default](docs/adr/0028-incident-resource-and-remediation-report.md), `proposed`; [Incident
+resource](docs/reference/incident-resource.md)); its kind cases had never run as of 2026-11-25. With
 `--notify-url-file` (off by default; the chart's `notifications.enabled`; since v0.3.0), it also
 posts each settled incident (`detected`, since the release after v0.6.3, with or without
 `--endpoint`) and each new explanation to one webhook, with the real names of the namespace and the top-level owner ([0015.
@@ -158,7 +167,8 @@ kausa must:
   write Events, `get` on ReplicaSets and Jobs, `list` and `watch` on Deployments only while the
   Deployment watch is on (no `get`, no write, nothing on StatefulSets or DaemonSets), `get` on
   `pods/log` only while log collection is on, `list`, `create`, `patch` and `delete` on its own `explanations` only while it writes
-  history, and `get` and `patch` on its one Lease, `<full name>-leader` in its own namespace,
+  history, `create`, `list` and `delete` on `incidents` only while it writes Incidents (never
+  `get`, `watch`, `patch`, `update`, `deletecollection` or `incidents/status`), and `get` and `patch` on its one Lease, `<full name>-leader` in its own namespace,
   only with `replicaCount: 2` (the same Role in both scopes; never `create`, `update`, `list`,
   `watch` or `delete` on Leases, and no other Lease). Never any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never
   does. Never Secrets, never ConfigMaps, no other write verb, no `exec`, no wildcards

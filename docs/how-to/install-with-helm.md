@@ -35,7 +35,9 @@ writes a `Detected` Event for each settled incident, with or without a model end
 the `Detected` Event](#upgrade-to-the-detected-event); [0027. Report each settled incident as a
 fact statement in its own `Detected` Event and webhook message, with or without a model, and mark
 the model's text as a
-model's](../adr/0027-fact-statement-for-the-detections.md)).
+model's](../adr/0027-fact-statement-for-the-detections.md)), and can keep each settled incident's
+facts in an Incident object (`incidents.enabled`, off by default; [Keep the
+Incidents](#keep-the-incidents)), whose kind cases had never run as of 2026-11-25.
 
 ## Before you start
 
@@ -43,7 +45,8 @@ model's](../adr/0027-fact-statement-for-the-detections.md)).
   ClusterRoleBinding (for `rbac.scope=namespaced`, a Role and a RoleBinding in each listed
   namespace instead: [Watch only some namespaces](#watch-only-some-namespaces)); with the history
   on, also a CustomResourceDefinition and a ClusterRole, unless an administrator installs them
-  ([Keep the history of explanations](#keep-the-history-of-explanations)); and `kubectl` and
+  ([Keep the history of explanations](#keep-the-history-of-explanations)), and the same with the
+  Incidents on ([Keep the Incidents](#keep-the-incidents)); and `kubectl` and
   Helm (CI uses 4.3.1; the chart was also rendered and installed with 3.16; OCI charts need Helm
   3.8 or later) pointed at it: check `kubectl config current-context`.
 - Nodes on linux/amd64 or linux/arm64 that can pull from `ghcr.io` (or your own build, below).
@@ -345,6 +348,55 @@ v0.3.0 is the first release with it.
   `count/explanations.kausa.fedeam.com`, if tenants there can create Explanations
   ([Security policy](../../SECURITY.md)).
 
+## Keep the Incidents
+
+kausa's `Detected` Event is updated in place and expires with the API server's event TTL. With
+`incidents.enabled=true`, kausa also creates one immutable Incident object in the incident's
+namespace for each settled incident, with its facts and redacted samples, and deletes it after
+`incidents.days` days (1 by default, 1 to 30) ([Incident resource](../reference/incident-resource.md);
+[0028. Publish each incident as an immutable Incident that only kausa writes, and report by webhook
+what kurita proposed for it, both off by default](../adr/0028-incident-resource-and-remediation-report.md),
+`proposed`). Status as of 2026-11-25: in `main` for the release after v0.6.3, not released, and its
+kind cases had never run.
+
+1. **Turn it on**, with or without an endpoint, and without `dryRun` (with `dryRun`, the chart
+   renders none of it):
+
+   ```sh
+   helm upgrade kausa "$CHART" --version "$VERSION" -n kausa --reuse-values --set incidents.enabled=true
+   ```
+
+   The chart installs the CustomResourceDefinition `incidents.kausa.fedeam.com` and a reader
+   ClusterRole aggregated to `view`, adds `--incidents --incident-days "1"` to kausa's arguments and
+   `create`, `list` and `delete` on `incidents` to its rules, last ([Permissions](../reference/permissions.md)).
+   A release installed with an earlier chart has no `incidents` values; upgraded with
+   `--reuse-values`, it renders with the Incidents off.
+
+2. **Read them** with `kubectl`: whoever has `view`, `edit` or `admin` in the namespace can, unless
+   `incidents.readers.aggregate=false`:
+
+   ```sh
+   kubectl get incidents -A
+   kubectl get incident -n <namespace> kausa.<fingerprint>.<first-seen Unix seconds> -o yaml
+   ```
+
+- **Turning it off deletes every Incident.** `helm uninstall`, `incidents.enabled=false` or
+  `dryRun=true` deletes the CustomResourceDefinition and, with it, every Incident in the cluster,
+  every release's included.
+- **A namespaced install without cluster rights, or a second release,** sets
+  `incidents.installCRD=false`, and a cluster administrator installs the CustomResourceDefinition
+  and the reader role from the same values, as for the history:
+
+  ```sh
+  helm template kausa "$CHART" --version "$VERSION" --kube-version 1.36.0 -f kausa-values.yaml \
+    --set incidents.enabled=true --set incidents.installCRD=true \
+    --show-only templates/incident-crd.yaml --show-only templates/incident-reader.yaml |
+    kubectl apply -f -
+  ```
+
+  Until the CustomResourceDefinition exists, kausa logs `incident sweep failed` naming it and
+  `incident write failed` for each create, and keeps working.
+
 ## Run a standby replica
 
 With `replicaCount: 2`, a second Pod waits as a standby and takes over when the one that acts
@@ -610,6 +662,8 @@ kausa's Events expire with the API server's event TTL (one hour by default). Wit
 and `history.installCRD=true`, `helm uninstall` also deletes the CustomResourceDefinition and every
 Explanation in the cluster; with `history.installCRD=false`, the administrator who installed it
 deletes it (`kubectl delete crd explanations.kausa.fedeam.com`), which deletes every Explanation.
+The same holds for the Incidents and `incidents.installCRD` (`kubectl delete crd
+incidents.kausa.fedeam.com`).
 With `replicaCount=2`, `helm uninstall` also deletes the Lease, its Role and RoleBinding and the
 PodDisruptionBudget. `helm uninstall` leaves the finished `helm test` Pod (seen in kind on
 2026-11-02); deleting the namespace deletes it, or, to keep the namespace, `kubectl -n kausa

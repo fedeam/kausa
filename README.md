@@ -18,7 +18,7 @@
 > The `internet: no` badge means kausa serves nothing on the internet: it only calls the Kubernetes
 > API server, the model endpoint you configure and, if you set one, one webhook.
 
-A tiny Kubernetes controller that reports failing workloads and, optionally, explains them with an LLM: one `Detected` Event of facts per incident, with or without a model, and with a model endpoint one redacted, budgeted explanation, marked as the model's, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects and, with `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease.
+A tiny Kubernetes controller that reports failing workloads and, optionally, explains them with an LLM: one `Detected` Event of facts per incident, with or without a model, and with a model endpoint one redacted, budgeted explanation, marked as the model's, written as an Event on the object itself. It reads the cluster and writes nothing but its own Events and, with `--history` (off by default), its own Explanation objects, with `--incidents` (off by default), its own Incident objects and, with `--leader-lease` (the chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease.
 
 ## The problem
 
@@ -129,7 +129,8 @@ notifications](docs/reference/data-sent-in-notifications.md)).
   and Jobs to follow owners, and Deployments for stuck rollouts (`--no-rollouts` turns that off);
   `pods/log` only for crash loops, out-of-memory kills and failed Jobs, and that can be turned
   off. It never reads Secrets or ConfigMaps, and the only thing it
-  writes is Events and, with `--history`, its own Explanations and, with `--leader-lease` (the
+  writes is Events and, with `--history`, its own Explanations, with `--incidents` (the chart's
+  `incidents.enabled`), its own Incidents, and, with `--leader-lease` (the
   chart's `replicaCount: 2`), a merge patch of the `spec` of its one Lease
   ([Permissions](docs/reference/permissions.md)).
 - **Deterministic before the model.** Detection, grouping, fingerprints and redaction are rules,

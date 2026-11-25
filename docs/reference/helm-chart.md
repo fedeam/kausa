@@ -38,7 +38,12 @@ Telegram](../adr/0015-notifications.md). Since v0.5.0, the values
 check-endpoint` and its NetworkPolicy ([0020. Check the model endpoint on demand with `kausa
 check-endpoint` and `helm test`, and hold calls behind a breaker while it
 fails](../adr/0020-check-the-endpoint.md)), checked by the renders; the kind test runs `helm
-test` in CI.
+test` in CI. In `main` for the release after v0.6.3 (status as of 2026-11-25), the `incidents`
+values, the Incident CustomResourceDefinition and its reader role ([0028. Publish each incident as
+an immutable Incident that only kausa writes, and report by webhook what kurita proposed for it,
+both off by default](../adr/0028-incident-resource-and-remediation-report.md), `proposed`), checked
+by the renders; the kind test's cases for them have not run. With the defaults the chart renders
+byte for byte what it rendered before them, in each scope ([The Incidents](#the-incidents)).
 
 ## Objects
 
@@ -57,18 +62,21 @@ test` in CI.
 | NetworkPolicy | `<full name>-endpoint-check` | Only when the endpoint check renders and `networkPolicy.enabled`: an ordinary release object, not a hook, that lets the test Pod reach DNS and the model endpoint only |
 | CustomResourceDefinition | `explanations.kausa.fedeam.com` | Only while the release writes history (`kausa.writesHistory`) and `history.installCRD` is true. Cluster-scoped, in both `rbac.scope`s. No `helm.sh/resource-policy: keep` ([Explanation resource](explanation-resource.md)) |
 | ClusterRole | `<full name>-explanation-reader` | Only with the CustomResourceDefinition and `history.readers.aggregate`: `get`, `list` and `watch` on `explanations`, aggregated to `view` ([Permissions](permissions.md)) |
+| CustomResourceDefinition | `incidents.kausa.fedeam.com` | Only while the release creates Incidents (`kausa.writesIncidents`) and `incidents.installCRD` is true. Cluster-scoped, in both `rbac.scope`s. No `helm.sh/resource-policy: keep` ([Incident resource](incident-resource.md)) |
+| ClusterRole | `<full name>-incident-reader` | Only with that CustomResourceDefinition and `incidents.readers.aggregate`: `get`, `list` and `watch` on `incidents`, aggregated to `view` ([Permissions](permissions.md#who-reads-the-history-and-the-incidents)) |
 
 The full name is the release name when it contains `kausa`, and `<release>-kausa` otherwise.
 Every object is in the release namespace, except the Roles and RoleBindings of `kausa.rules`, which
-are in the listed namespaces, and the CustomResourceDefinition and the reader role, which are
+are in the listed namespaces, and the CustomResourceDefinitions and the reader roles, which are
 cluster-scoped. The chart creates no Namespace: each listed one must exist before `helm
 install` (a chart that owned them would delete their workloads on `helm uninstall`).
 
 The RBAC objects come from `templates/rbac.yaml`, and their rules from the `kausa.rules` helper in
 `templates/_helpers.tpl`, which the ClusterRole and every Role render: a permission added later
 goes there only, so that both scopes grant the same. The history's rule (`list`, `create`,
-`patch` and `delete` on `explanations` in `kausa.fedeam.com`) is appended last, only while the
-release writes history. The Deployment watch's rule (`list` and `watch` on `deployments` in
+`patch` and `delete` on `explanations` in `kausa.fedeam.com`) is appended after the others, only
+while the release writes history, and the Incidents' rule (`create`, `list` and `delete` on
+`incidents` in `kausa.fedeam.com`) last, only while the release creates Incidents. The Deployment watch's rule (`list` and `watch` on `deployments` in
 `apps`) comes right after the `replicasets` rule, only while `rollouts` is on; with `rollouts:
 false` the rules are v0.3.0's, byte for byte. The one exception is the standby's Role
 `<full name>-leader` (`templates/leader-election.yaml`), which is not about the watched namespaces
@@ -102,6 +110,10 @@ but about kausa's own Lease, and is the same in both scopes.
 | `history.days` | `7` | `--history-days`: Explanations older than this many days are deleted, 1 to 30 |
 | `history.installCRD` | `true` | Whether this release installs the CustomResourceDefinition and the reader role. `false` when another release or a cluster administrator installs them |
 | `history.readers.aggregate` | `true` | The reader role, which lets `view`, `edit` and `admin` read Explanations; `false` leaves it out |
+| `incidents.enabled` | `false` | Without `dryRun`, with or without an endpoint: `--incidents --incident-days <days>` (and `--dedup-hours`, the window of their gate, when the endpoint's block does not pass it), the `incidents` rule, and (with `installCRD`) the CustomResourceDefinition and the reader role ([The Incidents](#the-incidents)). Turning it off or setting `dryRun` deletes them, and every Incident in the cluster |
+| `incidents.days` | `1` | `--incident-days`: Incidents created more than this many days ago are deleted, 1 to 30 |
+| `incidents.installCRD` | `true` | Whether this release installs the Incident CustomResourceDefinition and its reader role. `false` when another release or a cluster administrator installs them |
+| `incidents.readers.aggregate` | `true` | The reader role, which lets `view`, `edit` and `admin` read Incidents; `false` leaves it out |
 | `notifications.enabled` | `false` | Post each new detection and explanation to one webhook ([Notifications](#notifications)): `--notify-url-file /var/run/secrets/kausa-notify/url --notify-format <format>`, and the Secret volume. With or without `model.endpoint`; not with `dryRun` |
 | `notifications.format` | `json` | `--notify-format`: `json`, `slack` or `telegram` |
 | `notifications.existingSecret` | `""` | Required when enabled: a Secret of yours in the release namespace that holds the webhook URL, mounted read-only at `/var/run/secrets/kausa-notify/` (mode 0440, group 65532) |
@@ -150,6 +162,7 @@ reason, and nothing is applied) in these cases, checked in this order, with thes
 | The NetworkPolicy without the API server's addresses | `networkPolicy.apiServer.cidrs is required with networkPolicy.enabled: without it kausa cannot reach the API server` |
 | The NetworkPolicy with an endpoint (outside `dryRun`) and without its peers | `networkPolicy.endpoint.to is required with networkPolicy.enabled and model.endpoint: without it kausa cannot reach the model` |
 | `history.days` is not a whole number from 1 to 30, whether the history is on or off (for example `0`, `31`, `abc` or `7.5`) | `history.days must be a whole number of days from 1 to 30, not '<value>'` |
+| `incidents.days` is not a whole number from 1 to 30, whether incidents are on or off; a missing key or map is `1` | `incidents.days must be a whole number of days from 1 to 30, not '<value>'` |
 | `replicaCount` is anything but `1` or `2` (for example `0`, `3`, `two`, `-1` or `1.5`); a missing key or `null` is `1` | `replicaCount must be 1 or 2, not '<value>': a second replica is a standby that takes over through a Lease (docs/adr/0019-high-availability.md)` |
 | `model.timeoutSeconds` is not a whole number from 10 to 600, with or without an endpoint (for example `9`, `601`, `abc` or `1.5`); a missing key or `null` is `120` | `model.timeoutSeconds must be a whole number of seconds from 10 to 600, not '<value>'` |
 | `endpointCheck.enabled` is anything but `true` or `false` (for example `yes`) | `endpointCheck.enabled must be true or false, not '<value>'` |
@@ -361,6 +374,45 @@ uninstalling or turning the history off deletes the CustomResourceDefinition and
 Explanation; with `history.installCRD=false`, it names `explanations.kausa.fedeam.com` and says
 that a cluster administrator installs it.
 
+## The Incidents
+
+Three helpers in `templates/_helpers.tpl` decide what the Incidents render:
+
+| Helper | Gives `true` when | Renders |
+|---|---|---|
+| `kausa.writesIncidents` | `incidents.enabled` and `dryRun` false, with or without `model.endpoint` | `--incidents --incident-days "<days>"` in the Deployment's arguments (after the history's, before the notifications' and `--metrics-address`), `--dedup-hours` after `--settle-seconds` when there is no endpoint, and the `incidents` rule, last in `kausa.rules` |
+| `kausa.incidentDays` | (gives the days as a string, `1` when missing) | The value of `--incident-days` and of the `incidents.days` check |
+| `kausa.installsIncidentCRD` | `kausa.writesIncidents` and `incidents.installCRD` | `templates/incident-crd.yaml`, and with `incidents.readers.aggregate`, `templates/incident-reader.yaml` |
+
+The rule, the flags and the CustomResourceDefinition come from the same helper, so no value grants
+the rule to a kausa that does not use it, or the reverse; with `dryRun`, kausa would refuse
+`--incidents`, so the chart renders none of them. `incidents` is read nil-safely, like `history`: a
+release whose stored values have no `incidents` map, or `--set incidents=null`, renders as
+`enabled: false`, `days: 1`, `installCRD: true` and `readers.aggregate: true`. The NetworkPolicy
+does not change: Incidents go to the API server only. `NOTES.txt` does not change either.
+
+**With the defaults, nothing changes.** `tests/golden/chart-default-cluster.yaml` and
+`tests/golden/chart-default-namespaced.yaml` are the default renders of each scope from before the
+Incidents, with the chart's version replaced by `0.0.0-golden`; `tests/chart/render.sh` checks that
+the default render equals them byte for byte.
+
+**Life cycle.** As for the history: the CustomResourceDefinition is a template, its schema
+`charts/kausa/files/incident-schema.json` with an empty `status` subresource, and it carries no
+`helm.sh/resource-policy: keep`. **`helm uninstall`, `incidents.enabled=false` or `dryRun=true`
+deletes the CustomResourceDefinition and every Incident in the cluster.** Two releases in one
+cluster: exactly one sets `incidents.installCRD=true`. With `incidents.installCRD=false` the release
+renders the flags and the rule but neither object, and a cluster administrator applies both:
+
+```sh
+helm template kausa charts/kausa --kube-version 1.36.0 -f values.yaml \
+  --set incidents.installCRD=true \
+  --show-only templates/incident-crd.yaml --show-only templates/incident-reader.yaml |
+  kubectl apply -f -
+```
+
+Until it exists, kausa logs `incident sweep failed` naming it and `incident write failed` for each
+create, and keeps working.
+
 To lint and render the chart without a cluster:
 
 ```sh
@@ -376,7 +428,11 @@ with and without the NetworkPolicy, values without a `notifications` map, the `r
 `false`, `null` rendered as the default), `replicaCount` (`null` and `1` rendered as the default;
 `2` in both scopes, with only the Deployment changed among the existing objects and the Lease, its
 Role and RoleBinding and the PodDisruptionBudget added, and with a user affinity), and every
-`rbac`, `history.days`, `replicaCount` and notification refusal, and `tests/chart/render.sh` runs a longer set of the same checks (helm only, no cluster),
+`rbac`, `history.days`, `replicaCount` and notification refusal, and `incidents` on and off (the
+rule last, the flags before `--metrics-address`, the CustomResourceDefinition read back equal to its
+schema file, with an empty `status` subresource, and `dryRun` rendering as without them), and
+`tests/chart/render.sh` runs a longer set of the same checks (helm only, no cluster), with the
+`incidents.days` refusals and the default-render goldens,
 including a comparison of the cluster-scope rules with the v0.1.0 chart's: equal with `rollouts:
 false`, and with only the `deployments` rule more by default.
 
