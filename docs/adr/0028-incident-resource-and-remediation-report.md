@@ -510,19 +510,21 @@ so the slot and `on_pod` share it. So:
   Incidents written by anyone else are not bounded by this ADR, as for Explanations (0014).
 - **The cap is shared across namespaces**, as 0014 says of its own: it protects the datastore, not
   fairness. The sweep deletes the oldest Incidents beyond 500 whatever their namespace; only
-  Incidents written by someone other than kausa, or left by earlier processes, can push it to
-  delete ones younger than 6 hours, since one process holds at most 500 of those. kausa's own
-  table is per process and is the bound on creates: whoever makes kausa create 500 Incidents in 6
-  hours, a tenant whose workloads fail that often or a writer of Events (trust statement), stops
-  new Incidents in every namespace until the oldest entry passes 6 hours, and for as long as it
-  goes on: holding the stop takes one create every 6 × 3,600 / 500 = 43.2 seconds, so one forged
-  Event with a new fingerprint every 43.2 seconds holds it indefinitely. With `--dedup-hours` at 6
-  or more, 500 creates take 500 different fingerprints; with less, fewer, down to one fingerprint
-  that recurs at `0`, since the gate of point 1 then lets each occurrence create. That
-  moves kurita towards not proposing; kausa still writes its Events and posts its `detected`
-  messages, and a Remediation of an Incident already in the table is still reported. A
-  ResourceQuota on `count/incidents.kausa.fedeam.com` in a namespace bounds what that namespace can
-  hold, against writers of Incidents; it does not bound kausa's table.
+  Incidents written by someone other than kausa, or left by earlier processes, can push it to delete
+  ones younger than 6 hours, since one process holds at most 500 of those; and so can a kausa clock
+  ahead of the API server's by more than the day less 6 hours, since the age rule compares kausa's
+  wall clock with the server's `creationTimestamp` (`src/incidents.rs:277`). kausa's own table is
+  per process and is the bound on creates: whoever makes kausa create 500 Incidents in 6 hours, a
+  tenant whose workloads fail that often or a writer of Events (trust statement), stops new
+  Incidents in every namespace until the oldest entry passes 6 hours, and for as long as it goes on:
+  holding the stop takes one create every 6 × 3,600 / 500 = 43.2 seconds, so one forged Event with a
+  new fingerprint every 43.2 seconds holds it indefinitely. With `--dedup-hours` at 6 or more, 500
+  creates take 500 different fingerprints; with less, fewer, down to one fingerprint that recurs at
+  `0`, since the gate of point 1 then lets each occurrence create. That moves kurita towards not
+  proposing; kausa still writes its Events and posts its `detected` messages, and a Remediation of
+  an Incident already in the table is still reported. A ResourceQuota on
+  `count/incidents.kausa.fedeam.com` in a namespace bounds what that namespace can hold, against
+  writers of Incidents; it does not bound kausa's table.
 
 ### 5. Permissions
 
@@ -1118,6 +1120,12 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   lost or cut after the object was stored. Only kausa's side is tested, against a fake server.
   Test: in kind, delay the create's answer past the 10 seconds with a proxy, then check that the
   Incident exists, that no entry was kept, and that the next occurrence creates a second one.
+- **That kausa's wall clock is never ahead of the API server's by more than the day less 6 hours,**
+  on which point 4's "only Incidents written by someone other than kausa, or left by earlier
+  processes" rests: the age rule's cutoff is kausa's clock less the day, and a clock further ahead
+  deletes Incidents kurita may still decide. No test injects the clock. Test: a unit test of the
+  sweep with its time given, and in kind a kausa with its clock set ahead, checking which
+  Incidents the sweep deletes.
 - **Whether the Incident should take as its sample the first signal of the group whose values fit,**
   and refuse only when none fits, so that a signal a writer in N places first does not leave a
   genuine incident without an Incident (the trust statement). Open for the implementation; the
