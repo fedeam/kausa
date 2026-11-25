@@ -108,6 +108,15 @@ dryRun turns them off, as it turns off the history. */}}
 {{- if hasKey $i "days" }}{{ toString $i.days }}{{ else }}1{{ end }}
 {{- end }}
 
+{{/* budget.dedupHours as a string: a whole number that YAML read as a float (2000000 is 2e+06) is
+written out whole, anything else as it is; kausa.validate checks it while the chart passes
+--dedup-hours. Read nil-safe. */}}
+{{- define "kausa.dedupHours" -}}
+{{- $b := .Values.budget | default dict }}
+{{- $v := $b.dedupHours }}
+{{- if and (kindIs "float64" $v) (eq $v (float64 (int64 $v))) }}{{ int64 $v }}{{ else }}{{ toString $v }}{{ end }}
+{{- end }}
+
 {{/* The chart installs the Incident CRD while kausa creates Incidents, unless
 incidents.installCRD is false (another release or a cluster administrator installs it). */}}
 {{- define "kausa.installsIncidentCRD" -}}
@@ -305,6 +314,12 @@ without an endpoint, and the notification checks last, only with notifications.e
 {{- $incidentDays := include "kausa.incidentDays" . }}
 {{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $incidentDays) }}
 {{- fail (printf "incidents.days must be a whole number of days from 1 to 30, not '%s'" $incidentDays) }}
+{{- end }}
+{{- if or .Values.model.endpoint .Values.dryRun (include "kausa.writesIncidents" .) }}
+{{- $dedupHours := include "kausa.dedupHours" . }}
+{{- if not (regexMatch "^(0|[1-9][0-9]{0,5}|1000000)$" $dedupHours) }}
+{{- fail (printf "budget.dedupHours must be a whole number of hours from 0 to 1000000, not '%s'" $dedupHours) }}
+{{- end }}
 {{- end }}
 {{- $replicas := include "kausa.replicas" . }}
 {{- if not (has $replicas (list "1" "2")) }}

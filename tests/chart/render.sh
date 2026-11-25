@@ -1411,6 +1411,7 @@ for file in "$WORK/notes-cluster" "$WORK/notes-namespaced" "$WORK/notes-history-
     fail "NOTES.txt without the history tells how to read Explanations ($file)"
 done
 
+
 # NOTES.txt names the Deployments kausa reads only while the Deployment watch is on; with
 # rollouts=false it keeps v0.3's sentence (docs/adr/0018-stuck-rollouts.md).
 NS_AB=(--set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a,e2e-b}')
@@ -1585,6 +1586,52 @@ refuse order-incident-days-before-replicas "$(not_incident_days 0)" --set rbac.s
   --set incidents.days=0 --set replicaCount=3
 refuse order-incident-days-after-v0.1-checks "model.name is required with model.endpoint" \
   --set rbac.scope=cluster --set model.endpoint=https://api.example.com/v1 --set incidents.days=0
+# budget.dedupHours, right after incidents.days, whenever the chart passes --dedup-hours: with an
+# endpoint, with dryRun, or with incidents on. The binary takes 0 to 1000000.
+not_dedup() { echo "budget.dedupHours must be a whole number of hours from 0 to 1000000, not '$1'"; }
+for hours in 1000001 2000000 -1 7.5 abc; do
+  refuse "dedup-$hours-incidents" "$(not_dedup "$hours")" --set rbac.scope=cluster \
+    "${INCIDENTS_ON[@]}" --set "budget.dedupHours=$hours"
+  refuse "dedup-$hours-endpoint" "$(not_dedup "$hours")" --set rbac.scope=cluster \
+    "${ENDPOINT[@]}" --set "budget.dedupHours=$hours"
+  refuse "dedup-$hours-dry-run" "$(not_dedup "$hours")" --set rbac.scope=cluster "${DRY[@]}" \
+    --set "budget.dedupHours=$hours"
+done
+refuse dedup-namespaced "$(not_dedup 2000000)" --set rbac.scope=namespaced \
+  --set 'rbac.namespaces={e2e-a}' "${INCIDENTS_ON[@]}" --set budget.dedupHours=2000000
+refuse dedup-string "$(not_dedup 6h)" --set rbac.scope=cluster "${INCIDENTS_ON[@]}" \
+  --set-string budget.dedupHours=6h
+refuse dedup-null "$(not_dedup '<nil>')" --set rbac.scope=cluster "${INCIDENTS_ON[@]}" \
+  --set budget.dedupHours=null
+# A whole number YAML reads as a float is named whole.
+printf 'budget:\n  dedupHours: 2000000\n' >"$WORK/dedup-float.yaml"
+refuse dedup-yaml-float "$(not_dedup 2000000)" --set rbac.scope=cluster "${INCIDENTS_ON[@]}" \
+  -f "$WORK/dedup-float.yaml"
+refuse order-dedup-after-incident-days "$(not_incident_days 0)" --set rbac.scope=cluster \
+  "${INCIDENTS_ON[@]}" --set incidents.days=0 --set budget.dedupHours=-1
+refuse order-dedup-before-replicas "$(not_dedup -1)" --set rbac.scope=cluster \
+  "${INCIDENTS_ON[@]}" --set budget.dedupHours=-1 --set replicaCount=3
+# Without --dedup-hours in the render the value is not read, as before.
+for hours in 2000000 -1 abc; do
+  out="$WORK/dedup-unread-$hours"
+  if render "$out" "$RELEASE" "$CHART" --set rbac.scope=cluster --set "budget.dedupHours=$hours"; then
+    ok "refusal/dedup-unread-$hours: renders without --dedup-hours"
+  else
+    fail "refusal/dedup-unread-$hours: refused while no --dedup-hours is passed: $(cat "$out.err")"
+  fi
+done
+# The bounds render as the binary reads them.
+for hours in 0 1000000; do
+  out="$WORK/dedup-bound-$hours"
+  if ! render "$out" "$RELEASE" "$CHART" --set rbac.scope=cluster "${INCIDENTS_ON[@]}" \
+    --set "budget.dedupHours=$hours"; then
+    fail "dedup-bound-$hours: refused: $(cat "$out.err")"
+  elif args "$out" | grep -A1 -xF -- '- --dedup-hours' | grep -qxF -- "- \"$hours\""; then
+    ok "dedup-bound-$hours: --dedup-hours \"$hours\""
+  else
+    fail "dedup-bound-$hours: no --dedup-hours \"$hours\" in the args"
+  fi
+done
 
 # --- Notifications (docs/adr/0015-notifications.md) ---------------------------------------------
 
