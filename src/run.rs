@@ -3880,6 +3880,68 @@ mod tests {
     }
 
     #[test]
+    fn an_incident_sweep_that_completes_is_not_run_again_within_its_interval() {
+        use crate::incidents::tests::{Answer, api_server, client, created, failure, reply, sent};
+        // Each list of Incidents is answered at once, with none: the sweep completes in a tick.
+        let (url, requests) = api_server(|request| match request.method.as_str() {
+            "POST" if request.path.contains("/events") => Answer::Reply(201, request.body.clone()),
+            "POST" => created(),
+            "GET" if request.path.starts_with("/apis/kausa.fedeam.com/") => reply(
+                200,
+                json!({
+                    "apiVersion": "kausa.fedeam.com/v1alpha1",
+                    "kind": "IncidentList",
+                    "metadata": {"resourceVersion": "1"},
+                    "items": [],
+                }),
+            ),
+            _ => failure(404),
+        });
+        let on = Options {
+            detected: Some(ME.into()),
+            incidents: Some(INCIDENTS),
+            ..watching(&[], false)
+        };
+        let cluster = ScriptedCluster::new(list(&CLUSTER, vec![crashing("api-1")]), vec![], vec![]);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let lists = || {
+            sent(&requests)
+                .iter()
+                .filter(|r| r.method == "GET" && r.path.starts_with("/apis/kausa.fedeam.com/"))
+                .count()
+        };
+        runtime().block_on(async {
+            let client = client(&url);
+            let incidents = incidents_of(&client, &on);
+            let reporter = reporter(&client, &on, None, incidents.as_ref(), &metrics, &term)
+                .expect("a reporter");
+            let leading = lead(
+                &on,
+                &cluster,
+                None,
+                Some(&reporter),
+                None,
+                &metrics,
+                TEST_TICK,
+            );
+            // Twenty ticks, far less than the interval: the slot is free on each of them.
+            tokio::select! {
+                result = leading => {
+                    let Err(error) = result;
+                    match error {
+                        RunError::Failure(error) => panic!("the term ended: {error}"),
+                        RunError::Output(error) => panic!("the log failed: {error}"),
+                    }
+                }
+                () = tokio::time::sleep(TEST_TICK * 20) => {}
+            }
+            let incidents = incidents.expect("the incidents");
+            assert!(incidents.table().sweep_ended(), "the sweep did not end");
+        });
+        assert_eq!(lists(), 1, "{:?}", sent(&requests));
+    }
+
+    #[test]
     fn the_replica_set_read_shares_the_owner_lookup_s_get_and_cache() {
         let ok = || ("200 OK", replica_set_metadata(Some(RS_UID), Some("7")));
         let served = Served::new(true, vec![ok(), ok()]);
