@@ -167,7 +167,8 @@ version `v1alpha1`, kind `Incident`:
   (point 3), within the 10 seconds a write has there, and never before the incident's
   `incident` log line. A failed create is logged and counted (this ADR proposes
   `kausa_incident_write_errors_total`; the reference page fixes the name with the code) and not
-  retried.
+  retried. A create answered `409 AlreadyExists` is such a failure, and its fingerprint is not
+  marked: the table keeps an entry only with the UID the server gave a create it accepted.
 - **At most one create per fingerprint per `--dedup-hours`**, the window of 0027's point 5 (6 by
   default; with `0`, every occurrence). The gate reads kausa's own table of the Incidents it created
   in this process (below), never a list of the resource, and a fingerprint is marked only after a
@@ -199,8 +200,9 @@ version `v1alpha1`, kind `Incident`:
   oldest first, when room is needed. It is never seeded from a list of Incidents (point 10).
 - **While the table holds 500 entries younger than 6 hours, kausa creates no Incident.** The
   occurrence is counted (this ADR proposes `kausa_incidents_refused_total`, with a label `reason` of
-  two values, `table-full` for this stop and `schema` for point 2's rule; the reference page fixes
-  the names) and logged as `incident refused` at most once an hour for each reason; the incident's
+  three values, `table-full` for this stop, `schema` for point 2's rule and `starting` for a create
+  that arrives before the sweep at start ended (point 4); the reference page fixes the names) and
+  logged as `incident refused` at most once an hour for each reason; the incident's
   Events, its `incident` log line and its `detected` message are not affected, and its fingerprint
   is not marked, so a later occurrence creates one once there is room. So a process creates at most
   500 Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table,
@@ -208,7 +210,7 @@ version `v1alpha1`, kind `Incident`:
   ninth review: with one counter and one line an hour, one refusal of point 2's rule an hour, which
   a writer of Pods or Events in N can cause, would take the line and hide this stop, which holds
   Incidents back in every namespace. The label's values are a closed set and name nothing of the
-  cluster, as 0027's counters do, and both series show 0 from the start with incidents on.
+  cluster, as 0027's counters do, and the three series show 0 from the start with incidents on.
 - **No `ownerReference`** to the workload or to anything else, and nothing points to it.
 - **Not with `--dry-run`**, as `--history`: kausa refuses to start with incidents on and
   `--dry-run`, and the chart turns incidents off with `dryRun`.
@@ -463,7 +465,10 @@ and `on_pod` share it. So:
 - **One day covers kurita's window**: kurita decides an Incident only while it is younger than 6
   hours by `creationTimestamp` (its ADR 0008, point 3). The outcome check may raise the default.
 - **The cap of 500 is the sweep's target, and kausa's own creates are bounded apart.** The sweep
-  at start runs before the first create of the process. Between two sweeps one process creates at
+  at start ends before the first create of the process: a create that arrives before it ended,
+  completed or stopped at its 30 seconds, does not wait for it, and is refused with the reason
+  `starting` (point 1), counted and logged as the other refusals, its fingerprint not marked, so a
+  later occurrence creates one. Between two sweeps one process creates at
   most 500 Incidents (point 1: at most 500 in any 6 hours, and the sweeps are an hour apart), so
   after a sweep that completes the count kausa causes stays at most 500 + 500 = 1,000 until the
   next one. A restart or a failover empties the table, so each process start allows 500 more:

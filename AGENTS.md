@@ -98,7 +98,7 @@ read-only proxy that keeps it to its own reads. Tests never reach a cluster: `te
 the binary with a nonexistent kubeconfig, and a new test that starts `kausa run` must do the same.
 The core (`src/detect.rs`, `src/incident.rs`, `src/fingerprint.rs`, `src/owner.rs`,
 `src/record.rs`, `src/fact.rs`, `src/incident_resource.rs`, `src/redact.rs`, `src/context.rs`,
-`src/prompt.rs`, `src/history/pure.rs`,
+`src/incident_resource/table.rs`, `src/prompt.rs`, `src/history/pure.rs`,
 `src/notification.rs`, `src/leader/pure.rs`, `src/model/pure.rs`, `src/breaker.rs`) is pure and
 tested without a cluster, and so are `src/budget.rs`,
 `src/metrics.rs` (except its listener) and the building of Events in `src/events.rs`;

@@ -14,6 +14,8 @@ use crate::fact;
 use crate::incident::MAX_PODS;
 use crate::owner::{MAX_NAME_LEN, MAX_NAMESPACE_LEN, is_dns_label, is_dns_subdomain};
 
+pub(crate) mod table;
+
 /// The 16 lowercase hexadecimal characters of a fingerprint.
 pub(crate) const FINGERPRINT_PATTERN: &str = "^[0-9a-f]{16}$";
 pub(crate) const FINGERPRINT_LEN: usize = 16;
@@ -646,7 +648,7 @@ mod tests {
     }
 
     /// A crash loop of a Deployment's Pods, whose ReplicaSet's revision was read.
-    fn pod_spec() -> Spec {
+    pub(super) fn pod_spec() -> Spec {
         Spec {
             detection: Detection::CrashLoop,
             fingerprint: FP.into(),
