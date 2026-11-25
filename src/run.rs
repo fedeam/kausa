@@ -121,9 +121,10 @@ pub struct Options {
     /// With `--notify-url-file`, the webhook and the bounds of its `detected` messages
     /// (docs/adr/0015-notifications.md, docs/adr/0027-fact-statement-for-the-detections.md).
     pub notify: Option<Notify>,
-    /// With incidents on, each settled fact keeps what its Incident needs and the fact slot
-    /// creates it (docs/adr/0028-incident-resource-and-remediation-report.md, points 1 and 3).
-    /// Internal: no flag sets it yet.
+    /// With incidents on, each settled fact keeps what its Incident needs, the fact slot creates
+    /// it and a slot of its own sweeps them
+    /// (docs/adr/0028-incident-resource-and-remediation-report.md, points 1, 3 and 4). Internal:
+    /// no flag sets it yet.
     pub incidents: Option<crate::incidents::Settings>,
 }
 
@@ -1057,6 +1058,10 @@ async fn lead<C: Cluster>(
     // (docs/adr/0027-fact-statement-for-the-detections.md).
     let mut facts = report::Queue::default();
     let mut reporting: Option<Notifying<'_>> = None;
+    // The Incident sweep being run, and when the last one began: never in the fact slot nor in
+    // the explanation slot, so a fact waits for it no longer than for a write (invariant 6).
+    let mut incident_sweeping: Option<Notifying<'_>> = None;
+    let mut last_incident_sweep: Option<Instant> = None;
 
     loop {
         if let Some(reporter) = reporter
@@ -1064,6 +1069,20 @@ async fn lead<C: Cluster>(
             && let Some(fact) = facts.pop()
         {
             reporting = Some(Box::pin(reporter.report(fact, &lookup)));
+        }
+        // The Incident sweep, in a slot of its own, with incidents on: at the start of each term
+        // and then hourly, while the term holds (docs/adr/0028, point 4).
+        if let Some(reporter) = reporter
+            && let Some(incidents) = reporter.incidents
+            && incident_sweeping.is_none()
+            && reporter.term.holds()
+            && sweep_due(last_incident_sweep, Instant::now())
+        {
+            last_incident_sweep = Some(Instant::now());
+            let namespaces = &options.namespaces;
+            incident_sweeping = Some(Box::pin(async move {
+                incidents.sweep(namespaces, reporter.term).await.map(drop)
+            }));
         }
         if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
             let now = Instant::now();
@@ -1163,6 +1182,12 @@ async fn lead<C: Cluster>(
                 if reporting.is_some() => {
                 reporting = None;
                 // A failed write is only logged and counted; the error is kausa's own log.
+                result?;
+            }
+            result = async { incident_sweeping.as_mut().expect("guarded by the condition").await },
+                if incident_sweeping.is_some() => {
+                incident_sweeping = None;
+                // A failed call is only logged and counted; the error is kausa's own log.
                 result?;
             }
             item = pods.next() => match item {
@@ -3692,6 +3717,121 @@ mod tests {
             ..options(false, 10)
         };
         let requests = report_through_run(&off);
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(
+            requests[0]
+                .1
+                .starts_with("/apis/events.k8s.io/v1/namespaces/shop/events")
+        );
+    }
+
+    /// One term of `lead` with the fact path of `options` and an outbox, over a crashing Pod,
+    /// against a fake API server that echoes each Event and never answers a list of Incidents,
+    /// until the Pod's `Detected` Event was written and its `detected` message queued: the
+    /// requests, as method and path, how long that took, and the `starting` refusals.
+    fn lead_with_a_hung_sweep(options: &Options) -> (Vec<(String, String)>, Duration, u64) {
+        use crate::incident_resource::table::Refusal;
+        use crate::incidents::tests::{Answer, api_server, client, sent};
+        let (url, requests) = api_server(|request| match request.method.as_str() {
+            "POST" if request.path.contains("/events") => Answer::Reply(201, request.body.clone()),
+            _ => Answer::Hang,
+        });
+        let cluster = ScriptedCluster::new(list(&CLUSTER, vec![crashing("api-1")]), vec![], vec![]);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        // A webhook that is never reached: the message is only queued.
+        let notifier = crate::notify::Notifier::new(
+            "http://192.0.2.1/hook".parse().expect("a URL"),
+            crate::notify::Format::Json,
+            None,
+            true,
+        )
+        .expect("a notifier");
+        let outbox = Outbox::new(&notifier, Duration::ZERO, 30, &metrics, &term);
+        let events = || {
+            sent(&requests)
+                .iter()
+                .filter(|r| r.path.contains("/events"))
+                .count()
+        };
+        let (took, refused) = runtime().block_on(async {
+            let client = client(&url);
+            let incidents = incidents_of(&client, options);
+            let reporter = reporter(
+                &client,
+                options,
+                Some(&outbox),
+                incidents.as_ref(),
+                &metrics,
+                &term,
+            )
+            .expect("a reporter");
+            let start = Instant::now();
+            let leading = lead(
+                options,
+                &cluster,
+                None,
+                Some(&reporter),
+                None,
+                &metrics,
+                TEST_TICK,
+            );
+            tokio::select! {
+                result = leading => {
+                    let Err(error) = result;
+                    match error {
+                        RunError::Failure(error) => panic!("the term ended: {error}"),
+                        RunError::Output(error) => panic!("the log failed: {error}"),
+                    }
+                }
+                done = until(WAIT, || events() == 1 && outbox.queue().len() == 1) => {
+                    assert!(done, "no Event or no message within {WAIT:?}");
+                }
+            }
+            let refused = incidents.map_or(0, |i| i.refused(Refusal::Starting));
+            (start.elapsed(), refused)
+        });
+        let requests = sent(&requests)
+            .into_iter()
+            .map(|request| (request.method, request.path))
+            .collect();
+        (requests, took, refused)
+    }
+
+    #[test]
+    fn a_hung_incident_sweep_delays_neither_an_event_nor_a_detected_message() {
+        let on = Options {
+            detected: Some(ME.into()),
+            incidents: Some(INCIDENTS),
+            ..watching(&[], false)
+        };
+        let (requests, took, refused) = lead_with_a_hung_sweep(&on);
+        // The sweep began with the term and its list is still unanswered; the Event and the
+        // message came well before the list's own bound, which is the write's.
+        assert!(took < crate::leader::pure::WRITE_BOUND / 2, "{took:?}");
+        let lists: Vec<&(String, String)> = requests
+            .iter()
+            .filter(|(m, p)| m == "GET" && p.starts_with("/apis/kausa.fedeam.com/"))
+            .collect();
+        assert_eq!(lists.len(), 1, "{requests:?}");
+        assert!(
+            lists[0]
+                .1
+                .starts_with("/apis/kausa.fedeam.com/v1alpha1/incidents?")
+        );
+        // The create arrived before the sweep ended: refused, and nothing sent for it.
+        assert_eq!(refused, 1);
+        assert_eq!(
+            requests.iter().filter(|(m, _)| m == "POST").count(),
+            1,
+            "only the Event: {requests:?}"
+        );
+        // Off, no list of Incidents is ever sent: the same term sends only the Event.
+        let off = Options {
+            detected: Some(ME.into()),
+            ..watching(&[], false)
+        };
+        let (requests, _, refused) = lead_with_a_hung_sweep(&off);
+        assert_eq!(refused, 0);
         assert_eq!(requests.len(), 1, "{requests:?}");
         assert!(
             requests[0]

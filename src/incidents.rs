@@ -1,5 +1,6 @@
-//! The Incidents kausa creates (docs/adr/0028-incident-resource-and-remediation-report.md,
-//! point 1): the create in the fact slot, after the incident's `Detected` Event. Not
+//! The Incidents kausa creates and sweeps
+//! (docs/adr/0028-incident-resource-and-remediation-report.md, points 1 and 4): the create in the
+//! fact slot, after the incident's `Detected` Event, and the sweep, in a slot of its own. Not
 //! `incident.rs`, which groups signals into incidents, nor `incident_resource.rs`, the pure part:
 //! the `spec`, its check and the table of created Incidents.
 //!
@@ -11,11 +12,17 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use futures::AsyncReadExt;
-use kube::api::{ApiResource, DynamicObject, GroupVersionKind, PostParams};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::jiff::Timestamp;
+use kube::api::{
+    ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, PostParams,
+    Preconditions,
+};
 use kube::{Api, Client};
 use serde_json::{Value, json};
 
-use crate::history::api_failure;
+use crate::history::pure::{Reason, SweepPlan};
+use crate::history::{SWEEP_PAGE, SWEEP_TIME, api_failure, times};
 use crate::incident_resource::table::{Admission, Entry, Limiter, Refusal, Table};
 use crate::incident_resource::{Draft, Uid};
 use crate::leader::Term;
@@ -30,6 +37,10 @@ pub struct Settings {
     pub window: Duration,
 }
 
+/// The days after which the sweep deletes an Incident, by its `creationTimestamp`: point 4's
+/// default, an internal value until its flag comes.
+const DAYS: u32 = 1;
+
 /// The most bytes of the create's answer kausa reads: the object the server stored, whose `spec`
 /// the schema bounds (about 3 KiB at most) and whose `metadata` the server fills. An answer that
 /// does not fit is a write error.
@@ -38,6 +49,30 @@ pub(crate) const CREATE_ANSWER_BYTES: u64 = 64 * 1024;
 /// The path of a schema refusal for a namespace that is not a DNS label, which the server never
 /// gives an object: `Field` names only the fields of the `spec` and `metadata.name`.
 const NAMESPACE_FIELD: &str = "metadata.namespace";
+
+/// The error of a `list` answered `404`.
+const CRD_MISSING: &str =
+    "the CustomResourceDefinition incidents.kausa.fedeam.com is not installed";
+
+/// How a sweep ended. A sweep that completed, failed or stopped at its bound lets creates through;
+/// one cut by the loss of the term does not, and the next term's sweep counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ended {
+    Completed,
+    /// A list or a delete the server refused, the sweep going on after it.
+    Failed,
+    /// At `SWEEP_TIME`, or at a call that did not end within `WRITE_BOUND`.
+    Stopped,
+    /// The term no longer held before a call.
+    Cut,
+}
+
+impl Ended {
+    /// Whether the gate's flag is set by this ending.
+    pub(crate) fn ended(self) -> bool {
+        self != Ended::Cut
+    }
+}
 
 /// The resource, written out: kube's `derive` feature stays off (docs/adr/0014).
 fn resource() -> ApiResource {
@@ -60,6 +95,10 @@ pub struct Incidents {
     refused: [Cell<u64>; Refusal::ALL.len()],
     /// Creates that failed (`kausa_incident_write_errors_total` when rendered).
     write_errors: Cell<u64>,
+    /// Incidents the sweep deleted, by `Reason`: age, then cap.
+    deleted: [Cell<u64>; 2],
+    /// Lists and deletes of the sweep the server refused.
+    sweep_errors: Cell<u64>,
 }
 
 impl Incidents {
@@ -72,6 +111,8 @@ impl Incidents {
             limiter: RefCell::new(Limiter::default()),
             refused: Default::default(),
             write_errors: Cell::new(0),
+            deleted: Default::default(),
+            sweep_errors: Cell::new(0),
         }
     }
 
@@ -212,6 +253,133 @@ impl Incidents {
         )
     }
 
+    /// One sweep, 0014's applied to Incidents: deletes those created more than `DAYS` days ago and,
+    /// oldest first, those beyond `MAX_OBJECTS`, by `creationTimestamp` only. It lists every
+    /// Incident, with no label selector, in pages of `SWEEP_PAGE`, across the cluster when
+    /// `namespaces` is empty or in each listed namespace in order, keeps only five fields of each
+    /// one's `metadata` before it reduces it, deletes as each page arrives, each delete with the
+    /// UID and the `resourceVersion` listed as preconditions, and stops at `SWEEP_TIME`. A failed
+    /// list ends its namespace and the sweep goes on with the next; a delete answered `404` or
+    /// `409` is neither an error nor a deletion. Each call is made only while `term` holds and ends
+    /// within `WRITE_BOUND`, or at the deadline if that comes first; a call that does not end in
+    /// time ends the sweep. Unless the term ended, the gate's flag is set when it ends.
+    pub async fn sweep(&self, namespaces: &[String], term: &Term) -> io::Result<Ended> {
+        let ended = self.sweep_calls(namespaces, term).await?;
+        if ended.ended() {
+            self.table.borrow_mut().start_sweep_ended();
+        }
+        Ok(ended)
+    }
+
+    async fn sweep_calls(&self, namespaces: &[String], term: &Term) -> io::Result<Ended> {
+        let deadline = tokio::time::Instant::now() + SWEEP_TIME;
+        let call_end = || deadline.min(tokio::time::Instant::now() + WRITE_BOUND);
+        let (_, cutoff) = times(Timestamp::now(), DAYS);
+        let mut plan = SweepPlan::incidents(&cutoff);
+        let (mut by_age, mut by_cap) = (0_u64, 0_u64);
+        let mut ended = Ended::Completed;
+        let scopes: Vec<Option<&str>> = if namespaces.is_empty() {
+            vec![None]
+        } else {
+            namespaces.iter().map(|n| Some(n.as_str())).collect()
+        };
+        'scopes: for scope in scopes {
+            // The log names the namespace of the flag (null in cluster scope), never a listed one.
+            let failed = |error: String| {
+                self.sweep_errors.set(self.sweep_errors.get() + 1);
+                log::warn(
+                    "incident sweep failed",
+                    json!({"namespace": scope, "error": error}),
+                )
+            };
+            let api: Api<DynamicObject> = match scope {
+                None => Api::all_with(self.client.clone(), &self.resource),
+                Some(namespace) => {
+                    Api::namespaced_with(self.client.clone(), namespace, &self.resource)
+                }
+            };
+            let mut token: Option<String> = None;
+            loop {
+                let mut params = ListParams::default().limit(SWEEP_PAGE);
+                if let Some(token) = &token {
+                    params = params.continue_token(token);
+                }
+                if !term.holds() {
+                    ended = Ended::Cut;
+                    break 'scopes;
+                }
+                let Ok(listed) = tokio::time::timeout_at(call_end(), api.list(&params)).await
+                else {
+                    ended = Ended::Stopped;
+                    break 'scopes;
+                };
+                let list = match listed {
+                    Ok(list) => list,
+                    Err(error) => {
+                        failed(list_failure(&error))?;
+                        ended = Ended::Failed;
+                        continue 'scopes;
+                    }
+                };
+                token = list.metadata.continue_.filter(|token| !token.is_empty());
+                // Each object is reduced at once (invariant 8) and is untrusted (invariant 5).
+                let items: Vec<Value> = list.items.into_iter().map(read_metadata).collect();
+                let deletes = plan.page(&items);
+                drop(items);
+                for delete in deletes {
+                    let api: Api<DynamicObject> = Api::namespaced_with(
+                        self.client.clone(),
+                        &delete.namespace,
+                        &self.resource,
+                    );
+                    let params = DeleteParams {
+                        preconditions: Some(Preconditions {
+                            resource_version: Some(delete.resource_version.clone()),
+                            uid: delete.uid.clone(),
+                        }),
+                        ..DeleteParams::default()
+                    };
+                    if !term.holds() {
+                        ended = Ended::Cut;
+                        break 'scopes;
+                    }
+                    let Ok(answer) =
+                        tokio::time::timeout_at(call_end(), api.delete(&delete.name, &params))
+                            .await
+                    else {
+                        ended = Ended::Stopped;
+                        break 'scopes;
+                    };
+                    match answer {
+                        Ok(_) => {
+                            let count = &self.deleted[delete.reason as usize];
+                            count.set(count.get() + 1);
+                            match delete.reason {
+                                Reason::Age => by_age += 1,
+                                Reason::Cap => by_cap += 1,
+                            }
+                        }
+                        Err(kube::Error::Api(status)) if matches!(status.code, 404 | 409) => {}
+                        Err(error) => {
+                            failed(api_failure(&error))?;
+                            ended = Ended::Failed;
+                        }
+                    }
+                }
+                if token.is_none() {
+                    break;
+                }
+            }
+        }
+        if by_age + by_cap > 0 {
+            log::info(
+                "incidents swept",
+                json!({"deleted_by_age": by_age, "deleted_by_cap": by_cap}),
+            )?;
+        }
+        Ok(ended)
+    }
+
     #[cfg(test)]
     pub(crate) fn refused(&self, reason: Refusal) -> u64 {
         self.refused[reason as usize].get()
@@ -220,6 +388,16 @@ impl Incidents {
     #[cfg(test)]
     pub(crate) fn write_errors(&self) -> u64 {
         self.write_errors.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deleted(&self, reason: Reason) -> u64 {
+        self.deleted[reason as usize].get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sweep_errors(&self) -> u64 {
+        self.sweep_errors.get()
     }
 
     #[cfg(test)]
@@ -244,6 +422,31 @@ fn body(namespace: &str, name: &str, spec: Value) -> Vec<u8> {
     })
     .to_string()
     .into_bytes()
+}
+
+/// A listed Incident as the sweep reads it: `metadata` with its namespace, name, UID,
+/// `resourceVersion` and `creationTimestamp`, and nothing else, so neither its `spec` nor any other
+/// metadata reaches the reducer.
+fn read_metadata(object: DynamicObject) -> Value {
+    let metadata = object.metadata;
+    let kept = ObjectMeta {
+        namespace: metadata.namespace,
+        name: metadata.name,
+        uid: metadata.uid,
+        resource_version: metadata.resource_version,
+        creation_timestamp: metadata.creation_timestamp,
+        ..ObjectMeta::default()
+    };
+    json!({"metadata": serde_json::to_value(kept).unwrap_or(Value::Null)})
+}
+
+/// What the log says about a failed `list`: a `404` means the CRD is not installed; anything else
+/// is told as `api_failure` tells it.
+fn list_failure(error: &kube::Error) -> String {
+    match error {
+        kube::Error::Api(status) if status.code == 404 => CRD_MISSING.to_owned(),
+        _ => api_failure(error),
+    }
 }
 
 #[cfg(test)]
@@ -718,5 +921,329 @@ pub(crate) mod tests {
                 .is_none()
         );
         assert_eq!(incidents.table().len(), 1);
+    }
+
+    // --- The sweep (point 4) -------------------------------------------------------------------
+
+    /// The list of every Incident across the cluster, before its query.
+    const COLLECTION: &str = "/apis/kausa.fedeam.com/v1alpha1/incidents";
+
+    /// The collection of the Incidents of `namespace`, before its query.
+    fn collection(namespace: &str) -> String {
+        format!("/apis/kausa.fedeam.com/v1alpha1/namespaces/{namespace}/incidents")
+    }
+
+    /// An Incident of `shop` the API server lists, created `ago` before now.
+    fn listed(i: usize, ago: Duration) -> Value {
+        let created = Timestamp::now() - ago;
+        json!({
+            "apiVersion": "kausa.fedeam.com/v1alpha1",
+            "kind": "Incident",
+            "metadata": {
+                "name": format!("incident-{i:04}"),
+                "namespace": "shop",
+                "uid": format!("uid-{i}"),
+                "resourceVersion": format!("rv-{i}"),
+                "creationTimestamp": times(created, 0).0,
+                "labels": {"example.com/any": "x"},
+            },
+            "spec": {"firstSeen": "1970-01-01T00:00:00Z"},
+        })
+    }
+
+    const DAY: Duration = Duration::from_secs(86_400);
+
+    /// The page of `objects` a list at `path` asks for, by its `limit` and its `continue` token,
+    /// which is the index of the page's first object.
+    fn page(objects: &[Value], path: &str) -> Answer {
+        let (mut start, mut limit) = (0, objects.len());
+        for pair in path.split_once('?').map_or("", |(_, q)| q).split('&') {
+            match pair.split_once('=') {
+                Some(("limit", v)) => limit = v.parse().expect("a limit"),
+                Some(("continue", v)) => start = v.parse().expect("a token"),
+                _ => {}
+            }
+        }
+        let end = (start + limit).min(objects.len());
+        let token = if end < objects.len() {
+            end.to_string()
+        } else {
+            String::new()
+        };
+        reply(
+            200,
+            json!({
+                "apiVersion": "kausa.fedeam.com/v1alpha1",
+                "kind": "IncidentList",
+                "metadata": {"continue": token, "resourceVersion": "1"},
+                "items": objects[start..end],
+            }),
+        )
+    }
+
+    fn deleted_answer() -> Answer {
+        reply(
+            200,
+            json!({"apiVersion": "v1", "kind": "Status", "metadata": {}, "status": "Success"}),
+        )
+    }
+
+    /// The name of the Incident a delete at `path` is about: kube-rs ends the path with an empty
+    /// query, as for a create.
+    fn item(path: &str) -> &str {
+        let path = path.split('?').next().unwrap_or_default();
+        path.rsplit('/').next().unwrap_or_default()
+    }
+
+    /// The fake API server of a sweep: each list a page of `objects`, each delete `delete`'s
+    /// answer for the name it deletes.
+    fn sweep_server(
+        objects: Vec<Value>,
+        delete: impl Fn(&str) -> Answer + Send + 'static,
+    ) -> (String, Requests) {
+        api_server(move |request| match request.method.as_str() {
+            "GET" => page(&objects, &request.path),
+            "DELETE" => delete(item(&request.path)),
+            _ => failure(405),
+        })
+    }
+
+    /// A sweep of the Incidents at `url`, never started before: how it ended, and the Incidents.
+    fn sweep(url: &str, namespaces: &[&str], term: &Term) -> (Ended, Incidents) {
+        let rt = runtime();
+        let namespaces: Vec<String> = namespaces.iter().map(|n| (*n).to_owned()).collect();
+        rt.block_on(async {
+            let incidents = Incidents::new(client(url), SETTINGS);
+            let ended = incidents.sweep(&namespaces, term).await.expect("a log");
+            (ended, incidents)
+        })
+    }
+
+    #[test]
+    fn a_sweep_of_a_thousand_incidents_deletes_the_oldest_five_hundred_with_both_preconditions() {
+        // Created a minute apart, the newest a minute ago, all inside the day, listed shuffled.
+        let objects: Vec<Value> = (0..1000)
+            .map(|i| (i * 7919) % 1000)
+            .map(|i| listed(i, Duration::from_secs(60 * (i as u64 + 1))))
+            .collect();
+        let (url, requests) = sweep_server(objects, |_| deleted_answer());
+        let (ended, incidents) = sweep(&url, &[], &Term::unbounded());
+        assert_eq!(ended, Ended::Completed);
+        let requests = sent(&requests);
+        let lists: Vec<&Sent> = requests.iter().filter(|r| r.method == "GET").collect();
+        let deletes: Vec<&Sent> = requests.iter().filter(|r| r.method == "DELETE").collect();
+        assert_eq!(lists.len(), 500, "pages of {SWEEP_PAGE}");
+        assert_eq!(deletes.len(), 500);
+        assert_eq!(requests.len(), 1000);
+        for list in lists {
+            let (path, query) = list.path.split_once('?').expect("a query");
+            assert_eq!(path, COLLECTION);
+            // No label selector: every Incident counts, whoever wrote it.
+            assert!(query.split('&').any(|p| p == "limit=2"), "{query}");
+            assert!(!query.contains("labelSelector"), "{query}");
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for delete in deletes {
+            let path = delete.path.strip_suffix('?').expect("an empty query");
+            let name = path.strip_prefix(&format!("{}/", collection("shop")));
+            let name = name.expect("an Incident of shop").to_owned();
+            let i: usize = name["incident-".len()..].parse().expect("an index");
+            assert!(i >= 500, "{name} is not among the oldest");
+            let preconditions = &delete.json()["preconditions"];
+            assert_eq!(
+                preconditions,
+                &json!({"uid": format!("uid-{i}"), "resourceVersion": format!("rv-{i}")}),
+                "{name}"
+            );
+            names.insert(name);
+        }
+        assert_eq!(names.len(), 500);
+        assert_eq!(
+            (
+                incidents.deleted(Reason::Cap),
+                incidents.deleted(Reason::Age)
+            ),
+            (500, 0)
+        );
+        assert_eq!(incidents.sweep_errors(), 0);
+        assert!(incidents.table().sweep_ended());
+    }
+
+    #[test]
+    fn a_delete_answered_404_or_409_is_neither_an_error_nor_a_deletion() {
+        let objects: Vec<Value> = (0..3).map(|i| listed(i, 2 * DAY)).collect();
+        let (url, requests) = sweep_server(objects, |name| match name {
+            "incident-0000" => failure(404),
+            "incident-0001" => failure(409),
+            _ => deleted_answer(),
+        });
+        let (ended, incidents) = sweep(&url, &[], &Term::unbounded());
+        assert_eq!(ended, Ended::Completed);
+        let deletes = sent(&requests)
+            .into_iter()
+            .filter(|r| r.method == "DELETE")
+            .count();
+        assert_eq!(deletes, 3);
+        assert_eq!(
+            (
+                incidents.deleted(Reason::Age),
+                incidents.deleted(Reason::Cap)
+            ),
+            (1, 0)
+        );
+        assert_eq!(incidents.sweep_errors(), 0);
+    }
+
+    #[test]
+    fn a_failed_sweep_goes_on_and_sets_the_flag() {
+        // A list refused in one namespace ends that namespace only; a delete refused, that
+        // delete only.
+        let objects: Vec<Value> = (0..2).map(|i| listed(i, 2 * DAY)).collect();
+        let (url, requests) = api_server(move |request| {
+            if request.path.starts_with(&collection("a")) {
+                failure(500)
+            } else if request.method == "GET" {
+                page(&objects, &request.path)
+            } else if item(&request.path) == "incident-0000" {
+                failure(403)
+            } else {
+                deleted_answer()
+            }
+        });
+        let (ended, incidents) = sweep(&url, &["a", "b"], &Term::unbounded());
+        assert_eq!(ended, Ended::Failed);
+        let paths: Vec<String> = sent(&requests)
+            .into_iter()
+            .map(|r| {
+                format!(
+                    "{} {}",
+                    r.method,
+                    r.path.split('?').next().unwrap_or_default()
+                )
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                format!("GET {}", collection("a")),
+                format!("GET {}", collection("b")),
+                format!("DELETE {}/incident-0000", collection("shop")),
+                format!("DELETE {}/incident-0001", collection("shop")),
+            ]
+        );
+        assert_eq!(
+            (incidents.deleted(Reason::Age), incidents.sweep_errors()),
+            (1, 2)
+        );
+        assert!(incidents.table().sweep_ended());
+        // A list answered 404, the resource not installed, is a failure too.
+        let (url, _) = api_server(|_| failure(404));
+        let (ended, incidents) = sweep(&url, &[], &Term::unbounded());
+        assert_eq!((ended, incidents.sweep_errors()), (Ended::Failed, 1));
+        assert!(incidents.table().sweep_ended());
+    }
+
+    #[test]
+    fn a_sweep_that_completes_or_is_cut_by_the_term_sets_the_flag_or_not() {
+        let (url, requests) = sweep_server(Vec::new(), |_| deleted_answer());
+        let (ended, incidents) = sweep(&url, &[], &Term::unbounded());
+        assert_eq!(ended, Ended::Completed);
+        assert!(incidents.table().sweep_ended());
+        assert_eq!(sent(&requests).len(), 1);
+        // A term that does not hold: no call, and the flag stays down.
+        let (url, requests) = sweep_server(Vec::new(), |_| deleted_answer());
+        let (ended, incidents) = sweep(&url, &[], &Term::closed());
+        assert_eq!(ended, Ended::Cut);
+        assert!(!incidents.table().sweep_ended());
+        assert_eq!(sent(&requests).len(), 0);
+        // Nor does a create get through after it: it is refused `starting`.
+        let rt = runtime();
+        let (url, requests) = api_server(|_| created());
+        let incidents = rt.block_on(async { Incidents::new(client(&url), SETTINGS) });
+        let lookup = Revisions::of(UID_RS, 7);
+        create(&rt, &incidents, &sample_fact(), &lookup, &Term::unbounded());
+        assert_eq!(incidents.refused(Refusal::Starting), 1);
+        assert_eq!(sent(&requests).len(), 0);
+    }
+
+    #[test]
+    fn a_list_with_no_answer_stops_the_sweep_at_the_write_bound_and_sets_the_flag() {
+        let (url, requests) = api_server(|_| Answer::Hang);
+        let start = Instant::now();
+        let (ended, incidents) = sweep(&url, &[], &Term::unbounded());
+        let took = start.elapsed();
+        assert_eq!(ended, Ended::Stopped);
+        assert!(
+            took >= WRITE_BOUND && took < WRITE_BOUND + Duration::from_secs(2),
+            "{took:?}"
+        );
+        assert_eq!(sent(&requests).len(), 1);
+        assert!(incidents.table().sweep_ended());
+    }
+
+    #[test]
+    fn a_sweep_stops_at_its_deadline() {
+        // Each of the first three lists answers after 9.5 seconds, under the write bound; the
+        // fourth never does, and the sweep's 30 seconds end it before its own 10 do.
+        let objects: Vec<Value> = (0..8).map(|i| listed(i, Duration::from_secs(60))).collect();
+        let lists = std::sync::atomic::AtomicUsize::new(0);
+        let (url, requests) = api_server(move |request| {
+            if lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 3 {
+                return Answer::Hang;
+            }
+            std::thread::sleep(Duration::from_millis(9500));
+            page(&objects, &request.path)
+        });
+        let start = Instant::now();
+        let (ended, incidents) = sweep(&url, &[], &Term::unbounded());
+        let took = start.elapsed();
+        assert_eq!(ended, Ended::Stopped);
+        assert!(
+            took >= SWEEP_TIME && took < SWEEP_TIME + Duration::from_secs(2),
+            "{took:?}"
+        );
+        assert_eq!(sent(&requests).len(), 4);
+        assert!(incidents.table().sweep_ended());
+    }
+
+    /// The verbs of 0028's point 5 on `incidents`: nothing else is ever sent about one.
+    const POINT_5: [&str; 3] = ["create", "delete", "list"];
+
+    #[test]
+    fn the_requests_about_incidents_are_only_point_5_s_create_list_and_delete() {
+        let objects = vec![listed(0, 2 * DAY)];
+        let (url, requests) = api_server(move |request| match request.method.as_str() {
+            "GET" => page(&objects, &request.path),
+            "DELETE" => deleted_answer(),
+            _ => created(),
+        });
+        let rt = runtime();
+        let incidents = rt.block_on(async { Incidents::new(client(&url), SETTINGS) });
+        for namespaces in [vec![], vec!["shop".to_owned()]] {
+            let ended = rt.block_on(incidents.sweep(&namespaces, &Term::unbounded()));
+            assert_eq!(ended.expect("a log"), Ended::Completed);
+        }
+        let lookup = Revisions::of(UID_RS, 7);
+        create(&rt, &incidents, &sample_fact(), &lookup, &Term::unbounded());
+        let mut verbs = std::collections::BTreeSet::new();
+        for request in sent(&requests) {
+            let (path, query) = request.path.split_once('?').unwrap_or((&request.path, ""));
+            let verb = match (request.method.as_str(), path) {
+                ("POST", p) if p == collection("shop") => "create",
+                // A collection with a `limit` is a list; no `get` of one Incident is ever sent.
+                ("GET", p)
+                    if (p == COLLECTION || p == collection("shop")) && query.contains("limit=") =>
+                {
+                    "list"
+                }
+                ("DELETE", p) if p == format!("{}/incident-0000", collection("shop")) => "delete",
+                _ => panic!(
+                    "not a request of point 5: {} {}",
+                    request.method, request.path
+                ),
+            };
+            verbs.insert(verb);
+        }
+        assert_eq!(verbs.into_iter().collect::<Vec<_>>(), POINT_5);
     }
 }

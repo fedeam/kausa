@@ -429,11 +429,11 @@ the fact statement's parse (`src/record.rs:871-875`, any spelling Rust's `u64` p
 `+7` or `007`), then bounded 1 to 2^53 by the check. The slot compares the UID the entry's `get`
 returned with the UID in the Pod's `ownerReference`, and gives `revision-lookup-failed` when they
 differ. The slot can
-reach the lookup as the code stands: the term's lookup (`src/run.rs:973`) is created before the
-slot's future, which is assigned at `:1012` (`reporter.report(fact)`; `reporting` is declared at
-`:1005`), and outlives it; it is passed to `Reporter::report` as an argument, since the reporter
-outlives terms; and its cache is a `RefCell` (`:1905`) never borrowed across an `await`, so the slot
-and `on_pod` share it. So:
+reach the lookup as the code stands: the term's lookup (`src/run.rs:1028`) is created before the
+slot's future, which is assigned at `:1071` (`reporter.report(fact, &lookup)`; `reporting` is
+declared at `:1060`), and outlives it; it is passed to `Reporter::report` as an argument, since the
+reporter outlives terms; and its cache is a `RefCell` (`:2084`) never borrowed across an `await`,
+so the slot and `on_pod` share it. So:
 
 - **Fresh at the read, within 600 seconds, and of the same ReplicaSet.** The owner cache keys an
   entry by hop, namespace and name, not by UID; the UID kept in the entry makes a ReplicaSet deleted
@@ -489,14 +489,17 @@ and `on_pod` share it. So:
   at start ends before the first create of the process: a create that arrives before it ended,
   completed or stopped at its 30 seconds, does not wait for it, and is refused with the reason
   `starting` (point 1), counted and logged as the other refusals, its fingerprint not marked, so a
-  later occurrence creates one. Between two sweeps one process creates at
-  most 500 Incidents (point 1: at most 500 in any 6 hours, and the sweeps are an hour apart), so
-  after a sweep that completes the count kausa causes stays at most 500 + 500 = 1,000 until the
-  next one. A restart or a failover empties the table, so each process start allows 500 more:
-  in a crash loop, each start whose sweep does not complete before the process ends can leave up
-  to 500 more Incidents, and the next sweep that completes trims the count to 500 again (bar 8
-  measures that it does within its 30 seconds). Incidents written by anyone else are not bounded
-  by this ADR, as for Explanations (0014).
+  later occurrence creates one. A sweep that failed, a list or a delete refused by the server (the
+  CustomResourceDefinition missing among them), has ended too and lets creates through: the count
+  is then not trimmed, and the process's own 500 in any 6 hours (point 1) still bounds its
+  creates. A sweep cut by the loss of the term has not ended, and the next term's sweep counts.
+  Between two sweeps one process creates at most 500 Incidents (point 1: at most 500 in any 6 hours,
+  and the sweeps are an hour apart), so after a sweep that completes the count kausa causes stays at
+  most 500 + 500 = 1,000 until the next one. A restart or a failover empties the table, so each
+  process start allows 500 more: in a crash loop, each start whose sweep does not complete before
+  the process ends can leave up to 500 more Incidents, and the next sweep that completes trims the
+  count to 500 again (bar 8 measures that it does within its 30 seconds). Incidents written by
+  anyone else are not bounded by this ADR, as for Explanations (0014).
 - **The cap is shared across namespaces**, as 0014 says of its own: it protects the datastore, not
   fairness. The sweep deletes the oldest Incidents beyond 500 whatever their namespace; only
   Incidents written by someone other than kausa, or left by earlier processes, can push it to
@@ -1067,7 +1070,7 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   19.5 s to 30 − 3.85 = 26.15 s for the 500 lists, 39 to 52 ms each, a list latency not measured
   anywhere here. Test: bars 5 and 8. A sweep that stops at its deadline still deletes as it
   goes: past the first 500 objects it has listed, each one more pushes the oldest it holds out of
-  its heap, and that one is deleted at once (`src/history/pure.rs:480-519`, as 0014's). So a
+  its heap, and that one is deleted at once (`src/history/pure.rs:491-545`, as 0014's). So a
   sweep that lists k objects deletes k − 500 by the cap, and the count still comes down over the
   hourly sweeps if each lists more than 500 + 84 = 584, since one process creates at most
   500 / 6 = 83.3 Incidents an hour on average over 6 hours (point 1); not measured either.

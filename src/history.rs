@@ -20,7 +20,7 @@ use crate::log;
 use crate::metrics::Metrics;
 use crate::prompt::Explanation;
 
-mod pure;
+pub(crate) mod pure;
 
 /// The most the read-modify-write of one Explanation may take, all of its calls together, so that
 /// a slow API server delays the next explanation by at most this much and never the watches.

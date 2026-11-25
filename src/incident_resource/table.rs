@@ -242,9 +242,14 @@ impl Table {
     /// Records that a sweep of this process ended, whether it completed, failed or stopped at its
     /// bound: from then on the gate lets creates through. A sweep cut by the loss of the term has
     /// not ended.
-    #[cfg(test)]
     pub(crate) fn start_sweep_ended(&mut self) {
         self.started = true;
+    }
+
+    /// Whether a sweep of this process ended: the gate's flag.
+    #[cfg(test)]
+    pub(crate) fn sweep_ended(&self) -> bool {
+        self.started
     }
 
     /// The gate for an incident of `namespace` and `fingerprint` at `now`, with `--dedup-hours` as
