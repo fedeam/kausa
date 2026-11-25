@@ -281,7 +281,8 @@ owner's namespace, in the fact statement, the request to the model (`pods_total`
 `src/run.rs:1213`, the field at `:1384`), the `Detected` Event, the webhook's `facts.podsNow` and
 0028's `facts.podsNow`; no new watch, verb, write, table field or message. It changes the count only
 for an owner whose UID a Pod of another namespace names, and it can ship ahead of the rest of this
-ADR, in its own change, since it depends on nothing else here.
+ADR, in its own change, since it depends on nothing else here. **Update 2026-11-24:** this change
+shipped ahead, in its own change, with `pods_of` taking the namespace.
 
 **Where a Pod's revision comes from.** As 0028 decides it (its point 3, "Where the revision comes
 from"): a ReplicaSet's revision, with the UID its `get` returned, is held in the owner cache's

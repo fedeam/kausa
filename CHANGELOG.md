@@ -71,6 +71,13 @@ the request to the model provider; the only change in that request is `D013`'s n
   Hub page, the crate and the image) now puts the facts first and the model's explanation as
   optional (0026).
 
+### Fixed
+
+- `Pods now` counts only the Pods of the owner's namespace. A Pod of another namespace that named
+  the owner's UID in a controller reference kausa does not follow (a StatefulSet's, say) was
+  counted, so the count was too high in the fact statement, the request to the model
+  (`pods_total`), the `incident` log line, the `Detected` Event and the webhook.
+
 ### Security
 
 - The Slack and Telegram texts replace each control character and each line or paragraph

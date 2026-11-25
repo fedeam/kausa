@@ -1205,7 +1205,7 @@ async fn lead<C: Cluster>(
                 }
                 for incident in state.tick(&mut tracker, now) {
                     metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
-                    let pods_total = state.pods_of(&incident.owner);
+                    let pods_total = state.pods_of(&incident.key.namespace, &incident.owner);
                     let statement = fact::statement(&incident, pods_total);
                     if statement.reason_omitted {
                         metrics.inc("kausa_fact_reasons_omitted_total", &[]);
@@ -1689,7 +1689,7 @@ impl State {
             .flatten();
         Work {
             gathered: Gathered {
-                pods_total: self.pods_of(&incident.owner),
+                pods_total: self.pods_of(&incident.key.namespace, &incident.owner),
                 incident,
                 pods,
                 events,
@@ -1741,10 +1741,13 @@ impl State {
         })
     }
 
-    fn pods_of(&self, owner: &OwnerRef) -> usize {
+    /// The Pods kausa holds in `namespace` whose top-level owner has `owner`'s UID. A controller
+    /// reference kausa does not follow is kept as the Pod carries it, UID included
+    /// (`owner.rs`), so the UID alone would count a Pod of another namespace that names it.
+    fn pods_of(&self, namespace: &str, owner: &OwnerRef) -> usize {
         self.pods
             .values()
-            .filter(|(_, o, _)| o.uid == owner.uid)
+            .filter(|(record, o, _)| record.namespace == namespace && o.uid == owner.uid)
             .count()
     }
 }
@@ -3579,6 +3582,40 @@ mod tests {
             .expect("an owner reference"),
         ]);
         pod
+    }
+
+    #[test]
+    fn pods_now_counts_only_the_pods_of_the_owners_namespace() {
+        // A controller reference kausa does not follow is kept as the Pod carries it, so a Pod of
+        // another namespace can name the owner's UID.
+        let owned = |namespace: &str, name: &str| {
+            let mut pod = pod(namespace, name);
+            pod.metadata.owner_references = Some(vec![
+                serde_json::from_value(json!({
+                    "apiVersion": "apps/v1", "kind": "StatefulSet", "name": "db",
+                    "uid": "uid-db", "controller": true
+                }))
+                .expect("an owner reference"),
+            ]);
+            pod
+        };
+        let mut state = State::default();
+        for (namespace, name) in [("a", "db-0"), ("a", "db-1"), ("b", "db-0")] {
+            on_pod(
+                &mut state,
+                &CLUSTER,
+                watcher::Event::Apply(owned(namespace, name)),
+            );
+        }
+        let owner = OwnerRef {
+            api_version: "apps/v1".into(),
+            kind: "StatefulSet".into(),
+            name: "db".into(),
+            uid: "uid-db".into(),
+        };
+        assert_eq!(state.pods_of("a", &owner), 2);
+        assert_eq!(state.pods_of("b", &owner), 1);
+        assert_eq!(state.pods_of("c", &owner), 0);
     }
 
     #[test]
