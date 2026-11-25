@@ -534,6 +534,31 @@ mod tests {
     }
 
     #[test]
+    fn the_bytes_of_an_entry_count_the_name_of_its_regarding() {
+        // A `D011` about a ReplicaSet with the longest name: its name takes the field the sample's
+        // ReplicaSet takes, so the entry holds as much as the longest one about a Pod.
+        let about = |name: Option<Box<str>>| Fact {
+            facts: fact::Facts {
+                detection: Detection::PodCreate,
+                ..longest(0).facts
+            },
+            incident: Some(Box::new(IncidentData {
+                settled_at: Timestamp::UNIX_EPOCH,
+                owner_lookup_failed: true,
+                about: About::Regarding {
+                    kind: Some("ReplicaSet"),
+                    name,
+                    uid: MaybeUid::Uid(Uid::parse(UID).expect("a UID")),
+                },
+            })),
+            ..longest(0)
+        };
+        let name = "r".repeat(253).into_boxed_str();
+        assert_eq!(about(Some(name)).bytes() - about(None).bytes(), 253);
+        assert_eq!(about(Some("r".repeat(253).into())).bytes(), 1685);
+    }
+
+    #[test]
     fn the_incident_data_keeps_checked_values_only() {
         let owner = |api_version: &str, kind: &str, name: &str, uid: &str| OwnerRef {
             api_version: api_version.into(),
