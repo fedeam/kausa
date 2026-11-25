@@ -83,6 +83,20 @@ history:
   readers:
     # Let the built-in view, edit and admin roles read Explanations, as they read Events.
     aggregate: true
+incidents:
+  # Keep each settled incident's facts in an Incident object in its namespace
+  # (docs/reference/incident-resource.md), with or without an endpoint. Needs dryRun false.
+  # false or dryRun true deletes the CustomResourceDefinition, and with it every Incident in the
+  # cluster.
+  enabled: false
+  # Delete Incidents older than this many days (1-30).
+  days: 1
+  # Install the CustomResourceDefinition (and the reader role below). Set false when another
+  # release or a cluster administrator installs it, for example in a namespaced install.
+  installCRD: true
+  readers:
+    # Let the built-in view, edit and admin roles read Incidents, as they read Events.
+    aggregate: true
 # Post each settled incident (detected) and each new explanation (explained) to one webhook, as
 # JSON, a Slack message or a Telegram message (docs/adr/0015-notifications.md,
 # docs/adr/0027-fact-statement-for-the-detections.md). Only the documented fields are sent, and a

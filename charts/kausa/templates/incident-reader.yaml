@@ -1,0 +1,23 @@
+{{- /*
+Lets the built-in view role, and so edit and admin, read Incidents, as they read Events
+(docs/adr/0028-incident-resource-and-remediation-report.md, point 5). Only with the CRD and
+incidents.readers.aggregate. No write is aggregated: only kausa and cluster administrators write
+Incidents.
+*/}}
+{{- $i := .Values.incidents | default dict }}
+{{- $readers := $i.readers | default dict }}
+{{- $aggregate := true }}
+{{- if hasKey $readers "aggregate" }}{{ $aggregate = $readers.aggregate }}{{ end }}
+{{- if and (include "kausa.installsIncidentCRD" .) $aggregate }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kausa.fullname" . }}-incident-reader
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["kausa.fedeam.com"]
+    resources: ["incidents"]
+    verbs: ["get", "list", "watch"]
+{{- end }}

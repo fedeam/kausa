@@ -1,0 +1,36 @@
+{{- /*
+The Incident resource (docs/adr/0028-incident-resource-and-remediation-report.md, points 1 and 2).
+Rendered only while this release's kausa creates Incidents and incidents.installCRD is true, so it
+exists exactly while kausa sweeps it. A template, not crds/, so that Helm upgrades it with the
+release; and without helm.sh/resource-policy: keep, as the Explanation CRD, so that uninstalling,
+or turning incidents off, deletes it and every Incident. The schema is
+charts/kausa/files/incident-schema.json, which the Rust tests also read. The status subresource is
+declared and empty: kausa writes no status.
+*/}}
+{{- if include "kausa.installsIncidentCRD" . }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: incidents.kausa.fedeam.com
+  labels:
+    {{- include "kausa.labels" . | nindent 4 }}
+spec:
+  group: kausa.fedeam.com
+  scope: Namespaced
+  names:
+    kind: Incident
+    listKind: IncidentList
+    plural: incidents
+    singular: incident
+  conversion:
+    strategy: None
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          {{- .Files.Get "files/incident-schema.json" | fromJson | toYaml | nindent 10 }}
+      subresources:
+        status: {}
+{{- end }}

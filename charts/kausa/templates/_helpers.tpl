@@ -90,6 +90,34 @@ false (another release or a cluster administrator installs it). */}}
 {{- end }}
 
 {{/*
+The incidents map is read nil-safe, like the history map
+(docs/adr/0028-incident-resource-and-remediation-report.md): a release made before it (helm
+upgrade --reuse-values) or --set incidents=null has none.
+*/}}
+
+{{/* kausa creates Incidents with incidents.enabled outside dry-run, with or without an endpoint;
+dryRun turns them off, as it turns off the history. */}}
+{{- define "kausa.writesIncidents" -}}
+{{- $i := .Values.incidents | default dict }}
+{{- if and $i.enabled (not .Values.dryRun) }}true{{ end }}
+{{- end }}
+
+{{/* incidents.days as a string, 1 when missing; kausa.validate checks it. */}}
+{{- define "kausa.incidentDays" -}}
+{{- $i := .Values.incidents | default dict }}
+{{- if hasKey $i "days" }}{{ toString $i.days }}{{ else }}1{{ end }}
+{{- end }}
+
+{{/* The chart installs the Incident CRD while kausa creates Incidents, unless
+incidents.installCRD is false (another release or a cluster administrator installs it). */}}
+{{- define "kausa.installsIncidentCRD" -}}
+{{- $i := .Values.incidents | default dict }}
+{{- $install := true }}
+{{- if hasKey $i "installCRD" }}{{ $install = $i.installCRD }}{{ end }}
+{{- if and (include "kausa.writesIncidents" .) $install }}true{{ end }}
+{{- end }}
+
+{{/*
 The notifications map and networkPolicy.notifications are read nil-safe, like the history map: a
 release made before them (helm upgrade --reuse-values) or --set notifications=null has none.
 */}}
@@ -209,15 +237,20 @@ only here, so that both scopes grant the same.
   resources: ["explanations"]
   verbs: ["list", "create", "patch", "delete"]
 {{- end }}
+{{- if include "kausa.writesIncidents" . }}
+- apiGroups: ["kausa.fedeam.com"]
+  resources: ["incidents"]
+  verbs: ["create", "list", "delete"]
+{{- end }}
 {{- end }}
 
 {{/*
 Refuses to render with a reason. The rbac checks come first, in this order: the scope, the list
 against the scope, every name, the first repeat, and the count. rbac is read nil-safe: a v0.1
 release's stored values and --set rbac=null have no rbac map, and must reach the "not set"
-message, not a nil-pointer error. history.days, replicaCount, model.timeoutSeconds, endpointCheck
-(a map or null) and endpointCheck.enabled come next, with or without an endpoint, and the
-notification checks last, only with notifications.enabled.
+message, not a nil-pointer error. history.days, incidents.days, replicaCount,
+model.timeoutSeconds, endpointCheck (a map or null) and endpointCheck.enabled come next, with or
+without an endpoint, and the notification checks last, only with notifications.enabled.
 */}}
 {{- define "kausa.validate" -}}
 {{- $rbac := .Values.rbac | default dict }}
@@ -268,6 +301,10 @@ notification checks last, only with notifications.enabled.
 {{- $days := include "kausa.historyDays" . }}
 {{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $days) }}
 {{- fail (printf "history.days must be a whole number of days from 1 to 30, not '%s'" $days) }}
+{{- end }}
+{{- $incidentDays := include "kausa.incidentDays" . }}
+{{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $incidentDays) }}
+{{- fail (printf "incidents.days must be a whole number of days from 1 to 30, not '%s'" $incidentDays) }}
 {{- end }}
 {{- $replicas := include "kausa.replicas" . }}
 {{- if not (has $replicas (list "1" "2")) }}

@@ -187,8 +187,14 @@ rule_history() {
   printf '%s\n' '-apiGroups:["kausa.fedeam.com"]' 'resources:["explanations"]' \
     'verbs:["list","create","patch","delete"]'
 }
+# The incidents rule (docs/adr/0028-incident-resource-and-remediation-report.md), after the
+# history's.
+rule_incidents() {
+  printf '%s\n' '-apiGroups:["kausa.fedeam.com"]' 'resources:["incidents"]' \
+    'verbs:["create","list","delete"]'
+}
 # expected_rules LOGS WRITES [HISTORY]: the rules for "yes"/"no" pods/log, Event writes and the
-# history; with the deployments rule unless ROLLOUTS=no.
+# history; with the deployments rule unless ROLLOUTS=no, and the incidents rule with INCIDENTS=yes.
 expected_rules() {
   rule_pods
   if [ "$1" = yes ]; then rule_logs; fi
@@ -198,6 +204,22 @@ expected_rules() {
   if [ "${ROLLOUTS:-yes}" != no ]; then rule_deployments; fi
   rule_jobs
   if [ "${3-no}" = yes ]; then rule_history; fi
+  if [ "${INCIDENTS:-no}" = yes ]; then rule_incidents; fi
+}
+
+# check_incident_args NAME FILE: with INCIDENTS=yes, exactly one --incidents, one --incident-days
+# and one --dedup-hours (the window of the incidents' gate, with or without an endpoint); otherwise
+# no --incidents or --incident-days arg.
+check_incident_args() {
+  local count arg
+  if [ "${INCIDENTS:-no}" = yes ]; then
+    for arg in --incidents --incident-days --dedup-hours; do
+      count=$(args "$2" | grep -cx -- "- $arg" || true)
+      [ "$count" = 1 ] || fail "$1: $count $arg args, not exactly one"
+    done
+  elif args "$2" | grep -q -- '^- --incident'; then
+    fail "$1: passes an incidents arg"
+  fi
 }
 
 # check_rollouts_arg NAME FILE: with ROLLOUTS=no, exactly one --no-rollouts arg; otherwise none.
@@ -308,7 +330,8 @@ done
 # check_cluster NAME LOGS WRITES ARGS...: a cluster-scope render with v0.1's objects and rules.
 # HISTORY=yes expects the history rule last and --history in the args; EXTRA lists the other
 # cluster-scoped objects expected (Kind/name, space-separated), none by default. ROLLOUTS=no expects
-# no deployments rule and one --no-rollouts arg.
+# no deployments rule and one --no-rollouts arg. INCIDENTS=yes expects the incidents rule after the
+# history's and the incidents args (check_incident_args).
 check_cluster() {
   local name=$1 logs=$2 writes=$3
   shift 3
@@ -351,6 +374,7 @@ check_cluster() {
   args "$out" | grep -qx -- '- --namespace' && fail "cluster/$name: passes --namespace"
   [ "$(args "$out" | head -n 1)" = '- run' ] || fail "cluster/$name: the first arg is not run"
   check_rollouts_arg "cluster/$name" "$out"
+  check_incident_args "cluster/$name" "$out"
   passed "$since" "cluster/$name"
 }
 
@@ -435,7 +459,7 @@ fi
 # LIST: nothing cluster-scoped, one Role and one RoleBinding per namespace, the rules of the
 # cluster scope with the same values, and one --namespace per entry right after run.
 # FULLNAME and SUBJECT (the names of the objects and the service account) default to kausa;
-# HISTORY, EXTRA and ROLLOUTS as in check_cluster.
+# HISTORY, EXTRA, ROLLOUTS and INCIDENTS as in check_cluster.
 check_namespaced() {
   local name=$1 logs=$2 writes=$3 list=$4
   shift 4
@@ -519,6 +543,7 @@ check_namespaced() {
     args "$out" | grep -q -- '^- --history' && fail "namespaced/$name: passes a --history arg"
   fi
   check_rollouts_arg "namespaced/$name" "$out"
+  check_incident_args "namespaced/$name" "$out"
   passed "$since" "namespaced/$name"
 }
 
@@ -942,6 +967,360 @@ else
   fail "helm lint --strict with the history on, namespaced: $(cat "$WORK/lint-history")"
 fi
 
+# --- Incidents (docs/adr/0028-incident-resource-and-remediation-report.md) ----------------------
+
+INCIDENTS_ON=(--set incidents.enabled=true)
+INCIDENT_CRD=incidents.kausa.fedeam.com
+INCIDENT_OBJECTS="ClusterRole/kausa-incident-reader CustomResourceDefinition/$INCIDENT_CRD"
+INCIDENT_SCHEMA="$CHART/files/incident-schema.json"
+
+# A throwaway chart reads a rendered Incident CRD back with fromYaml: its versions, the keys of its
+# one version, its subresources and its schema as JSON.
+CRD_READER="$WORK/incident-crd-reader"
+mkdir -p "$CRD_READER/templates"
+printf '%s\n' 'apiVersion: v2' 'name: incident-crd-reader' 'version: 0.0.0' >"$CRD_READER/Chart.yaml"
+cat >"$CRD_READER/templates/read.yaml" <<'TEMPLATE'
+{{- $crd := .Files.Get "crd.yaml" | fromYaml }}
+{{- if hasKey $crd "Error" }}
+# error {{ $crd.Error }}
+{{- else }}
+{{- $versions := $crd.spec.versions }}
+# versions {{ len $versions }}
+{{- $v := index $versions 0 }}
+# version-keys {{ keys $v | sortAlpha | toJson }}
+# subresources {{ $v.subresources | toJson }}
+# schema {{ $v.schema.openAPIV3Schema | toJson }}
+{{- end }}
+TEMPLATE
+
+# same_json GOT WANT: the two JSON files hold the same value, numbers compared as numbers and every
+# other type exactly (a boolean is not a number); prints the first difference.
+same_json() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, sys
+
+def same(a, b, path):
+    number = (int, float)
+    if isinstance(a, bool) or isinstance(b, bool):
+        ok = type(a) is type(b) and a == b
+    elif isinstance(a, number) and isinstance(b, number):
+        ok = a == b
+    elif type(a) is not type(b):
+        ok = False
+    elif isinstance(a, dict):
+        if sorted(a) != sorted(b):
+            print(f"{path}: keys {sorted(a)} and {sorted(b)}")
+            return False
+        return all(same(a[k], b[k], f"{path}.{k}") for k in a)
+    elif isinstance(a, list):
+        if len(a) != len(b):
+            print(f"{path}: {len(a)} and {len(b)} items")
+            return False
+        return all(same(x, y, f"{path}[{i}]") for i, (x, y) in enumerate(zip(a, b)))
+    else:
+        ok = a == b
+    if not ok:
+        print(f"{path}: {json.dumps(a)} and {json.dumps(b)}")
+    return ok
+
+with open(sys.argv[1]) as got, open(sys.argv[2]) as want:
+    sys.exit(0 if same(json.load(got), json.load(want), "$") else 1)
+PY
+}
+
+# check_incident_crd NAME FILE [RELEASE]: the Incident CustomResourceDefinition, rendered from
+# charts/kausa/files/incident-schema.json (fromJson | toYaml), the file the Rust tests read: its
+# schema, read back, is that file's value; one version, v1alpha1; an empty status subresource; no
+# printer column, short name or category; and, as the Explanation CRD, no resource policy.
+check_incident_crd() {
+  local name=$1 out=$2 release=${3:-$RELEASE} since=$FAILURES crd
+  crd="$out.incident-crd"
+  docs "$out" CustomResourceDefinition "" "$INCIDENT_CRD" >"$crd"
+  if [ "$(grep -c '^%%$' "$crd" || true)" != 1 ]; then
+    fail "$name: not exactly one CustomResourceDefinition $INCIDENT_CRD"
+    return 0
+  fi
+  grep -q '^apiVersion: apiextensions.k8s.io/v1$' "$crd" || fail "$name: the CRD's apiVersion"
+  for line in 'group: kausa.fedeam.com' 'scope: Namespaced' 'kind: Incident' \
+    'listKind: IncidentList' 'plural: incidents' 'singular: incident' 'strategy: None' \
+    'name: v1alpha1' 'served: true' 'storage: true'; do
+    grep -Eq "^ *(- )?$line\$" "$crd" || fail "$name: the CRD lacks '$line'"
+  done
+  for key in shortNames categories additionalPrinterColumns; do
+    if grep -Eq "^ *$key:" "$crd"; then fail "$name: the CRD has $key"; fi
+  done
+  if grep -q 'helm.sh/resource-policy' "$crd"; then fail "$name: the CRD has a resource policy"; fi
+  for line in "    app.kubernetes.io/instance: $release" '    app.kubernetes.io/name: kausa' \
+    '    app.kubernetes.io/managed-by: Helm'; do
+    grep -qx "$line" "$crd" || fail "$name: the CRD lacks the label '${line#    }'"
+  done
+  grep -q '^    helm.sh/chart: kausa-' "$crd" || fail "$name: the CRD lacks the chart label"
+  # Every bound is a plain integer in the YAML, never an exponent.
+  grep -E '^ *(maxLength|minLength|maxItems|minItems|maximum|minimum): ' "$crd" |
+    grep -vE ': -?[0-9]+$' >"$crd.numbers" || true
+  if [ -s "$crd.numbers" ]; then
+    fail "$name: bounds that are not plain integers: $(cat "$crd.numbers")"
+  fi
+  grep -v '^%%$' "$crd" >"$CRD_READER/crd.yaml"
+  if ! render "$crd.read" incident-crd-reader "$CRD_READER"; then
+    fail "$name: the CRD cannot be read back: $(cat "$crd.read.err")"
+    return 0
+  fi
+  if grep -q '^# error ' "$crd.read"; then
+    fail "$name: the CRD is not YAML: $(sed -n 's/^# error //p' "$crd.read")"
+    return 0
+  fi
+  [ "$(sed -n 's/^# versions //p' "$crd.read")" = 1 ] || fail "$name: not exactly one version"
+  [ "$(sed -n 's/^# version-keys //p' "$crd.read")" = \
+    '["name","schema","served","storage","subresources"]' ] ||
+    fail "$name: the version's keys: $(sed -n 's/^# version-keys //p' "$crd.read")"
+  [ "$(sed -n 's/^# subresources //p' "$crd.read")" = '{"status":{}}' ] ||
+    fail "$name: the subresources are not one empty status:" \
+      "$(sed -n 's/^# subresources //p' "$crd.read")"
+  sed -n 's/^# schema //p' "$crd.read" >"$crd.schema.json"
+  same_json "$crd.schema.json" "$INCIDENT_SCHEMA" >"$crd.schema-diff" 2>&1 ||
+    fail "$name: the CRD's schema is not files/incident-schema.json: $(cat "$crd.schema-diff")"
+  passed "$since" "$name: the Incident CustomResourceDefinition"
+}
+
+# check_incident_reader NAME FILE [FULLNAME]: the reader ClusterRole of incidents: get, list and
+# watch, aggregated to view only.
+check_incident_reader() {
+  local name=$1 out=$2 fullname=${3:-kausa} since=$FAILURES reader
+  reader="$fullname-incident-reader"
+  if [ "$(count_docs "$out" ClusterRole "" "$reader")" != 1 ]; then
+    fail "$name: not exactly one ClusterRole $reader"
+    return 0
+  fi
+  docs "$out" ClusterRole "" "$reader" >"$out.incident-reader"
+  grep -Eqx "    rbac.authorization.k8s.io/aggregate-to-view: (\"true\"|'true')" \
+    "$out.incident-reader" || fail "$name: the incident reader is not aggregated to view"
+  if grep -Eq 'aggregate-to-(edit|admin)' "$out.incident-reader"; then
+    fail "$name: the incident reader is aggregated to edit or admin"
+  fi
+  grep -qx '    app.kubernetes.io/name: kausa' "$out.incident-reader" ||
+    fail "$name: the incident reader lacks the name label"
+  section rules <"$out.incident-reader" >"$out.incident-reader-rules"
+  printf '%s\n' '-apiGroups:["kausa.fedeam.com"]' 'resources:["incidents"]' \
+    'verbs:["get","list","watch"]' >"$out.incident-reader-expected"
+  diff -u "$out.incident-reader-expected" "$out.incident-reader-rules" \
+    >"$out.incident-reader-diff" ||
+    fail "$name: the incident reader's rules: $(cat "$out.incident-reader-diff")"
+  passed "$since" "$name: the incident reader ClusterRole"
+}
+
+# check_incidents_in_place NAME FILE BASE DAYS [DEDUP]: FILE's args are BASE's (the same values
+# without incidents) with --incidents --incident-days "DAYS" before --metrics-address, after the
+# history's; with DEDUP (BASE has no endpoint and passes no window), also --dedup-hours "DEDUP"
+# right after the --settle-seconds value.
+check_incidents_in_place() {
+  local name=$1 out=$2 base=$3 days=$4 dedup=${5-}
+  [ -f "$out" ] && [ -f "$base" ] || return 0
+  args "$base" | awk -v days="$days" -v dedup="$dedup" '
+    !done && $0 == "- --metrics-address" { insert() }
+    { print }
+    settle { settle = 0; if (dedup != "") { print "- --dedup-hours"; print "- \"" dedup "\"" } }
+    $0 == "- --settle-seconds" { settle = 1 }
+    END { if (!done) insert() }
+    function insert() {
+      print "- --incidents"; print "- --incident-days"; print "- \"" days "\""; done = 1
+    }
+  ' >"$out.incident-args-expected"
+  args "$out" >"$out.incident-args"
+  if diff -u "$out.incident-args-expected" "$out.incident-args" >"$out.incident-args-diff"; then
+    ok "$name: --incidents --incident-days \"$days\" in place${dedup:+, with --dedup-hours \"$dedup\"}"
+  else
+    fail "$name: the incidents args: $(cat "$out.incident-args-diff")"
+  fi
+}
+
+# same_render NAME FILE BASE: FILE is BASE byte for byte.
+same_render() {
+  if [ ! -f "$2" ] || [ ! -f "$3" ]; then
+    fail "$1: no render to compare"
+  elif cmp -s "$3" "$2"; then
+    ok "$1: renders like $(basename "$3")"
+  else
+    fail "$1: renders unlike $(basename "$3"): $(diff "$3" "$2" | head -20)"
+  fi
+}
+
+# Incidents on without an endpoint: the CRD, the reader, the rule after the others, the two flags
+# and the gate's window, which the endpoint's block does not pass here.
+INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_cluster incidents no yes "${INCIDENTS_ON[@]}"
+check_incident_crd cluster/incidents "$WORK/cluster-incidents"
+check_incident_reader cluster/incidents "$WORK/cluster-incidents"
+check_incidents_in_place cluster/incidents "$WORK/cluster-incidents" "$WORK/cluster-default" 1 6
+INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_cluster incidents-dedup no yes "${INCIDENTS_ON[@]}" \
+  --set budget.dedupHours=12
+check_incidents_in_place cluster/incidents-dedup "$WORK/cluster-incidents-dedup" \
+  "$WORK/cluster-default" 1 12
+# With an endpoint, its block passes the window, once.
+INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_cluster incidents-endpoint yes yes "${ENDPOINT[@]}" \
+  "${INCIDENTS_ON[@]}"
+check_incident_crd cluster/incidents-endpoint "$WORK/cluster-incidents-endpoint"
+check_incidents_in_place cluster/incidents-endpoint "$WORK/cluster-incidents-endpoint" \
+  "$WORK/cluster-endpoint" 1
+for days in 1 30; do
+  INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_cluster "incidents-days-$days" no yes \
+    "${INCIDENTS_ON[@]}" --set "incidents.days=$days"
+  check_incidents_in_place "cluster/incidents-days-$days" "$WORK/cluster-incidents-days-$days" \
+    "$WORK/cluster-default" "$days" 6
+done
+# A value file may quote the number.
+INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_cluster incidents-days-string no yes \
+  "${INCIDENTS_ON[@]}" --set-string incidents.days=12
+check_incidents_in_place cluster/incidents-days-string "$WORK/cluster-incidents-days-string" \
+  "$WORK/cluster-default" 12 6
+# With the history: both CRDs and both readers, the incidents rule after the history's, and the
+# incidents flags after the history's.
+INCIDENTS=yes HISTORY=yes EXTRA="$INCIDENT_OBJECTS $HISTORY_OBJECTS" \
+  check_cluster incidents-history yes yes "${ENDPOINT[@]}" "${HISTORY_ON[@]}" "${INCIDENTS_ON[@]}"
+check_incident_crd cluster/incidents-history "$WORK/cluster-incidents-history"
+check_incident_reader cluster/incidents-history "$WORK/cluster-incidents-history"
+check_reader cluster/incidents-history "$WORK/cluster-incidents-history"
+check_incidents_in_place cluster/incidents-history "$WORK/cluster-incidents-history" \
+  "$WORK/cluster-history" 1
+# Without the CRD: the rule and the flags only, and no reader either way.
+INCIDENTS=yes check_cluster incidents-no-crd no yes "${INCIDENTS_ON[@]}" \
+  --set incidents.installCRD=false --set incidents.readers.aggregate=false
+check_incidents_in_place cluster/incidents-no-crd "$WORK/cluster-incidents-no-crd" \
+  "$WORK/cluster-default" 1 6
+INCIDENTS=yes check_cluster incidents-no-crd-aggregate no yes "${INCIDENTS_ON[@]}" \
+  --set incidents.installCRD=false
+# The CRD without the reader.
+INCIDENTS=yes EXTRA="CustomResourceDefinition/$INCIDENT_CRD" check_cluster incidents-no-reader \
+  no yes "${INCIDENTS_ON[@]}" --set incidents.readers.aggregate=false
+check_incident_crd cluster/incidents-no-reader "$WORK/cluster-incidents-no-reader"
+# events=false: the incidents without the Event writes; the endpoint's block passes the window.
+INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_cluster incidents-no-events yes no \
+  "${NO_EVENTS[@]}" "${INCIDENTS_ON[@]}"
+check_incidents_in_place cluster/incidents-no-events "$WORK/cluster-incidents-no-events" \
+  "$WORK/cluster-no-events" 1
+# dryRun turns incidents off: no CRD, reader, rule or flag; the render is dryRun's, byte for byte,
+# so kausa is never passed --incidents with --dry-run, which it refuses.
+check_cluster incidents-dry-run yes no "${INCIDENTS_ON[@]}" "${DRY[@]}"
+same_render cluster/incidents-dry-run "$WORK/cluster-incidents-dry-run" "$WORK/cluster-dry-run"
+check_cluster incidents-dry-run-endpoint yes no "${ENDPOINT[@]}" "${INCIDENTS_ON[@]}" "${DRY[@]}"
+# Off, whatever the other keys say: the defaults, byte for byte.
+check_cluster incidents-off no yes --set incidents.enabled=false --set incidents.installCRD=true \
+  --set incidents.days=30 --set incidents.readers.aggregate=true
+same_render cluster/incidents-off "$WORK/cluster-incidents-off" "$WORK/cluster-default"
+# Without incidents, nothing in any render names them, and no render or template names
+# remediations (the report of point 6 is not in the chart) but in the ADR's file name.
+for name in default endpoint dry-run no-events history; do
+  if grep -qi 'incident-\|incidents\.kausa\|"incidents"\|--incident' "$WORK/cluster-$name"; then
+    fail "cluster/$name: names incidents with incidents off"
+  fi
+done
+grep -rhi 'remediation' "$CHART" "$WORK/cluster-incidents" "$WORK/cluster-incidents-history" |
+  sed 's/0028-incident-resource-and-remediation-report//g' | grep -i 'remediation' \
+  >"$WORK/remediations" || true
+if [ -s "$WORK/remediations" ]; then
+  fail "the chart or a render with incidents names remediations: $(head -5 "$WORK/remediations")"
+else
+  ok "no template, value or render with incidents names remediations"
+fi
+
+# Another release: the reader takes its full name; the CRD's name is the same for every release.
+out="$WORK/cluster-incidents-tenant"
+if render "$out" tenant "$CHART" --set rbac.scope=cluster "${INCIDENTS_ON[@]}"; then
+  since=$FAILURES
+  check_incident_reader cluster/incidents-tenant "$out" tenant-kausa
+  check_incident_crd cluster/incidents-tenant "$out" tenant
+  passed "$since" "cluster/incidents-tenant"
+else
+  fail "cluster/incidents-tenant does not render: $(cat "$out.err")"
+fi
+
+# Namespaced scope: the rule in every Role, the same as the ClusterRole's; the CRD and the reader
+# are the only cluster-scoped objects, and with installCRD=false there is nothing cluster-scoped.
+INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_namespaced incidents no yes e2e-a "${INCIDENTS_ON[@]}"
+check_incident_crd namespaced/incidents "$WORK/namespaced-incidents"
+check_incident_reader namespaced/incidents "$WORK/namespaced-incidents"
+check_incidents_in_place namespaced/incidents "$WORK/namespaced-incidents" \
+  "$WORK/namespaced-default" 1 6
+INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_namespaced incidents-endpoint yes yes e2e-a,e2e-b \
+  "${ENDPOINT[@]}" "${INCIDENTS_ON[@]}"
+check_incidents_in_place namespaced/incidents-endpoint "$WORK/namespaced-incidents-endpoint" \
+  "$WORK/namespaced-endpoint" 1
+INCIDENTS=yes check_namespaced incidents-no-crd no yes e2e-a,e2e-b "${INCIDENTS_ON[@]}" \
+  --set incidents.installCRD=false
+INCIDENTS=yes HISTORY=yes EXTRA="$INCIDENT_OBJECTS $HISTORY_OBJECTS" \
+  check_namespaced incidents-history yes yes e2e-a,e2e-b "${ENDPOINT[@]}" "${HISTORY_ON[@]}" \
+  "${INCIDENTS_ON[@]}"
+INCIDENTS=yes EXTRA="$INCIDENT_OBJECTS" check_namespaced incidents-no-events yes no e2e-a \
+  "${NO_EVENTS[@]}" "${INCIDENTS_ON[@]}"
+check_namespaced incidents-dry-run yes no e2e-a,e2e-b "${INCIDENTS_ON[@]}" "${DRY[@]}"
+same_render namespaced/incidents-dry-run "$WORK/namespaced-incidents-dry-run" \
+  "$WORK/namespaced-dry-run"
+for name in incidents incidents-endpoint incidents-no-crd incidents-history incidents-no-events \
+  incidents-dry-run; do
+  for rules in "$WORK/namespaced-$name".*.rules; do
+    [ -f "$rules" ] || continue
+    diff -q "$WORK/cluster-$name.rules" "$rules" >/dev/null 2>&1 ||
+      fail "namespaced/$name: a Role's rules differ from the ClusterRole's ($rules)"
+  done
+done
+
+# incidents=null renders like the defaults, and a release made before incidents (helm upgrade
+# --reuse-values) renders with values that have no incidents map: a copy of the chart without it
+# renders like the chart, and an incidents map given in parts takes the defaults of the missing
+# keys (1 day, the CRD, the reader), never a nil-pointer error.
+for values in default endpoint; do
+  case $values in
+    default) set_values=() ;;
+    endpoint) set_values=("${ENDPOINT[@]}") ;;
+  esac
+  out="$WORK/incidents-null-$values"
+  if render "$out" "$RELEASE" "$CHART" --set rbac.scope=cluster \
+    ${set_values[@]+"${set_values[@]}"} --set incidents=null; then
+    same_render "incidents=null with $values" "$out" "$WORK/cluster-$values"
+  else
+    fail "incidents=null does not render with $values: $(cat "$out.err")"
+  fi
+done
+NOINC_CHART="$WORK/noincidents/kausa"
+mkdir -p "$WORK/noincidents"
+cp -R "$CHART" "$NOINC_CHART"
+awk '/^incidents:/ { skip = 1; next } skip && /^[^ ]/ { skip = 0 } !skip' "$CHART/values.yaml" \
+  >"$NOINC_CHART/values.yaml"
+if grep -q '^incidents:' "$NOINC_CHART/values.yaml"; then
+  fail "the chart copy still has an incidents map"
+fi
+for pair in default: endpoint:endpoint incidents:incidents \
+  incidents-no-crd-aggregate:incidents,no-crd incidents-no-reader:incidents,no-reader \
+  incidents-days-30:incidents,days-30; do
+  name=${pair%%:*} sets=${pair#*:}
+  set_values=()
+  case ",$sets," in *,endpoint,*) set_values+=("${ENDPOINT[@]}") ;; esac
+  case ",$sets," in *,incidents,*) set_values+=("${INCIDENTS_ON[@]}") ;; esac
+  case ",$sets," in *,no-crd,*) set_values+=(--set incidents.installCRD=false) ;; esac
+  case ",$sets," in *,no-reader,*) set_values+=(--set incidents.readers.aggregate=false) ;; esac
+  case ",$sets," in *,days-30,*) set_values+=(--set incidents.days=30) ;; esac
+  out="$WORK/noincidents-$name"
+  if ! render "$out" "$RELEASE" "$NOINC_CHART" --set rbac.scope=cluster \
+    ${set_values[@]+"${set_values[@]}"}; then
+    fail "no incidents map, $name: does not render: $(cat "$out.err")"
+  else
+    same_render "no incidents map, $name" "$out" "$WORK/cluster-$name"
+  fi
+done
+
+# helm lint --strict with incidents on, in both scopes.
+if "$HELM" lint --strict "$CHART" --set rbac.scope=cluster "${INCIDENTS_ON[@]}" \
+  >"$WORK/lint-incidents" 2>&1; then
+  ok "helm lint --strict with incidents on"
+else
+  fail "helm lint --strict with incidents on: $(cat "$WORK/lint-incidents")"
+fi
+if "$HELM" lint --strict "$CHART" --set rbac.scope=namespaced --set 'rbac.namespaces={e2e-a}' \
+  "${INCIDENTS_ON[@]}" >"$WORK/lint-incidents" 2>&1; then
+  ok "helm lint --strict with incidents on, namespaced"
+else
+  fail "helm lint --strict with incidents on, namespaced: $(cat "$WORK/lint-incidents")"
+fi
+
 # --- NOTES.txt ----------------------------------------------------------------------------------
 
 notes "$WORK/notes-cluster" --set rbac.scope=cluster "${ENDPOINT[@]}"
@@ -1185,6 +1564,27 @@ refuse days-string "$(not_days 7d)" --set rbac.scope=cluster --set-string histor
 refuse order-days-after-rbac "$NOT_SET" --set history.days=0
 refuse order-days-last "model.name is required with model.endpoint" --set rbac.scope=cluster \
   --set model.endpoint=https://api.example.com/v1 --set history.days=0
+# incidents.days, right after history.days, with incidents on and off.
+not_incident_days() { echo "incidents.days must be a whole number of days from 1 to 30, not '$1'"; }
+for days in 0 31 abc 7.5 -1 100; do
+  refuse "incident-days-$days-on" "$(not_incident_days "$days")" --set rbac.scope=cluster \
+    "${INCIDENTS_ON[@]}" --set "incidents.days=$days"
+  refuse "incident-days-$days-off" "$(not_incident_days "$days")" --set rbac.scope=cluster \
+    --set "incidents.days=$days"
+done
+refuse incident-days-namespaced "$(not_incident_days 31)" --set rbac.scope=namespaced \
+  --set 'rbac.namespaces={e2e-a}' "${INCIDENTS_ON[@]}" --set incidents.days=31
+refuse incident-days-string "$(not_incident_days 1d)" --set rbac.scope=cluster \
+  --set-string incidents.days=1d
+refuse incident-days-dry-run "$(not_incident_days 0)" --set rbac.scope=cluster \
+  "${INCIDENTS_ON[@]}" "${DRY[@]}" --set incidents.days=0
+refuse order-incident-days-after-rbac "$NOT_SET" --set incidents.days=0
+refuse order-incident-days-after-history-days "$(not_days 0)" --set rbac.scope=cluster \
+  --set history.days=0 --set incidents.days=0
+refuse order-incident-days-before-replicas "$(not_incident_days 0)" --set rbac.scope=cluster \
+  --set incidents.days=0 --set replicaCount=3
+refuse order-incident-days-after-v0.1-checks "model.name is required with model.endpoint" \
+  --set rbac.scope=cluster --set model.endpoint=https://api.example.com/v1 --set incidents.days=0
 
 # --- Notifications (docs/adr/0015-notifications.md) ---------------------------------------------
 

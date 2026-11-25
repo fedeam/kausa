@@ -306,6 +306,91 @@ RUN set -eu; \
       helm lint --strict charts/kausa $scope $endpoint $on > /tmp/lint 2>&1 || { cat /tmp/lint >&2; fail "helm lint --strict with $scope fails with the history on"; }; \
     done; \
     rm -f /tmp/lint
+# Incidents (docs/adr/0028-incident-resource-and-remediation-report.md), off by default. With
+# incidents.enabled and no dryRun, with or without an endpoint, kausa's ClusterRole or each Role
+# gets the incidents rule (create, list and delete) last; the args get --incidents
+# --incident-days "<days>" before --metrics-address and, without an endpoint, --dedup-hours
+# "<hours>" right after the --settle-seconds value; and the chart installs the
+# CustomResourceDefinition incidents.kausa.fedeam.com (incidents.installCRD), whose schema, read
+# back, is charts/kausa/files/incident-schema.json and whose one subresource is an empty status,
+# and a reader ClusterRole aggregated to view (incidents.readers.aggregate). With dryRun the
+# render is dryRun's, byte for byte. A chart whose values.yaml has no incidents map renders like
+# the chart. tests/chart/render.sh checks the same renders in more detail, and every refusal.
+RUN set -eu; \
+    endpoint="--set model.endpoint=https://api.example.com/v1 --set model.name=m --set model.apiKey.existingSecret=k"; \
+    on="--set incidents.enabled=true"; \
+    cluster="--set rbac.scope=cluster"; \
+    namespaced="--set rbac.scope=namespaced --set rbac.namespaces={e2e-a,e2e-b}"; \
+    crd=CustomResourceDefinition/incidents.kausa.fedeam.com; \
+    reader=ClusterRole/kausa-incident-reader; \
+    fail() { echo "incidents: $*" >&2; exit 1; }; \
+    render_in() { chart=$1; shift; helm template kausa "$chart" --kube-version 1.36.0 --namespace kausa-system "$@" || fail "$chart does not render with $*"; }; \
+    render() { render_in charts/kausa "$@"; }; \
+    has() { printf '%s\n' "$1" | grep -qx -- "$2"; }; \
+    rules() { printf '%s\n' "$1" | awk -v kind="$2" -v name="$3" 'function flush() { if (k && n) printf "%s", r; k = 0; n = 0; on = 0; r = "" }; /^---/ { flush(); next }; $0 == "kind: " kind { k = 1 }; $0 == "  name: " name { n = 1 }; /^[^ ]/ { on = ($0 == "rules:"); next }; on && NF { r = r $0 "\n" }; END { flush() }'; }; \
+    scoped() { printf '%s\n' "$1" | awk 'function flush() { if (k != "" && !n) print k "/" m; k = ""; n = 0; m = "" }; /^---/ { flush(); next }; /^kind: / { k = substr($0, 7) }; /^[^ #]/ { meta = ($0 == "metadata:") }; meta && /^  namespace: / { n = 1 }; meta && /^  name: / { m = substr($0, 9) }; END { flush() }' | LC_ALL=C sort | paste -sd' ' -; }; \
+    args() { printf '%s\n' "$1" | sed -n '/^ *args:$/,/^ *env:$/p' | sed 's/^ *//'; }; \
+    plus_incidents() { awk -v days="$1" -v dedup="$2" '$0 == "- --metrics-address" { print "- --incidents"; print "- --incident-days"; print "- \"" days "\"" }; { print }; settle { settle = 0; if (dedup != "") { print "- --dedup-hours"; print "- \"" dedup "\"" } }; $0 == "- --settle-seconds" { settle = 1 }'; }; \
+    incident_rule=$(printf '%s\n' '  - apiGroups: ["kausa.fedeam.com"]' '    resources: ["incidents"]' '    verbs: ["create", "list", "delete"]'); \
+    nothing() { ! printf '%s\n' "$2" | grep -qE 'incidents\.kausa\.fedeam\.com|incident-reader|--incident|"incidents"' || fail "$1: renders part of the incidents"; }; \
+    on_in_cluster() { \
+      name=$1; objects=$2; days=$3; dedup=$4; base=$5; extra=$6; \
+      off=$(render $cluster $base); \
+      out=$(render $cluster $base $on $extra); \
+      [ "$(scoped "$out")" = "$objects" ] || fail "$name: the cluster-scoped objects are '$(scoped "$out")', not '$objects'"; \
+      [ "$(rules "$out" ClusterRole kausa)" = "$(rules "$off" ClusterRole kausa; echo "$incident_rule")" ] || fail "$name: kausa's rules are not those without incidents plus the incidents rule last"; \
+      [ "$(args "$out")" = "$(args "$off" | plus_incidents "$days" "$dedup")" ] || fail "$name: not --incidents --incident-days \"$days\" before --metrics-address, with --dedup-hours '$dedup'"; \
+    }; \
+    for scope in "$cluster" "$namespaced"; do \
+      for values in "" "$endpoint" "--set dryRun=true"; do \
+        out=$(render $scope $values); nothing "the defaults with $scope $values" "$out"; \
+      done; \
+    done; \
+    on_in_cluster "incidents on" "ClusterRole/kausa $reader ClusterRoleBinding/kausa $crd" 1 6 "" ""; \
+    if printf '%s\n' "$out" | grep -q 'helm.sh/resource-policy'; then fail "incidents on: the CRD has a resource policy"; fi; \
+    has "$out" '              - message: spec is immutable' || fail "incidents on: no CEL message 'spec is immutable'"; \
+    has "$out" '    rbac\.authorization\.k8s\.io/aggregate-to-view: "true"' || fail "incidents on: the reader is not aggregated to view"; \
+    if printf '%s\n' "$out" | grep -qE 'aggregate-to-(edit|admin)'; then fail "incidents on: the reader is aggregated to edit or admin"; fi; \
+    [ "$(rules "$out" ClusterRole kausa-incident-reader)" = "$(printf '%s\n' '  - apiGroups: ["kausa.fedeam.com"]' '    resources: ["incidents"]' '    verbs: ["get", "list", "watch"]')" ] || fail "incidents on: the reader's rules are not get, list and watch on incidents"; \
+    mkdir -p /tmp/incident-crd/templates; \
+    printf '%s\n' 'apiVersion: v2' 'name: incident-crd' 'version: 0.0.0' > /tmp/incident-crd/Chart.yaml; \
+    cp charts/kausa/files/incident-schema.json /tmp/incident-crd/schema.json; \
+    helm template kausa charts/kausa --kube-version 1.36.0 --namespace kausa-system $cluster $on --show-only templates/incident-crd.yaml > /tmp/incident-crd/crd.yaml; \
+    printf '%s\n' '{{- $crd := .Files.Get "crd.yaml" | fromYaml }}' '{{- $versions := $crd.spec.versions }}' '{{- if ne (len $versions) 1 }}{{ fail "not exactly one version" }}{{ end }}' '{{- $v := index $versions 0 }}' '{{- if ne (toJson $v.subresources) "{\"status\":{}}" }}{{ fail "the subresources are not one empty status" }}{{ end }}' '{{- if ne (toJson $v.schema.openAPIV3Schema) (.Files.Get "schema.json" | fromJson | toJson) }}{{ fail "the schema is not files/incident-schema.json" }}{{ end }}' > /tmp/incident-crd/templates/check.yaml; \
+    helm template check /tmp/incident-crd > /dev/null || fail "the CRD read back is not the contract's"; \
+    rm -rf /tmp/incident-crd; \
+    on_in_cluster "incidents with an endpoint" "ClusterRole/kausa $reader ClusterRoleBinding/kausa $crd" 1 "" "$endpoint" ""; \
+    on_in_cluster "incidents.days=30" "ClusterRole/kausa $reader ClusterRoleBinding/kausa $crd" 30 6 "" "--set incidents.days=30"; \
+    on_in_cluster "incidents.installCRD=false" "ClusterRole/kausa ClusterRoleBinding/kausa" 1 6 "" "--set incidents.installCRD=false"; \
+    on_in_cluster "incidents.readers.aggregate=false" "ClusterRole/kausa ClusterRoleBinding/kausa $crd" 1 6 "" "--set incidents.readers.aggregate=false"; \
+    for values in "" "$endpoint"; do \
+      [ "$(render $cluster $values --set dryRun=true)" = "$(render $cluster $values $on --set dryRun=true)" ] || fail "incidents with dryRun $values: renders unlike dryRun alone"; \
+    done; \
+    clusterrules=$(rules "$(render $cluster $on)" ClusterRole kausa); \
+    out=$(render $namespaced $on); \
+    [ "$(scoped "$out")" = "$reader $crd" ] || fail "namespaced incidents: the cluster-scoped objects are '$(scoped "$out")'"; \
+    [ "$(rules "$out" Role kausa)" = "$(printf '%s\n%s\n' "$clusterrules" "$clusterrules")" ] || fail "namespaced incidents: the Roles' rules are not the ClusterRole's"; \
+    [ "$(args "$out")" = "$(args "$(render $namespaced)" | plus_incidents 1 6)" ] || fail "namespaced incidents: not the incidents args"; \
+    out=$(render $namespaced $on --set incidents.installCRD=false); \
+    [ -z "$(scoped "$out")" ] || fail "namespaced incidents with installCRD=false: renders cluster-scoped objects"; \
+    has "$out" '    verbs: \["create", "list", "delete"\]' || fail "namespaced incidents with installCRD=false: no incidents rule"; \
+    cp -R charts/kausa /tmp/noincidents; \
+    awk '/^incidents:/ { skip = 1; next }; skip && /^[^ ]/ { skip = 0 }; !skip' charts/kausa/values.yaml > /tmp/noincidents/values.yaml; \
+    if grep -q '^incidents:' /tmp/noincidents/values.yaml; then fail "the chart copy still has an incidents map"; fi; \
+    for values in "" "$endpoint" "$on"; do \
+      a=$(render $cluster $values); b=$(render_in /tmp/noincidents $cluster $values); \
+      [ "$a" = "$b" ] || fail "a chart without the incidents map renders unlike the chart with $values"; \
+    done; \
+    rm -rf /tmp/noincidents; \
+    for days in 0 31 abc; do \
+      if helm template kausa charts/kausa --kube-version 1.36.0 $cluster $on --set incidents.days=$days > /tmp/refusal 2>&1; then fail "incidents.days=$days renders"; fi; \
+      grep -qF "incidents.days must be a whole number of days from 1 to 30, not '$days'" /tmp/refusal || fail "incidents.days=$days: $(cat /tmp/refusal)"; \
+    done; \
+    rm -f /tmp/refusal; \
+    for scope in "$cluster" "$namespaced"; do \
+      helm lint --strict charts/kausa $scope $on > /tmp/lint 2>&1 || { cat /tmp/lint >&2; fail "helm lint --strict with $scope fails with incidents on"; }; \
+    done; \
+    rm -f /tmp/lint
 # Notifications (docs/adr/0015-notifications.md), off by default. With notifications.enabled, the
 # args get --notify-url-file /var/run/secrets/kausa-notify/url --notify-format "<format>" and, by
 # format, the Telegram chat id, the token file and --notify-allow-http, before --metrics-address;
