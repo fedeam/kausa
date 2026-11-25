@@ -1674,8 +1674,12 @@ if [ "$REPLICAS" = 1 ]; then
     "get $CRDS" "list $CRDS" "watch $CRDS" "create $CRDS" "update $CRDS" "patch $CRDS"
     "delete $CRDS" "get secrets" "list secrets" "watch secrets" "get configmaps"
     "list configmaps" "watch configmaps")
-  # The rows of point 5 as kausa's service account, with incidents $1 (on or off).
+  # The rows of point 5 as kausa's service account, with incidents $1 (on or off). can-i answers
+  # no for a subject that does not exist, so a row of the same subject answers yes first: the
+  # first row of the grant, in its first place; with incidents on, the incidents rows too.
   incident_rows() {
+    allowed_in "${granted[0]}" "${incident_where[0]}" ||
+      fail "kausa cannot ${granted[0]} ${incident_where[0]}: its never rows would prove nothing"
     for check in "${incident_granted[@]}"; do
       if [ "$1" = on ]; then
         for where in "${incident_where[@]}"; do
@@ -2117,6 +2121,8 @@ print(json.dumps([item["metadata"], item["spec"], item.get("status") or {}], sor
     "each CEL rule, refused; a /status write changed nothing"
 
   # view, edit and admin read incidents through the reader role, and do nothing else with them.
+  # For each subject, watch, get and list answer yes before its never rows, so that a subject that
+  # does not exist, for which can-i answers no to everything, fails here.
   k -n "$TARGET" create serviceaccount e2e-incident-admin
   k -n "$TARGET" create rolebinding e2e-incident-admin --clusterrole=admin \
     --serviceaccount="$TARGET:e2e-incident-admin"
