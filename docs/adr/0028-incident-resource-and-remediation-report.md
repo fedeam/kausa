@@ -202,17 +202,23 @@ version `v1alpha1`, kind `Incident`:
   occurrence is counted (this ADR proposes `kausa_incidents_refused_total`, with a label `reason` of
   three values, `table-full` for this stop, `schema` for point 2's rule and `starting` for a create
   that arrives before the sweep at start ended (point 4); the reference page fixes the names) and
-  logged as `incident refused` at most once an hour for each reason; the incident's
-  Events, its `incident` log line and its `detected` message are not affected, and its fingerprint
-  is not marked, so a later occurrence creates one once there is room. So a process creates at most
-  500 Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table,
-  and the table holds at most 500. The label is the manager's decision, from the security reader's
-  ninth review: with one counter and one line an hour, one refusal of point 2's rule an hour, which
-  a writer of Pods or Events in N can cause, would take the line and hide this stop, which holds
-  Incidents back in every namespace. The label's values are a closed set and name nothing of the
-  cluster, as 0027's counters do, and the three series show 0 from the start with incidents on.
-  The hour is kept per reason and across namespaces, so the line names the first refusal of the
-  hour for its reason and the counter counts every one.
+  logged as `incident refused` at most once an hour for each reason; the incident's Events, its
+  `incident` log line and its `detected` message are not affected, and its fingerprint is not
+  marked, so a later occurrence creates one once there is room. So a process creates at most 500
+  Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table, and
+  the table holds at most 500. The one exception is a create the server stored but kausa got no
+  valid answer for: no answer within the 10 seconds, an answer over 64 KiB, or one with no UID.
+  kausa then inserts no entry and marks no fingerprint, and that create does not count toward the
+  500, so a later occurrence of the incident creates again. Such creates are bounded only by the
+  rate of the fact slot, which writes one fact at a time (0027's point 3), and the Incidents they
+  leave by the hourly sweep's cap of 500 (point 4). A Remediation about such an Incident finds no
+  entry and is not reported (`incident-unknown`). The label is the manager's decision, from the
+  security reader's ninth review: with one counter and one line an hour, one refusal of point 2's
+  rule an hour, which a writer of Pods or Events in N can cause, would take the line and hide this
+  stop, which holds Incidents back in every namespace. The label's values are a closed set and name
+  nothing of the cluster, as 0027's counters do, and the three series show 0 from the start with
+  incidents on. The hour is kept per reason and across namespaces, so the line names the first
+  refusal of the hour for its reason and the counter counts every one.
 - **No `ownerReference`** to the workload or to anything else, and nothing points to it.
 - **Not with `--dry-run`**, as `--history`: kausa refuses to start with incidents on and
   `--dry-run`, and the chart turns incidents off with `dryRun`.
@@ -1104,6 +1110,11 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   record (`src/incident.rs:88-93` and `:194`, older than this ADR, as the fact statement reads
   them). Test: in kind, delete a crashing Pod during a watch gap and compare its Incident with the
   Pods.
+- **Whether the API server can store an Incident and still give kausa no valid answer,** point 1's
+  one exception to "every Incident it created in the last 6 hours is still in the table": an answer
+  lost or cut after the object was stored. Only kausa's side is tested, against a fake server.
+  Test: in kind, delay the create's answer past the 10 seconds with a proxy, then check that the
+  Incident exists, that no entry was kept, and that the next occurrence creates a second one.
 - **Whether the Incident should take as its sample the first signal of the group whose values fit,**
   and refuse only when none fits, so that a signal a writer in N places first does not leave a
   genuine incident without an Incident (the trust statement). Open for the implementation; the
