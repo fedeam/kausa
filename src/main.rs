@@ -18,8 +18,8 @@ mod fact;
 mod fingerprint;
 mod history;
 mod incident;
-#[cfg(test)]
 mod incident_resource;
+mod incidents;
 mod leader;
 mod log;
 mod metrics;
@@ -412,7 +412,7 @@ fn run_command(args: &[OsString]) -> ExitCode {
         }),
         notify,
         // docs/adr/0028-incident-resource-and-remediation-report.md: not reachable yet.
-        incidents: false,
+        incidents: None,
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,

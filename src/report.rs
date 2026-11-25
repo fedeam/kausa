@@ -12,11 +12,12 @@ use serde_json::json;
 use crate::events::{Emitted, Writer};
 use crate::fact;
 use crate::incident::Incident;
+use crate::incidents::Incidents;
 use crate::leader::Term;
 use crate::log;
 use crate::metrics::Metrics;
 use crate::notify::{self, Outbox};
-use crate::owner::{Hop, is_dns_subdomain};
+use crate::owner::{Hop, OwnerLookup, is_dns_subdomain};
 use crate::record::{DeploymentRecord, OwnerRef, PodRecord, Regarding, Uid};
 
 /// The most facts that wait for the fact slot. A fact pushed on a full queue drops the oldest.
@@ -315,11 +316,13 @@ pub fn enqueue(
     Ok(())
 }
 
-/// What the fact slot works with, across terms: the Event writer, unless `--no-events`, and the
-/// outbox, with `--notify-url-file`.
+/// What the fact slot works with, across terms: the Event writer, unless `--no-events`, the
+/// outbox, with `--notify-url-file`, and the Incidents, with the internal option of
+/// docs/adr/0028-incident-resource-and-remediation-report.md.
 pub struct Reporter<'a> {
     pub writer: Option<Writer>,
     pub outbox: Option<&'a Outbox<'a>>,
+    pub incidents: Option<&'a Incidents>,
     pub metrics: &'a Metrics,
     pub term: &'a Term,
 }
@@ -328,8 +331,9 @@ impl Reporter<'_> {
     /// Writes the `Detected` Event of `fact`: one create, or the patch of its series. A failed
     /// write is logged and counted, and not tried again. Then, while the term holds, queues the
     /// fact's `detected` message, whether the write succeeded or not: the message never waits for
-    /// another try.
-    pub async fn report(&self, fact: Fact) -> io::Result<()> {
+    /// another try. Then, with incidents on, its Incident, with the term's `lookup` for the read of
+    /// a revision (`Incidents::create`).
+    pub async fn report(&self, fact: Fact, lookup: &impl OwnerLookup) -> io::Result<()> {
         if let Some(writer) = &self.writer {
             match writer
                 .emit_detected(&fact, Timestamp::now(), self.term)
@@ -353,6 +357,9 @@ impl Reporter<'_> {
             && self.term.holds()
         {
             outbox.enqueue(notify::detected(&fact))?;
+        }
+        if let Some(incidents) = self.incidents {
+            incidents.create(&fact, lookup, self.term).await?;
         }
         Ok(())
     }

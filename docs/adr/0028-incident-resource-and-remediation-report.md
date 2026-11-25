@@ -426,8 +426,9 @@ read is kept as a failed read for the answer's 600 seconds, not the error's 30: 
 for a request that failed. A ReplicaSet's revision is read in one strict spelling (digits, no sign,
 no leading zero, 1 to 2^53; `parse_revision`, `src/record.rs:810`); a Deployment's, for `D014`, is
 the fact statement's parse (`src/record.rs:871-875`, any spelling Rust's `u64` parse takes, such as
-`+7` or `007`), then bounded 1 to 2^53 by the check. The slot compares the UID the entry's `get` returned with the
-UID in the Pod's `ownerReference`, and gives `revision-lookup-failed` when they differ. The slot can
+`+7` or `007`), then bounded 1 to 2^53 by the check. The slot compares the UID the entry's `get`
+returned with the UID in the Pod's `ownerReference`, and gives `revision-lookup-failed` when they
+differ. The slot can
 reach the lookup as the code stands: the term's lookup (`src/run.rs:973`) is created before the
 slot's future, which is assigned at `:1012` (`reporter.report(fact)`; `reporting` is declared at
 `:1005`), and outlives it; it is passed to `Reporter::report` as an argument, since the reporter
@@ -676,7 +677,10 @@ Changed in [ARCHITECTURE.md](../../ARCHITECTURE.md) with the code:
   reused, except a Remediation's action id and `proposedAt`, which, after the checks of 0028,
   are sent as a `remediation`
   message's action and time, and the namespace and name of a dropped Remediation, logged after
-  their patterns are checked."
+  their patterns are checked." The `metadata.uid` of the answer to kausa's own create is the
+  stated exception to that text: it is parsed as a UID and kept, as 16 bytes, only in the table of
+  created Incidents (point 1), never logged, sent or reused otherwise; the rest of the answer is
+  read under a cap of 64 KiB and dropped.
 - **Invariant 11** gains the `remediation` message and its fields.
 - **Invariant 12** gains: "An Incident holds only what a fact statement may hold and the typed
   values of 0028's schema; changing what it may hold needs an ADR."
@@ -1090,6 +1094,13 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   failing Pod, or a ReplicaSet, whose controller `ownerReference` is an object of it; a Deployment
   it owns would not do, since kausa follows only a ReplicaSet's and a Job's controller
   (`src/owner.rs:22-28`).
+- **Which Pod an Incident describes while two records of one name are held,** the old one of a Pod
+  deleted in a watch gap beside its replacement until the relist ends: the sample's Pod is found
+  by UID, but `spec.facts.podsNow` counts both records (`pods_of`, `src/run.rs`), and the owner of
+  an Event about a Pod, which becomes `spec.object`, is looked up by name and can come from the old
+  record (`src/incident.rs:88-93` and `:194`, older than this ADR, as the fact statement reads
+  them). Test: in kind, delete a crashing Pod during a watch gap and compare its Incident with the
+  Pods.
 - **Whether the Incident should take as its sample the first signal of the group whose values fit,**
   and refuse only when none fits, so that a signal a writer in N places first does not leave a
   genuine incident without an Incident (the trust statement). Open for the implementation; the

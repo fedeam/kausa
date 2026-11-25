@@ -59,6 +59,7 @@ use crate::explain::{self, LogSource, Next, QUEUE_LIMIT, Settings, Shared, Work}
 use crate::fact;
 use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals, rollout_signals};
+use crate::incidents::Incidents;
 use crate::leader::pure::{TIMINGS, Timings};
 use crate::leader::{self, KubeLease, LEASE_ERROR_PERIOD, LeaseApi, LeaseErrors, Lost, Term};
 use crate::log;
@@ -120,10 +121,10 @@ pub struct Options {
     /// With `--notify-url-file`, the webhook and the bounds of its `detected` messages
     /// (docs/adr/0015-notifications.md, docs/adr/0027-fact-statement-for-the-detections.md).
     pub notify: Option<Notify>,
-    /// Whether each settled fact keeps what its Incident needs
-    /// (docs/adr/0028-incident-resource-and-remediation-report.md, point 3). Internal: no flag
-    /// sets it yet, and nothing reads the data.
-    pub incidents: bool,
+    /// With incidents on, each settled fact keeps what its Incident needs and the fact slot
+    /// creates it (docs/adr/0028-incident-resource-and-remediation-report.md, points 1 and 3).
+    /// Internal: no flag sets it yet.
+    pub incidents: Option<crate::incidents::Settings>,
 }
 
 /// The webhook of `--notify-url-file` and the bounds of its `detected` messages.
@@ -563,16 +564,15 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         outbox: outbox.as_ref(),
         term: &term,
     });
-    // The fact path: its Events, its `detected` messages, or both.
-    let reporter = (options.detected.is_some() || outbox.is_some()).then(|| Reporter {
-        writer: options
-            .detected
-            .as_ref()
-            .map(|instance| Writer::new(client.clone(), instance.clone())),
-        outbox: outbox.as_ref(),
-        metrics: &metrics,
-        term: &term,
-    });
+    let incidents = incidents_of(&client, &options);
+    let reporter = reporter(
+        &client,
+        &options,
+        outbox.as_ref(),
+        incidents.as_ref(),
+        &metrics,
+        &term,
+    );
     show_start(&metrics, &options, shared.as_ref(), Instant::now());
     let lease = options
         .leader_lease
@@ -634,6 +634,36 @@ struct Watched {
     deployments: Option<Watches<Deployment>>,
 }
 
+/// The Incidents and their table, across terms, only with `options.incidents`
+/// (docs/adr/0028-incident-resource-and-remediation-report.md, point 1).
+fn incidents_of(client: &Client, options: &Options) -> Option<Incidents> {
+    options
+        .incidents
+        .map(|settings| Incidents::new(client.clone(), settings))
+}
+
+/// The fact path: its Events, its `detected` messages, its Incidents, or any of them; `None` with
+/// none of them.
+fn reporter<'a>(
+    client: &Client,
+    options: &Options,
+    outbox: Option<&'a Outbox<'a>>,
+    incidents: Option<&'a Incidents>,
+    metrics: &'a Metrics,
+    term: &'a Term,
+) -> Option<Reporter<'a>> {
+    (options.detected.is_some() || outbox.is_some() || incidents.is_some()).then(|| Reporter {
+        writer: options
+            .detected
+            .as_ref()
+            .map(|instance| Writer::new(client.clone(), instance.clone())),
+        outbox,
+        incidents,
+        metrics,
+        term,
+    })
+}
+
 /// The cluster through the API server.
 struct KubeCluster {
     client: Client,
@@ -647,7 +677,7 @@ impl KubeCluster {
     fn new(client: Client, options: &Options) -> KubeCluster {
         KubeCluster {
             client,
-            keep_revision: options.incidents,
+            keep_revision: options.incidents.is_some(),
         }
     }
 }
@@ -1033,7 +1063,7 @@ async fn lead<C: Cluster>(
             && reporting.is_none()
             && let Some(fact) = facts.pop()
         {
-            reporting = Some(Box::pin(reporter.report(fact)));
+            reporting = Some(Box::pin(reporter.report(fact, &lookup)));
         }
         if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
             let now = Instant::now();
@@ -1708,7 +1738,7 @@ impl State {
         now: Timestamp,
     ) -> Fact {
         let mut fact = Fact::new(incident, facts);
-        if !options.incidents {
+        if options.incidents.is_none() {
             return fact;
         }
         let (about, owner_lookup_failed) = if incident.key.detection == Detection::RolloutStalled {
@@ -2095,7 +2125,6 @@ impl OwnerLookup for KubeLookup {
         answer
     }
 
-    #[cfg(test)]
     async fn replica_set(&self, namespace: &str, name: &str) -> Result<(Uid, u64), ()> {
         // Off, nothing is kept to answer from: no request.
         if !self.keep_revision {
@@ -2137,6 +2166,11 @@ mod tests {
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
     use kube::core::Status;
+
+    /// Incidents on, with the gate's default window of 24 hours.
+    const INCIDENTS: crate::incidents::Settings = crate::incidents::Settings {
+        window: Duration::from_secs(24 * 3600),
+    };
 
     /// Every Pod in these tests has no owner, so no lookup is made; a lookup is an error.
     struct NoLookup;
@@ -3491,7 +3525,7 @@ mod tests {
     impl Served {
         /// With `incidents`, the lookup of a process whose options have them on, built as `run`
         /// builds it.
-        fn new(incidents: bool, answers: Vec<(&'static str, serde_json::Value)>) -> Served {
+        fn new(on: bool, answers: Vec<(&'static str, serde_json::Value)>) -> Served {
             use std::io::{Read, Write};
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
             let addr = listener.local_addr().expect("an address");
@@ -3532,7 +3566,7 @@ mod tests {
                 Client::try_from(config).expect("a client")
             };
             let options = Options {
-                incidents,
+                incidents: on.then_some(INCIDENTS),
                 ..options(false, 10)
             };
             Served {
@@ -3596,6 +3630,74 @@ mod tests {
 
     fn rs_uid() -> Uid {
         Uid::parse(RS_UID).expect("a UID")
+    }
+
+    /// One fact through the reporter and the lookup `run` builds from `options`, against a fake
+    /// API server that echoes each Event, answers a ReplicaSet's `get` with its revision and
+    /// creates the Incident: the requests, as method and path.
+    fn report_through_run(options: &Options) -> Vec<(String, String)> {
+        use crate::incident_resource::tests::{UID_RS, sample_fact};
+        use crate::incidents::tests::{Answer, api_server, client, created, reply, runtime, sent};
+        let (url, requests) = api_server(|request| match request.method.as_str() {
+            "POST" if request.path.contains("/events") => Answer::Reply(201, request.body.clone()),
+            "GET" => reply(200, replica_set_metadata(Some(UID_RS), Some("7"))),
+            _ => created(),
+        });
+        let rt = runtime();
+        let metrics = Metrics::default();
+        let term = Term::unbounded();
+        rt.block_on(async {
+            let client = client(&url);
+            let incidents = incidents_of(&client, options);
+            if let Some(incidents) = &incidents {
+                incidents.table_mut().start_sweep_ended();
+            }
+            let reporter = reporter(&client, options, None, incidents.as_ref(), &metrics, &term)
+                .expect("a reporter");
+            let lookup = KubeCluster::new(client, options).lookup();
+            reporter
+                .report(sample_fact(), &lookup)
+                .await
+                .expect("a log");
+        });
+        sent(&requests)
+            .into_iter()
+            .map(|request| (request.method, request.path))
+            .collect()
+    }
+
+    #[test]
+    fn a_fact_is_written_as_its_event_then_its_replica_set_is_read_then_its_incident_created() {
+        let on = Options {
+            detected: Some(ME.into()),
+            incidents: Some(INCIDENTS),
+            ..options(false, 10)
+        };
+        let requests = report_through_run(&on);
+        let methods: Vec<&str> = requests.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(methods, ["POST", "GET", "POST"], "{requests:?}");
+        assert!(
+            requests[0]
+                .1
+                .starts_with("/apis/events.k8s.io/v1/namespaces/shop/events")
+        );
+        assert_eq!(
+            requests[1].1,
+            "/apis/apps/v1/namespaces/shop/replicasets/web-7d4b9c6f5d"
+        );
+        assert_eq!(requests[2].1, crate::incidents::tests::PATH);
+        // Off, the same fact sends only its Event: no read and no create.
+        let off = Options {
+            detected: Some(ME.into()),
+            ..options(false, 10)
+        };
+        let requests = report_through_run(&off);
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(
+            requests[0]
+                .1
+                .starts_with("/apis/events.k8s.io/v1/namespaces/shop/events")
+        );
     }
 
     #[test]
@@ -4808,7 +4910,7 @@ mod tests {
             }),
             detected: None,
             notify: None,
-            incidents: false,
+            incidents: None,
         }
     }
 
@@ -7139,7 +7241,7 @@ mod tests {
         let facts = || fact::statement(incident, 1).facts;
         let mut options = options(false, 10);
         let off = state.fact(incident, facts(), &options, now);
-        options.incidents = true;
+        options.incidents = Some(INCIDENTS);
         let on = state.fact(incident, facts(), &options, now);
         assert_eq!(on.incident.as_ref().expect("the data").settled_at, now);
         // The data is the only difference.

@@ -796,6 +796,20 @@ impl Uid {
     }
 }
 
+/// The UID as the API server spells it: lowercase hexadecimal with its four `-`, the one text
+/// `Uid::parse` takes for these bytes.
+impl std::fmt::Display for Uid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, byte) in self.0.iter().enumerate() {
+            if matches!(i, 4 | 6 | 8 | 10) {
+                f.write_str("-")?;
+            }
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// The annotation where the deployment controller writes a Deployment's revision, and a
 /// ReplicaSet's.
 pub(crate) const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
@@ -2512,5 +2526,20 @@ mod tests {
             record.progressing_reason.as_deref(),
             Some("NewReplicaSetAvailable")
         );
+    }
+
+    #[test]
+    fn a_uid_is_written_as_the_one_text_it_is_parsed_from() {
+        for text in [
+            "00000000-0000-0000-0000-000000000000",
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ] {
+            let uid = Uid::parse(text).expect("a UID");
+            assert_eq!(uid.to_string(), text);
+            assert_eq!(Uid::parse(&uid.to_string()), Some(uid));
+        }
+        // Uppercase is not the API server's spelling: it is not parsed, so never written.
+        assert_eq!(Uid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0"), None);
     }
 }

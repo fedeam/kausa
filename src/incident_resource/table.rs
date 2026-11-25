@@ -71,18 +71,22 @@ pub(crate) struct Target {
 }
 
 impl Target {
+    #[cfg(test)]
     pub(crate) fn api_version(&self) -> &str {
         &self.api_version
     }
 
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> &str {
         &self.kind
     }
 
+    #[cfg(test)]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
+    #[cfg(test)]
     pub(crate) fn uid(&self) -> Option<Uid> {
         self.uid
     }
@@ -141,31 +145,38 @@ impl Entry {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn namespace(&self) -> &str {
         &self.namespace
     }
 
     /// The fingerprint, as its 16 hexadecimal characters.
+    #[cfg(test)]
     pub(crate) fn fingerprint(&self) -> String {
         format!("{:016x}", self.fingerprint)
     }
 
+    #[cfg(test)]
     pub(crate) fn first_seen(&self) -> Timestamp {
         self.first_seen
     }
 
+    #[cfg(test)]
     pub(crate) fn uid(&self) -> Uid {
         self.uid
     }
 
+    #[cfg(test)]
     pub(crate) fn detection(&self) -> Detection {
         self.detection
     }
 
+    #[cfg(test)]
     pub(crate) fn target(&self) -> &Target {
         &self.target
     }
 
+    #[cfg(test)]
     pub(crate) fn reported(&self) -> bool {
         self.reported
     }
@@ -176,6 +187,7 @@ impl Entry {
 
     /// Whether the Incident's name is `name`: `kausa.`, the fingerprint, `.` and the first-seen
     /// second, written without a leading zero.
+    #[cfg(test)]
     fn is_named(&self, name: &str) -> bool {
         let Some((fingerprint, second)) = name
             .strip_prefix("kausa.")
@@ -203,6 +215,7 @@ impl Entry {
 /// Where an entry sits in the table, from a lookup. It names that entry only while the slot holds
 /// it: `Table::mark_reported` checks the UID again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct Slot(usize);
 
 /// The table was full: `CAPACITY` entries younger than `KEEP`.
@@ -226,16 +239,18 @@ impl Default for Table {
 }
 
 impl Table {
-    /// Records that the sweep at start ended, whether it completed or stopped at its bound: from
-    /// then on the gate lets creates through.
+    /// Records that a sweep of this process ended, whether it completed, failed or stopped at its
+    /// bound: from then on the gate lets creates through. A sweep cut by the loss of the term has
+    /// not ended.
+    #[cfg(test)]
     pub(crate) fn start_sweep_ended(&mut self) {
         self.started = true;
     }
 
     /// The gate for an incident of `namespace` and `fingerprint` at `now`, with `--dedup-hours` as
-    /// `window`: refused before the sweep at start ended; a duplicate when an entry of both was
-    /// created inside the window (none with a window of zero); refused when no slot is free and
-    /// every entry is younger than `KEEP`; a create otherwise. It changes nothing.
+    /// `window`, in this order: a duplicate when an entry of both was created inside the window
+    /// (none with a window of zero); refused before a sweep of this process ended; refused when no
+    /// slot is free and every entry is younger than `KEEP`; a create otherwise. It changes nothing.
     pub(crate) fn admit(
         &self,
         namespace: &str,
@@ -243,9 +258,6 @@ impl Table {
         window: Duration,
         now: Instant,
     ) -> Admission {
-        if !self.started {
-            return Admission::Refused(Refusal::Starting);
-        }
         let fingerprint = parse_fingerprint(fingerprint);
         let duplicate = self.entries().any(|(_, entry)| {
             Some(entry.fingerprint) == fingerprint
@@ -254,6 +266,8 @@ impl Table {
         });
         if duplicate {
             Admission::Duplicate
+        } else if !self.started {
+            Admission::Refused(Refusal::Starting)
         } else if self.room(now).is_none() {
             Admission::Refused(Refusal::TableFull)
         } else {
@@ -270,6 +284,7 @@ impl Table {
 
     /// The Incident named `name` in `namespace` whose UID is `uid`, if this process created it and
     /// still holds it.
+    #[cfg(test)]
     pub(crate) fn find(&self, namespace: &str, name: &str, uid: Uid) -> Option<(Slot, &Entry)> {
         self.entries()
             .find(|(_, entry)| {
@@ -280,6 +295,7 @@ impl Table {
 
     /// Marks the entry at `slot` as reported, if the slot still holds the Incident of `uid` and it
     /// was not reported before; whether it marked it.
+    #[cfg(test)]
     pub(crate) fn mark_reported(&mut self, slot: Slot, uid: Uid) -> bool {
         match self.slots.get_mut(slot.0).and_then(Option::as_mut) {
             Some(entry) if entry.uid == uid && !entry.reported => {
@@ -291,6 +307,7 @@ impl Table {
     }
 
     /// How many entries the table holds.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries().count()
     }

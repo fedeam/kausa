@@ -90,9 +90,7 @@ pub(crate) trait OwnerLookup {
     /// The UID and the revision of the ReplicaSet `name` in `namespace`, read through the same
     /// cache as `controller_of` and refused by the same rule (docs/adr/0028, point 3).
     /// `Err(())` when the read failed or is not kept: a lookup that keeps no revision answers so
-    /// with no request. Built for tests only until the fact slot's create calls it (0028, point
-    /// 1), as the Incident's other parts are.
-    #[cfg(test)]
+    /// with no request. The fact slot's create calls it, only with incidents on (0028, point 1).
     fn replica_set(
         &self,
         _namespace: &str,

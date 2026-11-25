@@ -12,39 +12,51 @@ use serde_json::{Map, Value, json};
 use crate::detect::Detection;
 use crate::fact;
 use crate::incident::MAX_PODS;
-use crate::owner::{MAX_NAME_LEN, MAX_NAMESPACE_LEN, is_dns_label, is_dns_subdomain};
+use crate::owner::{MAX_NAME_LEN, is_dns_label, is_dns_subdomain};
 
 pub(crate) mod table;
 
-pub(crate) use crate::record::{UID_LEN, Uid};
+#[cfg(test)]
+use crate::owner::MAX_NAMESPACE_LEN;
+#[cfg(test)]
+pub(crate) use crate::record::UID_LEN;
+pub(crate) use crate::record::Uid;
+use crate::report::{About, Fact, IncidentData, MaybeUid};
 pub(crate) use crate::report::{ControllerKind, REGARDING_KINDS};
 
 /// The 16 lowercase hexadecimal characters of a fingerprint.
+#[cfg(test)]
 pub(crate) const FINGERPRINT_PATTERN: &str = "^[0-9a-f]{16}$";
 pub(crate) const FINGERPRINT_LEN: usize = 16;
 
 /// A time in UTC to the second, as kausa writes it: `YYYY-MM-DDTHH:MM:SSZ`.
+#[cfg(test)]
 pub(crate) const TIME_PATTERN: &str = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$";
 pub(crate) const TIME_LEN: usize = 20;
 
 /// A UID as the API server sets one: a UUID in lowercase hexadecimal.
+#[cfg(test)]
 pub(crate) const UID_PATTERN: &str =
     "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
 
 /// A DNS-1123 subdomain, of at most `MAX_NAME_LEN` characters: `is_dns_subdomain`.
+#[cfg(test)]
 pub(crate) const NAME_PATTERN: &str =
     "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$";
 
 /// A DNS-1123 label, of at most `MAX_NAMESPACE_LEN` characters: `is_dns_label`.
+#[cfg(test)]
 pub(crate) const LABEL_PATTERN: &str = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$";
 
 /// A kind, of at most `KIND_LEN` characters.
+#[cfg(test)]
 pub(crate) const KIND_PATTERN: &str = "^[A-Z][A-Za-z0-9]*$";
 pub(crate) const KIND_LEN: usize = 63;
 
 /// An apiVersion, of at most `MAX_NAME_LEN` characters: a group that is a DNS-1123 subdomain and
 /// a `/` before a version, or a version alone, as the core group's `v1`. The version starts with a
 /// letter and has no limit of its own: kurita's pattern, byte for byte.
+#[cfg(test)]
 pub(crate) const API_VERSION_PATTERN: &str = concat!(
     "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?",
     "[a-z]([-a-z0-9]*[a-z0-9])?$"
@@ -52,6 +64,7 @@ pub(crate) const API_VERSION_PATTERN: &str = concat!(
 
 /// The Incident's name: `kausa.`, the fingerprint, `.` and the first-seen time in Unix seconds, of
 /// 1 to 10 digits, the pattern kurita's record names an Incident by.
+#[cfg(test)]
 pub(crate) const INCIDENT_NAME_PATTERN: &str = "^kausa\\.[0-9a-f]{16}\\.[0-9]{1,10}$";
 
 /// The first first-seen time the name cannot hold: 10^10 seconds, 2286-11-20T17:46:40Z.
@@ -86,17 +99,25 @@ pub(crate) const DETECTIONS: [Detection; 14] = [
 
 /// The schema's CEL rules, as the file writes them, each with the field a refusal of its Rust
 /// mirror names. On `spec`:
+#[cfg(test)]
 pub(crate) const RULE_IMMUTABLE: &str = "self == oldSelf";
+#[cfg(test)]
 pub(crate) const RULE_SAMPLE: &str = "has(self.sample) == (self.facts.podsSeen > 0)";
+#[cfg(test)]
 pub(crate) const RULE_PODS_SEEN: &str = "(self.facts.podsSeen == 0) == \
      (self.detection in ['D008', 'D011', 'D012', 'D013', 'D014'])";
+#[cfg(test)]
 pub(crate) const RULE_DEPLOYMENT: &str = "has(self.deployment) == (self.detection == 'D014')";
+#[cfg(test)]
 pub(crate) const RULE_MISSING_REVISION: &str = "('revision-lookup-failed' in self.missing) == \
      (has(self.sample) && has(self.sample.controller) && \
      self.sample.controller.kind == 'ReplicaSet' && !has(self.sample.controller.revision))";
+#[cfg(test)]
 pub(crate) const RULE_SAMPLE_OR_REGARDING: &str = "!(has(self.sample) && has(self.regarding))";
+#[cfg(test)]
 pub(crate) const RULE_MISSING_OWNER: &str = "!('owner-lookup-failed' in self.missing) || \
      has(self.sample) || self.detection in ['D008', 'D011']";
+#[cfg(test)]
 pub(crate) const RULE_OWNER_LOOKUP_OBJECT: &str = "!('owner-lookup-failed' in self.missing && \
      self.detection in ['D008', 'D011']) || (has(self.regarding) && \
      ((self.object.kind == 'Job' && self.object.apiVersion == 'batch/v1') || \
@@ -105,8 +126,10 @@ pub(crate) const RULE_OWNER_LOOKUP_OBJECT: &str = "!('owner-lookup-failed' in se
      self.object.name == self.regarding.name && has(self.object.uid) == has(self.regarding.uid) && \
      (!has(self.object.uid) || self.object.uid == self.regarding.uid))";
 /// On `facts`:
+#[cfg(test)]
 pub(crate) const RULE_MINIMUM: &str = "self.podsSeenIsMinimum == (self.podsSeen == 100)";
 /// On `sample.controller`:
+#[cfg(test)]
 pub(crate) const RULE_CONTROLLER_REVISION: &str =
     "!has(self.revision) || self.kind == 'ReplicaSet'";
 
@@ -143,6 +166,7 @@ pub(crate) enum Field {
 }
 
 impl Field {
+    #[cfg(test)]
     pub(crate) const ALL: [Field; 27] = [
         Field::Name,
         Field::Fingerprint,
@@ -598,8 +622,136 @@ impl Spec {
     }
 }
 
+/// The read of point 3: the sample's ReplicaSet, by the name its Pod's reference gives, and the
+/// UID that reference gives it, which the read's answer must equal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RevisionRead {
+    pub name: Box<str>,
+    pub uid: Uid,
+}
+
+/// An Incident before the read of its revision: its `spec` as it is without the read, which says
+/// `revision-lookup-failed` for a sample run by a ReplicaSet, and the read to make, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Draft {
+    pub spec: Spec,
+    pub read: Option<RevisionRead>,
+}
+
+impl Draft {
+    /// The Incident of `fact`, from what the fact keeps for it. A value kept as a mark, a UID or a
+    /// kind or a name that did not fit, is the refusal of its field; so is an owner's UID that is
+    /// not one. An owner with no UID (an Event that gives none) is written with no `uid`, never an
+    /// empty one. A sample whose controller is an `apps/v1` ReplicaSet with a name the lookup takes
+    /// and a UID gets a read; one run by any other ReplicaSet keeps `revision-lookup-failed`.
+    pub(crate) fn of(fact: &Fact, data: &IncidentData) -> Result<Draft, Field> {
+        let owner = &fact.owner;
+        let mut read = None;
+        let mut revision_lookup_failed = false;
+        let (mut sample, mut deployment, mut regarding) = (None, None, None);
+        match &data.about {
+            About::Sample {
+                pod_uid,
+                controller,
+            } => {
+                let controller = match controller {
+                    Some(c) => {
+                        let uid = c.uid.ok_or(Field::SampleControllerUid)?;
+                        if c.kind == ControllerKind::ReplicaSet {
+                            revision_lookup_failed = true;
+                            read = c.replica_set.as_ref().map(|name| RevisionRead {
+                                name: name.clone(),
+                                uid,
+                            });
+                        }
+                        Some(Controller {
+                            kind: c.kind,
+                            uid: uid.to_string(),
+                            revision: None,
+                        })
+                    }
+                    None => None,
+                };
+                // With no Pod name the sample is left out, and the check refuses it under
+                // `sample`, which `podsSeen` then requires.
+                if let Some(pod_name) = &fact.pod {
+                    sample = Some(Sample {
+                        pod_name: pod_name.clone(),
+                        pod_uid: pod_uid.ok_or(Field::SamplePodUid)?.to_string(),
+                        controller,
+                    });
+                }
+            }
+            About::Regarding { kind, name, uid } => {
+                regarding = Some(Regarding {
+                    kind: (*kind).ok_or(Field::RegardingKind)?.to_owned(),
+                    name: name.as_deref().ok_or(Field::RegardingName)?.to_owned(),
+                    uid: match uid {
+                        MaybeUid::Absent => None,
+                        MaybeUid::Uid(uid) => Some(uid.to_string()),
+                        MaybeUid::NotAUid => return Err(Field::RegardingUid),
+                    },
+                });
+            }
+            About::Deployment {
+                generation,
+                revision,
+            } => {
+                deployment = Some(Deployment {
+                    generation: *generation,
+                    revision: *revision,
+                });
+            }
+        }
+        let spec = Spec {
+            detection: fact.facts.detection,
+            fingerprint: fact.fingerprint.clone(),
+            first_seen: fact.first_seen,
+            settled_at: data.settled_at,
+            object: Object {
+                api_version: owner.api_version.clone(),
+                kind: owner.kind.clone(),
+                name: owner.name.clone(),
+                uid: (!owner.uid.is_empty()).then(|| owner.uid.clone()),
+            },
+            facts: Facts::of(&fact.facts),
+            sample,
+            deployment,
+            regarding,
+            missing: Missing {
+                owner_lookup_failed: data.owner_lookup_failed,
+                revision_lookup_failed,
+            },
+        };
+        Ok(Draft { spec, read })
+    }
+
+    /// The `spec` after the read: with `read`, the UID and the revision its answer gave, the
+    /// revision when the UID is the one the Pod's reference gives and the revision is in
+    /// 1..=2^53; `revision-lookup-failed` otherwise, never a refusal.
+    pub(crate) fn after_read(mut self, read: Option<(Uid, u64)>) -> Spec {
+        let expected = self.read.as_ref().map(|r| r.uid);
+        let revision = read
+            .filter(|(uid, revision)| {
+                Some(*uid) == expected && (1..=MAX_REVISION).contains(revision)
+            })
+            .map(|(_, revision)| revision);
+        if let (Some(revision), Some(controller)) = (
+            revision,
+            self.spec
+                .sample
+                .as_mut()
+                .and_then(|sample| sample.controller.as_mut()),
+        ) {
+            controller.revision = Some(revision);
+            self.spec.missing.revision_lookup_failed = false;
+        }
+        self.spec
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use regex::Regex;
@@ -607,7 +759,7 @@ mod tests {
     use super::*;
 
     const UID_POD: &str = "00000000-0000-4000-8000-000000000001";
-    const UID_RS: &str = "00000000-0000-4000-8000-000000000002";
+    pub(crate) const UID_RS: &str = "00000000-0000-4000-8000-000000000002";
     const UID_OWNER: &str = "00000000-0000-4000-8000-000000000003";
     const FP: &str = "5d0c2b7e9a1f4c38";
 
@@ -620,7 +772,7 @@ mod tests {
     }
 
     /// A crash loop of a Deployment's Pods, whose ReplicaSet's revision was read.
-    pub(super) fn pod_spec() -> Spec {
+    pub(crate) fn pod_spec() -> Spec {
         Spec {
             detection: Detection::CrashLoop,
             fingerprint: FP.into(),
@@ -656,7 +808,7 @@ mod tests {
     }
 
     /// A ReplicaSet that cannot create its Pods, from an Event about it.
-    fn event_spec() -> Spec {
+    pub(crate) fn event_spec() -> Spec {
         Spec {
             detection: Detection::PodCreate,
             facts: Facts {
@@ -678,7 +830,7 @@ mod tests {
     }
 
     /// A rollout that does not progress.
-    fn rollout_spec() -> Spec {
+    pub(crate) fn rollout_spec() -> Spec {
         Spec {
             detection: Detection::RolloutStalled,
             facts: Facts {
@@ -759,7 +911,7 @@ mod tests {
 
     // --- The schema file, shared with the chart -----------------------------------------------
 
-    fn schema() -> Value {
+    pub(crate) fn schema() -> Value {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/charts/kausa/files/incident-schema.json"
@@ -1621,7 +1773,7 @@ mod tests {
 
     /// Checks `value` against `schema`: only listed properties, the required ones present, types,
     /// enums, patterns, lengths in characters, ranges and sets.
-    fn conforms(value: &Value, schema: &Value, path: &str) {
+    pub(crate) fn conforms(value: &Value, schema: &Value, path: &str) {
         match schema["type"].as_str() {
             Some("object") => {
                 let object = value
@@ -1915,5 +2067,272 @@ mod tests {
         let longest = (bytes(longest_spec()), bytes(longest_pod_spec()));
         assert_eq!(longest, (1364, 1460));
         assert!(longest.0.max(longest.1) <= 1536);
+    }
+
+    // The `Draft`: the `spec` of a settled fact from what the fact keeps for it, before and after
+    // the read of its revision (docs/adr/0028-incident-resource-and-remediation-report.md,
+    // points 1 and 3).
+
+    fn uid(text: &str) -> Uid {
+        Uid::parse(text).expect("a UID")
+    }
+
+    /// The fact of `pod_spec`, as `State::fact` keeps it with incidents on.
+    pub(crate) fn sample_fact() -> Fact {
+        Fact {
+            facts: fact::Facts {
+                detection: Detection::CrashLoop,
+                container: Some("app".into()),
+                reason: Some("CrashLoopBackOff"),
+                exit_code: Some(1),
+                pods_seen: 3,
+                pods_seen_is_minimum: false,
+                pods_now: 4,
+                revision: None,
+            },
+            namespace: "shop".into(),
+            owner: crate::record::OwnerRef {
+                api_version: "apps/v1".into(),
+                kind: "Deployment".into(),
+                name: "web".into(),
+                uid: UID_OWNER.into(),
+            },
+            pod: Some("web-7d4b9c6f5d-abcde".into()),
+            fingerprint: FP.into(),
+            first_seen: at("2026-11-24T10:00:00.750Z"),
+            incident: Some(Box::new(IncidentData {
+                settled_at: at("2026-11-24T10:05:00Z"),
+                owner_lookup_failed: false,
+                about: About::Sample {
+                    pod_uid: Some(uid(UID_POD)),
+                    controller: Some(crate::report::Controller {
+                        kind: ControllerKind::ReplicaSet,
+                        uid: Some(uid(UID_RS)),
+                        replica_set: Some("web-7d4b9c6f5d".into()),
+                    }),
+                },
+            })),
+        }
+    }
+
+    /// A crash loop of a StatefulSet's Pod: a sample with a controller that is not a ReplicaSet.
+    pub(crate) fn stateful_fact() -> Fact {
+        let mut fact = sample_fact();
+        fact.owner.kind = "StatefulSet".into();
+        fact.owner.name = "db".into();
+        fact.pod = Some("db-0".into());
+        fact.fingerprint = "0a1b2c3d4e5f6a7b".into();
+        data(&mut fact).about = About::Sample {
+            pod_uid: Some(uid(UID_POD)),
+            controller: Some(crate::report::Controller {
+                kind: ControllerKind::StatefulSet,
+                uid: Some(uid(UID_OWNER)),
+                replica_set: None,
+            }),
+        };
+        fact
+    }
+
+    /// The fact of `event_spec`.
+    pub(crate) fn event_fact() -> Fact {
+        let mut fact = sample_fact();
+        fact.facts = fact::Facts {
+            detection: Detection::PodCreate,
+            container: None,
+            reason: Some("FailedCreate"),
+            exit_code: None,
+            pods_seen: 0,
+            pods_seen_is_minimum: false,
+            pods_now: 0,
+            revision: None,
+        };
+        fact.pod = None;
+        data(&mut fact).about = About::Regarding {
+            kind: Some("ReplicaSet"),
+            name: Some("web-7d4b9c6f5d".into()),
+            uid: MaybeUid::Uid(uid(UID_RS)),
+        };
+        fact
+    }
+
+    /// The fact of `rollout_spec`.
+    pub(crate) fn rollout_fact() -> Fact {
+        let mut fact = sample_fact();
+        fact.facts = fact::Facts {
+            detection: Detection::RolloutStalled,
+            container: None,
+            reason: Some("ProgressDeadlineExceeded"),
+            exit_code: None,
+            pods_seen: 0,
+            pods_seen_is_minimum: false,
+            pods_now: 2,
+            revision: Some(7),
+        };
+        fact.pod = None;
+        data(&mut fact).about = About::Deployment {
+            generation: Some(12),
+            revision: Some(7),
+        };
+        fact
+    }
+
+    pub(crate) fn data(fact: &mut Fact) -> &mut IncidentData {
+        fact.incident.as_deref_mut().expect("the data")
+    }
+
+    fn draft(fact: &Fact) -> Result<Draft, Field> {
+        Draft::of(fact, fact.incident.as_deref().expect("the data"))
+    }
+
+    #[test]
+    fn a_draft_is_the_spec_of_its_fact_and_reads_only_an_apps_v1_replica_set() {
+        // A sample run by a ReplicaSet: the read of its revision, by the name and the UID the
+        // Pod's reference gives; without it, `revision-lookup-failed`.
+        let sample = draft(&sample_fact()).expect("a draft");
+        assert_eq!(
+            sample.read,
+            Some(RevisionRead {
+                name: "web-7d4b9c6f5d".into(),
+                uid: uid(UID_RS),
+            })
+        );
+        let mut unread = pod_spec();
+        unread.missing.revision_lookup_failed = true;
+        if let Some(controller) = unread.sample.as_mut().and_then(|s| s.controller.as_mut()) {
+            controller.revision = None;
+        }
+        assert_eq!(sample.spec, unread);
+        assert_eq!(sample.spec.check(), Ok(()));
+        assert_eq!(sample.after_read(Some((uid(UID_RS), 7))), pod_spec());
+        // Each other fact needs no read, and its draft is its spec.
+        for (fact, spec) in [
+            (event_fact(), event_spec()),
+            (rollout_fact(), rollout_spec()),
+        ] {
+            let draft = draft(&fact).expect("a draft");
+            assert_eq!(draft.read, None);
+            assert_eq!(draft.spec, spec);
+        }
+        let stateful = draft(&stateful_fact()).expect("a draft");
+        assert_eq!(stateful.read, None);
+        assert!(!stateful.spec.missing.revision_lookup_failed);
+        assert_eq!(stateful.spec.check(), Ok(()));
+        // A ReplicaSet the lookup would not read (not `apps/v1`, or a name it refuses): no read,
+        // and `revision-lookup-failed`, which the check accepts.
+        let mut other = sample_fact();
+        if let About::Sample {
+            controller: Some(controller),
+            ..
+        } = &mut data(&mut other).about
+        {
+            controller.replica_set = None;
+        }
+        let other = draft(&other).expect("a draft");
+        assert_eq!(other.read, None);
+        assert!(other.spec.missing.revision_lookup_failed);
+        assert_eq!(other.clone().after_read(None), other.spec);
+        assert_eq!(other.spec.check(), Ok(()));
+    }
+
+    #[test]
+    fn a_read_gives_the_revision_only_for_the_pod_s_replica_set_and_in_range() {
+        let failed = |read: Option<(Uid, u64)>| {
+            let spec = draft(&sample_fact()).expect("a draft").after_read(read);
+            let controller = spec
+                .sample
+                .as_ref()
+                .and_then(|s| s.controller.as_ref())
+                .expect("a controller");
+            assert_eq!(
+                controller.revision.is_none(),
+                spec.missing.revision_lookup_failed,
+                "{read:?}"
+            );
+            assert_eq!(spec.check(), Ok(()), "{read:?}");
+            spec.missing.revision_lookup_failed
+        };
+        // Never a refusal: a failed, foreign or out-of-range read is `revision-lookup-failed`.
+        assert!(failed(None));
+        assert!(failed(Some((uid(UID_POD), 7))));
+        assert!(failed(Some((uid(UID_RS), 0))));
+        assert!(failed(Some((uid(UID_RS), MAX_REVISION + 1))));
+        assert!(!failed(Some((uid(UID_RS), 1))));
+        assert!(!failed(Some((uid(UID_RS), MAX_REVISION))));
+    }
+
+    #[test]
+    fn an_owner_without_a_uid_is_written_with_no_uid() {
+        // An Event can name an object with no UID; the owner then has an empty one.
+        let mut fact = event_fact();
+        fact.owner.uid = String::new();
+        let checked = draft(&fact)
+            .expect("a draft")
+            .spec
+            .checked()
+            .expect("a spec that fits");
+        assert!(checked.spec["object"].get("uid").is_none(), "{checked:?}");
+        assert!(!checked.spec.to_string().contains("\"uid\":\"\""));
+        let mut fact = sample_fact();
+        fact.owner.uid = String::new();
+        let spec = draft(&fact).expect("a draft").spec;
+        assert_eq!(spec.object.uid, None);
+    }
+
+    #[test]
+    fn a_mark_kept_in_the_data_is_the_refusal_of_its_field() {
+        let mut refusals: Vec<(Field, Fact)> = Vec::new();
+        let mut pod_uid = sample_fact();
+        if let About::Sample { pod_uid, .. } = &mut data(&mut pod_uid).about {
+            *pod_uid = None;
+        }
+        refusals.push((Field::SamplePodUid, pod_uid));
+        let mut controller_uid = sample_fact();
+        if let About::Sample {
+            controller: Some(controller),
+            ..
+        } = &mut data(&mut controller_uid).about
+        {
+            controller.uid = None;
+        }
+        refusals.push((Field::SampleControllerUid, controller_uid));
+        for (field, about) in [
+            (
+                Field::RegardingKind,
+                About::Regarding {
+                    kind: None,
+                    name: Some("web".into()),
+                    uid: MaybeUid::Absent,
+                },
+            ),
+            (
+                Field::RegardingName,
+                About::Regarding {
+                    kind: Some("Job"),
+                    name: None,
+                    uid: MaybeUid::Absent,
+                },
+            ),
+            (
+                Field::RegardingUid,
+                About::Regarding {
+                    kind: Some("Job"),
+                    name: Some("web".into()),
+                    uid: MaybeUid::NotAUid,
+                },
+            ),
+        ] {
+            let mut fact = event_fact();
+            data(&mut fact).about = about;
+            refusals.push((field, fact));
+        }
+        for (field, fact) in refusals {
+            assert_eq!(draft(&fact).map(|_| ()), Err(field), "{field:?}");
+        }
+        // A sample that does not fit the schema is refused by the check, before any read.
+        let mut long = sample_fact();
+        long.pod = Some("a".repeat(MAX_NAME_LEN + 1));
+        let long = draft(&long).expect("a draft");
+        assert!(long.read.is_some());
+        assert_eq!(long.spec.check(), Err(Field::SamplePodName));
     }
 }
