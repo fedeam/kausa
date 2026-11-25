@@ -430,16 +430,15 @@ timeout of 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`); a failed one is answered f
 seconds (`OWNER_ERROR_TTL`, `:83`). An answer whose `metadata.uid` or revision annotation cannot be
 read is kept as a failed read for the answer's 600 seconds, not the error's 30: the 30 seconds are
 for a request that failed. A ReplicaSet's revision is read in one strict spelling (digits, no sign,
-no leading zero, 1 to 2^53; `parse_revision`, `src/record.rs:810`); a Deployment's, for `D014`, is
-the fact statement's parse (`src/record.rs:871-875`, any spelling Rust's `u64` parse takes, such as
+no leading zero, 1 to 2^53; `parse_revision`, `src/record.rs:824`); a Deployment's, for `D014`, is
+the fact statement's parse (`src/record.rs:885-889`, any spelling Rust's `u64` parse takes, such as
 `+7` or `007`), then bounded 1 to 2^53 by the check. The slot compares the UID the entry's `get`
 returned with the UID in the Pod's `ownerReference`, and gives `revision-lookup-failed` when they
-differ. The slot can
-reach the lookup as the code stands: the term's lookup (`src/run.rs:1028`) is created before the
-slot's future, which is assigned at `:1071` (`reporter.report(fact, &lookup)`; `reporting` is
-declared at `:1060`), and outlives it; it is passed to `Reporter::report` as an argument, since the
-reporter outlives terms; and its cache is a `RefCell` (`:2084`) never borrowed across an `await`,
-so the slot and `on_pod` share it. So:
+differ. The slot can reach the lookup as the code stands: the term's lookup (`src/run.rs:1028`) is
+created before the slot's future, which is assigned at `:1071` (`reporter.report(fact, &lookup)`;
+`reporting` is declared at `:1060`), and outlives it; it is passed to `Reporter::report` as an
+argument, since the reporter outlives terms; and its cache is a `RefCell` (`:2084`) never borrowed
+across an `await`, so the slot and `on_pod` share it. So:
 
 - **Fresh at the read, within 600 seconds, and of the same ReplicaSet.** The owner cache keys an
   entry by hop, namespace and name, not by UID; the UID kept in the entry makes a ReplicaSet deleted
@@ -1109,12 +1108,12 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   it owns would not do, since kausa follows only a ReplicaSet's and a Job's controller
   (`src/owner.rs:22-28`).
 - **Which Pod an Incident describes while two records of one name are held,** the old one of a Pod
-  deleted in a watch gap beside its replacement until the relist ends: the sample's Pod is found
-  by UID, but `spec.facts.podsNow` counts both records (`pods_of`, `src/run.rs`), and the owner of
-  an Event about a Pod, which becomes `spec.object`, is looked up by name and can come from the old
-  record (`src/incident.rs:88-93` and `:194`, older than this ADR, as the fact statement reads
-  them). Test: in kind, delete a crashing Pod during a watch gap and compare its Incident with the
-  Pods.
+  deleted in a watch gap beside its replacement until the relist ends: the sample's Pod is found by
+  UID, but `spec.facts.podsNow` counts both records (`pods_of`, `src/run.rs`), and the owner of an
+  Event about a Pod, which becomes `spec.object`, is looked up by name and can come from the old
+  record (`src/incident.rs:92` and `:95` for the map by name, and `:199-203` for the Pod branch,
+  older than this ADR, as the fact statement reads them). Test: in kind, delete a crashing Pod
+  during a watch gap and compare its Incident with the Pods.
 - **Whether the API server can store an Incident and still give kausa no valid answer,** point 1's
   one exception to "every Incident it created in the last 6 hours is still in the table": an answer
   lost or cut after the object was stored. Only kausa's side is tested, against a fake server.
