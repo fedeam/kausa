@@ -838,12 +838,42 @@ pub(crate) mod tests {
         assert_eq!(incidents.table().len(), 1);
     }
 
+    /// A refusal whose body also carries the created UID where kausa reads it: only its status
+    /// tells it from an accepted create.
+    fn refused_with_a_uid(code: u16) -> Answer {
+        reply(
+            code,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Status",
+                "metadata": {"uid": UID_CREATED},
+                "status": "Failure",
+                "message": "an invented message",
+                "reason": "an invented reason",
+                "code": code,
+            }),
+        )
+    }
+
     #[test]
     fn a_failed_create_is_counted_keeps_nothing_and_marks_nothing() {
         let unbounded = Term::unbounded();
+        // The same body, accepted, is a create: each refusal below fails by its status alone.
+        let (url, _) = api_server(|_| refused_with_a_uid(201));
+        let rt = runtime();
+        let incidents = rt.block_on(async { started(&url) });
+        create(
+            &rt,
+            &incidents,
+            &sample_fact(),
+            &Revisions::of(UID_RS, 7),
+            &unbounded,
+        );
+        assert_eq!(incidents.table().len(), 1);
+        write_error(refused_with_a_uid(409), &unbounded, 1);
+        write_error(refused_with_a_uid(500), &unbounded, 1);
+        write_error(refused_with_a_uid(403), &unbounded, 1);
         write_error(failure(409), &unbounded, 1);
-        write_error(failure(500), &unbounded, 1);
-        write_error(failure(403), &unbounded, 1);
         // Accepted, with no UID, a UID that is not one, or an answer over the cap.
         write_error(reply(201, json!({"metadata": {}})), &unbounded, 1);
         write_error(
