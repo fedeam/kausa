@@ -272,6 +272,37 @@ fi
 # A bare helm lint is not checked: lint renders in lint mode, where fail is logged as [INFO] and
 # does not fail the lint (Helm 3.16.1, checked on 2026-10-28). helm template refuses (below).
 
+# --- The default renders ------------------------------------------------------------------------
+
+# With only the scope set (and, namespaced, one namespace), each scope renders byte for byte as
+# before incidents could be turned on (docs/adr/0028-incident-resource-and-remediation-report.md):
+# a feature off by default adds nothing to them. The files were rendered by the chart before it,
+# with the chart's version and appVersion replaced by 0.0.0-golden, so that a release does not
+# change them; a change to the default render is made in the same change as the file's.
+CHART_VERSION=$(sed -n 's/^version: //p' "$CHART/Chart.yaml")
+APP_VERSION=$(sed -n 's/^appVersion: //p' "$CHART/Chart.yaml")
+for scope in cluster namespaced; do
+  out="$WORK/default-$scope"
+  golden="$ROOT/tests/golden/chart-default-$scope.yaml"
+  if [ "$scope" = cluster ]; then
+    scope_args=(--set rbac.scope=cluster)
+  else
+    scope_args=(--set rbac.scope=namespaced --set 'rbac.namespaces={team-a}')
+  fi
+  if render "$out" "$RELEASE" "$CHART" "${scope_args[@]}"; then
+    sed -e "s/${CHART_VERSION//./\\.}/0.0.0-golden/g" \
+      -e "s/${APP_VERSION//./\\.}/0.0.0-golden/g" "$out" >"$out.golden"
+    if cmp -s "$golden" "$out.golden"; then
+      ok "$scope: the default render is tests/golden/chart-default-$scope.yaml"
+    else
+      fail "$scope: the default render differs from tests/golden/chart-default-$scope.yaml:" \
+        "$(diff "$golden" "$out.golden" 2>&1 | head -20)"
+    fi
+  else
+    fail "$scope: the default render fails: $(cat "$out.err")"
+  fi
+done
+
 # --- Cluster scope ------------------------------------------------------------------------------
 
 # check_cluster NAME LOGS WRITES ARGS...: a cluster-scope render with v0.1's objects and rules.
