@@ -99,6 +99,8 @@ pub(crate) const RULE_MISSING_OWNER: &str = "!('owner-lookup-failed' in self.mis
      has(self.sample) || self.detection in ['D008', 'D011']";
 pub(crate) const RULE_OWNER_LOOKUP_OBJECT: &str = "!('owner-lookup-failed' in self.missing && \
      self.detection in ['D008', 'D011']) || (has(self.regarding) && \
+     ((self.object.kind == 'Job' && self.object.apiVersion == 'batch/v1') || \
+     (self.object.kind == 'ReplicaSet' && self.object.apiVersion == 'apps/v1')) && \
      self.object.kind == self.regarding.kind && \
      self.object.name == self.regarding.name && has(self.object.uid) == has(self.regarding.uid) && \
      (!has(self.object.uid) || self.object.uid == self.regarding.uid))";
@@ -487,7 +489,8 @@ impl Spec {
             Field::Regarding,
         )?;
         // `owner-lookup-failed` only where a lookup exists: the sample Pod's, or that of an Event's
-        // Job or ReplicaSet, which then names `object` as `regarding` does (point 3).
+        // Job or ReplicaSet, which then names `object` as `regarding` does, and is a Job of
+        // `batch/v1` or a ReplicaSet of `apps/v1`, the two kurita reads (point 3).
         let event_lookup = matches!(self.detection, Detection::JobFailed | Detection::PodCreate);
         let owner_failed = self.missing.owner_lookup_failed;
         ensure(
@@ -497,7 +500,10 @@ impl Spec {
         ensure(
             !(owner_failed && event_lookup)
                 || self.regarding.as_ref().is_some_and(|regarding| {
-                    regarding.kind == object.kind
+                    matches!(
+                        (object.kind.as_str(), object.api_version.as_str()),
+                        ("Job", "batch/v1") | ("ReplicaSet", "apps/v1")
+                    ) && regarding.kind == object.kind
                         && regarding.name == object.name
                         && regarding.uid == object.uid
                 }),
@@ -1427,8 +1433,20 @@ mod tests {
             spec.missing.owner_lookup_failed = true;
             assert_eq!(spec.check(), Err(Field::Missing), "{detection:?}");
         }
-        // For D008 and D011, `object` is `regarding`'s object: same kind, name and UID.
-        let changes: [fn(&mut Spec); 7] = [
+        // For D008 and D011, `object` is `regarding`'s object: same kind, name and UID, a Job of
+        // `batch/v1` or a ReplicaSet of `apps/v1`.
+        let changes: [fn(&mut Spec); 10] = [
+            |s| {
+                s.object.kind = "StatefulSet".into();
+                s.regarding.as_mut().expect("r").kind = "StatefulSet".into();
+            },
+            |s| s.object.api_version = "example.com/v1".into(),
+            |s| {
+                s.detection = Detection::JobFailed;
+                s.facts.reason = Some("BackoffLimitExceeded");
+                s.object.kind = "Job".into();
+                s.regarding.as_mut().expect("r").kind = "Job".into();
+            },
             |s| s.object = pod_spec().object,
             |s| s.object.name = "web".into(),
             |s| s.object.kind = "Deployment".into(),

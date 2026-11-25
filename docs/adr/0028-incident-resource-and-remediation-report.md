@@ -267,7 +267,8 @@ spec:                       # required; CEL: self == oldSelf
   missing: at most 2 of owner-lookup-failed | revision-lookup-failed, a set
                             # CEL: owner-lookup-failed only with sample or for D008 and D011,
                             # and for those two only with a regarding whose kind, name and uid
-                            # (both absent or equal) are object's
+                            # (both absent or equal) are object's, and an object that is a Job
+                            # of batch/v1 or a ReplicaSet of apps/v1
 ```
 
 `Time` is the pattern `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$` with at most 20
@@ -366,7 +367,9 @@ Each entry of the fact queue gains one optional pointer, filled only with incide
   Pod's entry, `src/run.rs:1399-1401`); for an Event incident about a Job or a ReplicaSet (`D008`,
   `D011`), the lookup of the Event's object (`src/run.rs:1540-1548`), whose failure an Event's entry
   does not keep today (`:1410`, only logged): the entry gains the same flag, kept with incidents off
-  too, and then `object` and `regarding` name the same Job or ReplicaSet. Both are taken in the
+  too, and then `object` and `regarding` name the same Job or ReplicaSet: same kind, name and UID,
+  and an `object` that is a Job of `batch/v1` or a ReplicaSet of `apps/v1`, the two kurita's parse
+  admits (a CEL rule on `spec` and the check say it in these words). Both are taken in the
   tick. `revision-lookup-failed`: the read of the revision in the fact slot found none, because its
   `get` failed or gave no answer within 5 seconds, because it answered for a ReplicaSet with another
   UID than the one in the Pod's `ownerReference`, or because the annotation is absent or not a whole

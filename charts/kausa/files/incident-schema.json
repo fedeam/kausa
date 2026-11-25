@@ -47,8 +47,8 @@
           "message": "missing names owner-lookup-failed only for an incident about a Pod, D008 or D011"
         },
         {
-          "rule": "!('owner-lookup-failed' in self.missing && self.detection in ['D008', 'D011']) || (has(self.regarding) && self.object.kind == self.regarding.kind && self.object.name == self.regarding.name && has(self.object.uid) == has(self.regarding.uid) && (!has(self.object.uid) || self.object.uid == self.regarding.uid))",
-          "message": "a D008 or D011 with owner-lookup-failed names in object the object of regarding"
+          "rule": "!('owner-lookup-failed' in self.missing && self.detection in ['D008', 'D011']) || (has(self.regarding) && ((self.object.kind == 'Job' && self.object.apiVersion == 'batch/v1') || (self.object.kind == 'ReplicaSet' && self.object.apiVersion == 'apps/v1')) && self.object.kind == self.regarding.kind && self.object.name == self.regarding.name && has(self.object.uid) == has(self.regarding.uid) && (!has(self.object.uid) || self.object.uid == self.regarding.uid))",
+          "message": "a D008 or D011 with owner-lookup-failed names in object the object of regarding, a Job of batch/v1 or a ReplicaSet of apps/v1"
         }
       ],
       "properties": {
