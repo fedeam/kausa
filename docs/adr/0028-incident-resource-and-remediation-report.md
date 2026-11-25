@@ -1132,11 +1132,22 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   a long reason, then read kausa's log line.
 - **That `lead` sweeps the Incidents again once the hour has passed, and how a create answered with
   a success other than `201` is taken.** The hourly sweep rests on the pure test of `sweep_due`
-  (`src/run.rs:1941`); no clock is injected into `lead`, so no test drives it past the hour. And
+  (`src/run.rs:1964`, tested near `src/run.rs:3103-3121`); no clock is injected into `lead`, so no
+  test drives it past the hour. And
   kausa takes any success answer that carries a UID as a create, a `200` or `202` included, since
   the client gives no status for a success (`send`, `src/incidents.rs`). Test: in kind, a kausa
   with incidents on, left running past the hour, then its log and its metrics; and a fake server
   that answers a create with `200` and a UID.
+- **What the API server does with a `metadata` label and a `spec` change sent in a `/status`
+  patch** of an Incident. The kind case (`tests/e2e/run.sh`) sends both, as the cluster's admin,
+  and expects neither to change; that the status subresource keeps everything but `status`, labels
+  included, is taken from the documentation of CustomResourceDefinitions, a hypothesis that nobody
+  has seen hold for this schema. Test: run that case in kind.
+- **That the restart case tells the new process's Incidents from old ones,** as it is written: it
+  lists the `metadata.uid` of every Incident once kausa is scaled to 0 and no Pod is left, and takes
+  every Incident named `kausa.*` whose UID is not in that list as created by the new process. It
+  assumes that the API server gives each create a UID it never gave before, and that no create of
+  the old process lands after the list. Nobody has seen it run. Test: run that case in kind.
 - **Whether the Incident should take as its sample the first signal of the group whose values fit,**
   and refuse only when none fits, so that a signal a writer in N places first does not leave a
   genuine incident without an Incident (the trust statement). Open for the implementation; the
