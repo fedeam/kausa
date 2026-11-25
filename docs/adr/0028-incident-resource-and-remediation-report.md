@@ -201,12 +201,12 @@ version `v1alpha1`, kind `Incident`:
 - **While the table holds 500 entries younger than 6 hours, kausa creates no Incident.** The
   occurrence is counted (this ADR proposes `kausa_incidents_refused_total`, with a label `reason` of
   three values, `table-full` for this stop, `schema` for point 2's rule and `starting` for a create
-  that arrives before the sweep at start ended (point 4); the reference page fixes the names) and
-  logged as `incident refused` at most once an hour for each reason; the incident's Events, its
-  `incident` log line and its `detected` message are not affected, and its fingerprint is not
-  marked, so a later occurrence creates one once there is room. So a process creates at most 500
-  Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table, and
-  the table holds at most 500. The one exception is a create the server stored but kausa got no
+  that arrives before any sweep of this process has ended (point 4); the reference page fixes the
+  names) and logged as `incident refused` at most once an hour for each reason; the incident's
+  Events, its `incident` log line and its `detected` message are not affected, and its fingerprint
+  is not marked, so a later occurrence creates one once there is room. So a process creates at most
+  500 Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table,
+  and the table holds at most 500. The one exception is a create the server stored but kausa got no
   valid answer for: no answer within the 10 seconds, an answer over 64 KiB, or one with no UID.
   kausa then inserts no entry and marks no fingerprint, and that create does not count toward the
   500, so a later occurrence of the incident creates again. Such creates are bounded only by the
