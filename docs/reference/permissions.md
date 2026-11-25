@@ -26,14 +26,14 @@ Incident that only kausa writes, and report by webhook what kurita proposed for 
 default](../adr/0028-incident-resource-and-remediation-report.md), point 5. The kind test
 (`tests/e2e/run.sh`) checks the installed role against this table with `kubectl auth can-i`, both
 what it allows and a list of what it must refuse, in each scope; both scopes passed on 2026-10-28 on
-the maintainer's machine. Its cases for the `incidents` row, with incidents on and off, had never
-run as of 2026-11-25. As of 2026-10-26, `kausa run` uses every row: the Pod and event watches, the
-metadata `get` of ReplicaSets and Jobs, `pods/log` for the detections that read logs, and `create`
-and `patch` on Events for its `Detected` Events (with or without `--endpoint`) and its explanations
-(with `--endpoint`), unless `--no-events`. On 2026-10-26 it ran against a live cluster through a
-`kubectl proxy` that let only these reads through, plus `POST` and `PATCH` on Events in one test
-namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a local
-model](../how-to/try-with-a-local-model.md)).
+the maintainer's machine. Its cases for the `incidents` row, with incidents on and off, passed in
+both scopes in CI on 2026-11-25. As of 2026-10-26, `kausa run` uses every row: the Pod and event
+watches, the metadata `get` of ReplicaSets and Jobs, `pods/log` for the detections that read logs,
+and `create` and `patch` on Events for its `Detected` Events (with or without `--endpoint`) and its
+explanations (with `--endpoint`), unless `--no-events`. On 2026-10-26 it ran against a live cluster
+through a `kubectl proxy` that let only these reads through, plus `POST` and `PATCH` on Events in
+one test namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a
+local model](../how-to/try-with-a-local-model.md)).
 
 Notifications (`--notify-url-file`, the chart's `notifications.enabled`; since v0.3.0)
 add no row and change no row, in either scope, and no longer need an endpoint: a webhook `POST` is not a call to the Kubernetes
@@ -180,7 +180,7 @@ What the kind test asks `kubectl auth can-i`, as kausa's service account
   under a new name and under the Lease's own, and expects it refused.
 - **The readers**, in both scopes: service accounts bound to `view` and to `edit` in a watched
   namespace can `list` Explanations and cannot `create` or `delete` them.
-- **The Incidents**, in both scopes (cases written, never run as of 2026-11-25): with incidents
+- **The Incidents**, in both scopes (passed in CI on 2026-11-25): with incidents
   off, every verb on `incidents`, `--subresource=status` included, on `remediations`, on
   CustomResourceDefinitions, Secrets and ConfigMaps `no`, and neither the CustomResourceDefinition
   nor the reader role exists. With incidents on, `create`, `list` and `delete` on `incidents` `yes`,

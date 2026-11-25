@@ -100,37 +100,36 @@ holding only what a fact statement may hold and the typed values of its schema, 
 ones ([0028. Publish each incident as an immutable Incident that only kausa writes, and report by
 webhook what kurita proposed for it, both off by
 default](docs/adr/0028-incident-resource-and-remediation-report.md), `proposed`; [Incident
-resource](docs/reference/incident-resource.md)); its kind cases had never run as of 2026-11-25. With
-`--notify-url-file` (off by default; the chart's `notifications.enabled`; since v0.3.0), it also
-posts each settled incident (`detected`, since the release after v0.6.3, with or without
-`--endpoint`) and each new explanation to one webhook, with the real names of the namespace and the top-level owner ([0015.
-Post each new explanation to one optional webhook, as JSON, Slack or
-Telegram](docs/adr/0015-notifications.md)). Each of these is implemented: the redaction, the prompt's validation, the
-budget, the Event writes and the metrics responder have unit tests, and the permissions are
-checked by the kind test (`kubectl auth can-i`, what is allowed and what must be refused) in both
-`rbac.scope`s: every namespace with `cluster`, or the listed namespaces only with `namespaced`
-([0013. Offer a namespaced install mode: one watch pair and one Role per listed namespace, and
-nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)). Since v0.4.0, kausa also
-watches Deployments, unless `--no-rollouts` (the chart's `rollouts:
-false`), to explain a rollout past its progress deadline (`D014`) ([0018. Explain a Deployment past
-its progress deadline (`D014`) from a Deployment watch that is on by default, and add nothing for
-StatefulSets or DaemonSets](docs/adr/0018-stuck-rollouts.md)). Also since v0.4.0, the chart's
-`replicaCount: 2` (off by default) runs a second replica as a standby: both run `kausa run
---leader-lease <release namespace>/<full name>-leader`, and only the one that holds that Lease
-watches, explains and writes; the other reads the Lease every 5 s and takes it over if the leader
-stops renewing it ([0019. Offer an optional standby replica that takes over through a
+resource](docs/reference/incident-resource.md)); its kind cases passed in both scopes in CI on
+2026-11-25. With `--notify-url-file` (off by default; the chart's `notifications.enabled`; since
+v0.3.0), it also posts each settled incident (`detected`, since the release after v0.6.3, with or
+without `--endpoint`) and each new explanation to one webhook, with the real names of the namespace
+and the top-level owner ([0015. Post each new explanation to one optional webhook, as JSON, Slack or
+Telegram](docs/adr/0015-notifications.md)). Each of these is implemented: the redaction, the
+prompt's validation, the budget, the Event writes and the metrics responder have unit tests, and the
+permissions are checked by the kind test (`kubectl auth can-i`, what is allowed and what must be
+refused) in both `rbac.scope`s: every namespace with `cluster`, or the listed namespaces only with
+`namespaced` ([0013. Offer a namespaced install mode: one watch pair and one Role per listed
+namespace, and nothing cluster-wide](docs/adr/0013-namespaced-install-mode.md)). Since v0.4.0, kausa
+also watches Deployments, unless `--no-rollouts` (the chart's `rollouts: false`), to explain a
+rollout past its progress deadline (`D014`) ([0018. Explain a Deployment past its progress deadline
+(`D014`) from a Deployment watch that is on by default, and add nothing for StatefulSets or
+DaemonSets](docs/adr/0018-stuck-rollouts.md)). Also since v0.4.0, the chart's `replicaCount: 2` (off
+by default) runs a second replica as a standby: both run
+`kausa run --leader-lease <release namespace>/<full name>-leader`, and only the one that holds that
+Lease watches, explains and writes; the other reads the Lease every 5 s and takes it over if the
+leader stops renewing it ([0019. Offer an optional standby replica that takes over through a
 chart-created Lease, elected by kausa's own code](docs/adr/0019-high-availability.md)). A hosted
 provider over HTTPS (the distroless CA bundle with rustls) was tried on 2026-10-30. Starts were
 measured in kind with up to 10,000 Pods ([Thousands of
 Pods](docs/research/2026-10-28-thousands-of-pods.md), [List
-pages](docs/research/2026-11-02-list-pages.md)). Since v0.5.0,
-`kausa check-endpoint`, which the chart runs as its `helm test`, sends one synthetic request to
-the endpoint on demand, and `kausa run` holds its calls behind a breaker while the endpoint fails
-([0020. Check the model endpoint on demand with `kausa check-endpoint` and `helm test`, and hold
-calls behind a breaker while it fails](docs/adr/0020-check-the-endpoint.md)); the breaker and the
-test Pod are checked by unit tests and the renders, and the kind test that exercises them runs in
-CI. Not tested yet: long runs
-([Architecture](docs/explanation/architecture.md)).
+pages](docs/research/2026-11-02-list-pages.md)). Since v0.5.0, `kausa check-endpoint`, which the
+chart runs as its `helm test`, sends one synthetic request to the endpoint on demand, and
+`kausa run` holds its calls behind a breaker while the endpoint fails ([0020. Check the model
+endpoint on demand with `kausa check-endpoint` and `helm test`, and hold calls behind a breaker
+while it fails](docs/adr/0020-check-the-endpoint.md)); the breaker and the test Pod are checked by
+unit tests and the renders, and the kind test that exercises them runs in CI. Not tested yet: long
+runs ([Architecture](docs/explanation/architecture.md)).
 
 **Who controls kausa's inputs.** Anyone who can create or change a workload in a watched namespace
 controls event messages, log lines, container and volume names, image references, exit codes,

@@ -111,8 +111,8 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    may read it, the sweep at start with 500 seeded Incidents, and that `incidents.enabled=false`
    leaves the defaults' matrix ([0028. Publish each incident as an immutable Incident that only
    kausa writes, and report by webhook what kurita proposed for it, both off by
-   default](../adr/0028-incident-resource-and-remediation-report.md)). As of 2026-11-25 these
-   Incident cases had never run.
+   default](../adr/0028-incident-resource-and-remediation-report.md)). These Incident cases
+   passed in both scopes in CI on 2026-11-25.
    `KAUSA_E2E_REPLICAS` picks the chart's `replicaCount`: `1` when unset (the value stays unset,
    and the test checks that nothing of the standby is installed), or `2`, with
    `KAUSA_E2E_SCOPE=namespaced` only: a leader and a standby behind the Lease `kausa-leader`,

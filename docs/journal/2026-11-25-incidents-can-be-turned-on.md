@@ -55,7 +55,13 @@ the binary and in the chart, without changing anything with the defaults, and do
   - invariant 5 names what the sweep does with the listed namespace, name and `continue` token;
   - 0028's "Not verified" cites `sweep_due` at its line and lists two assumptions of the kind
     cases; the front page links the Incident resource; long lines are rewrapped.
-  The image build, `promtool` and the kind cases still did not run.
+  The image build, `promtool` and the kind cases did not run in this session.
+- **Then the pull request's CI ran them** at `d048b40`, the round's last commit, and every job
+  passed: the checks on both architectures (the `Dockerfile`'s `ci` target, with the three
+  `promtool` commands), the image on both, the fuzz job, the kind test in both scopes and with the
+  standby, and the upgrade test in both scopes. Each Incident case of point 8 printed its result
+  line in both scopes. [0028](../adr/0028-incident-resource-and-remediation-report.md)'s "Not
+  verified" says what they showed.
 
 ## Decisions
 

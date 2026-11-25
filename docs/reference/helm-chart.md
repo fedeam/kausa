@@ -42,8 +42,9 @@ test` in CI. In `main` for the release after v0.6.3 (status as of 2026-11-25), t
 values, the Incident CustomResourceDefinition and its reader role ([0028. Publish each incident as
 an immutable Incident that only kausa writes, and report by webhook what kurita proposed for it,
 both off by default](../adr/0028-incident-resource-and-remediation-report.md), `proposed`), checked
-by the renders; the kind test's cases for them have not run. With the defaults the chart renders
-byte for byte what it rendered before them, in each scope ([The Incidents](#the-incidents)).
+by the renders; the kind test's cases for them passed in both scopes in CI on 2026-11-25. With the
+defaults the chart renders byte for byte what it rendered before them, in each scope ([The
+Incidents](#the-incidents)).
 
 ## Objects
 

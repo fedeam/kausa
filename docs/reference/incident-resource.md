@@ -11,8 +11,8 @@ off by default](../adr/0028-incident-resource-and-remediation-report.md), is `pr
 describes its points 1 to 5 as the code implements them, and nothing of its remediation report
 (point 6), which is not implemented: kausa reads no `remediations` and has no flag or chart value
 for them. The kind test (`tests/e2e/run.sh`) has cases that install the resource with
-`incidents.enabled=true` in both `rbac.scope`s and read the Incidents back; as of 2026-11-25 they
-have never run.
+`incidents.enabled=true` in both `rbac.scope`s and read the Incidents back; they passed in both
+scopes in CI on 2026-11-25.
 
 ## The CustomResourceDefinition
 

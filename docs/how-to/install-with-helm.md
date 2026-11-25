@@ -37,7 +37,7 @@ fact statement in its own `Detected` Event and webhook message, with or without 
 the model's text as a
 model's](../adr/0027-fact-statement-for-the-detections.md)), and can keep each settled incident's
 facts in an Incident object (`incidents.enabled`, off by default; [Keep the
-Incidents](#keep-the-incidents)), whose kind cases had never run as of 2026-11-25.
+Incidents](#keep-the-incidents)), whose kind cases passed in both scopes in CI on 2026-11-25.
 
 ## Before you start
 
@@ -357,7 +357,8 @@ namespace for each settled incident, with its facts and redacted samples, and de
 resource](../reference/incident-resource.md); [0028. Publish each incident as an immutable Incident
 that only kausa writes, and report by webhook what kurita proposed for it, both off by
 default](../adr/0028-incident-resource-and-remediation-report.md), `proposed`). Status as of
-2026-11-25: in `main` for the release after v0.6.3, not released, and its kind cases had never run.
+2026-11-25: in `main` for the release after v0.6.3, not released, and its kind cases passed in both
+scopes in CI.
 
 1. **Turn it on**, with or without an endpoint, and without `dryRun` (with `dryRun`, the chart
    renders none of it):
