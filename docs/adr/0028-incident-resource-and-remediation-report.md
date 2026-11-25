@@ -258,12 +258,16 @@ spec:                       # required; CEL: self == oldSelf
                                 # ownerReference, or found the annotation absent or not a
                                 # whole number in 1..2^53); CEL: only with kind ReplicaSet
   deployment: {generation: int64 >= 1, revision: int64 1..2^53}   # CEL: exactly for D014
-  regarding:                # an Event incident about something other than a Pod
+  regarding:                # an Event incident about something other than a Pod; CEL: never
+                            # with sample
     kind: Job | ReplicaSet | StatefulSet | DaemonSet | CronJob | PersistentVolumeClaim
           | HorizontalPodAutoscaler
     name: Name
     uid: UID                # optional
   missing: at most 2 of owner-lookup-failed | revision-lookup-failed, a set
+                            # CEL: owner-lookup-failed only with sample or for D008 and D011,
+                            # and for those two only with a regarding whose kind, name and uid
+                            # (both absent or equal) are object's
 ```
 
 `Time` is the pattern `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$` with at most 20

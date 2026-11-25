@@ -94,6 +94,14 @@ pub(crate) const RULE_DEPLOYMENT: &str = "has(self.deployment) == (self.detectio
 pub(crate) const RULE_MISSING_REVISION: &str = "('revision-lookup-failed' in self.missing) == \
      (has(self.sample) && has(self.sample.controller) && \
      self.sample.controller.kind == 'ReplicaSet' && !has(self.sample.controller.revision))";
+pub(crate) const RULE_SAMPLE_OR_REGARDING: &str = "!(has(self.sample) && has(self.regarding))";
+pub(crate) const RULE_MISSING_OWNER: &str = "!('owner-lookup-failed' in self.missing) || \
+     has(self.sample) || self.detection in ['D008', 'D011']";
+pub(crate) const RULE_OWNER_LOOKUP_OBJECT: &str = "!('owner-lookup-failed' in self.missing && \
+     self.detection in ['D008', 'D011']) || (has(self.regarding) && \
+     self.object.kind == self.regarding.kind && \
+     self.object.name == self.regarding.name && has(self.object.uid) == has(self.regarding.uid) && \
+     (!has(self.object.uid) || self.object.uid == self.regarding.uid))";
 /// On `facts`:
 pub(crate) const RULE_MINIMUM: &str = "self.podsSeenIsMinimum == (self.podsSeen == 100)";
 /// On `sample.controller`:
@@ -127,11 +135,13 @@ pub(crate) enum Field {
     RegardingKind,
     RegardingName,
     RegardingUid,
+    Regarding,
+    Object,
     Missing,
 }
 
 impl Field {
-    pub(crate) const ALL: [Field; 25] = [
+    pub(crate) const ALL: [Field; 27] = [
         Field::Name,
         Field::Fingerprint,
         Field::FirstSeen,
@@ -156,6 +166,8 @@ impl Field {
         Field::RegardingKind,
         Field::RegardingName,
         Field::RegardingUid,
+        Field::Regarding,
+        Field::Object,
         Field::Missing,
     ];
 
@@ -186,6 +198,8 @@ impl Field {
             Field::RegardingKind => "regarding.kind",
             Field::RegardingName => "regarding.name",
             Field::RegardingUid => "regarding.uid",
+            Field::Regarding => "regarding",
+            Field::Object => "object",
             Field::Missing => "missing",
         }
     }
@@ -467,6 +481,29 @@ impl Spec {
             ensure_uid(regarding.uid.as_deref(), Field::RegardingUid)?;
         }
 
+        // An entry holds a `sample` or a `regarding`, never both (point 3).
+        ensure(
+            self.sample.is_none() || self.regarding.is_none(),
+            Field::Regarding,
+        )?;
+        // `owner-lookup-failed` only where a lookup exists: the sample Pod's, or that of an Event's
+        // Job or ReplicaSet, which then names `object` as `regarding` does (point 3).
+        let event_lookup = matches!(self.detection, Detection::JobFailed | Detection::PodCreate);
+        let owner_failed = self.missing.owner_lookup_failed;
+        ensure(
+            !owner_failed || self.sample.is_some() || event_lookup,
+            Field::Missing,
+        )?;
+        ensure(
+            !(owner_failed && event_lookup)
+                || self.regarding.as_ref().is_some_and(|regarding| {
+                    regarding.kind == object.kind
+                        && regarding.name == object.name
+                        && regarding.uid == object.uid
+                }),
+            Field::Object,
+        )?;
+
         let read_revision_failed = self
             .sample
             .as_ref()
@@ -682,10 +719,6 @@ mod tests {
                 name: "r".repeat(MAX_NAME_LEN),
                 uid: Some(UID_RS.into()),
             }),
-            missing: Missing {
-                owner_lookup_failed: true,
-                revision_lookup_failed: false,
-            },
             ..pod_spec()
         }
     }
@@ -710,6 +743,10 @@ mod tests {
                 }),
             }),
             regarding: None,
+            missing: Missing {
+                owner_lookup_failed: true,
+                revision_lookup_failed: false,
+            },
             ..longest_spec()
         }
     }
@@ -1162,6 +1199,9 @@ mod tests {
                 RULE_PODS_SEEN,
                 RULE_DEPLOYMENT,
                 RULE_MISSING_REVISION,
+                RULE_SAMPLE_OR_REGARDING,
+                RULE_MISSING_OWNER,
+                RULE_OWNER_LOOKUP_OBJECT,
             ]
         );
         assert_eq!(texts(&field("facts")), [RULE_MINIMUM]);
@@ -1325,10 +1365,86 @@ mod tests {
         let mut spec = event_spec();
         spec.missing.revision_lookup_failed = true;
         assert_eq!(spec.check(), Err(Field::Missing));
-        // The owner's flag is free.
-        let mut spec = event_spec();
+        // The owner's flag is the other rules' (`the_owner_lookup_rules_hold_both_ways`).
+        let mut spec = pod_spec();
         spec.missing.owner_lookup_failed = true;
         assert_eq!(spec.check(), Ok(()));
+    }
+
+    /// `event_spec` as kausa writes it when the lookup of its ReplicaSet failed: `object` names
+    /// the ReplicaSet that `regarding` names.
+    fn unresolved_event_spec() -> Spec {
+        let mut spec = event_spec();
+        spec.object = Object {
+            api_version: "apps/v1".into(),
+            kind: "ReplicaSet".into(),
+            name: "web-7d4b9c6f5d".into(),
+            uid: Some(UID_RS.into()),
+        };
+        spec.missing.owner_lookup_failed = true;
+        spec
+    }
+
+    #[test]
+    fn the_owner_lookup_rules_hold_both_ways() {
+        // Never both a sample and a regarding.
+        let mut spec = pod_spec();
+        spec.regarding = event_spec().regarding;
+        assert_eq!(spec.check(), Err(Field::Regarding));
+        // The flag with a sample Pod, or for D008 and D011 naming the Job or ReplicaSet itself.
+        assert_eq!(unresolved_event_spec().check(), Ok(()));
+        let mut job = unresolved_event_spec();
+        job.detection = Detection::JobFailed;
+        job.facts.reason = Some("BackoffLimitExceeded");
+        job.object.api_version = "batch/v1".into();
+        for spec in [
+            &mut job.object.kind,
+            &mut job.regarding.as_mut().expect("r").kind,
+        ] {
+            *spec = "Job".into();
+        }
+        assert_eq!(job.check(), Ok(()));
+        let mut no_uids = unresolved_event_spec();
+        no_uids.object.uid = None;
+        no_uids.regarding.as_mut().expect("a regarding").uid = None;
+        assert_eq!(no_uids.check(), Ok(()));
+        // Never for D012, D013 or D014, where no lookup exists.
+        for detection in [
+            Detection::ClaimProvisioning,
+            Detection::AutoscalerMetrics,
+            Detection::RolloutStalled,
+        ] {
+            let mut spec = if detection == Detection::RolloutStalled {
+                rollout_spec()
+            } else {
+                Spec {
+                    detection,
+                    ..event_spec()
+                }
+            };
+            spec.facts.reason = None;
+            assert_eq!(spec.check(), Ok(()), "{detection:?}");
+            spec.missing.owner_lookup_failed = true;
+            assert_eq!(spec.check(), Err(Field::Missing), "{detection:?}");
+        }
+        // For D008 and D011, `object` is `regarding`'s object: same kind, name and UID.
+        let changes: [fn(&mut Spec); 7] = [
+            |s| s.object = pod_spec().object,
+            |s| s.object.name = "web".into(),
+            |s| s.object.kind = "Deployment".into(),
+            |s| s.object.uid = Some(UID_OWNER.into()),
+            |s| s.object.uid = None,
+            |s| s.regarding.as_mut().expect("r").uid = None,
+            |s| s.regarding = None,
+        ];
+        for (i, change) in changes.iter().enumerate() {
+            let mut spec = unresolved_event_spec();
+            change(&mut spec);
+            assert_eq!(spec.check(), Err(Field::Object), "{i}");
+            // Without the flag the owner is free.
+            spec.missing.owner_lookup_failed = false;
+            assert_eq!(spec.check(), Ok(()), "{i}");
+        }
     }
 
     #[test]
@@ -1452,6 +1568,15 @@ mod tests {
         });
         case(Field::Missing, pod(), &|s| {
             s.missing.revision_lookup_failed = true
+        });
+        case(Field::Missing, rollout_spec(), &|s| {
+            s.missing.owner_lookup_failed = true
+        });
+        case(Field::Regarding, pod(), &|s| {
+            s.regarding = event_spec().regarding
+        });
+        case(Field::Object, event_spec(), &|s| {
+            s.missing.owner_lookup_failed = true
         });
         cases
     }
@@ -1616,14 +1741,15 @@ mod tests {
         );
         let mut spec = rollout_spec();
         spec.object.uid = None;
-        spec.missing.owner_lookup_failed = true;
         let checked = spec.checked().expect("a spec that fits");
         assert_eq!(
             checked.spec["deployment"],
             json!({"generation": 12, "revision": 7})
         );
-        assert_eq!(checked.spec["missing"], json!(["owner-lookup-failed"]));
+        assert_eq!(checked.spec["missing"], json!([]));
         assert!(checked.spec["object"].get("uid").is_none());
+        let checked = unresolved_event_spec().checked().expect("a spec that fits");
+        assert_eq!(checked.spec["missing"], json!(["owner-lookup-failed"]));
         assert!(checked.spec["facts"].get("exitCode").is_none());
         let checked = event_spec().checked().expect("a spec that fits");
         assert_eq!(
@@ -1760,7 +1886,7 @@ mod tests {
     #[test]
     fn the_longest_specs_stay_near_the_adr_s_estimate() {
         // 0028 estimates about 1.5 KB for the spec at the longest names; its bar 6 measures the
-        // stored object. Pinned here as the JSON kausa sends: 1,385 bytes for an incident about
+        // stored object. Pinned here as the JSON kausa sends: 1,364 bytes for an incident about
         // another object and 1,460 for one about Pods. The figures come first, so that a failure
         // of the bound prints them.
         let bytes = |spec: Spec| {
@@ -1769,7 +1895,7 @@ mod tests {
                 .len()
         };
         let longest = (bytes(longest_spec()), bytes(longest_pod_spec()));
-        assert_eq!(longest, (1385, 1460));
+        assert_eq!(longest, (1364, 1460));
         assert!(longest.0.max(longest.1) <= 1536);
     }
 }

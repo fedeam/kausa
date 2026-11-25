@@ -37,6 +37,18 @@
         {
           "rule": "('revision-lookup-failed' in self.missing) == (has(self.sample) && has(self.sample.controller) && self.sample.controller.kind == 'ReplicaSet' && !has(self.sample.controller.revision))",
           "message": "missing names revision-lookup-failed exactly when a ReplicaSet controller has no revision"
+        },
+        {
+          "rule": "!(has(self.sample) && has(self.regarding))",
+          "message": "sample and regarding are never both set"
+        },
+        {
+          "rule": "!('owner-lookup-failed' in self.missing) || has(self.sample) || self.detection in ['D008', 'D011']",
+          "message": "missing names owner-lookup-failed only for an incident about a Pod, D008 or D011"
+        },
+        {
+          "rule": "!('owner-lookup-failed' in self.missing && self.detection in ['D008', 'D011']) || (has(self.regarding) && self.object.kind == self.regarding.kind && self.object.name == self.regarding.name && has(self.object.uid) == has(self.regarding.uid) && (!has(self.object.uid) || self.object.uid == self.regarding.uid))",
+          "message": "a D008 or D011 with owner-lookup-failed names in object the object of regarding"
         }
       ],
       "properties": {
