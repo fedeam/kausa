@@ -869,7 +869,10 @@ bar 2, 3 or 6 measures it.
   them. Then 500 × 48 = 24,000 bytes, about 23 KiB, and 500 × 750 = 375,000 bytes, 0.36 MiB. The
   rule of point 1 keeps a creation time in each entry, a monotonic instant of 16 bytes on a 64-bit
   Linux target; whether the review's estimates count it is not known, so at most 500 × 16 = 8,000
-  bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry.
+  bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry. Update
+  2026-11-24: measured, a full table of the longest entries holds 392,000 bytes, 0.37 MiB, on a
+  64-bit target: 500 slots of 152 bytes and 632 bytes of names an entry
+  (`a_full_table_of_the_longest_entries_is_within_bar_3` in `src/incident_resource/table.rs`).
 - **The owner cache:** +8 bytes an entry, one optional pointer, empty with incidents off (bar 1);
   with incidents on, 24 bytes more for each entry of a ReplicaSet whose `get` answered, the revision
   (8) and the UID its `get` returned (16), plus the allocator's overhead, not counted. The name in
