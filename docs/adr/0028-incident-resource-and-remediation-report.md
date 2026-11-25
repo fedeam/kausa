@@ -1130,6 +1130,13 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   the answer gives it, and leaves out only the message. A webhook that denies a create or delete of
   an Incident was not checked. Test: in kind, a validating webhook on `incidents` that denies with
   a long reason, then read kausa's log line.
+- **That `lead` sweeps the Incidents again once the hour has passed, and how a create answered with
+  a success other than `201` is taken.** The hourly sweep rests on the pure test of `sweep_due`
+  (`src/run.rs:1941`); no clock is injected into `lead`, so no test drives it past the hour. And
+  kausa takes any success answer that carries a UID as a create, a `200` or `202` included, since
+  the client gives no status for a success (`send`, `src/incidents.rs`). Test: in kind, a kausa
+  with incidents on, left running past the hour, then its log and its metrics; and a fake server
+  that answers a create with `200` and a UID.
 - **Whether the Incident should take as its sample the first signal of the group whose values fit,**
   and refuse only when none fits, so that a signal a writer in N places first does not leave a
   genuine incident without an Incident (the trust statement). Open for the implementation; the
