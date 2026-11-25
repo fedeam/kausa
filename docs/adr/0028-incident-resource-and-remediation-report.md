@@ -1027,7 +1027,11 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 
 - **Whether the metadata `get` of a ReplicaSet returns its annotations,** where the revision is.
   Test: read a ReplicaSet with a metadata-only `get` in kind and check the
-  `deployment.kubernetes.io/revision` annotation.
+  `deployment.kubernetes.io/revision` annotation. Ran in the pull request's CI at d048b40 (kind,
+  both scopes): the Incident of `crasher` (`D001`) has a `sample.controller` that is a ReplicaSet
+  owned by the Deployment, whose `revision` equals that ReplicaSet's
+  `deployment.kubernetes.io/revision` annotation; kausa reads the revision only from the
+  metadata-only `get` (`controller_of` and `replica_set_read`, `src/run.rs`).
 - **That the API server asks an ownerReference's `uid` only to be non-empty,** on which point 2's
   rule rests for `object.uid` and `sample.controller.uid` (a hypothesis, not read in its source),
   and how long the garbage collector takes to delete a Pod whose owner's UID matches no object.
@@ -1086,7 +1090,11 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   500 / 6 = 83.3 Incidents an hour on average over 6 hours (point 1); not measured either.
 - **That a `/status` write cannot change `metadata` or `spec`, and that root CEL rules run on
   `/status` writes:** checked in the source only. Test both in kind before the outcome check
-  relies on them.
+  relies on them. Ran in the pull request's CI at d048b40 (kind, both scopes): a merge patch to the
+  `/status` of an Incident, as the cluster's admin, with a label, a `spec.facts.podsNow` and an
+  empty `status`, left its `metadata` (but `resourceVersion` and `managedFields`), `spec` and
+  `status` unchanged. No case asserts that root CEL rules run on `/status` writes: that part stays
+  unverified.
 - **The CEL cost of the per-detection rules and of `sample`'s rule.** Test: install both
   CustomResourceDefinitions on the oldest supported k3s (bar 7).
 - **That a forged Event yields an `inspect` that kurita's cluster window counts:** test in kind that
@@ -1141,13 +1149,20 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 - **What the API server does with a `metadata` label and a `spec` change sent in a `/status`
   patch** of an Incident. The kind case (`tests/e2e/run.sh`) sends both, as the cluster's admin,
   and expects neither to change; that the status subresource keeps everything but `status`, labels
-  included, is taken from the documentation of CustomResourceDefinitions, a hypothesis that nobody
-  has seen hold for this schema. Test: run that case in kind.
+  included, is taken from the documentation of CustomResourceDefinitions. Ran in the pull
+  request's CI at d048b40 (kind, both scopes): after the patch, the Incident's `metadata` (but
+  `resourceVersion` and `managedFields`), `spec` and `status` equal what they were before it, so
+  neither the label nor the `spec` change was kept, on the one Kubernetes version of that kind.
 - **That the restart case tells the new process's Incidents from old ones,** as it is written: it
   lists the `metadata.uid` of every Incident once kausa is scaled to 0 and no Pod is left, and takes
   every Incident named `kausa.*` whose UID is not in that list as created by the new process. It
   assumes that the API server gives each create a UID it never gave before, and that no create of
-  the old process lands after the list. Nobody has seen it run. Test: run that case in kind.
+  the old process lands after the list. Ran in the pull request's CI at d048b40 (kind, both
+  scopes): after the restart with 500 seeded Incidents, one `incidents swept` line, at least one
+  deleted by the cap in the line and in `kausa_incidents_deleted_total{reason="cap"}`, no
+  Incident with a new UID created before that line (to the second `creationTimestamp` keeps), and
+  3 new Incidents with 0 refused as `starting`. The two assumptions are not asserted by the case
+  and stay unverified.
 - **Whether the Incident should take as its sample the first signal of the group whose values fit,**
   and refuse only when none fits, so that a signal a writer in N places first does not leave a
   genuine incident without an Incident (the trust statement). Open for the implementation; the
