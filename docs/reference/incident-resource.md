@@ -173,8 +173,10 @@ stops creating Incidents or is uninstalled.
   annotations, and an empty `status`. The ReplicaSet's name read for the revision is never written.
 
 Nothing new leaves the cluster: Incidents go to the API server only, and nothing read back from one
-is logged, sent or reused. The sweep echoes the UID and `resourceVersion` it lists only as its
-delete's preconditions, and uses `creationTimestamp` only to rank.
+is logged, sent or reused. Of each Incident it lists, the sweep uses the namespace and name only
+to build the path of its delete and echoes the UID and `resourceVersion` only as that delete's
+preconditions, and uses `creationTimestamp` only to rank; the list's `continue` token is only sent
+back to ask for the next page.
 
 ## Refusals, log lines and counters
 

@@ -156,8 +156,10 @@ accepted ADR, and most should never change.
    reads with fixed lists, and derives only a cause it defines and a clamped delay; the start of
    the body stays in kausa's log only ([0020](docs/adr/0020-check-the-endpoint.md)). Nothing read back from an Explanation, an Incident or the Lease is logged,
    sent or reused (the Lease's holder is only compared with kausa's own identity, and its version
-   echoed as the next precondition; the UID and `resourceVersion` the sweep lists of an Incident
-   are echoed only as its delete's preconditions, and its `creationTimestamp` only ranks it). The
+   echoed as the next precondition; of an Incident the sweep lists, the namespace and name only
+   build its delete's path, the UID and `resourceVersion` are echoed only as that delete's
+   preconditions, and its `creationTimestamp` only ranks it; the list's `continue` token is only
+   sent back to ask for the next page). The
    `metadata.uid` of the answer to kausa's own create of an Incident is the one exception: it is
    parsed as a UID and kept, as 16 bytes, only in the table of created Incidents, never logged,
    sent or reused otherwise; the rest of that answer is read under a cap of 64 KiB and dropped
