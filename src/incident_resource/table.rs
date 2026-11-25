@@ -33,7 +33,7 @@ pub(crate) enum Refusal {
     TableFull,
     /// A value does not fit its field of the schema (`Spec::check`).
     Schema,
-    /// The sweep at start has not ended: the create does not wait for it.
+    /// No sweep of this process has ended yet: the create does not wait for one.
     Starting,
 }
 
