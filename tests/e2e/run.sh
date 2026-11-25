@@ -2150,7 +2150,9 @@ print(json.dumps([item["metadata"], item["spec"], item.get("status") or {}], sor
   echo "view, edit and admin: get, list and watch incidents, nothing else"
 
   # The sweep at start comes before any create of the new process (point 4). kausa is scaled to
-  # 0 first, so that every Incident named kausa.* that was not there then is the new process's.
+  # 0 first, so that every Incident named kausa.* whose metadata.uid was not there then is the new
+  # process's. By UID, not by name: once the sweep has deleted an old Incident, a create of the
+  # same name could succeed, and a name alone would take it for an old one.
   # 500 hand-made Incidents, made after kausa's, bring the count past 500, so that the sweep
   # deletes kausa's oldest and logs incidents swept when it has ended; every Incident the new
   # process creates is newer than that line, at the second creationTimestamp keeps. A create that
@@ -2163,7 +2165,7 @@ print(json.dumps([item["metadata"], item["spec"], item.get("status") or {}], sor
     sleep 1
   done
   [ -n "$stopped" ] || fail "a kausa Pod is left 60 s after scaling kausa to 0"
-  k get "$INCIDENTS" -A -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+  k get "$INCIDENTS" -A -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}' \
     > "$WORK/incidents-before.txt"
   python3 -I -c '
 import json, sys
@@ -2215,7 +2217,7 @@ if lines[0].get("deleted_by_cap", 0) < 1:
 ended = at(lines[0]["ts"])
 before = set(open(work + "/incidents-before.txt").read().split())
 new = [i for i in json.load(open(work + "/incidents.json"))["items"]
-       if i["metadata"]["name"].startswith("kausa.") and i["metadata"]["name"] not in before]
+       if i["metadata"]["name"].startswith("kausa.") and i["metadata"]["uid"] not in before]
 early = [i["metadata"]["name"] for i in new if at(i["metadata"]["creationTimestamp"]) < ended]
 if early:
     fail("%d Incidents created before the sweep at start ended" % len(early))
