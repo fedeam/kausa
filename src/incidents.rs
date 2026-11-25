@@ -1255,6 +1255,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_listed_incident_is_reduced_to_five_fields_of_its_metadata() {
+        let object: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "kausa.fedeam.com/v1alpha1",
+            "kind": "Incident",
+            "metadata": {
+                "name": "incident-0001",
+                "namespace": "shop",
+                "uid": "uid-1",
+                "resourceVersion": "rv-1",
+                "creationTimestamp": "2026-01-02T03:04:05Z",
+                "generation": 3,
+                "labels": {"example.com/any": "x"},
+                "annotations": {"example.com/note": "y"},
+                "ownerReferences": [{
+                    "apiVersion": "v1", "kind": "Pod", "name": "api-1", "uid": "uid-pod"
+                }],
+                "finalizers": ["example.com/keep"],
+                "managedFields": [{"manager": "example", "operation": "Update"}],
+            },
+            "spec": {"firstSeen": "1970-01-01T00:00:00Z"},
+            "status": {"phase": "any"},
+        }))
+        .expect("an object");
+        assert_eq!(
+            read_metadata(object),
+            json!({"metadata": {
+                "name": "incident-0001",
+                "namespace": "shop",
+                "uid": "uid-1",
+                "resourceVersion": "rv-1",
+                "creationTimestamp": "2026-01-02T03:04:05Z",
+            }})
+        );
+    }
+
+    #[test]
     fn a_list_with_no_answer_stops_the_sweep_at_the_write_bound_and_sets_the_flag() {
         let (url, requests) = api_server(|_| Answer::Hang);
         let start = Instant::now();
