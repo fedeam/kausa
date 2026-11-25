@@ -211,6 +211,8 @@ version `v1alpha1`, kind `Incident`:
   a writer of Pods or Events in N can cause, would take the line and hide this stop, which holds
   Incidents back in every namespace. The label's values are a closed set and name nothing of the
   cluster, as 0027's counters do, and the three series show 0 from the start with incidents on.
+  The hour is kept per reason and across namespaces, so the line names the first refusal of the
+  hour for its reason and the counter counts every one.
 - **No `ownerReference`** to the workload or to anything else, and nothing points to it.
 - **Not with `--dry-run`**, as `--history`: kausa refuses to start with incidents on and
   `--dry-run`, and the chart turns incidents off with `dryRun`.
