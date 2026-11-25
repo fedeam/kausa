@@ -181,6 +181,11 @@ impl Entry {
         self.reported
     }
 
+    #[cfg(test)]
+    pub(crate) fn created(&self) -> Instant {
+        self.created
+    }
+
     fn age(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.created)
     }

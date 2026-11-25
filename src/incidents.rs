@@ -885,6 +885,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_entry_is_timed_by_the_answer_never_by_the_request() {
+        // The server holds its answer well beyond the time it takes to send a request, and notes
+        // when it answers: the entry is not older than that.
+        let answered: Arc<Mutex<Option<Instant>>> = Arc::default();
+        let noted = Arc::clone(&answered);
+        let (url, requests) = api_server(move |_| {
+            std::thread::sleep(Duration::from_millis(300));
+            *noted.lock().expect("the time") = Some(Instant::now());
+            created()
+        });
+        let lookup = Revisions::of(UID_RS, 7);
+        let rt = runtime();
+        let incidents = rt.block_on(async { started(&url) });
+        create(
+            &rt,
+            &incidents,
+            &stateful_fact(),
+            &lookup,
+            &Term::unbounded(),
+        );
+        let sent = sent(&requests);
+        let name = sent[0].json()["metadata"]["name"]
+            .as_str()
+            .expect("a name")
+            .to_owned();
+        let answered = answered.lock().expect("the time").expect("an answer");
+        let table = incidents.table();
+        let uid = Uid::parse(UID_CREATED).expect("a UID");
+        let (_, entry) = table.find("shop", &name, uid).expect("the entry");
+        assert!(
+            entry.created() >= answered,
+            "the entry is older than the answer"
+        );
+    }
+
+    #[test]
     fn an_answer_at_the_cap_is_read() {
         let answer = |size: usize| {
             let mut body = json!({"metadata": {"uid": UID_CREATED}, "padding": ""});
