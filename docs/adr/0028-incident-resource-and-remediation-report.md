@@ -683,13 +683,14 @@ Changed in [ARCHITECTURE.md](../../ARCHITECTURE.md) with the code:
 - **Invariant 2** gains: "and, with incidents on, Incidents (`create`, and, for retention, a
   `delete` with UID and `resourceVersion` preconditions)".
 - **Invariant 5** gains: "Nothing read back from an Incident or a Remediation is logged, sent or
-  reused, except a Remediation's action id and `proposedAt`, which, after the checks of 0028,
-  are sent as a `remediation`
-  message's action and time, and the namespace and name of a dropped Remediation, logged after
-  their patterns are checked." The `metadata.uid` of the answer to kausa's own create is the
-  stated exception to that text: it is parsed as a UID and kept, as 16 bytes, only in the table of
-  created Incidents (point 1), never logged, sent or reused otherwise; the rest of the answer is
-  read under a cap of 64 KiB and dropped.
+  reused, except a Remediation's action id and `proposedAt`, which, after the checks of 0028, are
+  sent as a `remediation` message's action and time, and the namespace and name of a dropped
+  Remediation, logged after their patterns are checked." The `metadata.uid` of the answer to kausa's
+  own create is the stated exception to that text: it is parsed as a UID and kept, as 16 bytes, only
+  in the table of created Incidents (point 1), never logged, sent or reused otherwise; the rest of
+  the answer is read under a cap of 64 KiB and dropped. An error answer is not under that cap:
+  kube-rs reads its body whole before kausa sees it, bounded only by the 10 seconds, as for every
+  request kausa makes, and kausa keeps only its code and reason.
 - **Invariant 11** gains the `remediation` message and its fields.
 - **Invariant 12** gains: "An Incident holds only what a fact statement may hold and the typed
   values of 0028's schema; changing what it may hold needs an ADR."
