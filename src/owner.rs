@@ -87,6 +87,20 @@ pub(crate) trait OwnerLookup {
         name: &str,
     ) -> impl Future<Output = Result<Option<OwnerRef>, String>>;
 
+    /// The UID and the revision of the ReplicaSet `name` in `namespace`, read through the same
+    /// cache as `controller_of` and refused by the same rule (docs/adr/0028, point 3).
+    /// `Err(())` when the read failed or is not kept: a lookup that keeps no revision answers so
+    /// with no request. Built for tests only until the fact slot's create calls it (0028, point
+    /// 1), as the Incident's other parts are.
+    #[cfg(test)]
+    fn replica_set(
+        &self,
+        _namespace: &str,
+        _name: &str,
+    ) -> impl Future<Output = Result<(crate::record::Uid, u64), ()>> {
+        std::future::ready(Err(()))
+    }
+
     /// The lookups held in a cache, expired ones included (the `kausa_owner_cache_entries`
     /// gauge); 0 for a lookup without one.
     fn cached(&self) -> usize {

@@ -38,6 +38,7 @@ use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::events::v1::Event;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
 use k8s_openapi::serde::de::DeserializeOwned;
 use kube::config::KubeConfigOptions;
@@ -67,7 +68,10 @@ use crate::owner::{
     Hop, OwnerLookup, REFUSED, bounded_name, is_dns_label, is_dns_subdomain, top_owner,
 };
 use crate::prompt;
-use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
+use crate::record::{
+    DeploymentRecord, EventRecord, OwnerRef, PodRecord, REVISION_ANNOTATION, Uid, controller_of,
+    parse_revision,
+};
 use crate::report::{self, About, Fact, IncidentData, MaybeUid, Reporter};
 
 /// The reporting controller of the Events kausa writes, excluded from its own watch.
@@ -574,7 +578,10 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         .leader_lease
         .as_ref()
         .map(|l| KubeLease::new(client.clone(), &l.namespace, &l.name, TIMINGS.call_timeout));
-    let cluster = KubeCluster { client };
+    let cluster = KubeCluster {
+        client,
+        keep_revision: options.incidents,
+    };
     // A signal ends the process, so the stop is awaited at most once.
     let stop = async move {
         tokio::select! {
@@ -633,6 +640,8 @@ struct Watched {
 /// The cluster through the API server.
 struct KubeCluster {
     client: Client,
+    /// Whether the owner lookups keep a ReplicaSet's revision: with incidents on.
+    keep_revision: bool,
 }
 
 impl Cluster for KubeCluster {
@@ -658,6 +667,7 @@ impl Cluster for KubeCluster {
         KubeLookup {
             client: self.client.clone(),
             cache: RefCell::new(HashMap::new()),
+            keep_revision: self.keep_revision,
         }
     }
 
@@ -1996,13 +2006,25 @@ fn announce(announced: &mut bool, queue_empty: bool, held: bool) -> bool {
     false
 }
 
-/// A cached owner lookup: the answer (or the error) and when it was read.
-type CachedLookup = (Result<Option<OwnerRef>, String>, Instant);
+/// A cached owner lookup: the answer (or the error), when it was read and, with incidents on,
+/// what the answer of a ReplicaSet's `get` said of it (`ReplicaSetRead`).
+type CachedLookup = (
+    Result<Option<OwnerRef>, String>,
+    Instant,
+    Option<Box<ReplicaSetRead>>,
+);
+
+/// A ReplicaSet's `metadata.uid` and the revision in its annotation, kept only when both parse
+/// (docs/adr/0028-incident-resource-and-remediation-report.md, point 3).
+type ReplicaSetRead = (Uid, u64);
 
 /// Owner lookups against the API server: metadata only, with a timeout, cached for a while.
 struct KubeLookup {
     client: Client,
     cache: RefCell<HashMap<(Hop, String, String), CachedLookup>>,
+    /// Whether a ReplicaSet's `get` keeps its UID and revision: with incidents on. Off, no
+    /// annotation is read and every entry's read is `None`.
+    keep_revision: bool,
 }
 
 impl OwnerLookup for KubeLookup {
@@ -2028,7 +2050,7 @@ impl OwnerLookup for KubeLookup {
             at.elapsed() < ttl
         };
         let key = (hop, namespace.to_owned(), name.to_owned());
-        if let Some((answer, at)) = self.cache.borrow().get(&key)
+        if let Some((answer, at, _)) = self.cache.borrow().get(&key)
             && fresh(answer, at)
         {
             return answer.clone();
@@ -2045,23 +2067,59 @@ impl OwnerLookup for KubeLookup {
                     .map(|m| m.metadata),
             }
         };
-        let answer = match tokio::time::timeout(OWNER_LOOKUP_TIMEOUT, get).await {
-            Ok(Ok(metadata)) => Ok(controller_of(metadata.owner_references.as_ref())),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(_) => Err(format!(
-                "no answer within {} seconds",
-                OWNER_LOOKUP_TIMEOUT.as_secs()
-            )),
+        let (answer, read) = match tokio::time::timeout(OWNER_LOOKUP_TIMEOUT, get).await {
+            Ok(Ok(metadata)) => {
+                let read = (self.keep_revision && hop == Hop::ReplicaSet)
+                    .then(|| replica_set_read(&metadata))
+                    .flatten()
+                    .map(Box::new);
+                (Ok(controller_of(metadata.owner_references.as_ref())), read)
+            }
+            Ok(Err(error)) => (Err(error.to_string()), None),
+            Err(_) => (
+                Err(format!(
+                    "no answer within {} seconds",
+                    OWNER_LOOKUP_TIMEOUT.as_secs()
+                )),
+                None,
+            ),
         };
         let mut cache = self.cache.borrow_mut();
-        cache.retain(|_, (answer, at)| fresh(answer, at));
-        cache.insert(key, (answer.clone(), Instant::now()));
+        cache.retain(|_, (answer, at, _)| fresh(answer, at));
+        cache.insert(key, (answer.clone(), Instant::now(), read));
         answer
+    }
+
+    #[cfg(test)]
+    async fn replica_set(&self, namespace: &str, name: &str) -> Result<(Uid, u64), ()> {
+        // Off, nothing is kept to answer from: no request.
+        if !self.keep_revision {
+            return Err(());
+        }
+        // The same name rule, the same cache, timeout and error TTL: the `get` is
+        // `controller_of`'s, which keeps the read in the entry it answers from.
+        self.controller_of(Hop::ReplicaSet, namespace, name)
+            .await
+            .map_err(|_| ())?;
+        let key = (Hop::ReplicaSet, namespace.to_owned(), name.to_owned());
+        self.cache
+            .borrow()
+            .get(&key)
+            .and_then(|(_, _, read)| read.as_deref().copied())
+            .ok_or(())
     }
 
     fn cached(&self) -> usize {
         self.cache.borrow().len()
     }
+}
+
+/// What a ReplicaSet's metadata says for an Incident: its UID as 16 bytes and its revision, or
+/// `None` when either does not parse. Nothing of the annotation's text is kept.
+fn replica_set_read(metadata: &ObjectMeta) -> Option<ReplicaSetRead> {
+    let uid = Uid::parse(metadata.uid.as_deref()?)?;
+    let revision = parse_revision(metadata.annotations.as_ref()?.get(REVISION_ANNOTATION)?)?;
+    Some((uid, revision))
 }
 
 // Tests of the namespaced mode (docs/adr/0013-namespaced-install-mode.md), without a cluster: the
@@ -3328,6 +3386,7 @@ mod tests {
                 lookup: KubeLookup {
                     client,
                     cache: RefCell::new(HashMap::new()),
+                    keep_revision: true,
                 },
                 runtime,
             }
@@ -3414,6 +3473,302 @@ mod tests {
         assert!(answer.is_err_and(|e| e != REFUSED));
         assert_eq!(spy.lookup.cached(), 3);
         assert_eq!(spy.connections(), 3);
+    }
+
+    /// A `KubeLookup` whose client points at a local API server that answers each connection, in
+    /// order, with one of `answers` (a status and a body) and counts the requests it reads.
+    struct Served {
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        lookup: KubeLookup,
+        runtime: tokio::runtime::Runtime,
+    }
+
+    impl Served {
+        fn new(keep_revision: bool, answers: Vec<(&'static str, serde_json::Value)>) -> Served {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
+            let addr = listener.local_addr().expect("an address");
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = requests.clone();
+            std::thread::spawn(move || {
+                for (status, body) in answers {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        return;
+                    };
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buffer[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&request).into_owned();
+                    let line = text.lines().next().unwrap_or_default().to_owned();
+                    seen.lock().expect("the requests").push(line);
+                    let body = body.to_string();
+                    let answer = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(answer.as_bytes());
+                }
+            });
+            let config = kube::Config::new(format!("http://{addr}").parse().expect("a URL"));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let client = {
+                let _guard = runtime.enter();
+                Client::try_from(config).expect("a client")
+            };
+            Served {
+                requests,
+                lookup: KubeLookup {
+                    client,
+                    cache: RefCell::new(HashMap::new()),
+                    keep_revision,
+                },
+                runtime,
+            }
+        }
+
+        fn run<F: Future>(&self, future: F) -> F::Output {
+            self.runtime.block_on(future)
+        }
+
+        /// The request lines read so far; a lookup that returned had its request read.
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().expect("the requests").clone()
+        }
+
+        /// Moves every cache entry `by` into the past.
+        fn age(&self, by: Duration) {
+            for (_, at, _) in self.lookup.cache.borrow_mut().values_mut() {
+                *at = at.checked_sub(by).expect("an earlier instant");
+            }
+        }
+
+        /// The read kept in the entry of the ReplicaSet `name` of `shop`.
+        fn kept(&self, name: &str) -> Option<ReplicaSetRead> {
+            let key = (Hop::ReplicaSet, "shop".to_owned(), name.to_owned());
+            let cache = self.lookup.cache.borrow();
+            cache
+                .get(&key)
+                .and_then(|(_, _, read)| read.as_deref().copied())
+        }
+    }
+
+    const RS_UID: &str = "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b";
+
+    /// The metadata of the ReplicaSet `web-7d4b9c6f5d`, owned by the Deployment `web`, with
+    /// `uid` and, when given, `revision` as its annotation.
+    fn replica_set_metadata(uid: Option<&str>, revision: Option<&str>) -> serde_json::Value {
+        let mut metadata = json!({
+            "name": "web-7d4b9c6f5d",
+            "namespace": "shop",
+            "ownerReferences": [{
+                "apiVersion": "apps/v1", "kind": "Deployment", "name": "web",
+                "uid": "uid-web", "controller": true
+            }],
+        });
+        if let Some(uid) = uid {
+            metadata["uid"] = json!(uid);
+        }
+        if let Some(revision) = revision {
+            metadata["annotations"] = json!({ REVISION_ANNOTATION: revision, "other": "x" });
+        }
+        json!({
+            "apiVersion": "meta.k8s.io/v1",
+            "kind": "PartialObjectMetadata",
+            "metadata": metadata,
+        })
+    }
+
+    fn rs_uid() -> Uid {
+        Uid::parse(RS_UID).expect("a UID")
+    }
+
+    #[test]
+    fn the_replica_set_read_shares_the_owner_lookup_s_get_and_cache() {
+        let ok = || ("200 OK", replica_set_metadata(Some(RS_UID), Some("7")));
+        let served = Served::new(true, vec![ok(), ok()]);
+        let lookup = &served.lookup;
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Ok((rs_uid(), 7))
+        );
+        assert_eq!(
+            served.requests(),
+            ["GET /apis/apps/v1/namespaces/shop/replicasets/web-7d4b9c6f5d HTTP/1.1"]
+        );
+        // A fresh entry answers both calls with no request.
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Ok((rs_uid(), 7))
+        );
+        let owner = served.run(lookup.controller_of(Hop::ReplicaSet, "shop", "web-7d4b9c6f5d"));
+        assert_eq!(owner.expect("an answer").expect("an owner").name, "web");
+        assert_eq!(served.requests().len(), 1);
+        assert_eq!(lookup.cached(), 1);
+        // Still fresh at 599 seconds.
+        served.age(Duration::from_secs(599));
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Ok((rs_uid(), 7))
+        );
+        assert_eq!(served.requests().len(), 1);
+        // An expired entry costs one `get`, and is replaced.
+        served.age(Duration::from_secs(1));
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Ok((rs_uid(), 7))
+        );
+        assert_eq!(served.requests().len(), 2);
+        assert_eq!(lookup.cached(), 1);
+    }
+
+    #[test]
+    fn a_failed_replica_set_read_is_answered_from_the_cache_for_30_seconds() {
+        let ok = ("200 OK", replica_set_metadata(Some(RS_UID), Some("3")));
+        let error = ("500 Internal Server Error", json!({"kind": "Status"}));
+        let served = Served::new(true, vec![error, ok]);
+        let lookup = &served.lookup;
+        assert_eq!(served.run(lookup.replica_set("shop", "web")), Err(()));
+        assert_eq!(served.requests().len(), 1);
+        served.age(Duration::from_secs(29));
+        assert_eq!(served.run(lookup.replica_set("shop", "web")), Err(()));
+        assert_eq!(served.requests().len(), 1);
+        served.age(Duration::from_secs(1));
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web")),
+            Ok((rs_uid(), 3))
+        );
+        assert_eq!(served.requests().len(), 2);
+    }
+
+    #[test]
+    fn a_replica_set_read_fails_for_a_revision_or_a_uid_that_does_not_parse() {
+        let too_high = (crate::record::MAX_REVISION + 1).to_string();
+        let revisions = [
+            None,
+            Some("0"),
+            Some(too_high.as_str()),
+            Some("x"),
+            Some("+7"),
+            Some("-7"),
+            Some(" 7"),
+            Some("7 "),
+            Some("07"),
+            Some(""),
+            Some("18446744073709551616"),
+        ];
+        let mut answers: Vec<_> = revisions
+            .iter()
+            .map(|r| ("200 OK", replica_set_metadata(Some(RS_UID), *r)))
+            .collect();
+        for uid in [
+            None,
+            Some("uid-web-7d4b9c6f5d"),
+            Some(&RS_UID.to_uppercase()[..]),
+        ] {
+            answers.push(("200 OK", replica_set_metadata(uid, Some("7"))));
+        }
+        let count = answers.len();
+        let served = Served::new(true, answers);
+        for i in 0..count {
+            let name = format!("web-{i}");
+            assert_eq!(
+                served.run(served.lookup.replica_set("shop", &name)),
+                Err(()),
+                "{i}"
+            );
+            // The owner lookup itself worked, and its entry keeps no read.
+            assert!(
+                served
+                    .lookup
+                    .cache
+                    .borrow()
+                    .values()
+                    .all(|(a, _, _)| a.is_ok())
+            );
+            assert_eq!(served.kept(&name), None, "{i}");
+        }
+        assert_eq!(served.requests().len(), count);
+        // The highest revision is kept.
+        let highest = crate::record::MAX_REVISION.to_string();
+        let served = Served::new(
+            true,
+            vec![("200 OK", replica_set_metadata(Some(RS_UID), Some(&highest)))],
+        );
+        assert_eq!(
+            served.run(served.lookup.replica_set("shop", "web")),
+            Ok((rs_uid(), crate::record::MAX_REVISION))
+        );
+    }
+
+    #[test]
+    fn with_incidents_off_the_owner_cache_reads_no_revision_and_sends_no_request_for_one() {
+        let ok = || ("200 OK", replica_set_metadata(Some(RS_UID), Some("7")));
+        let served = Served::new(false, vec![ok(), ok()]);
+        let lookup = &served.lookup;
+        // Off, the read answers failed with no request and no entry.
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Err(())
+        );
+        assert_eq!(lookup.cached(), 0);
+        // The owner lookup's entry keeps no read.
+        let owner = served.run(lookup.controller_of(Hop::ReplicaSet, "shop", "web-7d4b9c6f5d"));
+        assert!(owner.is_ok_and(|o| o.is_some()));
+        assert_eq!(served.kept("web-7d4b9c6f5d"), None);
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Err(())
+        );
+        assert_eq!(served.requests().len(), 1);
+        // On, a Job's entry keeps none either.
+        let job = json!({"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadata",
+            "metadata": replica_set_metadata(Some(RS_UID), Some("7"))["metadata"].clone()});
+        let served = Served::new(true, vec![("200 OK", job)]);
+        let owner = served.run(
+            served
+                .lookup
+                .controller_of(Hop::Job, "shop", "web-7d4b9c6f5d"),
+        );
+        assert!(owner.is_ok());
+        let cache = served.lookup.cache.borrow();
+        assert!(cache.values().all(|(_, _, read)| read.is_none()));
+        // The entry gains one pointer, 8 bytes, whether incidents are on or off; with them on, a
+        // ReplicaSet entry whose read parsed points to 24 more (16 of UID and 8 of revision).
+        let today = std::mem::size_of::<(Result<Option<OwnerRef>, String>, Instant)>();
+        assert_eq!(std::mem::size_of::<CachedLookup>(), today + 8);
+        assert_eq!(std::mem::size_of::<ReplicaSetRead>(), 24);
+    }
+
+    #[test]
+    fn the_replica_set_read_refuses_a_name_or_namespace_before_any_request() {
+        let spy = Spy::new();
+        let too_long = "a".repeat(254);
+        for name in ["a/b", "../x", "a?x=1", "Web", "", "a\nb", too_long.as_str()] {
+            assert_eq!(
+                spy.run(spy.lookup.replica_set("shop", name)),
+                Err(()),
+                "{name:?}"
+            );
+        }
+        let long_namespace = "a".repeat(64);
+        for namespace in ["a/b", "..", "", "Shop", "a\nb", long_namespace.as_str()] {
+            let answer = spy.run(spy.lookup.replica_set(namespace, "web"));
+            assert_eq!(answer, Err(()), "{namespace:?}");
+        }
+        assert_eq!(spy.lookup.cached(), 0);
+        assert_eq!(spy.connections_after_a_wait(), 0);
+        // A valid one is sent.
+        assert_eq!(spy.run(spy.lookup.replica_set("shop", "web")), Err(()));
+        assert_eq!((spy.lookup.cached(), spy.connections()), (1, 1));
     }
 
     #[test]

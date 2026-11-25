@@ -64,7 +64,7 @@ pub(crate) const MAX_PODS_SEEN: usize = MAX_PODS;
 pub(crate) const MAX_PODS_NOW: usize = 1_000_000;
 
 /// The highest revision: 2^53, the largest integer every JSON reader holds exactly.
-pub(crate) const MAX_REVISION: u64 = 1 << 53;
+pub(crate) const MAX_REVISION: u64 = crate::record::MAX_REVISION;
 
 /// The detections, in the order of their ids.
 pub(crate) const DETECTIONS: [Detection; 14] = [

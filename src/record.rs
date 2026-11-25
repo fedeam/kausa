@@ -796,8 +796,27 @@ impl Uid {
     }
 }
 
-/// The annotation where the deployment controller writes a Deployment's revision.
-const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
+/// The annotation where the deployment controller writes a Deployment's revision, and a
+/// ReplicaSet's.
+pub(crate) const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
+
+/// The highest revision an Incident holds: 2^53, the largest integer every JSON reader holds
+/// exactly (docs/adr/0028-incident-resource-and-remediation-report.md, point 2).
+pub(crate) const MAX_REVISION: u64 = 1 << 53;
+
+/// The revision `text` spells as a whole number in 1..=2^53, written as the deployment
+/// controller writes one: ASCII digits only, the first not `0`; no sign, no space. `None` for
+/// anything else.
+pub(crate) fn parse_revision(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let digits = bytes.first().is_some_and(|b| (b'1'..=b'9').contains(b))
+        && bytes.len() <= 16
+        && bytes.iter().all(u8::is_ascii_digit);
+    digits
+        .then(|| text.parse::<u64>().ok())
+        .flatten()
+        .filter(|r| *r <= MAX_REVISION)
+}
 
 /// What kausa keeps of a Deployment: the fields of `D014` and of its request to the model
 /// (docs/adr/0018-stuck-rollouts.md). Never its Pod template, labels, other annotations, managed
@@ -871,6 +890,40 @@ impl DeploymentRecord {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_revision_is_a_whole_number_in_1_to_2_to_the_53_spelled_plainly() {
+        for (text, revision) in [
+            ("1", 1),
+            ("7", 7),
+            ("10", 10),
+            ("9007199254740992", 1 << 53),
+        ] {
+            assert_eq!(parse_revision(text), Some(revision), "{text:?}");
+        }
+        for text in [
+            "",
+            "0",
+            "00",
+            "07",
+            "+7",
+            "-7",
+            " 7",
+            "7 ",
+            "7\n",
+            "1e3",
+            "7.0",
+            "0x7",
+            "x",
+            "\u{0667}",
+            "9007199254740993",
+            "18446744073709551616",
+            "99999999999999999999",
+        ] {
+            assert_eq!(parse_revision(text), None, "{text:?}");
+        }
+        assert_eq!(MAX_REVISION, 9_007_199_254_740_992);
+    }
 
     // Invented values only: no real cluster output (AGENTS.md, Security rules).
     fn crashing_pod() -> Pod {
