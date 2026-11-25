@@ -103,6 +103,14 @@ pub(crate) struct Entry {
     reported: bool,
 }
 
+/// The value of `text` if it is a fingerprint as `is_fingerprint` reads one, 16 lower-case
+/// hexadecimal digits; `u64::from_str_radix` alone also takes a sign, upper case and fewer digits.
+fn parse_fingerprint(text: &str) -> Option<u64> {
+    is_fingerprint(text)
+        .then(|| u64::from_str_radix(text, 16).ok())
+        .flatten()
+}
+
 impl Entry {
     /// The entry of the Incident of `spec` that the server created in `namespace` with `uid`, its
     /// answer arriving at `created`. `None` for a spec the check refuses or a namespace that is
@@ -118,7 +126,7 @@ impl Entry {
         };
         Some(Entry {
             namespace: namespace.into(),
-            fingerprint: u64::from_str_radix(&spec.fingerprint, 16).ok()?,
+            fingerprint: parse_fingerprint(&spec.fingerprint)?,
             first_seen: spec.first_seen,
             uid,
             detection: spec.detection,
@@ -175,8 +183,7 @@ impl Entry {
         else {
             return false;
         };
-        is_fingerprint(fingerprint)
-            && u64::from_str_radix(fingerprint, 16) == Ok(self.fingerprint)
+        parse_fingerprint(fingerprint) == Some(self.fingerprint)
             && (1..=10).contains(&second.len())
             && second.bytes().all(|b| b.is_ascii_digit())
             && (second == "0" || !second.starts_with('0'))
@@ -239,7 +246,7 @@ impl Table {
         if !self.started {
             return Admission::Refused(Refusal::Starting);
         }
-        let fingerprint = u64::from_str_radix(fingerprint, 16).ok();
+        let fingerprint = parse_fingerprint(fingerprint);
         let duplicate = self.entries().any(|(_, entry)| {
             Some(entry.fingerprint) == fingerprint
                 && *entry.namespace == *namespace
@@ -438,6 +445,20 @@ mod tests {
             table.admit("shop", &fp, Duration::ZERO, t0),
             Admission::Create
         );
+        // Only the fingerprint's own spelling is a duplicate: upper case, a sign or fewer digits
+        // name no entry.
+        let fp = fingerprint(0xab);
+        table.insert(entry(0xab, t0), t0).expect("room");
+        for other in ["00000000000000AB", "+0000000000000ab", "ab"] {
+            assert_eq!(u64::from_str_radix(other, 16), u64::from_str_radix(&fp, 16));
+            assert_eq!(
+                table.admit("shop", other, window, t0),
+                Admission::Create,
+                "{other}"
+            );
+        }
+        assert_eq!(table.admit("shop", &fp, window, t0), Admission::Duplicate);
+        let fp = fingerprint(1);
         // A window past 6 hours holds while the entry is kept.
         assert_eq!(
             table.admit("shop", &fp, 24 * HOUR, t0 + 12 * HOUR),
