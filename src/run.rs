@@ -3752,10 +3752,8 @@ mod tests {
             incidents.table_mut().start_sweep_ended();
             let lookup = KubeCluster::new(client, &on).lookup();
             let fact = sample_fact();
-            let (created, ()) = futures::join!(
-                incidents.create(&fact, &lookup, &term),
-                hold.end(&term)
-            );
+            let (created, ()) =
+                futures::join!(incidents.create(&fact, &lookup, &term), hold.end(&term));
             created.expect("a log");
             assert_eq!(incidents.table().len(), 0);
             incidents.write_errors()
