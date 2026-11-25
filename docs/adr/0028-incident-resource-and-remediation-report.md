@@ -421,7 +421,12 @@ gate of point 1 admits the create and after the table of created Incidents is fo
 and before the create. It calls the lookup for the sample's ReplicaSet: a fresh entry answers with
 no request; an absent or expired one costs the existing metadata `get` of `replicasets`, with its
 timeout of 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`); a failed one is answered from the cache for 30
-seconds (`OWNER_ERROR_TTL`, `:83`). The slot compares the UID the entry's `get` returned with the
+seconds (`OWNER_ERROR_TTL`, `:83`). An answer whose `metadata.uid` or revision annotation cannot be
+read is kept as a failed read for the answer's 600 seconds, not the error's 30: the 30 seconds are
+for a request that failed. A ReplicaSet's revision is read in one strict spelling (digits, no sign,
+no leading zero, 1 to 2^53; `parse_revision`, `src/record.rs:810`); a Deployment's, for `D014`, is
+the fact statement's parse (`src/record.rs:871-875`, any spelling Rust's `u64` parse takes, such as
+`+7` or `007`), then bounded 1 to 2^53 by the check. The slot compares the UID the entry's `get` returned with the
 UID in the Pod's `ownerReference`, and gives `revision-lookup-failed` when they differ. The slot can
 reach the lookup as the code stands: the term's lookup (`src/run.rs:973`) is created before the
 slot's future, which is assigned at `:1012` (`reporter.report(fact)`; `reporting` is declared at
