@@ -1012,6 +1012,7 @@ mod tests {
                 event: None,
                 regarding_kind: None,
                 pod: Some("api-7d9c8b6f4d-2xkqp".into()),
+                pod_uid: None,
                 container: Some("api".into()),
                 image: None,
                 reason: "CrashLoopBackOff".into(),

@@ -1219,7 +1219,6 @@ async fn lead<C: Cluster>(
                 for (_, job) in ready {
                     enqueue(&mut queue, job, metrics, waiting)?;
                 }
-                let mut by_name = options.incidents.then(PodsByName::default);
                 for incident in state.tick(&mut tracker, now) {
                     metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
                     let pods_total = state.pods_of(&incident.key.namespace, &incident.owner);
@@ -1231,7 +1230,7 @@ async fn lead<C: Cluster>(
                     if reporter.is_some() {
                         report::enqueue(
                             &mut facts,
-                            state.fact(&incident, statement.facts, by_name.as_mut(), now),
+                            state.fact(&incident, statement.facts, options, now),
                             metrics,
                             reporter.as_ref().and_then(|r| r.outbox),
                         )?;
@@ -1430,11 +1429,6 @@ fn log_incident(incident: &Incident, pods_total: usize, statement: &str) -> io::
 /// A Pod's record, its top-level owner, and whether that owner was resolved (a failed lookup
 /// leaves the ReplicaSet or Job as a stand-in, retried on the Pod's next update).
 type PodEntry = (PodRecord, OwnerRef, bool);
-
-/// The Pods by namespace and name, for the facts of one tick: built at the first fact whose
-/// Incident data needs a sample Pod, at most once a tick, and only with incidents on.
-#[derive(Default)]
-struct PodsByName<'a>(Option<HashMap<(&'a str, &'a str), &'a PodEntry>>);
 
 /// The records kausa keeps, keyed by UID.
 #[derive(Default)]
@@ -1690,39 +1684,38 @@ impl State {
         tracker.tick(now, signals)
     }
 
-    /// The fact of `incident` for the fact slot, with `facts` from its statement. With incidents
-    /// on (`by_name` set), it keeps what the incident's Incident needs, from the records of this
-    /// tick (docs/adr/0028-incident-resource-and-remediation-report.md, point 3): one map read for
-    /// the sample Pod, the Event or the Deployment, by name or UID, never a scan of the records
-    /// but the one that builds `by_name`.
-    fn fact<'a>(
-        &'a self,
+    /// The fact of `incident` for the fact slot, with `facts` from its statement. With
+    /// `options.incidents`, it keeps what the incident's Incident needs, from the records of this
+    /// tick (docs/adr/0028-incident-resource-and-remediation-report.md, point 3): one map read by
+    /// UID for the sample Pod, the Event or the Deployment, never by name and never a scan.
+    fn fact(
+        &self,
         incident: &Incident,
         facts: fact::Facts,
-        by_name: Option<&mut PodsByName<'a>>,
+        options: &Options,
         now: Timestamp,
     ) -> Fact {
         let mut fact = Fact::new(incident, facts);
-        let Some(by_name) = by_name else {
+        if !options.incidents {
             return fact;
-        };
-        let namespace = incident.key.namespace.as_str();
+        }
         let (about, owner_lookup_failed) = if incident.key.detection == Detection::RolloutStalled {
             (
                 About::deployment(self.deployments.get(&incident.owner.uid)),
                 false,
             )
-        } else if let Some(pod) = &incident.sample.pod {
-            let pods = by_name.0.get_or_insert_with(|| {
-                self.pods
-                    .values()
-                    .map(|entry| ((entry.0.namespace.as_str(), entry.0.name.as_str()), entry))
-                    .collect()
-            });
-            match pods.get(&(namespace, pod.as_str())) {
+        } else if incident.sample.pod.is_some() {
+            // The record the sample was taken from, by its UID: a name can name two records.
+            let record = incident
+                .sample
+                .pod_uid
+                .as_ref()
+                .and_then(|uid| self.pods.get(uid));
+            match record {
                 Some((record, _, resolved)) => (About::sample(record), !resolved),
                 // Not reached: the tick emits an incident about a Pod only from the records it
-                // holds. The Incident's check refuses a sample with no UID.
+                // holds, and nothing changes them before its facts. The Incident's check refuses
+                // a sample with no UID.
                 None => (
                     About::Sample {
                         pod_uid: None,
@@ -7117,18 +7110,19 @@ mod tests {
     const POD_UID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
     const OWNER_UID: &str = "1f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
 
-    /// The one incident of `state` at a tick, and its fact with incidents off and on, and whether
-    /// the tick built its map of Pods by name.
-    fn facts_of(state: &State) -> (Fact, Fact, bool) {
+    /// The one incident of `state` at a tick, and its fact with incidents off and on, from the
+    /// options `lead` passes: `run`'s options leave them off.
+    fn facts_of(state: &State) -> (Fact, Fact) {
         let now = Timestamp::now();
         let mut tracker = Tracker::new(SignedDuration::ZERO);
         let incidents = state.tick(&mut tracker, now);
         assert_eq!(incidents.len(), 1);
         let incident = &incidents[0];
         let facts = || fact::statement(incident, 1).facts;
-        let off = state.fact(incident, facts(), None, now);
-        let mut by_name = PodsByName::default();
-        let on = state.fact(incident, facts(), Some(&mut by_name), now);
+        let mut options = options(false, 10);
+        let off = state.fact(incident, facts(), &options, now);
+        options.incidents = true;
+        let on = state.fact(incident, facts(), &options, now);
         assert_eq!(on.incident.as_ref().expect("the data").settled_at, now);
         // The data is the only difference.
         assert_eq!(
@@ -7138,7 +7132,7 @@ mod tests {
             },
             off
         );
-        (off, on, by_name.0.is_some())
+        (off, on)
     }
 
     fn about(fact: &Fact) -> (&About, bool) {
@@ -7181,10 +7175,9 @@ mod tests {
             }
             .expect("the log is written");
             assert_eq!(calls.get(), counted);
-            let (off, on, built) = facts_of(&state);
+            let (off, on) = facts_of(&state);
             assert_eq!(off.incident, None);
             assert_eq!(about(&on), (&sample, failed));
-            assert!(built);
         }
 
         // `D008`, a failed Job whose lookup failed: the Event's entry keeps the failure, with
@@ -7205,7 +7198,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
         let (_, _, lookup_failed) = state.events.values().next().expect("the Event is kept");
         assert!(lookup_failed);
-        let (off, on, built) = facts_of(&state);
+        let (off, on) = facts_of(&state);
         assert_eq!(off.incident, None);
         let regarding = About::Regarding {
             kind: Some("Job"),
@@ -7213,7 +7206,6 @@ mod tests {
             uid: MaybeUid::Uid(uid(OWNER_UID).expect("a UID")),
         };
         assert_eq!(about(&on), (&regarding, true));
-        assert!(!built, "no Pod is read for an incident with no sample");
 
         // `D011`, a ReplicaSet whose lookup worked; the fixture's UID is not one.
         let event = event_about(
@@ -7225,14 +7217,13 @@ mod tests {
             .expect("the log is written");
         let (_, _, lookup_failed) = state.events.values().next().expect("the Event is kept");
         assert!(!lookup_failed);
-        let (_, on, built) = facts_of(&state);
+        let (_, on) = facts_of(&state);
         let regarding = About::Regarding {
             kind: Some("ReplicaSet"),
             name: Some("checkout-7fffb9bf5c".into()),
             uid: MaybeUid::NotAUid,
         };
         assert_eq!(about(&on), (&regarding, false));
-        assert!(!built);
 
         // `D014`: the Deployment's generation and revision, from its record.
         let mut state = State::default();
@@ -7241,13 +7232,62 @@ mod tests {
             &CLUSTER,
             watcher::Event::Apply(deployment("shop", "checkout", true)),
         );
-        let (off, on, built) = facts_of(&state);
+        let (off, on) = facts_of(&state);
         assert_eq!(off.incident, None);
         let rollout = About::Deployment {
             generation: Some(2),
             revision: Some(3),
         };
         assert_eq!(about(&on), (&rollout, false));
-        assert!(!built);
+    }
+
+    #[test]
+    fn the_data_names_the_record_the_sample_was_taken_from_when_two_share_a_name() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+        // While a relist is open, the old record of a Pod deleted in a watch gap sits beside its
+        // replacement of the same name: here the old one crashes and the new one runs.
+        const OLD: &str = "2f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        const NEW: &str = "3f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        const OLD_RS: &str = "4f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        const NEW_RS: &str = "5f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        let of = |mut pod: Pod, uid: &str, rs_uid: &str| {
+            pod.metadata.uid = Some(uid.into());
+            pod.metadata.owner_references = Some(vec![OwnerReference {
+                api_version: "apps/v1".into(),
+                kind: "ReplicaSet".into(),
+                name: "checkout-7fffb9bf5c".into(),
+                uid: rs_uid.into(),
+                controller: Some(true),
+                ..OwnerReference::default()
+            }]);
+            pod
+        };
+        let name = "checkout-7fffb9bf5c-x1y2z";
+        let old = of(crashing(name), OLD, OLD_RS);
+        let new = of(pod("shop", name), NEW, NEW_RS);
+        let uid = |text| crate::record::Uid::parse(text);
+        let sample = About::Sample {
+            pod_uid: uid(OLD),
+            controller: Some(report::Controller {
+                kind: report::ControllerKind::ReplicaSet,
+                uid: uid(OLD_RS),
+                replica_set: Some("checkout-7fffb9bf5c".into()),
+            }),
+        };
+        // Each map has its own order: both orders of arrival, many times.
+        for run in 0..128 {
+            let mut state = State::default();
+            let pods = if run % 2 == 0 {
+                [old.clone(), new.clone()]
+            } else {
+                [new.clone(), old.clone()]
+            };
+            for pod in pods {
+                on_pod(&mut state, &CLUSTER, watcher::Event::Apply(pod));
+            }
+            assert_eq!(state.pods.len(), 2);
+            let (_, on) = facts_of(&state);
+            assert_eq!(about(&on), (&sample, true), "run {run}");
+        }
     }
 }

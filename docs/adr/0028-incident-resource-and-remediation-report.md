@@ -345,7 +345,12 @@ Each entry of the fact queue gains one optional pointer, filled only with incide
   about a Pod (`D001` to `D007`, `D009` and `D010`) is emitted only at a tick where each of its
   signals comes from a Pod record kausa holds (`src/incident.rs:99`, `:194-197`), and every such
   record has a UID (`src/record.rs:548`), so for those `sample.pod` is always set. `D008`, `D011` to
-  `D014` have no sample Pod, and no `sample`.
+  `D014` have no sample Pod, and no `sample`. Update 2026-11-25: the record is found by the UID the
+  sample's signal carries (`Signal.pod_uid`, the record's own for a Pod's state, and for an Event
+  about a Pod the UID of the record the tick takes the Pod's owner from), never by name: while a
+  relist is open, kausa holds the old record of a Pod deleted in a watch gap beside its replacement
+  of the same name (`on_pod` drops a vanished UID only at `InitDone`), and by name the data could
+  name the one that is not failing.
 - **The sample Pod's controller, when the Pod has a controller `ownerReference`:** its kind and its
   UID, from the Pod's own `ownerReference`, and, for a ReplicaSet, its name and the revision in its
   `deployment.kubernetes.io/revision` annotation, read in the fact slot as the next paragraph says.
@@ -903,6 +908,12 @@ bar 2, 3 or 6 measures it.
   `regarding`'s name of any length still enters 0027's fact queue as the incident's object, and its
   `incident` log line, as it does at `4b85369`; this ADR's part of the entry holds only values that
   fit (point 2).
+- **The sample's UID in each signal and incident:** a signal about a Pod carries its record's UID
+  (point 3), with incidents off too, since detection does not read the option: measured on a 64-bit
+  target, a `Signal` grows from 392 to 416 bytes and an `Incident` from 648 to 672, and a signal
+  about a Pod clones the UID's 36 bytes to the heap. An incident is held only while its tick handles
+  it and in an explanation's work: queued (at most `explain::QUEUE_LIMIT`, 16), running, or waiting
+  for its retry. No entry of the fact queue grows: a fact does not keep the signal.
 - **The refusals' counter and log line:** three series of `kausa_incidents_refused_total`, one per
   reason, and three hour marks, one for each reason's line, a monotonic instant of 16 bytes each on
   a 64-bit Linux target (point 1).

@@ -50,6 +50,10 @@ pub struct Signal {
     /// owner's: a Job's event is keyed to its CronJob. `None` for a state.
     pub regarding_kind: Option<String>,
     pub pod: Option<String>,
+    /// The UID of the Pod record the signal was taken from: two records of one name are held at
+    /// once while a relist is open, the old one of a Pod deleted in a watch gap and its
+    /// replacement (docs/adr/0028-incident-resource-and-remediation-report.md, point 3).
+    pub pod_uid: Option<String>,
     pub container: Option<String>,
     pub image: Option<String>,
     /// The waiting or termination reason, the `PodScheduled` condition's reason (`Unschedulable`
@@ -97,6 +101,7 @@ pub fn collect_signals(
                 event: None,
                 regarding_kind: None,
                 pod: Some(record.name.clone()),
+                pod_uid: Some(record.uid.clone()),
                 container: container.map(str::to_owned),
                 image,
                 reason,
@@ -195,7 +200,7 @@ pub fn collect_signals(
             else {
                 continue; // the Pod is gone, or not seen yet
             };
-            (pod.owner.clone(), Some(pod.record.name.clone()))
+            (pod.owner.clone(), Some(pod.record))
         };
         let series_first = (record.count > 1)
             .then_some(record.first_seen)
@@ -207,7 +212,8 @@ pub fn collect_signals(
             observed_at: last_seen,
             event: Some((record.uid.clone(), series_first)),
             regarding_kind: Some(regarding.kind.clone()),
-            pod,
+            pod: pod.map(|pod| pod.name.clone()),
+            pod_uid: pod.map(|pod| pod.uid.clone()),
             container: None,
             image: None,
             reason: record.reason.clone(),
@@ -240,6 +246,7 @@ pub fn rollout_signals(rollouts: &[&DeploymentRecord], now: Timestamp) -> Vec<Si
                 event: None,
                 regarding_kind: None,
                 pod: None,
+                pod_uid: None,
                 container: None,
                 image: None,
                 reason: "ProgressDeadlineExceeded".to_owned(),
@@ -2113,6 +2120,7 @@ mod tests {
                 event: None,
                 regarding_kind: None,
                 pod: None,
+                pod_uid: None,
                 container: None,
                 image: None,
                 reason: "ProgressDeadlineExceeded".into(),
@@ -2942,5 +2950,50 @@ mod tests {
                 "case {case}"
             );
         }
+    }
+
+    #[test]
+    fn a_signal_names_the_uid_of_the_record_it_was_taken_from() {
+        // docs/adr/0028-incident-resource-and-remediation-report.md, point 3: two records of one
+        // name, an old crashing one and a new running one.
+        let deploy = owner("Deployment", "api");
+        let old = pod("api-a", "Running", Some("CrashLoopBackOff"));
+        let new = PodRecord {
+            uid: "uid-api-a-new".into(),
+            ..pod("api-a", "Running", None)
+        };
+        let view = |record| PodView {
+            record,
+            owner: &deploy,
+        };
+        for records in [[&old, &new], [&new, &old]] {
+            let views = records.map(view);
+            let signals = collect_signals(&views, &[], t(0), FRESH);
+            let uids: Vec<_> = signals.iter().map(|s| s.pod_uid.as_deref()).collect();
+            assert_eq!(uids, [Some("uid-api-a")]);
+        }
+        // An event about a Pod takes the record it takes the owner from; one about a Job, none.
+        let views = [view(&old)];
+        let events = [
+            event("e1", "FailedMount", "Pod", "api-a", t(0)),
+            event("e2", "BackoffLimitExceeded", "Job", "nightly", t(0)),
+        ];
+        let events: Vec<_> = events
+            .iter()
+            .map(|record| EventView {
+                record,
+                job_owner: None,
+            })
+            .collect();
+        let signals = collect_signals(&views, &events, t(0), FRESH);
+        let of = |uid: &str| {
+            let signal = signals
+                .iter()
+                .find(|s| s.event.as_ref().is_some_and(|e| e.0 == uid));
+            signal.expect("a signal").pod_uid.clone()
+        };
+        assert_eq!((of("e1"), of("e2")), (Some("uid-api-a".into()), None));
+        // The UID costs each signal and each incident 24 bytes, on a 64-bit target.
+        assert_eq!((size_of::<Signal>(), size_of::<Incident>()), (416, 672));
     }
 }

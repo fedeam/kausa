@@ -956,6 +956,7 @@ mod tests {
                 event: None,
                 regarding_kind: None,
                 pod: Some("web-7d9c8b6f4d-2xkqp".into()),
+                pod_uid: None,
                 container: Some("server".into()),
                 image: None,
                 reason: "CrashLoopBackOff".into(),

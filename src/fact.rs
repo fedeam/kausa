@@ -216,6 +216,7 @@ mod tests {
                 event: None,
                 regarding_kind: None,
                 pod: (pods > 0).then(|| "web-0".to_owned()),
+                pod_uid: None,
                 container: None,
                 image: None,
                 reason: reason.into(),

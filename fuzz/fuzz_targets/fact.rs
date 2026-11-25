@@ -106,6 +106,7 @@ fuzz_target!(|input: Input| {
             event: None,
             regarding_kind: None,
             pod: set.iter().next().cloned(),
+            pod_uid: None,
             container: container.map(str::to_owned),
             image: None,
             reason: reason.to_owned(),

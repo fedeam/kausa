@@ -51,6 +51,7 @@ fn incident() -> Gathered {
         event: None,
         regarding_kind: None,
         pod: Some(POD.into()),
+        pod_uid: None,
         container: Some(CONTAINER.into()),
         image: Some(IMAGE.into()),
         reason: "CrashLoopBackOff".into(),
