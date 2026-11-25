@@ -369,6 +369,9 @@ kind cases had never run.
    The chart installs the CustomResourceDefinition `incidents.kausa.fedeam.com` and a reader
    ClusterRole aggregated to `view`, adds `--incidents --incident-days "1"` to kausa's arguments and
    `create`, `list` and `delete` on `incidents` to its rules, last ([Permissions](../reference/permissions.md)).
+   Without an endpoint it also passes `--dedup-hours` from `budget.dedupHours`, the gate's window,
+   which is also the window of the `detected` notifications: one window. A `budget.dedupHours` you
+   set without an endpoint had no effect until now (kausa used 6), and now applies to both.
    A release installed with an earlier chart has no `incidents` values; upgraded with
    `--reuse-values`, it renders with the Incidents off.
 

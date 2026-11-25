@@ -110,7 +110,7 @@ but about kausa's own Lease, and is the same in both scopes.
 | `history.days` | `7` | `--history-days`: Explanations older than this many days are deleted, 1 to 30 |
 | `history.installCRD` | `true` | Whether this release installs the CustomResourceDefinition and the reader role. `false` when another release or a cluster administrator installs them |
 | `history.readers.aggregate` | `true` | The reader role, which lets `view`, `edit` and `admin` read Explanations; `false` leaves it out |
-| `incidents.enabled` | `false` | Without `dryRun`, with or without an endpoint: `--incidents --incident-days <days>` (and `--dedup-hours`, the window of their gate, when the endpoint's block does not pass it), the `incidents` rule, and (with `installCRD`) the CustomResourceDefinition and the reader role ([The Incidents](#the-incidents)). Turning it off or setting `dryRun` deletes them, and every Incident in the cluster |
+| `incidents.enabled` | `false` | Without `dryRun`, with or without an endpoint: `--incidents --incident-days <days>` (and `--dedup-hours`, the window of their gate, when the endpoint's block does not pass it: without an endpoint, `budget.dedupHours` then sets that window and the `detected` notifications' too, one window by [0028](../adr/0028-incident-resource-and-remediation-report.md)'s point 1), the `incidents` rule, and (with `installCRD`) the CustomResourceDefinition and the reader role ([The Incidents](#the-incidents)). Turning it off or setting `dryRun` deletes them, and every Incident in the cluster |
 | `incidents.days` | `1` | `--incident-days`: Incidents created more than this many days ago are deleted, 1 to 30 |
 | `incidents.installCRD` | `true` | Whether this release installs the Incident CustomResourceDefinition and its reader role. `false` when another release or a cluster administrator installs them |
 | `incidents.readers.aggregate` | `true` | The reader role, which lets `view`, `edit` and `admin` read Incidents; `false` leaves it out |
@@ -126,7 +126,7 @@ but about kausa's own Lease, and is the same in both scopes.
 | `budget.callsPerHour` | `30` | `--max-calls-per-hour`: model calls in any hour, per process. Each start (an install, upgrade, restart or takeover) allows 3 at once, then one every `3600/callsPerHour` seconds, up to `callsPerHour`; incidents wait in the queue for their call |
 | `budget.callsPerDay` | `200` | `--max-calls-per-day`: model calls in any 24 hours, per process. For it to hold across restarts, up to the bursts of 3, set `callsPerHour <= callsPerDay / 24` |
 | `budget.maxInputTokens` | `6000` | `--max-input-tokens` |
-| `budget.dedupHours` | `6` | `--dedup-hours` |
+| `budget.dedupHours` | `6` | `--dedup-hours`, a whole number from 0 to 1000000: one window for three things, how long an explanation is reused for a repeated incident, the window of the `detected` notifications and, with `incidents.enabled`, the window of the Incident gate. The chart passes it with an endpoint, with `dryRun` or with `incidents.enabled`; without any of them it has no effect and kausa's default, 6, applies to the `detected` notifications. So turning incidents on without an endpoint makes a `budget.dedupHours` set before apply to the `detected` notifications too |
 | `metrics.enabled` | `true` | `--metrics-address <bindAddress>:<port>`, the liveness (`/healthz`) and readiness (`/readyz`) probes, and the Service |
 | `metrics.port` | `9090` | |
 | `metrics.bindAddress` | `[::]` | IPv4 and IPv6 on Linux (checked in the image on 2026-10-26, also with IPv6 turned off in the container); `0.0.0.0` for nodes booted with `ipv6.disable=1` |
@@ -163,6 +163,7 @@ reason, and nothing is applied) in these cases, checked in this order, with thes
 | The NetworkPolicy with an endpoint (outside `dryRun`) and without its peers | `networkPolicy.endpoint.to is required with networkPolicy.enabled and model.endpoint: without it kausa cannot reach the model` |
 | `history.days` is not a whole number from 1 to 30, whether the history is on or off (for example `0`, `31`, `abc` or `7.5`) | `history.days must be a whole number of days from 1 to 30, not '<value>'` |
 | `incidents.days` is not a whole number from 1 to 30, whether incidents are on or off; a missing key or map is `1` | `incidents.days must be a whole number of days from 1 to 30, not '<value>'` |
+| `budget.dedupHours` is not a whole number from 0 to 1000000 (for example `2000000`, `-1`, `abc`, `7.5` or `null`), while the chart passes `--dedup-hours`: with an endpoint, with `dryRun` or with `incidents.enabled`. Otherwise the value is not read | `budget.dedupHours must be a whole number of hours from 0 to 1000000, not '<value>'` |
 | `replicaCount` is anything but `1` or `2` (for example `0`, `3`, `two`, `-1` or `1.5`); a missing key or `null` is `1` | `replicaCount must be 1 or 2, not '<value>': a second replica is a standby that takes over through a Lease (docs/adr/0019-high-availability.md)` |
 | `model.timeoutSeconds` is not a whole number from 10 to 600, with or without an endpoint (for example `9`, `601`, `abc` or `1.5`); a missing key or `null` is `120` | `model.timeoutSeconds must be a whole number of seconds from 10 to 600, not '<value>'` |
 | `endpointCheck.enabled` is anything but `true` or `false` (for example `yes`) | `endpointCheck.enabled must be true or false, not '<value>'` |
@@ -380,7 +381,7 @@ Three helpers in `templates/_helpers.tpl` decide what the Incidents render:
 
 | Helper | Gives `true` when | Renders |
 |---|---|---|
-| `kausa.writesIncidents` | `incidents.enabled` and `dryRun` false, with or without `model.endpoint` | `--incidents --incident-days "<days>"` in the Deployment's arguments (after the history's, before the notifications' and `--metrics-address`), `--dedup-hours` after `--settle-seconds` when there is no endpoint, and the `incidents` rule, last in `kausa.rules` |
+| `kausa.writesIncidents` | `incidents.enabled` and `dryRun` false, with or without `model.endpoint` | `--incidents --incident-days "<days>"` in the Deployment's arguments (after the history's, before the notifications' and `--metrics-address`), `--dedup-hours` after `--settle-seconds` when there is no endpoint (from `budget.dedupHours`, which then also sets the window of the `detected` notifications), the `incidents` rule, last in `kausa.rules`, and the Incidents paragraph of `NOTES.txt` |
 | `kausa.incidentDays` | (gives the days as a string, `1` when missing) | The value of `--incident-days` and of the `incidents.days` check |
 | `kausa.installsIncidentCRD` | `kausa.writesIncidents` and `incidents.installCRD` | `templates/incident-crd.yaml`, and with `incidents.readers.aggregate`, `templates/incident-reader.yaml` |
 
@@ -389,7 +390,10 @@ the rule to a kausa that does not use it, or the reverse; with `dryRun`, kausa w
 `--incidents`, so the chart renders none of them. `incidents` is read nil-safely, like `history`: a
 release whose stored values have no `incidents` map, or `--set incidents=null`, renders as
 `enabled: false`, `days: 1`, `installCRD: true` and `readers.aggregate: true`. The NetworkPolicy
-does not change: Incidents go to the API server only. `NOTES.txt` does not change either.
+does not change: Incidents go to the API server only. `NOTES.txt` gains a paragraph only while the
+release writes Incidents, as for the history: how to read them, per scope, and that uninstalling
+the release or turning its Incidents off deletes the CustomResourceDefinition and every Incident
+(or, with `incidents.installCRD=false`, who installs it). With the defaults it does not change.
 
 **With the defaults, nothing changes.** `tests/golden/chart-default-cluster.yaml` and
 `tests/golden/chart-default-namespaced.yaml` are the default renders of each scope from before the

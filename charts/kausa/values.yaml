@@ -136,6 +136,10 @@ budget:
   callsPerHour: 30
   callsPerDay: 200
   maxInputTokens: 6000
+  # --dedup-hours, 0 to 1000000: one window for the reuse of an explanation, the detected
+  # notifications and, with incidents.enabled, the Incident gate. Passed with model.endpoint,
+  # dryRun or incidents.enabled; without any of them it has no effect, and kausa's default, 6,
+  # applies to the detected notifications. Turning incidents on without an endpoint makes it apply.
   dedupHours: 6
 
 # Prometheus counters, /healthz and /readyz. When enabled, the probes use them and a Service
