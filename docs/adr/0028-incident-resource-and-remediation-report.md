@@ -877,8 +877,9 @@ bar 2, 3 or 6 measures it.
   rule of point 1 keeps a creation time in each entry, a monotonic instant of 16 bytes on a 64-bit
   Linux target; whether the review's estimates count it is not known, so at most 500 × 16 = 8,000
   bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry. Update
-  2026-11-24: measured, a full table of the longest entries holds 392,000 bytes, 0.37 MiB, on a
-  64-bit target: 500 slots of 152 bytes and 632 bytes of names an entry
+  2026-11-24: measured on a 64-bit target, an entry holds a slot of 152 bytes and at most 632 bytes
+  of names on the heap, 784 bytes, and a full table of the longest entries 500 × 784 = 392,000
+  bytes, 0.37 MiB, under bar 3's 524,288 bytes, which measures them
   (`a_full_table_of_the_longest_entries_is_within_bar_3` in `src/incident_resource/table.rs`).
 - **The owner cache:** +8 bytes an entry, one optional pointer, empty with incidents off (bar 1);
   with incidents on, 24 bytes more for each entry of a ReplicaSet whose `get` answered, the revision
@@ -888,9 +889,9 @@ bar 2, 3 or 6 measures it.
   `regarding`'s name of any length still enters 0027's fact queue as the incident's object, and its
   `incident` log line, as it does at `4b85369`; this ADR's part of the entry holds only values that
   fit (point 2).
-- **The refusals' counter and log line:** two series of `kausa_incidents_refused_total`, one per
-  reason, and one more hour mark for the second reason's line, a monotonic instant of 16 bytes on a
-  64-bit Linux target (point 1).
+- **The refusals' counter and log line:** three series of `kausa_incidents_refused_total`, one per
+  reason, and three hour marks, one for each reason's line, a monotonic instant of 16 bytes each on
+  a 64-bit Linux target (point 1).
 - **The table of Events:** one flag an entry, whether the owner lookup of the Event's object failed
   (point 3's `missing`), kept with incidents off too: at most 8 bytes an entry with alignment, an
   estimate; bar 1 measures it. Update 2026-11-25: measured on a 64-bit target, an entry grows
