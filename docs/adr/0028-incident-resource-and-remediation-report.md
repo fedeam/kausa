@@ -1126,6 +1126,11 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   deletes Incidents kurita may still decide. No test injects the clock. Test: a unit test of the
   sweep with its time given, and in kind a kausa with its clock set ahead, checking which
   Incidents the sweep deletes.
+- **Whether an admission webhook can put a text of its own in the reason kausa logs,** of any
+  length: `api_failure` (`src/history.rs:411-418`) logs a refused create's or delete's `reason` as
+  the answer gives it, and leaves out only the message. A webhook that denies a create or delete of
+  an Incident was not checked. Test: in kind, a validating webhook on `incidents` that denies with
+  a long reason, then read kausa's log line.
 - **Whether the Incident should take as its sample the first signal of the group whose values fit,**
   and refuse only when none fits, so that a signal a writer in N places first does not leave a
   genuine incident without an Incident (the trust statement). Open for the implementation; the
