@@ -139,6 +139,57 @@ pub fn parse_chat_id(text: &str) -> Option<ChatId> {
     }
 }
 
+/// The `json` body of a `remediation` message
+/// (docs/adr/0028-incident-resource-and-remediation-report.md, point 6): these fields and nothing
+/// else. `result` is kausa's fixed word, since kurita only proposes.
+#[cfg(any(test, fuzzing))]
+pub fn remediation_json_body(r: &Remediation, kausa_version: &str) -> Value {
+    json!({
+        "schema": SCHEMA,
+        "type": "remediation",
+        "kausa_version": kausa_version,
+        "detection": {"id": r.detection_id, "name": r.detection_name},
+        "object": {
+            "apiVersion": r.api_version,
+            "kind": r.kind,
+            "namespace": r.namespace,
+            "name": r.name,
+        },
+        "fingerprint": r.fingerprint,
+        "remediation": {"action": r.action, "result": "proposed", "time": r.time},
+    })
+}
+
+/// The one line of a `remediation` message's text formats. Its values are fixed words and the
+/// names of kausa's own Incident, bounded by their patterns, so it needs no cut; the kind and the
+/// name go through [`one_line`] as in every other header.
+#[cfg(any(test, fuzzing))]
+pub fn remediation_text(r: &Remediation) -> String {
+    format!(
+        "kausa: kurita proposed {} for {} ({}) in {}, {} {}",
+        r.action,
+        r.detection_name,
+        r.detection_id,
+        r.namespace,
+        one_line(&r.kind),
+        one_line(&r.name)
+    )
+}
+
+/// The `slack` body of a `remediation` message: its line with a `JOINER` after every `@`, then
+/// escaped, as every `slack` body.
+#[cfg(any(test, fuzzing))]
+pub fn remediation_slack_body(r: &Remediation) -> Value {
+    slack_json(join(remediation_text(r), |c| c == '@'))
+}
+
+/// The `telegram` body of a `remediation` message: its line with a `JOINER` after every `@` and
+/// every `/`, as every `telegram` body.
+#[cfg(any(test, fuzzing))]
+pub fn remediation_telegram_body(r: &Remediation, chat: &ChatId) -> Value {
+    telegram_json(join(remediation_text(r), |c| matches!(c, '@' | '/')), chat)
+}
+
 /// The `json` body: these fields and nothing else. `explanation` is only in `explained`.
 pub fn json_body(n: &Notice, kausa_version: &str) -> Value {
     let mut body = json!({
@@ -265,6 +316,11 @@ pub fn slack_text(n: &Notice) -> String {
 /// follows every character `is_joined` picks, with those joiners.
 fn joined(n: &Notice, is_joined: impl Fn(char) -> bool) -> String {
     let cut = cut(render(n), |c| c.len_utf16() + usize::from(is_joined(c)));
+    join(cut, is_joined)
+}
+
+/// `cut` with a `JOINER` after every character `is_joined` picks.
+fn join(cut: String, is_joined: impl Fn(char) -> bool) -> String {
     let mut joined = String::with_capacity(cut.len() + 3 * cut.matches(&is_joined).count());
     for c in cut.chars() {
         joined.push(c);
@@ -413,6 +469,8 @@ mod tests {
     const GOLDEN_JSON: &str = include_str!("../tests/golden/notification-explained.json");
     const GOLDEN_DETECTED_JSON: &str = include_str!("../tests/golden/notification-detected.json");
     const GOLDEN_CAPPED_JSON: &str = include_str!("../tests/golden/notification-capped.json");
+    const GOLDEN_REMEDIATION_JSON: &str =
+        include_str!("../tests/golden/notification-remediation.json");
 
     /// The text of the explained example, with no trailing newline.
     const GOLDEN_TEXT: &str = "kausa: crash loop (D001) in shop, Deployment web\n\
@@ -1352,5 +1410,113 @@ mod tests {
         for c in ['@', '/', '&', '<', '>', '\n'] {
             assert!(!WITHHELD.contains(c), "the notice holds {c:?}");
         }
+    }
+
+    /// The example of 0028, point 6.
+    fn remediation() -> Remediation {
+        Remediation {
+            detection_id: "D003",
+            detection_name: "out of memory",
+            api_version: "apps/v1".into(),
+            kind: "Deployment".into(),
+            namespace: "shop".into(),
+            name: "web".into(),
+            fingerprint: "5d0c2b7e9a1f4c38".into(),
+            action: "raise-memory-limit",
+            time: "2026-11-24T10:00:12Z".into(),
+        }
+    }
+
+    #[test]
+    fn the_remediation_json_body_is_the_adr_example() {
+        let golden: Value =
+            serde_json::from_str(GOLDEN_REMEDIATION_JSON).expect("the golden JSON parses");
+        assert_eq!(remediation_json_body(&remediation(), "0.8.0"), golden);
+        // The golden file is the ADR's block, byte for byte.
+        let adr = include_str!("../docs/adr/0028-incident-resource-and-remediation-report.md");
+        let block = format!("```json\n{}\n```", GOLDEN_REMEDIATION_JSON.trim_end());
+        assert!(adr.contains(&block), "the ADR lacks:\n{block}");
+    }
+
+    #[test]
+    fn the_remediation_json_body_has_these_fields_and_no_other() {
+        let body = remediation_json_body(&remediation(), "0.8.0");
+        let keys = |v: &Value| -> Vec<String> {
+            let mut keys: Vec<String> = v.as_object().expect("an object").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(
+            keys(&body),
+            [
+                "detection",
+                "fingerprint",
+                "kausa_version",
+                "object",
+                "remediation",
+                "schema",
+                "type"
+            ]
+        );
+        assert_eq!(keys(&body["detection"]), ["id", "name"]);
+        assert_eq!(
+            keys(&body["object"]),
+            ["apiVersion", "kind", "name", "namespace"]
+        );
+        assert_eq!(keys(&body["remediation"]), ["action", "result", "time"]);
+        assert_eq!(body["schema"], SCHEMA);
+        assert_eq!(body["type"], "remediation");
+        assert_eq!(body["remediation"]["result"], "proposed");
+    }
+
+    #[test]
+    fn the_remediation_text_is_the_adr_line() {
+        let line = "kausa: kurita proposed raise-memory-limit for out of memory (D003) in shop, \
+                    Deployment web";
+        assert_eq!(remediation_text(&remediation()), line);
+        assert_eq!(
+            remediation_slack_body(&remediation()),
+            json!({
+                "text": line,
+                "mrkdwn": false,
+                "unfurl_links": false,
+                "unfurl_media": false,
+                "parse": "none",
+            })
+        );
+        let chat = ChatId::Id(-1001234567890);
+        assert_eq!(
+            remediation_telegram_body(&remediation(), &chat),
+            json!({
+                "chat_id": -1001234567890_i64,
+                "text": line,
+                "link_preview_options": {"is_disabled": true},
+            })
+        );
+    }
+
+    #[test]
+    fn the_remediation_text_keeps_its_line_and_escapes_as_the_others() {
+        // The kind and the name come from kausa's Incident, bounded by their patterns; were they
+        // not, they could not break the line, and Slack's characters are escaped.
+        let mut r = remediation();
+        r.kind = "Deploy\nment".into();
+        r.name = "<@here>&/x".into();
+        let line = remediation_text(&r);
+        assert_eq!(line.lines().count(), 1);
+        let slack = remediation_slack_body(&r);
+        assert!(
+            slack["text"]
+                .as_str()
+                .expect("a text")
+                .ends_with("Deploy\u{fffd}ment &lt;@\u{2060}here&gt;&amp;/x")
+        );
+        let telegram = remediation_telegram_body(&r, &ChatId::Username("@kausa_alerts".into()));
+        assert!(
+            telegram["text"]
+                .as_str()
+                .expect("a text")
+                .ends_with("<@\u{2060}here>&/\u{2060}x")
+        );
     }
 }

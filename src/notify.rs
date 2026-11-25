@@ -205,6 +205,19 @@ impl Notifier {
         self.post(body).await
     }
 
+    /// The same for a message of a lower class: one attempt of its body in this format.
+    #[cfg(test)]
+    pub async fn send_low(&self, item: &Low) -> Result<u16, Failure> {
+        let body = match item {
+            Low::Remediation(r) => match &self.format {
+                Format::Json => notification::remediation_json_body(r, env!("CARGO_PKG_VERSION")),
+                Format::Slack => notification::remediation_slack_body(r),
+                Format::Telegram(chat) => notification::remediation_telegram_body(r, chat),
+            },
+        };
+        self.post(body).await
+    }
+
     async fn post(&self, body: Value) -> Result<u16, Failure> {
         let mut request = self
             .client
@@ -427,6 +440,131 @@ impl Cap {
     }
 }
 
+/// A class of message ranked below `detected` and `explained` messages
+/// (docs/adr/0028-incident-resource-and-remediation-report.md, point 6): it shares the
+/// `QUEUE_LIMIT` entries with them, is dropped first when they are full, is taken only when none
+/// of them waits, has its own cap on the same `--notify-max-per-hour` and its own outcomes, never
+/// owes the `capped` message and is never checked against the `detected` messages sent. The
+/// classes are ranked by their order: a later one is dropped before and taken after an earlier one.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LowClass {
+    Remediation,
+}
+
+#[cfg(test)]
+impl LowClass {
+    pub const ALL: [LowClass; 1] = [LowClass::Remediation];
+
+    /// The line logged, at most once an hour, when a message of the class is dropped.
+    fn dropped_line(self) -> &'static str {
+        match self {
+            LowClass::Remediation => "remediation dropped",
+        }
+    }
+
+    /// The line logged, at most once an hour, when a message of the class is over its cap.
+    fn capped_line(self) -> &'static str {
+        match self {
+            LowClass::Remediation => "remediation capped",
+        }
+    }
+}
+
+/// A message of a [`LowClass`].
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Low {
+    /// kurita's proposal for one of kausa's Incidents.
+    Remediation(notification::Remediation),
+}
+
+#[cfg(test)]
+impl Low {
+    pub fn class(&self) -> LowClass {
+        match self {
+            Low::Remediation(_) => LowClass::Remediation,
+        }
+    }
+
+    /// The fingerprint of kausa's own incident the message is about.
+    fn fingerprint(&self) -> &str {
+        match self {
+            Low::Remediation(r) => &r.fingerprint,
+        }
+    }
+}
+
+/// What became of a message of a [`LowClass`]: the outcomes of `kausa_notifications_total`,
+/// counted apart, which the caller adds to its class's own counter.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LowOutcome {
+    Sent,
+    Failed,
+    Dropped,
+    Capped,
+}
+
+#[cfg(test)]
+impl LowOutcome {
+    pub const ALL: [LowOutcome; 4] = [
+        LowOutcome::Sent,
+        LowOutcome::Failed,
+        LowOutcome::Dropped,
+        LowOutcome::Capped,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LowOutcome::Sent => "sent",
+            LowOutcome::Failed => "failed",
+            LowOutcome::Dropped => "dropped",
+            LowOutcome::Capped => "capped",
+        }
+    }
+}
+
+/// The messages of the lower classes waiting, oldest first, and what each class keeps apart: its
+/// cap, its outcomes not yet taken, and when its `dropped` and `capped` lines were last logged.
+#[cfg(test)]
+struct Lower {
+    queue: VecDeque<Low>,
+    caps: [Cap; LowClass::ALL.len()],
+    outcomes: [[u64; LowOutcome::ALL.len()]; LowClass::ALL.len()],
+    dropped_logged: [Option<Instant>; LowClass::ALL.len()],
+    capped_logged: [Option<Instant>; LowClass::ALL.len()],
+}
+
+#[cfg(test)]
+impl Lower {
+    fn new(max_per_hour: usize) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            caps: std::array::from_fn(|_| Cap::new(max_per_hour)),
+            outcomes: [[0; LowOutcome::ALL.len()]; LowClass::ALL.len()],
+            dropped_logged: [None; LowClass::ALL.len()],
+            capped_logged: [None; LowClass::ALL.len()],
+        }
+    }
+
+    fn count(&mut self, class: LowClass, outcome: LowOutcome) {
+        let count = &mut self.outcomes[class as usize][outcome as usize];
+        *count = count.saturating_add(1);
+    }
+}
+
+/// Whether a line last logged at `last` may be logged again at `now`, at most once an hour; if
+/// it may, `now` is noted.
+#[cfg(test)]
+fn hourly(last: &mut Option<Instant>, now: Instant) -> bool {
+    let due = last.is_none_or(|at| now.saturating_duration_since(at) >= CAP_WINDOW);
+    if due {
+        *last = Some(now);
+    }
+    due
+}
+
 /// The webhook and what its messages share across terms: the queue (emptied when a term ends),
 /// the table of `detected` messages sent and the cap, which live as long as the process.
 pub struct Outbox<'a> {
@@ -434,6 +572,9 @@ pub struct Outbox<'a> {
     queue: RefCell<VecDeque<Queued>>,
     sent: RefCell<Sent>,
     cap: RefCell<Cap>,
+    /// The messages of the lower classes, which share `QUEUE_LIMIT` with `queue`.
+    #[cfg(test)]
+    lower: RefCell<Lower>,
     pub metrics: &'a Metrics,
     /// The lease term: kausa notifies only while it holds (docs/adr/0019-high-availability.md).
     pub term: &'a Term,
@@ -454,6 +595,8 @@ impl<'a> Outbox<'a> {
             queue: RefCell::new(VecDeque::new()),
             sent: RefCell::new(Sent::new(ttl)),
             cap: RefCell::new(Cap::new(max_per_hour)),
+            #[cfg(test)]
+            lower: RefCell::new(Lower::new(max_per_hour)),
             metrics,
             term,
         }
@@ -475,6 +618,9 @@ impl<'a> Outbox<'a> {
         {
             return Ok(());
         }
+        // A message of a lower class makes room first; with none queued, nothing changes.
+        #[cfg(test)]
+        self.evict_low(None, Instant::now())?;
         let dropped = {
             let mut queue = self.queue.borrow_mut();
             if queue.len() < QUEUE_LIMIT {
@@ -512,6 +658,8 @@ impl<'a> Outbox<'a> {
 
     /// Empties the queue when a term ends; returns how many messages it held.
     pub fn clear(&self) -> usize {
+        #[cfg(test)]
+        self.clear_low();
         self.queue.borrow_mut().drain(..).count()
     }
 
@@ -656,6 +804,160 @@ impl<'a> Outbox<'a> {
     fn count_dropped(&self) {
         self.metrics
             .inc("kausa_notifications_total", &[("outcome", "dropped")]);
+    }
+}
+
+/// The lower classes ([`LowClass`]): queued, taken, sent and counted apart from the `detected` and
+/// `explained` messages, whose bytes, order and counters they leave as they are.
+#[cfg(test)]
+impl Outbox<'_> {
+    /// The messages of the lower classes waiting, oldest first.
+    pub fn low_queue(&self) -> Vec<Low> {
+        self.lower.borrow().queue.iter().cloned().collect()
+    }
+
+    /// When both parts of the queue hold `QUEUE_LIMIT` messages, drops the oldest queued message
+    /// of the lowest class queued, provided that class ranks no higher than `newcomer` (any class,
+    /// for a `detected` or `explained` message, `None`). Returns whether there is room.
+    fn evict_low(&self, newcomer: Option<LowClass>, now: Instant) -> io::Result<bool> {
+        let mut lower = self.lower.borrow_mut();
+        if self.queue.borrow().len() + lower.queue.len() < QUEUE_LIMIT {
+            return Ok(true);
+        }
+        let Some(lowest) = lower.queue.iter().map(Low::class).max() else {
+            return Ok(false);
+        };
+        if newcomer.is_some_and(|class| class > lowest) {
+            return Ok(false);
+        }
+        let Some(at) = lower.queue.iter().position(|q| q.class() == lowest) else {
+            return Ok(false);
+        };
+        let Some(dropped) = lower.queue.remove(at) else {
+            return Ok(false);
+        };
+        Self::dropped(&mut lower, &dropped, now)?;
+        Ok(true)
+    }
+
+    /// Counts and, at most once an hour per class, logs a message of a lower class dropped because
+    /// the queue is full. It never owes the `capped` message.
+    fn dropped(lower: &mut Lower, dropped: &Low, now: Instant) -> io::Result<()> {
+        let class = dropped.class();
+        lower.count(class, LowOutcome::Dropped);
+        if hourly(&mut lower.dropped_logged[class as usize], now) {
+            log::warn(
+                class.dropped_line(),
+                json!({"fingerprint": dropped.fingerprint(), "reason": "the queue is full"}),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Queues `item` of a lower class at `now`. When the queue is full, the oldest queued message
+    /// of the lowest class goes, if it ranks no higher than `item`; with none, `item` is dropped
+    /// itself. It never evicts a `detected` or an `explained` message.
+    pub fn enqueue_low(&self, item: Low, now: Instant) -> io::Result<()> {
+        if self.evict_low(Some(item.class()), now)? {
+            self.lower.borrow_mut().queue.push_back(item);
+            return Ok(());
+        }
+        Self::dropped(&mut self.lower.borrow_mut(), &item, now)
+    }
+
+    /// The next message of a lower class to send, only when no `detected` or `explained` message
+    /// is queued: the caller takes it after [`Outbox::take_next`] has given nothing. It is the
+    /// oldest of the highest class queued; one over its class's cap is counted as `capped` and, at
+    /// most once an hour, logged, and the next one is tried. Nothing here owes the `capped`
+    /// message.
+    pub fn take_low(&self, now: Instant) -> io::Result<Option<Low>> {
+        loop {
+            if !self.queue.borrow().is_empty() {
+                return Ok(None);
+            }
+            let mut lower = self.lower.borrow_mut();
+            let Some(highest) = lower.queue.iter().map(Low::class).min() else {
+                return Ok(None);
+            };
+            let Some(item) = lower
+                .queue
+                .iter()
+                .position(|q| q.class() == highest)
+                .and_then(|at| lower.queue.remove(at))
+            else {
+                return Ok(None);
+            };
+            let cap = &mut lower.caps[highest as usize];
+            if cap.admit(now) {
+                return Ok(Some(item));
+            }
+            let limit = cap.limit();
+            lower.count(highest, LowOutcome::Capped);
+            if hourly(&mut lower.capped_logged[highest as usize], now) {
+                log::warn(
+                    highest.capped_line(),
+                    json!({"fingerprint": item.fingerprint(), "limit": limit}),
+                )?;
+            }
+        }
+    }
+
+    /// Sends one message of a lower class: one attempt and, after a transient failure, one more
+    /// after `RETRY_DELAY`, which is not counted apart. Counts its outcome in its class; past the
+    /// end of the lease term it is dropped. Then waits until the format's least interval has
+    /// passed since the last attempt began, as [`Outbox::deliver`] does.
+    pub async fn deliver_low(&self, item: Low) -> io::Result<()> {
+        let class = item.class();
+        let mut attempt: u8 = 1;
+        loop {
+            if !self.term.holds() {
+                self.lower.borrow_mut().count(class, LowOutcome::Dropped);
+                return Ok(());
+            }
+            let started = Instant::now();
+            let outcome = match self.notifier.send_low(&item).await {
+                Ok(_) => LowOutcome::Sent,
+                Err(failure) if failure.transient && attempt == 1 => {
+                    if !self.term.holds() {
+                        self.lower.borrow_mut().count(class, LowOutcome::Dropped);
+                        return Ok(());
+                    }
+                    tokio::time::sleep(RETRY_WAIT).await;
+                    attempt = 2;
+                    continue;
+                }
+                Err(_) => LowOutcome::Failed,
+            };
+            self.lower.borrow_mut().count(class, outcome);
+            tokio::time::sleep_until(started + self.notifier.format().min_interval()).await;
+            return Ok(());
+        }
+    }
+
+    /// Empties the lower classes' queue when a term ends: each message is counted as dropped in
+    /// its class, and none in `clear`'s count, which is of `detected` and `explained` messages.
+    fn clear_low(&self) {
+        let mut lower = self.lower.borrow_mut();
+        let cleared: Vec<LowClass> = lower.queue.drain(..).map(|q| q.class()).collect();
+        for class in cleared {
+            lower.count(class, LowOutcome::Dropped);
+        }
+    }
+
+    /// The outcomes of the lower classes since the last call, each with its count, and resets
+    /// them: the caller adds them to each class's counter.
+    pub fn take_low_outcomes(&self) -> Vec<(LowClass, LowOutcome, u64)> {
+        let mut lower = self.lower.borrow_mut();
+        let outcomes = std::mem::take(&mut lower.outcomes);
+        LowClass::ALL
+            .into_iter()
+            .flat_map(|class| {
+                LowOutcome::ALL.into_iter().map(move |outcome| {
+                    (class, outcome, outcomes[class as usize][outcome as usize])
+                })
+            })
+            .filter(|(_, _, count)| *count > 0)
+            .collect()
     }
 }
 
@@ -2210,5 +2512,522 @@ mod tests {
     #[test]
     fn the_notification_notice_is_the_prompt_notice() {
         assert_eq!(notification::WITHHELD, prompt::WITHHELD);
+    }
+
+    // --- The lower classes: remediation messages ---------------------------------------------
+
+    /// The `remediation` message of the incident with `fingerprint`.
+    fn remediation_for(fingerprint: &str) -> Low {
+        Low::Remediation(notification::Remediation {
+            detection_id: "D001",
+            detection_name: "crash loop",
+            api_version: "apps/v1".into(),
+            kind: "Deployment".into(),
+            namespace: "shop".into(),
+            name: "web".into(),
+            fingerprint: fingerprint.into(),
+            action: "rollout-undo",
+            time: "2026-10-28T12:00:12Z".into(),
+        })
+    }
+
+    /// The `remediation` outcomes recorded since the last call.
+    fn low(outbox: &Outbox<'_>) -> Vec<(LowClass, LowOutcome, u64)> {
+        outbox.take_low_outcomes()
+    }
+
+    fn owed(outbox: &Outbox<'_>) -> bool {
+        outbox.cap.borrow().owed
+    }
+
+    fn low_fingerprints(outbox: &Outbox<'_>) -> Vec<String> {
+        outbox
+            .low_queue()
+            .iter()
+            .map(|q| q.fingerprint().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_lower_classes_and_their_outcomes_have_their_names() {
+        assert_eq!(LowClass::ALL, [LowClass::Remediation]);
+        let mut sorted = LowClass::ALL;
+        sorted.sort();
+        assert_eq!(sorted, LowClass::ALL, "ALL is in rank order");
+        assert_eq!(remediation_for("fp").class(), LowClass::Remediation);
+        assert_eq!(LowClass::Remediation.dropped_line(), "remediation dropped");
+        assert_eq!(LowClass::Remediation.capped_line(), "remediation capped");
+        let labels: Vec<&str> = LowOutcome::ALL.iter().map(|o| o.as_str()).collect();
+        assert_eq!(labels, ["sent", "failed", "dropped", "capped"]);
+    }
+
+    #[test]
+    fn a_full_queue_drops_its_oldest_remediation_for_a_new_one() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        let now = Instant::now();
+        for i in 0..QUEUE_LIMIT {
+            outbox
+                .enqueue_low(remediation_for(&format!("fp-{i}")), now)
+                .expect("the log");
+        }
+        assert_eq!(outbox.low_queue().len(), QUEUE_LIMIT);
+        assert_eq!(low(&outbox), []);
+        outbox
+            .enqueue_low(remediation_for(&format!("fp-{QUEUE_LIMIT}")), now)
+            .expect("the log");
+        let queue = low_fingerprints(&outbox);
+        assert_eq!(queue.len(), QUEUE_LIMIT);
+        assert_eq!(queue.first().map(String::as_str), Some("fp-1"));
+        assert_eq!(queue.last().map(String::as_str), Some("fp-16"));
+        assert_eq!(
+            low(&outbox),
+            [(LowClass::Remediation, LowOutcome::Dropped, 1)]
+        );
+        assert_eq!(
+            outcomes(&metrics),
+            (0, 0, 0, 0),
+            "not counted as a notification"
+        );
+        assert!(
+            !owed(&outbox),
+            "a dropped remediation owes no capped message"
+        );
+    }
+
+    #[test]
+    fn a_new_remediation_is_dropped_when_the_queue_holds_no_remediation() {
+        for item in [detected_for as fn(&str) -> Queued, |fp| item_for(fp, "s")] {
+            let metrics = Metrics::default();
+            let outbox = outbox(nowhere(), &metrics, TTL);
+            for i in 0..QUEUE_LIMIT {
+                outbox.enqueue(item(&format!("fp-{i}"))).expect("the log");
+            }
+            outbox
+                .enqueue_low(remediation_for("fp-r"), Instant::now())
+                .expect("the log");
+            assert!(outbox.low_queue().is_empty());
+            assert_eq!(outbox.queue().len(), QUEUE_LIMIT);
+            assert_eq!(
+                outbox.queue().front().map(|q| q.fingerprint.as_str()),
+                Some("fp-0"),
+                "a remediation never evicts a detected or an explained message"
+            );
+            assert_eq!(
+                low(&outbox),
+                [(LowClass::Remediation, LowOutcome::Dropped, 1)]
+            );
+            assert_eq!(outcomes(&metrics), (0, 0, 0, 0));
+            assert!(!owed(&outbox));
+        }
+    }
+
+    #[test]
+    fn a_full_queue_of_remediations_costs_a_detected_or_an_explained_message_nothing() {
+        for item in [detected_for as fn(&str) -> Queued, |fp| item_for(fp, "s")] {
+            let metrics = Metrics::default();
+            let outbox = outbox(nowhere(), &metrics, TTL);
+            let now = Instant::now();
+            for i in 0..QUEUE_LIMIT {
+                outbox
+                    .enqueue_low(remediation_for(&format!("fp-r{i}")), now)
+                    .expect("the log");
+            }
+            outbox.enqueue(item("fp-new")).expect("the log");
+            assert_eq!(outbox.queue().len(), 1, "admitted");
+            let queue = low_fingerprints(&outbox);
+            assert_eq!(queue.len(), QUEUE_LIMIT - 1);
+            assert_eq!(
+                queue.first().map(String::as_str),
+                Some("fp-r1"),
+                "the oldest left"
+            );
+            assert_eq!(
+                low(&outbox),
+                [(LowClass::Remediation, LowOutcome::Dropped, 1)]
+            );
+            assert_eq!(outcomes(&metrics), (0, 0, 0, 0), "no notification dropped");
+            assert!(!owed(&outbox), "nothing owes the capped message");
+        }
+    }
+
+    #[test]
+    fn the_existing_rule_applies_only_once_no_remediation_is_queued() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        for i in 0..QUEUE_LIMIT - 1 {
+            outbox
+                .enqueue(detected_for(&format!("fp-{i}")))
+                .expect("the log");
+        }
+        outbox
+            .enqueue_low(remediation_for("fp-r"), Instant::now())
+            .expect("the log");
+        // The first new message takes the remediation's place; the second evicts the oldest
+        // detected message, as before, which is counted and owes the capped message.
+        outbox.enqueue(detected_for("fp-a")).expect("the log");
+        assert!(outbox.low_queue().is_empty());
+        assert_eq!(outcomes(&metrics), (0, 0, 0, 0));
+        assert!(!owed(&outbox));
+        outbox.enqueue(detected_for("fp-b")).expect("the log");
+        assert_eq!(outbox.queue().len(), QUEUE_LIMIT);
+        assert_eq!(
+            outbox.queue().front().map(|q| q.fingerprint.as_str()),
+            Some("fp-1")
+        );
+        assert_eq!(outcomes(&metrics), (0, 0, 1, 0));
+        assert!(owed(&outbox));
+        assert_eq!(
+            low(&outbox),
+            [(LowClass::Remediation, LowOutcome::Dropped, 1)]
+        );
+    }
+
+    #[test]
+    fn a_remediation_is_taken_only_when_no_other_message_waits() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        let now = Instant::now();
+        outbox
+            .enqueue_low(remediation_for("fp-r1"), now)
+            .expect("the log");
+        outbox.enqueue(detected_for("fp-d")).expect("the log");
+        outbox
+            .enqueue_low(remediation_for("fp-r2"), now)
+            .expect("the log");
+        outbox.enqueue(item_for("fp-e", "s")).expect("the log");
+        assert_eq!(outbox.take_low(now).expect("the log"), None);
+        assert_eq!(
+            next(&outbox, None).map(|q| q.fingerprint),
+            Some("fp-d".to_owned())
+        );
+        assert_eq!(outbox.take_low(now).expect("the log"), None);
+        assert_eq!(
+            next(&outbox, None).map(|q| q.fingerprint),
+            Some("fp-e".to_owned())
+        );
+        assert_eq!(next(&outbox, None), None);
+        assert_eq!(
+            outbox.take_low(now).expect("the log"),
+            Some(remediation_for("fp-r1")),
+            "the oldest first"
+        );
+        assert_eq!(
+            outbox.take_low(now).expect("the log"),
+            Some(remediation_for("fp-r2"))
+        );
+        assert_eq!(outbox.take_low(now).expect("the log"), None);
+        assert_eq!(low(&outbox), []);
+    }
+
+    #[test]
+    fn an_owed_capped_message_goes_before_a_remediation() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        let now = Instant::now();
+        outbox
+            .enqueue_low(remediation_for("fp-r"), now)
+            .expect("the log");
+        outbox.owe_capped();
+        assert_eq!(
+            outbox.take_next(None, now).expect("the log"),
+            Some(Outgoing::Capped)
+        );
+        assert_eq!(outbox.take_next(None, now).expect("the log"), None);
+        assert_eq!(
+            outbox.take_low(now).expect("the log"),
+            Some(remediation_for("fp-r"))
+        );
+    }
+
+    #[test]
+    fn a_remediation_is_sent_although_its_detected_message_was_sent() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        let now = Instant::now();
+        outbox.sent.borrow_mut().mark(FINGERPRINT, now);
+        // The detected message of that fingerprint is not queued again...
+        outbox.enqueue(detected_for(FINGERPRINT)).expect("the log");
+        assert!(outbox.queue().is_empty());
+        // ...and its remediation is queued and taken.
+        outbox
+            .enqueue_low(remediation_for(FINGERPRINT), now)
+            .expect("the log");
+        assert_eq!(
+            outbox.take_low(now).expect("the log"),
+            Some(remediation_for(FINGERPRINT))
+        );
+    }
+
+    #[test]
+    fn remediations_have_their_own_cap_on_the_same_limit() {
+        // Remediations first: their cap fills, and the detected messages' cap is untouched.
+        let metrics = Metrics::default();
+        let term = Term::unbounded();
+        let outbox = Outbox::new(nowhere(), TTL, 2, &metrics, &term);
+        let now = Instant::now();
+        for i in 0..3 {
+            outbox
+                .enqueue_low(remediation_for(&format!("fp-r{i}")), now)
+                .expect("the log");
+        }
+        assert!(outbox.take_low(now).expect("the log").is_some());
+        assert!(outbox.take_low(now).expect("the log").is_some());
+        assert_eq!(outbox.take_low(now).expect("the log"), None);
+        assert_eq!(
+            low(&outbox),
+            [(LowClass::Remediation, LowOutcome::Capped, 1)]
+        );
+        assert_eq!(capped(&metrics), 0);
+        assert!(
+            !owed(&outbox),
+            "a capped remediation owes no capped message"
+        );
+        for i in 0..2 {
+            outbox
+                .enqueue(detected_for(&format!("fp-d{i}")))
+                .expect("the log");
+        }
+        assert!(next(&outbox, None).is_some());
+        assert!(next(&outbox, None).is_some());
+        assert_eq!(capped(&metrics), 0);
+
+        // Detected messages first: their cap fills, and the remediations' cap is untouched.
+        let metrics = Metrics::default();
+        let outbox = Outbox::new(nowhere(), TTL, 2, &metrics, &term);
+        for i in 0..2 {
+            outbox
+                .enqueue(detected_for(&format!("fp-d{i}")))
+                .expect("the log");
+        }
+        assert!(next(&outbox, None).is_some());
+        assert!(next(&outbox, None).is_some());
+        for i in 0..2 {
+            outbox
+                .enqueue_low(remediation_for(&format!("fp-r{i}")), now)
+                .expect("the log");
+        }
+        assert!(outbox.take_low(now).expect("the log").is_some());
+        assert!(outbox.take_low(now).expect("the log").is_some());
+        assert_eq!(low(&outbox), []);
+    }
+
+    #[test]
+    fn thirty_remediations_every_120_seconds_leave_no_gap_in_the_window() {
+        // 0028, Not verified: one message every 120 seconds exactly, at the limit of 30 an hour.
+        // A start exactly 3,600 seconds old is out of the window, so the 31st start is admitted at
+        // that instant and not a millisecond before, and a second one at that instant is not.
+        let metrics = Metrics::default();
+        let term = Term::unbounded();
+        let outbox = Outbox::new(nowhere(), TTL, 30, &metrics, &term);
+        let t0 = Instant::now();
+        let every = Duration::from_secs(120);
+        let take = |i: u32, at: Instant| {
+            outbox
+                .enqueue_low(remediation_for(&format!("fp-{i}")), at)
+                .expect("the log");
+            outbox.take_low(at).expect("the log").is_some()
+        };
+        for i in 0..30 {
+            assert!(take(i, t0 + every * i), "start {i}");
+        }
+        assert_eq!(t0 + every * 30, t0 + CAP_WINDOW);
+        assert!(!take(30, t0 + CAP_WINDOW - Duration::from_millis(1)));
+        assert!(take(31, t0 + CAP_WINDOW));
+        assert!(!take(32, t0 + CAP_WINDOW));
+        assert!(!take(
+            33,
+            t0 + CAP_WINDOW + every - Duration::from_millis(1)
+        ));
+        assert!(take(34, t0 + CAP_WINDOW + every));
+        assert_eq!(
+            low(&outbox),
+            [(LowClass::Remediation, LowOutcome::Capped, 3)]
+        );
+    }
+
+    #[test]
+    fn the_dropped_and_capped_lines_are_logged_at_most_once_an_hour() {
+        let mut last = None;
+        let now = Instant::now();
+        assert!(hourly(&mut last, now));
+        assert!(!hourly(&mut last, now));
+        assert!(!hourly(
+            &mut last,
+            now + CAP_WINDOW - Duration::from_millis(1)
+        ));
+        assert!(hourly(&mut last, now + CAP_WINDOW));
+        assert_eq!(last, Some(now + CAP_WINDOW));
+
+        let metrics = Metrics::default();
+        let term = Term::unbounded();
+        let outbox = Outbox::new(nowhere(), TTL, 1, &metrics, &term);
+        let class = LowClass::Remediation as usize;
+        let dropped_logged = || outbox.lower.borrow().dropped_logged[class];
+        let capped_logged = || outbox.lower.borrow().capped_logged[class];
+        for i in 0..QUEUE_LIMIT + 3 {
+            outbox
+                .enqueue_low(remediation_for(&format!("fp-{i}")), now)
+                .expect("the log");
+        }
+        assert_eq!(dropped_logged(), Some(now), "logged once for three drops");
+        let later = now + CAP_WINDOW - Duration::from_secs(1);
+        outbox
+            .enqueue_low(remediation_for("fp-later"), later)
+            .expect("the log");
+        assert_eq!(dropped_logged(), Some(now));
+        outbox
+            .enqueue_low(remediation_for("fp-hour"), now + CAP_WINDOW)
+            .expect("the log");
+        assert_eq!(dropped_logged(), Some(now + CAP_WINDOW));
+        assert_eq!(
+            low(&outbox),
+            [(LowClass::Remediation, LowOutcome::Dropped, 5)]
+        );
+
+        assert!(outbox.take_low(now).expect("the log").is_some());
+        assert_eq!(capped_logged(), None);
+        outbox
+            .enqueue_low(remediation_for("fp-one"), now)
+            .expect("the log");
+        // The cap admits one an hour: the rest of the queue is capped at `now`, logged once.
+        assert_eq!(outbox.take_low(now).expect("the log"), None);
+        assert_eq!(capped_logged(), Some(now));
+        assert_eq!(
+            low(&outbox),
+            [(
+                LowClass::Remediation,
+                LowOutcome::Capped,
+                QUEUE_LIMIT as u64
+            )]
+        );
+    }
+
+    #[test]
+    fn a_cleared_queue_counts_its_remediations_apart() {
+        let metrics = Metrics::default();
+        let outbox = outbox(nowhere(), &metrics, TTL);
+        let now = Instant::now();
+        outbox.enqueue(detected_for("fp-d0")).expect("the log");
+        outbox.enqueue(detected_for("fp-d1")).expect("the log");
+        for i in 0..3 {
+            outbox
+                .enqueue_low(remediation_for(&format!("fp-r{i}")), now)
+                .expect("the log");
+        }
+        assert_eq!(
+            outbox.clear(),
+            2,
+            "only the detected and explained messages"
+        );
+        assert!(outbox.low_queue().is_empty());
+        assert_eq!(
+            low(&outbox),
+            [(LowClass::Remediation, LowOutcome::Dropped, 3)]
+        );
+        assert_eq!(low(&outbox), [], "taken once");
+        assert_eq!(outcomes(&metrics), (0, 0, 0, 0));
+    }
+
+    /// Delivers one remediation in `format` against a fake webhook giving `answers`; returns the
+    /// metrics, the outcomes recorded and the requests received.
+    fn deliver_low_with(
+        answers: Vec<Answer>,
+        format: Format,
+        term: &Term,
+    ) -> (Metrics, Vec<(LowClass, LowOutcome, u64)>, Vec<Received>) {
+        let count = answers.len();
+        let (base, requests) = webhook(answers);
+        let n = notifier(&base, format, None);
+        let metrics = Metrics::default();
+        let outcomes = {
+            let outbox = Outbox::new(&n, TTL, DEFAULT_MAX_PER_HOUR, &metrics, term);
+            block_on(outbox.deliver_low(remediation_for(FINGERPRINT))).expect("the log");
+            outbox.take_low_outcomes()
+        };
+        let sent: Vec<Received> = (0..count)
+            .filter_map(|_| requests.recv_timeout(Duration::from_millis(500)).ok())
+            .collect();
+        (metrics, outcomes, sent)
+    }
+
+    #[test]
+    fn a_remediation_is_posted_in_each_format() {
+        let Low::Remediation(r) = remediation_for(FINGERPRINT);
+        let chat = parse_chat_id("-1001234567890").expect("a chat id");
+        for (format, body) in [
+            (
+                Format::Json,
+                notification::remediation_json_body(&r, VERSION),
+            ),
+            (Format::Slack, notification::remediation_slack_body(&r)),
+            (
+                Format::Telegram(chat.clone()),
+                notification::remediation_telegram_body(&r, &chat),
+            ),
+        ] {
+            let name = format.name();
+            let (metrics, low, sent) =
+                deliver_low_with(vec![Answer::Status("200 OK")], format, &Term::unbounded());
+            assert_eq!(sent.len(), 1, "{name}");
+            assert!(sent[0].line.starts_with("POST /hook/x "), "{name}");
+            assert_eq!(sent[0].json(), body, "{name}");
+            assert_eq!(
+                low,
+                [(LowClass::Remediation, LowOutcome::Sent, 1)],
+                "{name}"
+            );
+            assert_eq!(outcomes(&metrics), (0, 0, 0, 0), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_remediation_is_retried_once_and_its_retry_is_not_counted() {
+        let term = Term::unbounded();
+        let (metrics, low, sent) = deliver_low_with(
+            vec![
+                Answer::Status("503 Service Unavailable"),
+                Answer::Status("200 OK"),
+            ],
+            Format::Json,
+            &term,
+        );
+        assert_eq!(sent.len(), 2);
+        assert_eq!(low, [(LowClass::Remediation, LowOutcome::Sent, 1)]);
+        assert_eq!(outcomes(&metrics), (0, 0, 0, 0), "no retry counted");
+
+        let (metrics, low, sent) = deliver_low_with(
+            vec![
+                Answer::Status("503 Service Unavailable"),
+                Answer::Status("503 Service Unavailable"),
+                Answer::Status("200 OK"),
+            ],
+            Format::Json,
+            &term,
+        );
+        assert_eq!(sent.len(), 2, "one retry");
+        assert_eq!(low, [(LowClass::Remediation, LowOutcome::Failed, 1)]);
+        assert_eq!(outcomes(&metrics), (0, 0, 0, 0));
+
+        let (metrics, low, sent) = deliver_low_with(
+            vec![Answer::Status("400 Bad Request"), Answer::Status("200 OK")],
+            Format::Json,
+            &term,
+        );
+        assert_eq!(sent.len(), 1, "a permanent failure is not retried");
+        assert_eq!(low, [(LowClass::Remediation, LowOutcome::Failed, 1)]);
+        assert_eq!(outcomes(&metrics), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_closed_term_drops_a_remediation() {
+        let (metrics, low, sent) = deliver_low_with(
+            vec![Answer::Status("200 OK")],
+            Format::Json,
+            &Term::closed(),
+        );
+        assert!(sent.is_empty(), "the webhook was called");
+        assert_eq!(low, [(LowClass::Remediation, LowOutcome::Dropped, 1)]);
+        assert_eq!(outcomes(&metrics), (0, 0, 0, 0));
     }
 }
