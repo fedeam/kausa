@@ -1162,9 +1162,10 @@ mod tests {
             .block_on(future)
     }
 
-    /// One request the fake webhook received: the request line, the head in lowercase and the
-    /// body.
+    /// One request the fake webhook received: the request line, the head in lowercase, the body
+    /// and when it was read whole, by the real clock, before its answer was written.
     struct Received {
+        at: std::time::Instant,
         line: String,
         head: String,
         body: String,
@@ -1218,6 +1219,7 @@ mod tests {
                         if request.len() >= end + 4 + length || n == 0 {
                             let (line, head) = text[..end].split_once("\r\n").unwrap_or_default();
                             let _ = sent.send(Received {
+                                at: std::time::Instant::now(),
                                 line: line.to_owned(),
                                 head: head.to_ascii_lowercase(),
                                 body: text[end + 4..].to_owned(),
@@ -3090,6 +3092,10 @@ mod tests {
             &term,
         );
         assert_eq!(sent.len(), 2);
+        // The retry starts `RETRY_WAIT` after the failed attempt's answer, which came after its
+        // request was read, not before.
+        let gap = sent[1].at.duration_since(sent[0].at);
+        assert!(gap >= RETRY_WAIT, "{gap:?}");
         assert_eq!(low, [(LowClass::Remediation, LowOutcome::Sent, 1)]);
         assert_eq!(outcomes(&metrics), (0, 0, 0, 0), "no retry counted");
 
@@ -3114,6 +3120,47 @@ mod tests {
         assert_eq!(sent.len(), 1, "a permanent failure is not retried");
         assert_eq!(low, [(LowClass::Remediation, LowOutcome::Failed, 1)]);
         assert_eq!(outcomes(&metrics), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn the_next_send_after_a_remediation_keeps_the_least_interval() {
+        // After a remediation is sent, the next message of any class starts no earlier than the
+        // format's least interval after the remediation began: a detected message after one in
+        // `json`, another remediation after one in `telegram`.
+        for (format, interval) in [("json", MIN_INTERVAL), ("telegram", TELEGRAM_MIN_INTERVAL)] {
+            let (base, requests) =
+                webhook(vec![Answer::Status("200 OK"), Answer::Status("200 OK")]);
+            let n = match format {
+                "telegram" => {
+                    let path = format!("{base}/bot{}/sendMessage", fake_telegram_token());
+                    Notifier::new(url(&path), telegram("-1001234567890"), None, true)
+                        .expect("a notifier")
+                }
+                _ => notifier(&base, Format::Json, None),
+            };
+            let metrics = Metrics::default();
+            let outbox = outbox(&n, &metrics, TTL);
+            let before = std::time::Instant::now();
+            block_on(async {
+                outbox
+                    .deliver_low(remediation_for(FINGERPRINT))
+                    .await
+                    .expect("the log");
+                if format == "telegram" {
+                    outbox.deliver_low(remediation_for("fp-next")).await
+                } else {
+                    let next = Outgoing::Message(Box::new(detected_for("fp-next")));
+                    outbox.deliver(next, None).await
+                }
+                .expect("the log");
+            });
+            let sent: Vec<Received> = (0..2)
+                .filter_map(|_| requests.recv_timeout(Duration::from_millis(500)).ok())
+                .collect();
+            assert_eq!(sent.len(), 2, "{format}");
+            let gap = sent[1].at.duration_since(before);
+            assert!(gap >= interval, "{format}: {gap:?}");
+        }
     }
 
     #[test]
