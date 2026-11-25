@@ -831,6 +831,14 @@ of its windows. kausa still writes its Events and posts its `detected` messages.
 the create gate of point 1, by the 500 Incidents in any 6 hours of point 1 and by the `remediation`
 bound of point 6.
 
+**What the create gate's key admits.** The gate of point 1 is keyed by namespace and fingerprint,
+as kurita keys its budget, and that is decided. The fingerprint is not collision resistant: a
+writer of Events in N who can also read N's Incidents can get an Incident created in N whose
+fingerprint equals a genuine incident's, and the genuine occurrence is then a duplicate for
+`--dedup-hours`, so kausa creates no Incident for it, and no refusal is counted. It reaches N only,
+and 0027's dedup of notifications has the same property. It is not demonstrated, since no collision
+was computed, and the key stays.
+
 **Already true before this contract, and out of its scope:** editors of kausa's namespace can read
 the webhook's Secret (`charts/kausa/values.yaml:96-99`) and post anything to the receiver
 directly; and anyone who can create Events can make kausa detect a forged Event incident and post
