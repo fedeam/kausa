@@ -863,7 +863,13 @@ bar 2, 3 or 6 measures it.
   prototype, measured](../research/2026-11-20-fact-statement-prototype.md)). So 1.617 × 1.126 = 1.82
   MiB and 1.617 × 1.190 = 1.92 MiB, under the bar of 2 MiB by 0.08 MiB at the highest reading, which
   counts the table (40 KiB computed) as if it were the queue's and so errs high. The bar is not
-  raised. On the Raspberry Pis the prototype did not measure the queue alone.
+  raised. On the Raspberry Pis the prototype did not measure the queue alone. Update 2026-11-25:
+  measured on a 64-bit target, the longest entry holds 1,685 bytes, +349 over `4b85369`'s 1,336:
+  the pointer's 8, an `IncidentData` of 88 and a ReplicaSet's name of 253, its longest. So a full
+  queue holds 1,685 × 1024 = 1,725,440 bytes = 1.6455 MiB computed, and 1.6455 × 1.126 = 1.853 MiB
+  and 1.6455 × 1.190 = 1.958 MiB resident at the ratios above, under the bar by 0.04 MiB at the
+  highest reading. Off, an entry holds 1,344 bytes and a full queue 1,376,256, as computed
+  (`a_full_queue_of_the_longest_entries_is_within_the_computed_bound` in `src/report.rs`).
 - **The table of created Incidents:** about 48 bytes an entry without the report and at most about
   750 bytes with it, estimates carried from the design review, not derived here; bar 3 measures
   them. Then 500 × 48 = 24,000 bytes, about 23 KiB, and 500 × 750 = 375,000 bytes, 0.36 MiB. The
@@ -886,7 +892,8 @@ bar 2, 3 or 6 measures it.
   64-bit Linux target (point 1).
 - **The table of Events:** one flag an entry, whether the owner lookup of the Event's object failed
   (point 3's `missing`), kept with incidents off too: at most 8 bytes an entry with alignment, an
-  estimate; bar 1 measures it.
+  estimate; bar 1 measures it. Update 2026-11-25: measured on a 64-bit target, an entry grows
+  from 368 to 376 bytes.
 - **Reads:** at most one metadata `get` of `replicasets` per create attempted, when the sample's
   owner-cache entry is absent or expired at the read: at most 500 in any 6 hours per process for
   creates the server accepts, 0.023 a second at the most, and, for failed creates, at most one per
