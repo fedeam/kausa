@@ -1411,6 +1411,80 @@ for file in "$WORK/notes-cluster" "$WORK/notes-namespaced" "$WORK/notes-history-
     fail "NOTES.txt without the history tells how to read Explanations ($file)"
 done
 
+# NOTES.txt with the Incidents, as with the history: how to read them, per scope, and that
+# turning them off deletes them; only while the release writes Incidents.
+INCIDENT_CRD_NAME=incidents.kausa.fedeam.com
+notes "$WORK/notes-incidents-cluster" --set rbac.scope=cluster "${INCIDENTS_ON[@]}"
+notes "$WORK/notes-incidents-namespaced" --set rbac.scope=namespaced \
+  --set 'rbac.namespaces={e2e-a,e2e-b}' "${INCIDENTS_ON[@]}"
+notes "$WORK/notes-incidents-no-crd" --set rbac.scope=cluster "${INCIDENTS_ON[@]}" \
+  --set incidents.installCRD=false
+notes "$WORK/notes-incidents-days" --set rbac.scope=cluster "${INCIDENTS_ON[@]}" \
+  --set incidents.days=3
+for scope in cluster namespaced no-crd days; do
+  file="$WORK/notes-incidents-$scope"
+  [ -s "$file" ] || { fail "NOTES.txt with the Incidents ($scope) is empty"; continue; }
+  since=$FAILURES
+  grep -Eq '^ *kubectl get incident -n <namespace> <name> -o yaml *$' "$file" ||
+    fail "NOTES.txt with the Incidents ($scope) lacks" \
+      "'kubectl get incident -n <namespace> <name> -o yaml'"
+  collapsed "$file" | grep -qi 'uninstalling' ||
+    fail "NOTES.txt with the Incidents ($scope) does not say what uninstalling does"
+  collapsed "$file" | grep -qF 'deletes the CustomResourceDefinition and every Incident' ||
+    fail "NOTES.txt with the Incidents ($scope) does not say that it" \
+      "'deletes the CustomResourceDefinition and every Incident'"
+  passed "$since" "NOTES.txt with the Incidents ($scope)"
+done
+if [ -s "$WORK/notes-incidents-cluster" ]; then
+  grep -Eq '^ *kubectl get incidents -A *$' "$WORK/notes-incidents-cluster" ||
+    fail "NOTES.txt with the Incidents in cluster scope lacks 'kubectl get incidents -A'"
+  collapsed "$WORK/notes-incidents-cluster" |
+    grep -qF 'deletes the ones older than 1 day (incidents.days)' ||
+    fail "NOTES.txt with the Incidents does not name 1 day of incidents.days"
+  collapsed "$WORK/notes-incidents-cluster" | grep -qF "installs the CustomResourceDefinition $INCIDENT_CRD_NAME" ||
+    fail "NOTES.txt with the Incidents does not say the release installs $INCIDENT_CRD_NAME"
+fi
+if [ -s "$WORK/notes-incidents-days" ]; then
+  collapsed "$WORK/notes-incidents-days" |
+    grep -qF 'deletes the ones older than 3 days (incidents.days)' ||
+    fail "NOTES.txt with incidents.days=3 does not name 3 days"
+fi
+if [ -s "$WORK/notes-incidents-namespaced" ]; then
+  for ns in e2e-a e2e-b; do
+    grep -Eq "^ *kubectl get incidents -n $ns *\$" "$WORK/notes-incidents-namespaced" ||
+      fail "NOTES.txt with the Incidents in namespaced scope lacks 'kubectl get incidents -n $ns'"
+  done
+  grep -q 'kubectl get incidents -A' "$WORK/notes-incidents-namespaced" &&
+    fail "NOTES.txt with the Incidents in namespaced scope prints the -A command"
+fi
+if [ -s "$WORK/notes-incidents-no-crd" ]; then
+  collapsed "$WORK/notes-incidents-no-crd" | grep -qF "$INCIDENT_CRD_NAME" ||
+    fail "NOTES.txt with incidents.installCRD=false does not name $INCIDENT_CRD_NAME"
+  collapsed "$WORK/notes-incidents-no-crd" | grep -qi 'cluster administrator' ||
+    fail "NOTES.txt with incidents.installCRD=false does not say a cluster administrator installs it"
+  collapsed "$WORK/notes-incidents-no-crd" | grep -qF 'This release installs' &&
+    fail "NOTES.txt with incidents.installCRD=false says the release installs the CRD"
+fi
+# Without the Incidents (the defaults, incidents.enabled=false, or dryRun), nothing about them;
+# and with the history and the Incidents, both paragraphs.
+notes "$WORK/notes-incidents-dry-run" --set rbac.scope=cluster "${INCIDENTS_ON[@]}" "${DRY[@]}"
+notes "$WORK/notes-incidents-off" --set rbac.scope=cluster --set incidents.enabled=false
+for file in "$WORK/notes-cluster" "$WORK/notes-namespaced" "$WORK/notes-incidents-dry-run" \
+  "$WORK/notes-incidents-off" "$WORK/notes-history-cluster"; do
+  [ -s "$file" ] || continue
+  grep -qiE 'kubectl get incident|Incident object|incidents\.' "$file" &&
+    fail "NOTES.txt without the Incidents tells about them ($file)"
+done
+notes "$WORK/notes-incidents-history" --set rbac.scope=cluster "${ENDPOINT[@]}" \
+  "${HISTORY_ON[@]}" "${INCIDENTS_ON[@]}"
+if [ -s "$WORK/notes-incidents-history" ]; then
+  since=$FAILURES
+  for line in 'kubectl get explanations -A' 'kubectl get incidents -A'; do
+    grep -qF -- "$line" "$WORK/notes-incidents-history" ||
+      fail "NOTES.txt with the history and the Incidents lacks '$line'"
+  done
+  passed "$since" "NOTES.txt with the history and the Incidents"
+fi
 
 # NOTES.txt names the Deployments kausa reads only while the Deployment watch is on; with
 # rollouts=false it keeps v0.3's sentence (docs/adr/0018-stuck-rollouts.md).
