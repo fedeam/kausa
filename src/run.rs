@@ -578,10 +578,7 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         .leader_lease
         .as_ref()
         .map(|l| KubeLease::new(client.clone(), &l.namespace, &l.name, TIMINGS.call_timeout));
-    let cluster = KubeCluster {
-        client,
-        keep_revision: options.incidents,
-    };
+    let cluster = KubeCluster::new(client, &options);
     // A signal ends the process, so the stop is awaited at most once.
     let stop = async move {
         tokio::select! {
@@ -642,6 +639,17 @@ struct KubeCluster {
     client: Client,
     /// Whether the owner lookups keep a ReplicaSet's revision: with incidents on.
     keep_revision: bool,
+}
+
+impl KubeCluster {
+    /// The cluster of `client`, whose owner lookups keep a ReplicaSet's revision only with
+    /// `options.incidents` (docs/adr/0028-incident-resource-and-remediation-report.md, point 3).
+    fn new(client: Client, options: &Options) -> KubeCluster {
+        KubeCluster {
+            client,
+            keep_revision: options.incidents,
+        }
+    }
 }
 
 impl Cluster for KubeCluster {
@@ -3477,7 +3485,9 @@ mod tests {
     }
 
     impl Served {
-        fn new(keep_revision: bool, answers: Vec<(&'static str, serde_json::Value)>) -> Served {
+        /// With `incidents`, the lookup of a process whose options have them on, built as `run`
+        /// builds it.
+        fn new(incidents: bool, answers: Vec<(&'static str, serde_json::Value)>) -> Served {
             use std::io::{Read, Write};
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
             let addr = listener.local_addr().expect("an address");
@@ -3517,13 +3527,13 @@ mod tests {
                 let _guard = runtime.enter();
                 Client::try_from(config).expect("a client")
             };
+            let options = Options {
+                incidents,
+                ..options(false, 10)
+            };
             Served {
                 requests,
-                lookup: KubeLookup {
-                    client,
-                    cache: RefCell::new(HashMap::new()),
-                    keep_revision,
-                },
+                lookup: KubeCluster::new(client, &options).lookup(),
                 runtime,
             }
         }
