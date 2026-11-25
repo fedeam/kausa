@@ -411,6 +411,8 @@ fn run_command(args: &[OsString]) -> ExitCode {
                 .unwrap_or_else(|| "kausa".to_owned())
         }),
         notify,
+        // docs/adr/0028-incident-resource-and-remediation-report.md: not reachable yet.
+        incidents: false,
     };
     match runtime.block_on(run::run(options)) {
         Ok(()) => ExitCode::SUCCESS,

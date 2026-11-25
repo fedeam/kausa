@@ -16,6 +16,9 @@ use crate::owner::{MAX_NAME_LEN, MAX_NAMESPACE_LEN, is_dns_label, is_dns_subdoma
 
 pub(crate) mod table;
 
+pub(crate) use crate::record::{UID_LEN, Uid};
+pub(crate) use crate::report::{ControllerKind, REGARDING_KINDS};
+
 /// The 16 lowercase hexadecimal characters of a fingerprint.
 pub(crate) const FINGERPRINT_PATTERN: &str = "^[0-9a-f]{16}$";
 pub(crate) const FINGERPRINT_LEN: usize = 16;
@@ -27,7 +30,6 @@ pub(crate) const TIME_LEN: usize = 20;
 /// A UID as the API server sets one: a UUID in lowercase hexadecimal.
 pub(crate) const UID_PATTERN: &str =
     "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
-pub(crate) const UID_LEN: usize = 36;
 
 /// A DNS-1123 subdomain, of at most `MAX_NAME_LEN` characters: `is_dns_subdomain`.
 pub(crate) const NAME_PATTERN: &str =
@@ -79,17 +81,6 @@ pub(crate) const DETECTIONS: [Detection; 14] = [
     Detection::ClaimProvisioning,
     Detection::AutoscalerMetrics,
     Detection::RolloutStalled,
-];
-
-/// The kinds of the object an Event incident is about, when that object is not a Pod.
-pub(crate) const REGARDING_KINDS: [&str; 7] = [
-    "Job",
-    "ReplicaSet",
-    "StatefulSet",
-    "DaemonSet",
-    "CronJob",
-    "PersistentVolumeClaim",
-    "HorizontalPodAutoscaler",
 ];
 
 /// The schema's CEL rules, as the file writes them, each with the field a refusal of its Rust
@@ -195,76 +186,6 @@ impl Field {
             Field::RegardingName => "regarding.name",
             Field::RegardingUid => "regarding.uid",
             Field::Missing => "missing",
-        }
-    }
-}
-
-/// A UID, kept as its 16 bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Uid([u8; 16]);
-
-impl Uid {
-    /// The UID `text` spells, when it fits `UID_PATTERN`; `None` otherwise.
-    pub(crate) fn parse(text: &str) -> Option<Uid> {
-        let bytes = text.as_bytes();
-        if bytes.len() != UID_LEN {
-            return None;
-        }
-        let mut uid = [0u8; 16];
-        let mut nibbles = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                if b != b'-' {
-                    return None;
-                }
-                continue;
-            }
-            let nibble = match b {
-                b'0'..=b'9' => b - b'0',
-                b'a'..=b'f' => b - b'a' + 10,
-                _ => return None,
-            };
-            uid[nibbles / 2] |= nibble << (4 * (1 - nibbles % 2));
-            nibbles += 1;
-        }
-        Some(Uid(uid))
-    }
-}
-
-/// The kind of a sample Pod's controller, as the Incident names it: any kind but these is `Other`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ControllerKind {
-    ReplicaSet,
-    Job,
-    StatefulSet,
-    DaemonSet,
-    Other,
-}
-
-impl ControllerKind {
-    pub(crate) const ALL: [ControllerKind; 5] = [
-        ControllerKind::ReplicaSet,
-        ControllerKind::Job,
-        ControllerKind::StatefulSet,
-        ControllerKind::DaemonSet,
-        ControllerKind::Other,
-    ];
-
-    /// The kind of an `ownerReference` whose kind is `kind`.
-    pub(crate) fn of(kind: &str) -> ControllerKind {
-        Self::ALL
-            .into_iter()
-            .find(|known| *known != ControllerKind::Other && known.as_str() == kind)
-            .unwrap_or(ControllerKind::Other)
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            ControllerKind::ReplicaSet => "ReplicaSet",
-            ControllerKind::Job => "Job",
-            ControllerKind::StatefulSet => "StatefulSet",
-            ControllerKind::DaemonSet => "DaemonSet",
-            ControllerKind::Other => "Other",
         }
     }
 }

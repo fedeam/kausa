@@ -760,6 +760,42 @@ impl EventRecord {
     }
 }
 
+/// The length of a UID as the API server sets one: a UUID in lowercase hexadecimal, 36
+/// characters with its four `-`.
+pub(crate) const UID_LEN: usize = 36;
+
+/// A UID, kept as its 16 bytes: any 16 bytes spell one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Uid(pub(crate) [u8; 16]);
+
+impl Uid {
+    /// The UID `text` spells, when it fits `UID_PATTERN`; `None` otherwise.
+    pub(crate) fn parse(text: &str) -> Option<Uid> {
+        let bytes = text.as_bytes();
+        if bytes.len() != UID_LEN {
+            return None;
+        }
+        let mut uid = [0u8; 16];
+        let mut nibbles = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                if b != b'-' {
+                    return None;
+                }
+                continue;
+            }
+            let nibble = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                _ => return None,
+            };
+            uid[nibbles / 2] |= nibble << (4 * (1 - nibbles % 2));
+            nibbles += 1;
+        }
+        Some(Uid(uid))
+    }
+}
+
 /// The annotation where the deployment controller writes a Deployment's revision.
 const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
 

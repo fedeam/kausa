@@ -68,7 +68,7 @@ use crate::owner::{
 };
 use crate::prompt;
 use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
-use crate::report::{self, Fact, Reporter};
+use crate::report::{self, About, Fact, IncidentData, MaybeUid, Reporter};
 
 /// The reporting controller of the Events kausa writes, excluded from its own watch.
 pub const REPORTING_CONTROLLER: &str = "kausa";
@@ -116,6 +116,10 @@ pub struct Options {
     /// With `--notify-url-file`, the webhook and the bounds of its `detected` messages
     /// (docs/adr/0015-notifications.md, docs/adr/0027-fact-statement-for-the-detections.md).
     pub notify: Option<Notify>,
+    /// Whether each settled fact keeps what its Incident needs
+    /// (docs/adr/0028-incident-resource-and-remediation-report.md, point 3). Internal: no flag
+    /// sets it yet, and nothing reads the data.
+    pub incidents: bool,
 }
 
 /// The webhook of `--notify-url-file` and the bounds of its `detected` messages.
@@ -1205,6 +1209,7 @@ async fn lead<C: Cluster>(
                 for (_, job) in ready {
                     enqueue(&mut queue, job, metrics, waiting)?;
                 }
+                let mut by_name = options.incidents.then(PodsByName::default);
                 for incident in state.tick(&mut tracker, now) {
                     metrics.inc("kausa_incidents_total", &[("detection", incident.key.detection.id())]);
                     let pods_total = state.pods_of(&incident.key.namespace, &incident.owner);
@@ -1216,7 +1221,7 @@ async fn lead<C: Cluster>(
                     if reporter.is_some() {
                         report::enqueue(
                             &mut facts,
-                            Fact::new(&incident, statement.facts),
+                            state.fact(&incident, statement.facts, by_name.as_mut(), now),
                             metrics,
                             reporter.as_ref().and_then(|r| r.outbox),
                         )?;
@@ -1416,14 +1421,20 @@ fn log_incident(incident: &Incident, pods_total: usize, statement: &str) -> io::
 /// leaves the ReplicaSet or Job as a stand-in, retried on the Pod's next update).
 type PodEntry = (PodRecord, OwnerRef, bool);
 
+/// The Pods by namespace and name, for the facts of one tick: built at the first fact whose
+/// Incident data needs a sample Pod, at most once a tick, and only with incidents on.
+#[derive(Default)]
+struct PodsByName<'a>(Option<HashMap<(&'a str, &'a str), &'a PodEntry>>);
+
 /// The records kausa keeps, keyed by UID.
 #[derive(Default)]
 struct State {
     pods: HashMap<String, PodEntry>,
     /// Only Warning events that a detection matches, with the top-level owner of the object an
     /// event is about when that is not a Pod (the Job's for `D008`, the controller's for `D011`,
-    /// the claim or the autoscaler itself for `D012` and `D013`).
-    events: HashMap<String, (EventRecord, Option<OwnerRef>)>,
+    /// the claim or the autoscaler itself for `D012` and `D013`), and whether that owner's lookup
+    /// failed.
+    events: HashMap<String, (EventRecord, Option<OwnerRef>, bool)>,
     /// The UIDs seen during the open relist of each watch, to drop the ones that disappeared
     /// from that watch.
     pod_relist: HashMap<WatchKey, HashSet<String>>,
@@ -1517,7 +1528,7 @@ impl State {
             }
             watcher::Event::InitDone => {
                 if let Some(seen) = self.event_relist.remove(watch) {
-                    self.events.retain(|uid, (record, _)| {
+                    self.events.retain(|uid, (record, _, _)| {
                         !inside(watch, &record.regarding.namespace) || seen.contains(uid)
                     });
                 }
@@ -1544,8 +1555,8 @@ impl State {
                 // An event about an object that is not a Pod is about that object's top-level
                 // owner: a Job's CronJob, a ReplicaSet's Deployment, through the hops kausa may
                 // follow (`owner.rs`); any other object is its own.
-                let job_owner = if record.regarding.kind == "Pod" {
-                    None
+                let (job_owner, lookup_failed) = if record.regarding.kind == "Pod" {
+                    (None, false)
                 } else {
                     let object = OwnerRef {
                         api_version: record.regarding.api_version.clone(),
@@ -1556,15 +1567,16 @@ impl State {
                     let namespace = record.regarding.namespace.clone();
                     let (owner, error) =
                         top_owner(lookup, &namespace, Some(&object), &object).await;
-                    if let Some(error) = error {
+                    if let Some(error) = &error {
                         log::warn(
                             "owner lookup failed",
-                            owner_lookup_failed_fields(&namespace, &object, &error),
+                            owner_lookup_failed_fields(&namespace, &object, error),
                         )?;
                     }
-                    Some(owner)
+                    (Some(owner), error.is_some())
                 };
-                self.events.insert(record.uid.clone(), (record, job_owner));
+                self.events
+                    .insert(record.uid.clone(), (record, job_owner, lookup_failed));
             }
             watcher::Event::Delete(event) => {
                 if let Some(uid) = event.metadata.uid {
@@ -1628,7 +1640,7 @@ impl State {
             Kind::Events => {
                 self.event_relist.remove(watch);
                 self.events
-                    .retain(|_, (record, _)| !inside(watch, &record.regarding.namespace));
+                    .retain(|_, (record, _, _)| !inside(watch, &record.regarding.namespace));
             }
             Kind::Deployments => {
                 self.deployment_relist.remove(watch);
@@ -1641,7 +1653,7 @@ impl State {
     /// Drops events that can no longer be a signal, so the map holds only what happened in the
     /// last few minutes.
     fn prune_events(&mut self, now: Timestamp) {
-        self.events.retain(|_, (record, _)| {
+        self.events.retain(|_, (record, _, _)| {
             record
                 .last_seen
                 .is_some_and(|seen| now.duration_since(seen.min(now)) <= EVENT_FRESHNESS)
@@ -1657,7 +1669,7 @@ impl State {
         let events: Vec<_> = self
             .events
             .values()
-            .map(|(record, job_owner)| EventView {
+            .map(|(record, job_owner, _)| EventView {
                 record,
                 job_owner: job_owner.as_ref(),
             })
@@ -1666,6 +1678,76 @@ impl State {
         let rollouts: Vec<_> = self.deployments.values().collect();
         signals.extend(rollout_signals(&rollouts, now));
         tracker.tick(now, signals)
+    }
+
+    /// The fact of `incident` for the fact slot, with `facts` from its statement. With incidents
+    /// on (`by_name` set), it keeps what the incident's Incident needs, from the records of this
+    /// tick (docs/adr/0028-incident-resource-and-remediation-report.md, point 3): one map read for
+    /// the sample Pod, the Event or the Deployment, by name or UID, never a scan of the records
+    /// but the one that builds `by_name`.
+    fn fact<'a>(
+        &'a self,
+        incident: &Incident,
+        facts: fact::Facts,
+        by_name: Option<&mut PodsByName<'a>>,
+        now: Timestamp,
+    ) -> Fact {
+        let mut fact = Fact::new(incident, facts);
+        let Some(by_name) = by_name else {
+            return fact;
+        };
+        let namespace = incident.key.namespace.as_str();
+        let (about, owner_lookup_failed) = if incident.key.detection == Detection::RolloutStalled {
+            (
+                About::deployment(self.deployments.get(&incident.owner.uid)),
+                false,
+            )
+        } else if let Some(pod) = &incident.sample.pod {
+            let pods = by_name.0.get_or_insert_with(|| {
+                self.pods
+                    .values()
+                    .map(|entry| ((entry.0.namespace.as_str(), entry.0.name.as_str()), entry))
+                    .collect()
+            });
+            match pods.get(&(namespace, pod.as_str())) {
+                Some((record, _, resolved)) => (About::sample(record), !resolved),
+                // Not reached: the tick emits an incident about a Pod only from the records it
+                // holds. The Incident's check refuses a sample with no UID.
+                None => (
+                    About::Sample {
+                        pod_uid: None,
+                        controller: None,
+                    },
+                    false,
+                ),
+            }
+        } else {
+            let event = incident
+                .sample
+                .event
+                .as_ref()
+                .and_then(|(uid, _)| self.events.get(uid));
+            match event {
+                Some((record, _, lookup_failed)) => {
+                    (About::regarding(&record.regarding), *lookup_failed)
+                }
+                // Not reached either; the check refuses a `regarding` with no kind.
+                None => (
+                    About::Regarding {
+                        kind: None,
+                        name: None,
+                        uid: MaybeUid::Absent,
+                    },
+                    false,
+                ),
+            }
+        };
+        fact.incident = Some(Box::new(IncidentData {
+            settled_at: now,
+            owner_lookup_failed,
+            about,
+        }));
+        fact
     }
 
     /// What an explanation needs about an incident, copied out of the state: the incident's Pods
@@ -1688,14 +1770,14 @@ impl State {
         let mut events: Vec<EventRecord> = self
             .events
             .values()
-            .filter(|(record, job_owner)| {
+            .filter(|(record, job_owner, _)| {
                 record.regarding.namespace == namespace
                     && (incident.pods.contains(&record.regarding.name)
                         || job_owner
                             .as_ref()
                             .is_some_and(|o| o.uid == incident.owner.uid))
             })
-            .map(|(record, _)| record.clone())
+            .map(|(record, _, _)| record.clone())
             .collect();
         events.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.uid.cmp(&b.uid)));
         let log = self.log_source(&incident, &pods);
@@ -3392,7 +3474,7 @@ mod tests {
             &spy.lookup,
         ))
         .expect("the log is written");
-        let (_, owner) = state.events.values().next().expect("the Event is kept");
+        let (_, owner, _) = state.events.values().next().expect("the Event is kept");
         let owner = owner.as_ref().expect("an owner");
         assert_eq!(
             (owner.kind.as_str(), owner.name.as_str()),
@@ -3413,7 +3495,7 @@ mod tests {
         let owners: Vec<_> = state
             .events
             .values()
-            .filter(|(record, _)| record.regarding.namespace == "a/b")
+            .filter(|(record, _, _)| record.regarding.namespace == "a/b")
             .collect();
         assert_eq!(owners.len(), 1);
         let owner = owners[0].1.as_ref().expect("an owner");
@@ -4360,6 +4442,7 @@ mod tests {
             }),
             detected: None,
             notify: None,
+            incidents: false,
         }
     }
 
@@ -6671,5 +6754,145 @@ mod tests {
         for watch in ["pods", "events", "deployments"] {
             assert_eq!(relists(&metrics, watch), 0, "{watch}");
         }
+    }
+
+    // docs/adr/0028-incident-resource-and-remediation-report.md, point 3: what a settled fact
+    // keeps for its Incident, from the records of the tick that emits it.
+
+    const POD_UID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+    const OWNER_UID: &str = "1f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+    /// The one incident of `state` at a tick, and its fact with incidents off and on, and whether
+    /// the tick built its map of Pods by name.
+    fn facts_of(state: &State) -> (Fact, Fact, bool) {
+        let now = Timestamp::now();
+        let mut tracker = Tracker::new(SignedDuration::ZERO);
+        let incidents = state.tick(&mut tracker, now);
+        assert_eq!(incidents.len(), 1);
+        let incident = &incidents[0];
+        let facts = || fact::statement(incident, 1).facts;
+        let off = state.fact(incident, facts(), None, now);
+        let mut by_name = PodsByName::default();
+        let on = state.fact(incident, facts(), Some(&mut by_name), now);
+        assert_eq!(on.incident.as_ref().expect("the data").settled_at, now);
+        // The data is the only difference.
+        assert_eq!(
+            Fact {
+                incident: None,
+                ..on.clone()
+            },
+            off
+        );
+        (off, on, by_name.0.is_some())
+    }
+
+    fn about(fact: &Fact) -> (&About, bool) {
+        let data = fact.incident.as_ref().expect("the data");
+        (&data.about, data.owner_lookup_failed)
+    }
+
+    #[test]
+    fn a_fact_keeps_its_incident_data_only_with_incidents_on() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+        let uid = |text| crate::record::Uid::parse(text);
+        // `D001`, a Pod of a ReplicaSet: its UID, its controller's kind and UID, and the
+        // ReplicaSet's name, from the Pod's records; the lookup worked, then failed.
+        let mut pod = crashing("checkout-7fffb9bf5c-x1y2z");
+        pod.metadata.uid = Some(POD_UID.into());
+        pod.metadata.owner_references = Some(vec![OwnerReference {
+            api_version: "apps/v1".into(),
+            kind: "ReplicaSet".into(),
+            name: "checkout-7fffb9bf5c".into(),
+            uid: OWNER_UID.into(),
+            controller: Some(true),
+            ..OwnerReference::default()
+        }]);
+        let sample = About::Sample {
+            pod_uid: uid(POD_UID),
+            controller: Some(report::Controller {
+                kind: report::ControllerKind::ReplicaSet,
+                uid: uid(OWNER_UID),
+                replica_set: Some("checkout-7fffb9bf5c".into()),
+            }),
+        };
+        for (failed, counted) in [(false, 0), (true, 1)] {
+            let calls = Rc::new(Cell::new(0));
+            let mut state = State::default();
+            let event = watcher::Event::Apply(pod.clone());
+            if failed {
+                block_on(state.on_pod(&CLUSTER, event, &CountingLookup(calls.clone())))
+            } else {
+                block_on(state.on_pod(&CLUSTER, event, &Parents))
+            }
+            .expect("the log is written");
+            assert_eq!(calls.get(), counted);
+            let (off, on, built) = facts_of(&state);
+            assert_eq!(off.incident, None);
+            assert_eq!(about(&on), (&sample, failed));
+            assert!(built);
+        }
+
+        // `D008`, a failed Job whose lookup failed: the Event's entry keeps the failure, with
+        // incidents off too, and the data names the Job.
+        let mut event = event_about(
+            ("batch/v1", "Job", "nightly-29000000"),
+            "BackoffLimitExceeded",
+        );
+        event.regarding.as_mut().expect("regarding").uid = Some(OWNER_UID.into());
+        let mut state = State::default();
+        let calls = Rc::new(Cell::new(0));
+        block_on(state.on_event(
+            &CLUSTER,
+            watcher::Event::Apply(event),
+            &CountingLookup(calls.clone()),
+        ))
+        .expect("the log is written");
+        assert_eq!(calls.get(), 1);
+        let (_, _, lookup_failed) = state.events.values().next().expect("the Event is kept");
+        assert!(lookup_failed);
+        let (off, on, built) = facts_of(&state);
+        assert_eq!(off.incident, None);
+        let regarding = About::Regarding {
+            kind: Some("Job"),
+            name: Some("nightly-29000000".into()),
+            uid: MaybeUid::Uid(uid(OWNER_UID).expect("a UID")),
+        };
+        assert_eq!(about(&on), (&regarding, true));
+        assert!(!built, "no Pod is read for an incident with no sample");
+
+        // `D011`, a ReplicaSet whose lookup worked; the fixture's UID is not one.
+        let event = event_about(
+            ("apps/v1", "ReplicaSet", "checkout-7fffb9bf5c"),
+            "FailedCreate",
+        );
+        let mut state = State::default();
+        block_on(state.on_event(&CLUSTER, watcher::Event::Apply(event), &Parents))
+            .expect("the log is written");
+        let (_, _, lookup_failed) = state.events.values().next().expect("the Event is kept");
+        assert!(!lookup_failed);
+        let (_, on, built) = facts_of(&state);
+        let regarding = About::Regarding {
+            kind: Some("ReplicaSet"),
+            name: Some("checkout-7fffb9bf5c".into()),
+            uid: MaybeUid::NotAUid,
+        };
+        assert_eq!(about(&on), (&regarding, false));
+        assert!(!built);
+
+        // `D014`: the Deployment's generation and revision, from its record.
+        let mut state = State::default();
+        on_deployment(
+            &mut state,
+            &CLUSTER,
+            watcher::Event::Apply(deployment("shop", "checkout", true)),
+        );
+        let (off, on, built) = facts_of(&state);
+        assert_eq!(off.incident, None);
+        let rollout = About::Deployment {
+            generation: Some(2),
+            revision: Some(3),
+        };
+        assert_eq!(about(&on), (&rollout, false));
+        assert!(!built);
     }
 }
