@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn the_remediation_text_keeps_its_line_and_escapes_as_the_others() {
         // The kind and the name come from kausa's Incident, bounded by their patterns; were they
-        // not, they could not break the line, and Slack's characters are escaped. Built here, in
+        // not, neither could break the line, and Slack's characters are escaped. Built here, in
         // the module that holds its private fields, since no entry holds such names.
         use crate::notification::{
             ChatId, remediation_slack_body, remediation_telegram_body, remediation_text,
@@ -895,22 +895,26 @@ mod tests {
         let entry = example_entry(Detection::OutOfMemory, FP);
         let mut r = Proposal::new(&entry, Action::RaiseMemoryLimit, at(PROPOSED_AT));
         r.kind = "Deploy\nment".into();
-        r.name = "<@here>&/x".into();
+        r.name = "<@here>\n&/x".into();
         let line = remediation_text(&r);
         assert_eq!(line.lines().count(), 1, "{line:?}");
+        assert!(
+            line.ends_with("Deploy\u{fffd}ment <@here>\u{fffd}&/x"),
+            "{line:?}"
+        );
         let slack = remediation_slack_body(&r);
         assert!(
             slack["text"]
                 .as_str()
                 .expect("a text")
-                .ends_with("Deploy\u{fffd}ment &lt;@\u{2060}here&gt;&amp;/x")
+                .ends_with("Deploy\u{fffd}ment &lt;@\u{2060}here&gt;\u{fffd}&amp;/x")
         );
         let telegram = remediation_telegram_body(&r, &ChatId::Username("@kausa_alerts".into()));
         assert!(
             telegram["text"]
                 .as_str()
                 .expect("a text")
-                .ends_with("<@\u{2060}here>&/\u{2060}x")
+                .ends_with("<@\u{2060}here>\u{fffd}&/\u{2060}x")
         );
     }
 
