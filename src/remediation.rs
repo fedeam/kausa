@@ -1493,6 +1493,71 @@ mod tests {
     }
 
     #[test]
+    fn the_fuzz_seeds_reach_the_outcome_their_name_says() {
+        // fuzz/fuzz_targets/remediation.rs checks every seed against one Incident, `spec()` first
+        // seen on a whole second, at 10:05:00: a seed that no longer reaches its outcome there
+        // would leave the target's assertions unreached.
+        let table = table_of(&Spec {
+            first_seen: at("2026-11-24T10:00:00Z"),
+            ..spec()
+        });
+        let now = at("2026-11-24T10:05:00Z");
+        let seeds = [
+            ("report", include_str!("../fuzz/seeds/remediation/report")),
+            ("nothing", include_str!("../fuzz/seeds/remediation/nothing")),
+            ("invalid", include_str!("../fuzz/seeds/remediation/invalid")),
+            (
+                "incident-unknown",
+                include_str!("../fuzz/seeds/remediation/incident-unknown"),
+            ),
+            (
+                "unknown-action",
+                include_str!("../fuzz/seeds/remediation/unknown-action"),
+            ),
+            (
+                "target-mismatch",
+                include_str!("../fuzz/seeds/remediation/target-mismatch"),
+            ),
+            (
+                "time-out-of-range",
+                include_str!("../fuzz/seeds/remediation/time-out-of-range"),
+            ),
+        ];
+        let names: Vec<String> = std::fs::read_dir("fuzz/seeds/remediation")
+            .expect("the seeds")
+            .map(|e| {
+                e.expect("an entry")
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8")
+            })
+            .collect();
+        assert_eq!(names.len(), seeds.len(), "every seed is checked: {names:?}");
+        for (name, text) in seeds {
+            let object: Value = serde_json::from_str(text).expect("JSON");
+            let outcome = match check(&object, &table, now) {
+                Outcome::Report(report) => {
+                    assert_eq!(report.action(), Action::RolloutUndo);
+                    "report"
+                }
+                Outcome::Nothing => "nothing",
+                Outcome::Ignored(reason) => reason.as_str(),
+            };
+            assert_eq!(outcome, name);
+        }
+        // `duplicate` needs a marked Incident, which the fuzz target's table never has.
+        let seeded: Vec<&str> = seeds.iter().map(|(name, _)| *name).collect();
+        for reason in Reason::ALL {
+            assert_eq!(
+                seeded.contains(&reason.as_str()),
+                reason != Reason::Duplicate,
+                "{}",
+                reason.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn context_uses_neither_incidents_nor_remediations() {
         // 0028, point 8: nothing read back from an Incident or a Remediation reaches the model.
         let context = include_str!("context.rs");
