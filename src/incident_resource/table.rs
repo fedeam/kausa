@@ -71,22 +71,22 @@ pub(crate) struct Target {
 }
 
 impl Target {
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn api_version(&self) -> &str {
         &self.api_version
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn kind(&self) -> &str {
         &self.kind
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn uid(&self) -> Option<Uid> {
         self.uid
     }
@@ -145,38 +145,38 @@ impl Entry {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn namespace(&self) -> &str {
         &self.namespace
     }
 
     /// The fingerprint, as its 16 hexadecimal characters.
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn fingerprint(&self) -> String {
         format!("{:016x}", self.fingerprint)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn first_seen(&self) -> Timestamp {
         self.first_seen
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn uid(&self) -> Uid {
         self.uid
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn detection(&self) -> Detection {
         self.detection
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn target(&self) -> &Target {
         &self.target
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn reported(&self) -> bool {
         self.reported
     }
@@ -192,7 +192,7 @@ impl Entry {
 
     /// Whether the Incident's name is `name`: `kausa.`, the fingerprint, `.` and the first-seen
     /// second, written without a leading zero.
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     fn is_named(&self, name: &str) -> bool {
         let Some((fingerprint, second)) = name
             .strip_prefix("kausa.")
@@ -220,7 +220,7 @@ impl Entry {
 /// Where an entry sits in the table, from a lookup. It names that entry only while the slot holds
 /// it: `Table::mark_reported` checks the UID again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 pub(crate) struct Slot(usize);
 
 /// The table was full: `CAPACITY` entries younger than `KEEP`.
@@ -294,7 +294,7 @@ impl Table {
 
     /// The Incident named `name` in `namespace` whose UID is `uid`, if this process created it and
     /// still holds it.
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn find(&self, namespace: &str, name: &str, uid: Uid) -> Option<(Slot, &Entry)> {
         self.entries()
             .find(|(_, entry)| {

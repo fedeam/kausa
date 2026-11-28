@@ -31,6 +31,10 @@ mod owner;
 mod fact;
 
 #[allow(dead_code)] // floor-ok: the mod holds more than the fuzz target uses, like its neighbours
+#[path = "../../src/report.rs"]
+mod report;
+
+#[allow(dead_code)] // floor-ok: the mod holds more than the fuzz target uses, like its neighbours
 #[path = "../../src/incident_resource.rs"]
 mod incident_resource;
 

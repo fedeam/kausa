@@ -3,21 +3,36 @@
 //! each, unless `--no-events`, and then queues its `detected` message when a webhook is set,
 //! whatever the model, the budget and the breaker do.
 
+// The remediation fuzz target (fuzz/fuzz_targets/remediation.rs) compiles this file for the types
+// an Incident is built from, in a crate with only the pure modules of kausa's, and `cargo fuzz
+// build` sets `--cfg fuzzing`. So the fact queue and the fact slot, which use the others, are left
+// out of that build.
+#[cfg(not(fuzzing))]
 use std::collections::VecDeque;
+#[cfg(not(fuzzing))]
 use std::io;
 
 use k8s_openapi::jiff::Timestamp;
+#[cfg(not(fuzzing))]
 use serde_json::json;
 
+#[cfg(not(fuzzing))]
 use crate::events::{Emitted, Writer};
 use crate::fact;
 use crate::incident::Incident;
+#[cfg(not(fuzzing))]
 use crate::incidents::Incidents;
+#[cfg(not(fuzzing))]
 use crate::leader::Term;
+#[cfg(not(fuzzing))]
 use crate::log;
+#[cfg(not(fuzzing))]
 use crate::metrics::Metrics;
+#[cfg(not(fuzzing))]
 use crate::notify::{self, Outbox};
-use crate::owner::{Hop, OwnerLookup, is_dns_subdomain};
+#[cfg(not(fuzzing))]
+use crate::owner::OwnerLookup;
+use crate::owner::{Hop, is_dns_subdomain};
 use crate::record::{DeploymentRecord, OwnerRef, PodRecord, Regarding, Uid};
 
 /// The most facts that wait for the fact slot. A fact pushed on a full queue drops the oldest.
@@ -257,11 +272,13 @@ impl Fact {
 }
 
 /// The facts waiting for the fact slot, oldest first, at most `FACT_QUEUE_CAPACITY`.
+#[cfg(not(fuzzing))]
 #[derive(Default)]
 pub struct Queue {
     entries: VecDeque<Fact>,
 }
 
+#[cfg(not(fuzzing))]
 impl Queue {
     /// Adds `fact` at the back. On a full queue the oldest entry leaves, and is returned.
     pub fn push(&mut self, fact: Fact) -> Option<Fact> {
@@ -297,6 +314,7 @@ impl Queue {
 
 /// Adds `fact` to `queue`; a fact dropped to make room is logged and counted, and owes the
 /// webhook's `capped` message, since its `detected` message is never queued.
+#[cfg(not(fuzzing))]
 pub fn enqueue(
     queue: &mut Queue,
     fact: Fact,
@@ -319,6 +337,7 @@ pub fn enqueue(
 /// What the fact slot works with, across terms: the Event writer, unless `--no-events`, the
 /// outbox, with `--notify-url-file`, and the Incidents, with `--incidents`
 /// (docs/adr/0028-incident-resource-and-remediation-report.md).
+#[cfg(not(fuzzing))]
 pub struct Reporter<'a> {
     pub writer: Option<Writer>,
     pub outbox: Option<&'a Outbox<'a>>,
@@ -327,6 +346,7 @@ pub struct Reporter<'a> {
     pub term: &'a Term,
 }
 
+#[cfg(not(fuzzing))]
 impl Reporter<'_> {
     /// Writes the `Detected` Event of `fact`: one create, or the patch of its series. A failed
     /// write is logged and counted, and not tried again. Then, while the term holds, queues the
