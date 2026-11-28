@@ -76,7 +76,11 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
 
    The chart has no default `rbac.scope`, so every `helm lint` and `helm template` sets it. The
    `ci` target also renders both scopes and every refusal of the chart; `tests/chart/render.sh`
-   runs a longer set of chart checks with helm alone, without a cluster.
+   runs a longer set of chart checks with helm alone, without a cluster, among them that the
+   default render of each scope equals `tests/golden/chart-default-cluster.yaml` and
+   `tests/golden/chart-default-namespaced.yaml` byte for byte (with the chart's version replaced
+   by `0.0.0-golden`). A change that is meant to alter the default render updates those files in
+   the same change, and says why.
 
    On an arm64 Mac this builds for linux/arm64, the same platform as the Gitea Actions runner
    that checks `main`. GitHub's hosted runners, which check pull requests, are linux/amd64; to
@@ -100,7 +104,15 @@ cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
    workload's Explanation, its columns, who may read and write it, what the
    CustomResourceDefinition refuses, the sweep after a restart, and kausa's own update of an
    Explanation after it; the cluster scope also turns the history off with `dryRun=true` and
-   `history.enabled=false`, and restarts kausa without the CustomResourceDefinition.
+   `history.enabled=false`, and restarts kausa without the CustomResourceDefinition. With one
+   replica, both scopes also check the Incidents: off, kausa is refused every verb on
+   `incidents`; then an upgrade with `incidents.enabled=true` checks the rule, the flags, the
+   counters, one Incident per failing workload and what it holds, what the schema refuses, who
+   may read it, the sweep at start with 500 seeded Incidents, and that `incidents.enabled=false`
+   leaves the defaults' matrix ([0028. Publish each incident as an immutable Incident that only
+   kausa writes, and report by webhook what kurita proposed for it, both off by
+   default](../adr/0028-incident-resource-and-remediation-report.md)). These Incident cases
+   passed in both scopes in CI on 2026-11-25.
    `KAUSA_E2E_REPLICAS` picks the chart's `replicaCount`: `1` when unset (the value stays unset,
    and the test checks that nothing of the standby is installed), or `2`, with
    `KAUSA_E2E_SCOPE=namespaced` only: a leader and a standby behind the Lease `kausa-leader`,
@@ -166,8 +178,9 @@ anything a cluster could produce), `validate` (validation of anything a model co
 `history` (merging an explanation into any stored Explanation, which also checks that what kausa
 writes survives its next read and that `prompt::clean` is idempotent), `notification` (the webhook
 bodies built from any text), `endpoint_error` (the endpoint's error and chat completion answers)
-and `fact` (the fact statement of any incident, which holds only its allowed bytes within its
-bound). GitHub Actions run them
+`fact` (the fact statement of any incident, which holds only its allowed bytes within its
+bound) and `remediation` (the parse and the checks of any Remediation, whose reported message holds
+only the values of kausa's own Incident). GitHub Actions run them
 with ClusterFuzzLite on pull requests that change that code and every week
 (`.github/workflows/cflite.yml`). To run one locally you need a nightly toolchain and
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (`cargo install cargo-fuzz`):

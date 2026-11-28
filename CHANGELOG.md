@@ -41,6 +41,32 @@ the request to the model provider; the only change in that request is `D013`'s n
   the full queue of 1024) and `kausa_fact_reasons_omitted_total` (a reason outside kausa's list,
   left out of a statement). Log lines: `fact dropped` and `notification capped`.
 - The fuzz target `fact`, and `src/fact.rs` and `src/report.rs`.
+- **Incidents, off by default** ([0028](docs/adr/0028-incident-resource-and-remediation-report.md),
+  `proposed`; [Incident resource](docs/reference/incident-resource.md)): `--incidents` creates one
+  immutable Incident object (`incidents.kausa.fedeam.com`, `v1alpha1`) per settled incident in its
+  namespace, named `kausa.<fingerprint>.<first-seen Unix seconds>`, after its `Detected` Event and
+  `detected` message, with or without `--endpoint`: the facts of the statement and the typed
+  values of its schema, never a model's text. At most one per fingerprint per `--dedup-hours`, at
+  most 500 per process in any 6 hours, each value checked against the schema before the request;
+  a sweep at the start of each term and hourly deletes those older than `--incident-days` (1 by
+  default, 1 to 30) or beyond 500. Usage errors: `--incident-days` without `--incidents`, and
+  `--incidents` with `--dry-run`. The schema is `charts/kausa/files/incident-schema.json`.
+- The chart's `incidents.enabled` (false), `incidents.days` (1), `incidents.installCRD` (true) and
+  `incidents.readers.aggregate` (true): on, they install the CustomResourceDefinition and a reader
+  ClusterRole aggregated to `view`, pass the flags, and add `create`, `list` and `delete` on
+  `incidents`, last in kausa's rules; with `dryRun` they render nothing. `helm uninstall` or
+  turning them off deletes every Incident in the cluster. `NOTES.txt` tells how to read them and
+  what turning them off deletes. With the defaults the chart's render is unchanged, byte for byte.
+- **What changes for a release that turns incidents on without an endpoint:** the chart then
+  passes `--dedup-hours` from `budget.dedupHours`, the window of the Incident gate. It is also the
+  window of the `detected` notifications, one window by 0028's point 1: a `budget.dedupHours` set
+  without an endpoint had no effect (kausa used 6), and now applies to the notifications and to
+  the gate.
+- Metrics, with `--incidents` only: `kausa_incidents_refused_total` (`reason`: `table-full`,
+  `schema`, `starting`), `kausa_incident_write_errors_total`, `kausa_incidents_deleted_total`
+  (`reason`: `age`, `cap`) and `kausa_incident_sweep_errors_total`. Log lines: `incident refused`,
+  `incident write failed`, `incident sweep failed` and `incidents swept`. Without `--incidents`
+  the exposition is unchanged.
 
 ### Changed
 
@@ -73,6 +99,9 @@ the request to the model provider; the only change in that request is `D013`'s n
 
 ### Fixed
 
+- The chart refuses a `budget.dedupHours` that is not a whole number from 0 to 1000000 whenever it
+  passes `--dedup-hours` (an endpoint, `dryRun` or `incidents.enabled`), naming the value. Before,
+  `2000000` or `-1` rendered and the Pod exited with a usage error, and `7.5` was cut to `7`.
 - `Pods now` counts only the Pods of the incident's namespace. A Pod of another namespace that named
   the owner's UID in a controller reference kausa does not follow (a StatefulSet's, say) was
   counted, so the count was too high in the fact statement, the request to the model

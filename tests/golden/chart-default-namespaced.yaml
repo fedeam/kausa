@@ -1,0 +1,176 @@
+---
+# Source: kausa/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kausa
+  namespace: kausa-system
+  labels:
+    app.kubernetes.io/name: kausa
+    app.kubernetes.io/instance: kausa
+    app.kubernetes.io/version: "0.0.0-golden"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: kausa-0.0.0-golden
+---
+# Source: kausa/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kausa
+  namespace: "team-a"
+  labels:
+    app.kubernetes.io/name: kausa
+    app.kubernetes.io/instance: kausa
+    app.kubernetes.io/version: "0.0.0-golden"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: kausa-0.0.0-golden
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get"]
+---
+# Source: kausa/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kausa
+  namespace: "team-a"
+  labels:
+    app.kubernetes.io/name: kausa
+    app.kubernetes.io/instance: kausa
+    app.kubernetes.io/version: "0.0.0-golden"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: kausa-0.0.0-golden
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kausa
+subjects:
+  - kind: ServiceAccount
+    name: kausa
+    namespace: kausa-system
+---
+# Source: kausa/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: kausa-metrics
+  namespace: kausa-system
+  labels:
+    app.kubernetes.io/name: kausa
+    app.kubernetes.io/instance: kausa
+    app.kubernetes.io/version: "0.0.0-golden"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: kausa-0.0.0-golden
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kausa
+    app.kubernetes.io/instance: kausa
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+---
+# Source: kausa/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kausa
+  namespace: kausa-system
+  labels:
+    app.kubernetes.io/name: kausa
+    app.kubernetes.io/instance: kausa
+    app.kubernetes.io/version: "0.0.0-golden"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: kausa-0.0.0-golden
+spec:
+  # One instance: Recreate stops the old Pod before the new one starts, so a rollout never runs
+  # two (docs/reference/permissions.md, "The pod that runs kausa").
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kausa
+      app.kubernetes.io/instance: kausa
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kausa
+        app.kubernetes.io/instance: kausa
+    spec:
+      serviceAccountName: kausa
+      # kausa talks to the API server with this token.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the API key file readable by kausa's group, and by no one else.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kausa
+          image: "ghcr.io/fedeam/kausa:0.0.0-golden"
+          imagePullPolicy: IfNotPresent
+          args:
+            - run
+            - --namespace
+            - "team-a"
+            - --settle-seconds
+            - "60"
+            - --metrics-address
+            - "[::]:9090"
+          env:
+            # The reporting instance of kausa's Events.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              cpu: 200m
+              memory: 192Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi

@@ -105,6 +105,11 @@ spec:
             - {{ int .Values.budget.maxInputTokens | quote }}
             - --dedup-hours
             - {{ int .Values.budget.dedupHours | quote }}
+            {{- else if include "kausa.writesIncidents" . }}
+            {{- /* The window of the incidents' gate (docs/adr/0028-incident-resource-and-remediation-report.md,
+            point 1), passed here once when the block above does not. */}}
+            - --dedup-hours
+            - {{ int .Values.budget.dedupHours | quote }}
             {{- end }}
             {{- if .Values.dryRun }}
             - --dry-run
@@ -122,6 +127,11 @@ spec:
             - --history
             - --history-days
             - {{ include "kausa.historyDays" . | quote }}
+            {{- end }}
+            {{- if include "kausa.writesIncidents" . }}
+            - --incidents
+            - --incident-days
+            - {{ include "kausa.incidentDays" . | quote }}
             {{- end }}
             {{- if $notifies }}
             {{- $format := include "kausa.notifyFormat" . }}

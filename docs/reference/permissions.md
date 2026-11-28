@@ -2,16 +2,17 @@
 
 The Kubernetes API permissions kausa's chart grants, and the ones it never asks for.
 
-Status as of 2026-11-24: the chart in `charts/kausa` grants this table, `pods/log` only when
+Status as of 2026-11-25: the chart in `charts/kausa` grants this table, `pods/log` only when
 kausa explains incidents (an endpoint or dry-run) with log collection on, and the Event writes
 only outside dry-run and unless they are turned off, with or without an endpoint (since the release after v0.6.3), and the `explanations` row only
 while kausa writes history (`history.enabled`, an endpoint, no `dryRun`; since v0.3.0), and the
 `deployments` row while Deployments are watched for stalled rollouts (`rollouts`, on by default;
 since v0.4.0), and, only with `replicaCount: 2`, `get` and `patch` on one Lease in
 kausa's own namespace ([In kausa's own namespace, with two
-replicas](#in-kausas-own-namespace-with-two-replicas); since v0.4.0) ([Helm
-chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or in the listed
-namespaces only (`namespaced`, since v0.3.0; see [Where the permissions
+replicas](#in-kausas-own-namespace-with-two-replicas); since v0.4.0), and the `incidents` row only
+while kausa creates Incidents (`incidents.enabled`, no `dryRun`; in `main` for the release after
+v0.6.3) ([Helm chart](helm-chart.md)). `rbac.scope` picks where: in every namespace (`cluster`), or
+in the listed namespaces only (`namespaced`, since v0.3.0; see [Where the permissions
 apply](#where-the-permissions-apply)). Why it is this list: [0009. Run with read-only permissions
 that never include Secrets](../adr/0009-least-privilege-rbac.md); why there are two scopes: [0013.
 Offer a namespaced install mode: one watch pair and one Role per listed namespace, and nothing
@@ -19,17 +20,20 @@ cluster-wide](../adr/0013-namespaced-install-mode.md); why kausa reads Deploymen
 Deployment past its progress deadline (`D014`) from a Deployment watch that is on by default, and
 add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md); why a second replica
 needs a Lease: [0019. Offer an optional standby replica that takes over through a chart-created
-Lease, elected by kausa's own code](../adr/0019-high-availability.md). The kind test (`tests/e2e/run.sh`) checks
-the installed role against this table with `kubectl auth can-i`, both what it allows and a list
-of what it must refuse, in each scope; both scopes passed on 2026-10-28 on the maintainer's
-machine. As of 2026-10-26,
-`kausa run` uses every row: the Pod and event watches, the metadata `get` of ReplicaSets and Jobs,
-`pods/log` for the detections that read logs, and `create` and `patch` on Events for its
-`Detected` Events (with or without `--endpoint`) and its explanations (with `--endpoint`), unless
-`--no-events`. On 2026-10-26 it
-ran against a live cluster through a `kubectl proxy` that let only these reads through, plus
-`POST` and `PATCH` on Events in one test namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a local
-model](../how-to/try-with-a-local-model.md)).
+Lease, elected by kausa's own code](../adr/0019-high-availability.md); why kausa may create and
+delete its own Incidents, a decision still `proposed`: [0028. Publish each incident as an immutable
+Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by
+default](../adr/0028-incident-resource-and-remediation-report.md), point 5. The kind test
+(`tests/e2e/run.sh`) checks the installed role against this table with `kubectl auth can-i`, both
+what it allows and a list of what it must refuse, in each scope; both scopes passed on 2026-10-28 on
+the maintainer's machine. Its cases for the `incidents` row, with incidents on and off, passed in
+both scopes in CI on 2026-11-25. As of 2026-10-26, `kausa run` uses every row: the Pod and event
+watches, the metadata `get` of ReplicaSets and Jobs, `pods/log` for the detections that read logs,
+and `create` and `patch` on Events for its `Detected` Events (with or without `--endpoint`) and its
+explanations (with `--endpoint`), unless `--no-events`. On 2026-10-26 it ran against a live cluster
+through a `kubectl proxy` that let only these reads through, plus `POST` and `PATCH` on Events in
+one test namespace, and the proxy refused none of its requests ([Try kausa against a cluster with a
+local model](../how-to/try-with-a-local-model.md)).
 
 Notifications (`--notify-url-file`, the chart's `notifications.enabled`; since v0.3.0)
 add no row and change no row, in either scope, and no longer need an endpoint: a webhook `POST` is not a call to the Kubernetes
@@ -49,10 +53,17 @@ The kind test checks that the `kubectl auth can-i` lists stay the same with noti
 | `apps` | `deployments` | `list`, `watch` | The Deployment watch: a Deployment's `Progressing` condition, generation, revision and replica counts, for a rollout past its progress deadline (`D014`). Each Deployment is reduced at once to those fields, and kept only while it matches. Only while `rollouts` is on (the default); `rollouts: false` removes the row and passes `--no-rollouts`. No `get` |
 | `batch` | `jobs` | `get` | Follow a Job's owner reference to its CronJob, for a Pod or for an event about the Job (`D008`, `D011`) |
 | `kausa.fedeam.com` | `explanations` | `list`, `create`, `patch`, `delete` | Only while kausa writes history. `list`: read one object by name (a `metadata.name` field selector) before a write, and the sweep; `create`: an incident's first explanation; `patch`: append to its history (`status` and `resourceVersion` only; `spec` is immutable); `delete`: retention by age and by count ([Explanation resource](explanation-resource.md)) |
+| `kausa.fedeam.com` | `incidents` | `create`, `list`, `delete` | Only while kausa creates Incidents. `create`: one immutable Incident per settled incident; `list`: the sweep, never a read before a create; `delete`: retention by age and by count, each with the listed UID and `resourceVersion` as preconditions ([Incident resource](incident-resource.md)) |
 
-The `explanations` rule comes last in the rules and only with the history on; why kausa may write
+The `explanations` rule comes after the others and only with the history on; why kausa may write
 its own resource: [0014. Keep each incident's full explanations in a namespaced Explanation
-resource, off by default](../adr/0014-explanation-history.md).
+resource, off by default](../adr/0014-explanation-history.md). The `incidents` rule comes last, and
+only with incidents on: with the defaults, the rules are byte for byte what they were before it
+(`tests/golden/chart-default-cluster.yaml` and `chart-default-namespaced.yaml`, checked by
+`tests/chart/render.sh`). With `dryRun` the chart turns incidents off, since kausa refuses
+`--incidents` with `--dry-run`; the rule and the flag come from the same helper,
+`kausa.writesIncidents`, so the rule is never granted to a kausa that does not use it, nor the
+reverse.
 
 ## Where the permissions apply
 
@@ -69,6 +80,7 @@ without it. It changes where the rows above apply, never which rows there are:
 | `apps` `deployments`: `list`, `watch` (`rollouts` on, the default) | every namespace | the listed namespaces only |
 | `batch` `jobs`: `get` | every namespace | the listed namespaces only |
 | `kausa.fedeam.com` `explanations`: `list`, `create`, `patch`, `delete` (history on) | every namespace | the listed namespaces only |
+| `kausa.fedeam.com` `incidents`: `create`, `list`, `delete` (incidents on) | every namespace | the listed namespaces only |
 | ClusterRole and ClusterRoleBinding | created | not created |
 
 - **`cluster`**: one ClusterRole and one ClusterRoleBinding, as in v0.1, and kausa watches every
@@ -121,7 +133,7 @@ name>-leader`, and only the replica that holds the Lease watches, explains and w
 - **Nothing else changes.** The rows above, the ClusterRole or the Roles of `kausa.rules`, and
   what is never granted are the same with one replica or two.
 
-## Who reads the history
+## Who reads the history and the Incidents
 
 With the history on and `history.installCRD`, the chart also installs a ClusterRole
 `<full name>-explanation-reader` with `get`, `list` and `watch` on `explanations`, labelled
@@ -131,6 +143,12 @@ read its Events. No write is aggregated: only kausa and cluster administrators w
 `history.readers.aggregate: false` leaves the reader role out, and reading to cluster
 administrators and to whatever the operator binds. The reader role is bound to nobody and grants
 kausa nothing.
+
+Incidents work the same way: with incidents on and `incidents.installCRD`, a ClusterRole
+`<full name>-incident-reader` with `get`, `list` and `watch` on `incidents`, labelled to aggregate
+to `view` only; `view` aggregates to `edit` and `edit` to `admin`, so the three read verbs reach all
+three. `incidents.readers.aggregate: false` leaves it out. No write is aggregated, and it grants
+kausa nothing ([Incident resource](incident-resource.md#who-can-read-it)).
 
 What the kind test asks `kubectl auth can-i`, as kausa's service account
 (`system:serviceaccount:<release namespace>:<full name>`):
@@ -162,20 +180,31 @@ What the kind test asks `kubectl auth can-i`, as kausa's service account
   under a new name and under the Lease's own, and expects it refused.
 - **The readers**, in both scopes: service accounts bound to `view` and to `edit` in a watched
   namespace can `list` Explanations and cannot `create` or `delete` them.
+- **The Incidents**, in both scopes (passed in CI on 2026-11-25): with incidents
+  off, every verb on `incidents`, `--subresource=status` included, on `remediations`, on
+  CustomResourceDefinitions, Secrets and ConfigMaps `no`, and neither the CustomResourceDefinition
+  nor the reader role exists. With incidents on, `create`, `list` and `delete` on `incidents` `yes`,
+  the rule last in the ClusterRole or each Role, and `get`, `watch`, `patch`, `update`,
+  `deletecollection` and any verb on `incidents/status` `no`; subjects bound to `view`, `edit` and
+  `admin` can `get`, `list` and `watch` Incidents and nothing else on them. Turning incidents off
+  again gives the defaults' matrix.
 
 ## Never granted
 
 - `secrets` and `configmaps`, in any verb. `list` on Secrets would return their data.
 - Any write verb other than `create` and `patch` on Events, with the history `create`, `patch`
-  and `delete` on `explanations`, and with two replicas `patch` on kausa's one Lease.
+  and `delete` on `explanations`, with incidents `create` and `delete` on `incidents`, and with
+  two replicas `patch` on kausa's one Lease.
 - On Deployments, anything but `list` and `watch`: no `get`, `create`, `update`, `patch`,
   `delete` or `deletecollection`, and no `deployments/status`, `deployments/scale` or
   `deployments/rollback`. No verb on `statefulsets`, `daemonsets` or `cronjobs`, and no `list` or
   `watch` on `replicasets` (`get` only).
 - `pods/exec`, `pods/attach`, `pods/portforward`, `pods/eviction`, `nodes`, `nodes/proxy`,
   `serviceaccounts/token`, impersonation, and wildcards (`*`) in groups, resources or verbs.
-- Any custom resource but kausa's own Explanations, and on those never `get`, `watch`, `update`,
-  `deletecollection` or a subresource (there is none).
+- Any custom resource but kausa's own Explanations and Incidents. On Explanations never `get`,
+  `watch`, `update`, `deletecollection` or a subresource (there is none); on Incidents never
+  `get`, `watch`, `patch`, `update`, `deletecollection` or `incidents/status`. Nothing on
+  `remediations` or any other project's resource.
 - Any verb on CustomResourceDefinitions: the chart installs the CRD, kausa never does.
 - On Leases, `create`, `update`, `list`, `watch`, `delete` and `deletecollection`, in any
   namespace; `get` and `patch` on any Lease but `<full name>-leader` in kausa's own namespace;

@@ -102,6 +102,24 @@
 # be. The webhook receives, for each failing workload, one v2 detected body (the facts, no
 # explanation) and one explained one (the facts and the explanation), the facts agreeing with the
 # statement; no series of the capped and dropped facts is over 0.
+# With one replica, both check the Incidents
+# (docs/adr/0028-incident-resource-and-remediation-report.md) before that: off, kausa's service
+# account is refused every verb on incidents (status included), on remediations, on
+# CustomResourceDefinitions, Secrets and ConfigMaps, and neither the CustomResourceDefinition nor
+# the reader role exists. An upgrade with incidents.enabled=true grants create, list and delete on
+# incidents last in the ClusterRole or each Role, passes --incidents, --incident-days 1 and one
+# --dedup-hours, and exposes the counters from 0. Each failing workload but refused gets one
+# Incident named kausa.<fingerprint>.<first-seen seconds>, whose spec names the workload by its UID,
+# agrees with the logged incident, and renders the statement of the Detected Event of its
+# fingerprint; crasher's sample controller is a ReplicaSet of crasher with its UID and revision
+# annotation, and stalled's deployment is the Deployment's generation and revision. As cluster
+# administrator, a spec patch, a create with no spec and nine creates, each breaking one CEL rule of
+# the schema file alone, are refused with that rule's message, and a /status write changes neither
+# metadata nor spec. view, edit and admin get, list and watch incidents and nothing else. With kausa
+# scaled to 0 and 500 hand-made Incidents seeded, the new process sweeps by the cap first: no
+# Incident of it is older than the incidents swept line. No Remediation resource is served, passed
+# or logged. incidents.enabled=false removes the CustomResourceDefinition, the reader role, the
+# rule, the flags and the counters, and the matrix is the defaults' again.
 # With one replica, both then upgrade to an empty model.endpoint and no history, and check that kausa
 # writes Detected Events and nothing else (no other reason, no model request, no explanation line),
 # that the Role or ClusterRole grants Events create and patch, and that the receiver gets only
@@ -1606,6 +1624,662 @@ print(late)
     fail "kausa_leader is not 1 on the holder and 0 on the standby after the rollout"
   fi
   echo "rollout: two new Ready Pods, one leader"
+fi
+
+# Incidents (docs/adr/0028-incident-resource-and-remediation-report.md), in both scopes, with one
+# replica: off until here, then turned on by an upgrade and off again. Off, kausa may do nothing
+# to incidents, and the matrix above is today's. On, each failing workload of check_detected gets
+# one Incident, named after its fingerprint and first-seen second, whose spec agrees with the
+# logged incident and the Detected Event of the same fingerprint, its object's UID with the
+# workload's, crasher's sample controller with its ReplicaSet (UID and revision annotation) and
+# stalled's deployment with its generation and revision. As cluster administrator, the API server
+# refuses a spec patch, a create with no spec and one create per CEL rule of the schema file that
+# breaks that rule alone, and a write to /status changes neither metadata nor spec. can-i grants
+# kausa create, list and delete on incidents where its grant holds, and refuses every row point 5
+# names "never"; view, edit and admin get, list and watch incidents and nothing else. After a
+# restart with 500 hand-made Incidents seeded, the sweep at start deletes the oldest beyond 500
+# before any Incident of the new process is created. No Remediation resource is installed and the
+# log never names one. The CustomResourceDefinition and the reader role go with incidents off.
+if [ "$REPLICAS" = 1 ]; then
+  INCIDENTS=incidents.kausa.fedeam.com
+  INCIDENT_READER=$RELEASE-incident-reader
+  INCIDENT_SCHEMA=charts/kausa/files/incident-schema.json
+  REMEDIATIONS=remediations.kurita.fedeam.com
+  CRDS=customresourcedefinitions.apiextensions.k8s.io
+  everywhere=("-n $TARGET" "-n $DENIED" "-n $OTHER" "-n $NAMESPACE" -A)
+  if [ "$SCOPE" = namespaced ]; then
+    incident_where=("-n $TARGET" "-n $DENIED")
+    incident_elsewhere=("-n $OTHER" "-n $NAMESPACE" -A)
+  else
+    incident_where=(-A)
+    incident_elsewhere=()
+  fi
+  # allowed, with a check and a place each given as one string ("verb resource [flag]", "-n ns"
+  # or -A), split into words without globbing, so that no call leaves them unquoted.
+  allowed_in() {
+    local -a words place
+    read -ra words <<<"$1"
+    read -ra place <<<"$2"
+    allowed "${words[@]}" "${place[@]}"
+  }
+  incident_granted=("create $INCIDENTS" "list $INCIDENTS" "delete $INCIDENTS")
+  # Point 5's "never", in either state: the read and write verbs kausa has no use for, the status
+  # subresource, any verb on Remediations and on CustomResourceDefinitions, Secrets and ConfigMaps.
+  incident_never=("get $INCIDENTS" "watch $INCIDENTS" "patch $INCIDENTS" "update $INCIDENTS"
+    "deletecollection $INCIDENTS" "get $INCIDENTS --subresource=status"
+    "patch $INCIDENTS --subresource=status" "update $INCIDENTS --subresource=status"
+    "list $REMEDIATIONS" "watch $REMEDIATIONS" "get $REMEDIATIONS" "create $REMEDIATIONS"
+    "patch $REMEDIATIONS" "update $REMEDIATIONS" "delete $REMEDIATIONS"
+    "patch $REMEDIATIONS --subresource=status" "update $REMEDIATIONS --subresource=status"
+    "get $CRDS" "list $CRDS" "watch $CRDS" "create $CRDS" "update $CRDS" "patch $CRDS"
+    "delete $CRDS" "get secrets" "list secrets" "watch secrets" "get configmaps"
+    "list configmaps" "watch configmaps")
+  # The rows of point 5 as kausa's service account, with incidents $1 (on or off). can-i answers
+  # no for a subject that does not exist, so a row of the same subject answers yes first: the
+  # first row of the grant, in its first place; with incidents on, the incidents rows too.
+  incident_rows() {
+    allowed_in "${granted[0]}" "${incident_where[0]}" ||
+      fail "kausa cannot ${granted[0]} ${incident_where[0]}: its never rows would prove nothing"
+    for check in "${incident_granted[@]}"; do
+      if [ "$1" = on ]; then
+        for where in "${incident_where[@]}"; do
+          allowed_in "$check" "$where" || fail "kausa cannot $check $where with incidents on"
+        done
+        places=("${incident_elsewhere[@]}")
+      else
+        places=("${everywhere[@]}")
+      fi
+      for where in "${places[@]}"; do
+        if allowed_in "$check" "$where"; then fail "kausa can $check $where with incidents $1"; fi
+      done
+    done
+    for check in "${incident_never[@]}"; do
+      for where in "${everywhere[@]}"; do
+        if allowed_in "$check" "$where"; then fail "kausa can $check $where with incidents $1"; fi
+      done
+    done
+  }
+  # The matrix of "The grant is the table" above, again: with the defaults it is today's.
+  matrix_today() {
+    if [ "$SCOPE" = namespaced ]; then
+      for check in "${granted[@]}"; do
+        for where in "-n $TARGET" "-n $DENIED"; do
+          allowed_in "$check" "$where" || fail "kausa cannot $check $where after incidents"
+        done
+        for where in "-n $OTHER" "-n $NAMESPACE" -A; do
+          if allowed_in "$check" "$where"; then fail "kausa can $check $where after incidents"; fi
+        done
+      done
+    else
+      for check in "${granted[@]}"; do
+        allowed_in "$check" -A || fail "kausa cannot $check after incidents"
+      done
+    fi
+    for check in "${refused[@]}"; do
+      for where in "${everywhere[@]}"; do
+        if allowed_in "$check" "$where"; then fail "kausa can $check $where after incidents"; fi
+      done
+    done
+  }
+  # What the rules of kausa's RBAC objects say about incidents: "on" when the last rule is the
+  # incidents rule and no other names them, "off" when none names them. The history's rule on
+  # explanations is the other rule of kausa.fedeam.com, and is left to the history's checks.
+  incident_rules() {
+    k get "$@" -o json | python3 -I -c '
+import json, sys
+rules = json.load(sys.stdin).get("rules") or []
+incidents = {"apiGroups": ["kausa.fedeam.com"], "resources": ["incidents"],
+             "verbs": ["create", "list", "delete"]}
+about = [r for r in rules if "kausa.fedeam.com" in (r.get("apiGroups") or [])
+         and any(x.startswith("incidents") for x in r.get("resources") or [])]
+if about == [incidents] and rules[-1] == incidents:
+    print("on")
+elif not about:
+    print("off")
+else:
+    print("other rules: " + json.dumps(about))
+'
+  }
+  # The rules of every RBAC object of kausa's grant are $1 (incident_rules' answer).
+  incident_rules_are() {
+    if [ "$SCOPE" = namespaced ]; then
+      for ns in "$TARGET" "$DENIED"; do
+        [ "$(incident_rules role/"$RELEASE" -n "$ns")" = "$1" ] ||
+          fail "the rules of $ns's Role about kausa.fedeam.com are not incidents $1"
+      done
+    else
+      [ "$(incident_rules clusterrole/"$RELEASE")" = "$1" ] ||
+        fail "the ClusterRole's rules about kausa.fedeam.com are not incidents $1"
+    fi
+  }
+  # The values of the four counters of the Incidents in $WORK/metrics.txt, or "absent" for each
+  # series that is not there.
+  incident_series=('kausa_incidents_refused_total{reason="table-full"}'
+    'kausa_incidents_refused_total{reason="schema"}'
+    'kausa_incidents_refused_total{reason="starting"}'
+    'kausa_incident_write_errors_total' 'kausa_incidents_deleted_total{reason="age"}'
+    'kausa_incidents_deleted_total{reason="cap"}' 'kausa_incident_sweep_errors_total')
+  no_incident_metrics() {
+    if awk '$1 !~ /^#/ { sub(/[{].*/, "", $1); print $1 }' "$WORK/metrics.txt" |
+      grep -E '^kausa_incident(s_refused|_write_errors|s_deleted|_sweep_errors)_total$' >/dev/null
+    then
+      fail "a counter of the Incidents is exposed with incidents off"
+    fi
+  }
+
+  # Off: no CustomResourceDefinition, no reader role, nothing granted.
+  [ -z "$(k get crd "$INCIDENTS" --ignore-not-found -o name)" ] ||
+    fail "the CustomResourceDefinition $INCIDENTS exists with incidents off"
+  [ -z "$(k get clusterrole "$INCIDENT_READER" --ignore-not-found -o name)" ] ||
+    fail "the ClusterRole $INCIDENT_READER exists with incidents off"
+  incident_rows off
+  echo "incidents off: no CustomResourceDefinition, reader role or grant"
+
+  # In the namespaced scope DENIED's RoleBinding was deleted above, and the kausa Pod is not Ready
+  # (so its metrics are not served until here); the upgrade puts the RoleBinding back, as the one
+  # of "fail closed" restored the Lease's, and the matrix of the defaults holds again.
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+    --set incidents.enabled=true
+  [ "$(pods_ready 1)" = yes ] || fail "the upgrade with incidents left no one Ready kausa Pod"
+  if [ "$SCOPE" = namespaced ]; then has_roles "$DENIED"; fi
+  pod=pod/$(kausa_pods | head -n 1)
+  args=$(kausa_args "$pod")
+  for flag in --incidents --incident-days --dedup-hours; do
+    [ "$(printf '%s\n' "$args" | grep -cxF -- "$flag")" = 1 ] ||
+      fail "the kausa Pod does not run with exactly one $flag with incidents on"
+  done
+  printf '%s\n' "$args" | awk 'prev == "--incident-days" && $0 == "1" { ok = 1 } { prev = $0 }
+    END { exit !ok }' || fail "--incident-days is not followed by 1"
+  k get crd "$INCIDENTS" -o name >/dev/null
+  k get clusterrole "$INCIDENT_READER" -o json | python3 -I -c '
+import json, sys
+role = json.load(sys.stdin)
+labels = role["metadata"].get("labels") or {}
+aggregate = sorted(k for k in labels if k.startswith("rbac.authorization.k8s.io/aggregate-to-"))
+if aggregate != ["rbac.authorization.k8s.io/aggregate-to-view"]:
+    sys.exit("FAIL: the reader role aggregates to %s" % aggregate)
+want = [{"apiGroups": ["kausa.fedeam.com"], "resources": ["incidents"],
+         "verbs": ["get", "list", "watch"]}]
+if role.get("rules") != want:
+    sys.exit("FAIL: the reader role grants " + json.dumps(role.get("rules")))
+'
+  incident_rules_are on
+  incident_rows on
+  kausa_metrics > "$WORK/metrics.txt"
+  for series in "${incident_series[@]}"; do
+    [ -n "$(metric_of "$series" "$WORK/metrics.txt")" ] ||
+      fail "$series is absent with incidents on"
+  done
+  for series in 'kausa_incidents_refused_total{reason="schema"}' kausa_incident_write_errors_total \
+    kausa_incident_sweep_errors_total; do
+    [ "$(metric_of "$series" "$WORK/metrics.txt")" = 0 ] || fail "$series is not 0"
+  done
+  echo "incidents on: the CustomResourceDefinition, the reader role (view only), the rule last," \
+    "the args once each, the counters from 0"
+
+  # Each failing workload's Incident, against the incident logged under its fingerprint, the
+  # Detected Event of that fingerprint, and the workloads as the API server has them. Prints a
+  # summary; the first argument is a file for the name of crasher's D001 Incident.
+  check_incidents() {
+    python3 -I -c '
+import json, re, sys
+from datetime import datetime, timezone
+work, target, other, crasher_file = sys.argv[1:5]
+WORKLOADS = (("Deployment", "crasher", "D001", "apps/v1"),
+             ("Job", "failing-job", "D008", "batch/v1"),
+             ("Job", "policy-job", "D008", "batch/v1"),
+             ("Deployment", "stranded", "D005", "apps/v1"),
+             ("Deployment", "stalled", "D014", "apps/v1"))
+DETECTED = re.compile(r"kausa\.detected\.([0-9a-f]{16})\.[0-9a-f]{8}")
+REVISION = "deployment.kubernetes.io/revision"
+
+def fail(message):
+    sys.exit("FAIL: the Incidents: " + message)
+
+def seconds(time):
+    return int(datetime.strptime(time, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc).timestamp())
+
+def to_second(time):
+    # The log writes the first-seen time with its fraction; the spec keeps the second.
+    return re.sub(r"\.[0-9]+Z$", "Z", time)
+
+def render(spec, name):
+    facts = spec["facts"]
+    text = "%s (%s)." % (name, spec["detection"])
+    parts = []
+    if "container" in facts:
+        parts.append("container " + facts["container"])
+    if "reason" in facts:
+        parts.append("reason " + facts["reason"])
+    if "exitCode" in facts:
+        parts.append("exit code %d" % facts["exitCode"])
+    if parts:
+        text += " Sample: %s." % ", ".join(parts)
+    if facts["podsSeen"] > 0:
+        text += " Pods seen failing: %s%d. Pods now: %d." % (
+            "at least " if facts["podsSeenIsMinimum"] else "", facts["podsSeen"], facts["podsNow"])
+    if "deployment" in spec:
+        text += " Revision: %d." % spec["deployment"]["revision"]
+    return text
+
+items = json.load(open(work + "/incidents.json"))["items"]
+if any(i["metadata"]["namespace"] == other for i in items):
+    fail("an Incident in %s, where kausa is granted nothing" % other)
+logged = {}
+for line in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "incident":
+        logged.setdefault(entry.get("fingerprint"), []).append(entry)
+notes = {}
+for event in json.load(open(work + "/events.json"))["items"]:
+    match = DETECTED.fullmatch(event["metadata"]["name"])
+    if event.get("reportingController") == "kausa" and event.get("reason") == "Detected" and match:
+        notes.setdefault(match.group(1), set()).add(event.get("note"))
+objects = {(o["kind"], o["metadata"]["name"]): o
+           for o in json.load(open(work + "/workloads.json"))["items"]}
+replica_sets = {o["metadata"]["uid"]: o for o in objects.values() if o["kind"] == "ReplicaSet"}
+for item in items:
+    metadata, spec = item["metadata"], item["spec"]
+    who = metadata["name"]
+    if metadata.get("ownerReferences") or metadata.get("labels") or metadata.get("annotations"):
+        fail("%s has an ownerReference, a label or an annotation" % who)
+    if item.get("status") not in (None, {}):
+        fail("%s has a status" % who)
+    if who != "kausa.%s.%d" % (spec["fingerprint"], seconds(spec["firstSeen"])):
+        fail("%s is not named after its fingerprint and first-seen second" % who)
+found = 0
+for kind, name, rule, api_version in WORKLOADS:
+    mine = [i for i in items if i["metadata"]["namespace"] == target
+            and (i["spec"]["object"]["kind"], i["spec"]["object"]["name"]) == (kind, name)
+            and i["spec"]["detection"] == rule]
+    if len(mine) != 1:
+        fail("%d Incidents of %s about %s %s" % (len(mine), rule, kind, name))
+    item = mine[0]
+    spec, who = item["spec"], "the Incident of %s %s" % (kind, name)
+    workload = objects.get((kind, name))
+    if workload is None:
+        fail("no %s %s in %s" % (kind, name, target))
+    if spec["object"] != {"apiVersion": api_version, "kind": kind, "name": name,
+                          "uid": workload["metadata"]["uid"]}:
+        fail("%s names another object: %s" % (who, json.dumps(spec["object"])))
+    if spec["missing"] != []:
+        fail("%s has missing %s" % (who, spec["missing"]))
+    entries = [e for e in logged.get(spec["fingerprint"], [])
+               if to_second(e.get("first_seen", "")) == spec["firstSeen"]]
+    if not entries:
+        fail("%s is not of an incident logged with its fingerprint and first-seen time" % who)
+    entry = entries[0]
+    if (entry.get("detection"), entry.get("namespace"), entry.get("owner")) != (
+            rule, target, {"apiVersion": api_version, "kind": kind, "name": name}):
+        fail("the log gives %s another detection or owner" % who)
+    statement = render(spec, entry.get("detection_name"))
+    if statement not in notes.get(spec["fingerprint"], set()):
+        fail("no Detected Event of the fingerprint of %s has the statement of its spec" % who)
+    if statement != entry.get("statement"):
+        fail("the statement of the spec of %s is not the logged one" % who)
+    if rule == "D001":
+        sample = spec.get("sample") or {}
+        controller = sample.get("controller") or {}
+        replica_set = replica_sets.get(controller.get("uid"))
+        if controller.get("kind") != "ReplicaSet" or replica_set is None:
+            fail("%s has no sample controller that is a ReplicaSet of %s" % (who, target))
+        owners = [(o.get("kind"), o.get("name"))
+                  for o in replica_set["metadata"].get("ownerReferences") or []]
+        if owners != [("Deployment", name)]:
+            fail("the sample ReplicaSet of %s is not run by Deployment %s" % (who, name))
+        annotation = (replica_set["metadata"].get("annotations") or {}).get(REVISION)
+        if str(controller.get("revision")) != annotation:
+            fail("the sample revision of %s is not its ReplicaSet annotation" % who)
+        if not sample["pod"]["name"].startswith(name + "-"):
+            fail("the sample Pod of %s is not one of its Pods" % who)
+        with open(crasher_file, "w") as out:
+            out.write(item["metadata"]["name"])
+    elif rule == "D014":
+        deployment = spec.get("deployment") or {}
+        metadata = workload["metadata"]
+        if (deployment.get("generation"), str(deployment.get("revision"))) != (
+                metadata.get("generation"), (metadata.get("annotations") or {}).get(REVISION)):
+            fail("the deployment of %s is not the generation and revision of %s" % (who, name))
+    elif rule == "D008" and ("sample" in spec or spec["facts"]["podsSeen"] != 0):
+        fail("%s has a sample or Pods seen" % who)
+    found += 1
+print("the Incidents: one for each of the %d failing workloads, named, logged and stated as their"
+      " Detected Event, %d in all" % (found, len(items)))
+' "$WORK" "$TARGET" "$OTHER" "$1"
+  }
+  incident_report=""
+  for _ in $(seq 1 60); do
+    k get "$INCIDENTS" -A -o json > "$WORK/incidents.json"
+    k -n "$TARGET" get events.events.k8s.io -o json > "$WORK/events.json"
+    k -n "$TARGET" get deployments.apps,replicasets.apps,jobs.batch -o json > "$WORK/workloads.json"
+    kausa_log "$pod"
+    incident_report=$(check_incidents "$WORK/crasher-incident" 2> "$WORK/incidents.err") && break
+    incident_report=""
+    sleep 5
+  done
+  [ -n "$incident_report" ] || fail "$(cat "$WORK/incidents.err")"
+  echo "$incident_report"
+  crasher_incident=$(cat "$WORK/crasher-incident")
+
+  # What the API server refuses, as cluster administrator. A spec patch: the spec is immutable.
+  before=$(k -n "$TARGET" get "$INCIDENTS" "$crasher_incident" -o jsonpath='{.spec}')
+  if out=$(k -n "$TARGET" patch "$INCIDENTS" "$crasher_incident" --type merge \
+    -p '{"spec":{"facts":{"podsNow":2}}}' 2>&1); then
+    fail "the API server accepted a patch of the spec of $crasher_incident"
+  fi
+  case "$out" in
+    *"spec is immutable"*) ;;
+    *) fail "the spec patch was refused for another reason: $out" ;;
+  esac
+  [ "$(k -n "$TARGET" get "$INCIDENTS" "$crasher_incident" -o jsonpath='{.spec}')" = "$before" ] ||
+    fail "the spec of $crasher_incident changed"
+  # A create with no spec, and one create for each CEL rule but the immutability: each from the
+  # spec of an Incident kausa created, changed so that it breaks that rule alone. The unchanged
+  # specs pass a server-side dry run, so each refusal is the change's.
+  rm -f "$WORK"/incident-case-*
+  python3 -I -c '
+import copy, json, sys
+work, target, schema_file = sys.argv[1:4]
+items = json.load(open(work + "/incidents.json"))["items"]
+
+def spec_of(kind, name, rule):
+    for item in items:
+        spec = item["spec"]
+        about = (spec["object"]["kind"], spec["object"]["name"], spec["detection"])
+        if about == (kind, name, rule):
+            return spec
+    sys.exit("FAIL: no Incident of %s about %s %s" % (rule, kind, name))
+
+crasher = spec_of("Deployment", "crasher", "D001")
+job = spec_of("Job", "failing-job", "D008")
+stalled = spec_of("Deployment", "stalled", "D014")
+schema = json.load(open(schema_file))
+spec_rules = schema["properties"]["spec"]["x-kubernetes-validations"]
+messages = [r["message"] for r in spec_rules]
+messages.append(schema["properties"]["spec"]["properties"]["facts"]
+                ["x-kubernetes-validations"][0]["message"])
+messages.append(schema["properties"]["spec"]["properties"]["sample"]["properties"]["controller"]
+                ["x-kubernetes-validations"][0]["message"])
+
+def changed(base, change):
+    spec = copy.deepcopy(base)
+    change(spec)
+    return spec
+
+def drop(*path):
+    def change(spec):
+        node = spec
+        for key in path[:-1]:
+            node = node[key]
+        del node[path[-1]]
+    return change
+
+def put(value, *path):
+    def change(spec):
+        node = spec
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+    return change
+
+def both(*changes):
+    def change(spec):
+        for one in changes:
+            one(spec)
+    return change
+
+cases = [
+    ("sample is set exactly when podsSeen is above 0", crasher, drop("sample")),
+    ("podsSeen is 0 exactly for D008 and D011 to D014", crasher, put("D008", "detection")),
+    ("deployment is set exactly for D014", crasher,
+     put({"generation": 1, "revision": 1}, "deployment")),
+    ("missing names revision-lookup-failed exactly when a ReplicaSet controller has no revision",
+     crasher, drop("sample", "controller", "revision")),
+    ("sample and regarding are never both set", crasher,
+     put({"kind": "ReplicaSet", "name": "crasher"}, "regarding")),
+    ("missing names owner-lookup-failed only for an incident about a Pod, D008 or D011", stalled,
+     put(["owner-lookup-failed"], "missing")),
+    ("a D008 or D011 with owner-lookup-failed names in object the object of regarding, a Job of "
+     "batch/v1 or a ReplicaSet of apps/v1", job,
+     both(put(["owner-lookup-failed"], "missing"), lambda spec: spec.pop("regarding", None))),
+    ("podsSeenIsMinimum is true exactly when podsSeen is 100", crasher,
+     put(True, "facts", "podsSeenIsMinimum")),
+    ("only a ReplicaSet has a revision", crasher, put("Job", "sample", "controller", "kind")),
+]
+wanted = sorted(m for m, _, _ in cases)
+if wanted != sorted(m for m in messages if m != "spec is immutable"):
+    sys.exit("FAIL: the cases do not cover the CEL rules of %s one each" % schema_file)
+
+def manifest(name, spec):
+    body = {"apiVersion": "kausa.fedeam.com/v1alpha1", "kind": "Incident",
+            "metadata": {"name": name, "namespace": target}}
+    if spec is not None:
+        body["spec"] = spec
+    return json.dumps(body)
+
+for index, base in enumerate((crasher, job, stalled)):
+    open("%s/incident-case-base-%d.json" % (work, index), "w").write(
+        manifest("e2e-base-%d" % index, base))
+open(work + "/incident-case-nospec.json", "w").write(manifest("e2e-nospec", None))
+for index, (message, base, change) in enumerate(cases):
+    open("%s/incident-case-rule-%d.json" % (work, index), "w").write(
+        manifest("e2e-rule-%d" % index, changed(base, change)))
+    open("%s/incident-case-rule-%d.want" % (work, index), "w").write(message)
+open(work + "/incident-case-messages.json", "w").write(json.dumps(messages))
+' "$WORK" "$TARGET" "$INCIDENT_SCHEMA"
+  for base in "$WORK"/incident-case-base-*.json; do
+    k create --dry-run=server -f "$base" >/dev/null ||
+      fail "the API server refuses the unchanged spec of $(basename "$base")"
+  done
+  if out=$(k create -f "$WORK/incident-case-nospec.json" 2>&1); then
+    fail "the API server accepted an Incident with no spec"
+  fi
+  case "$out" in
+    *"spec: Required value"*) ;;
+    *) fail "the Incident with no spec was refused for another reason: $out" ;;
+  esac
+  rules_refused=0
+  for case_file in "$WORK"/incident-case-rule-*.json; do
+    want=$(cat "${case_file%.json}.want")
+    if out=$(k create -f "$case_file" 2>&1); then
+      fail "the API server accepted an Incident that breaks '$want'"
+    fi
+    printf '%s' "$out" | python3 -I -c '
+import json, sys
+want, messages = sys.argv[1], json.load(open(sys.argv[2]))
+out = sys.stdin.read()
+if want not in out:
+    sys.exit("FAIL: a create that breaks \"%s\" was refused for another reason: %s" % (want, out))
+others = [m for m in messages if m != want and m in out]
+if others:
+    sys.exit("FAIL: a create that breaks \"%s\" also broke %s" % (want, others))
+' "$want" "$WORK/incident-case-messages.json"
+    rules_refused=$((rules_refused + 1))
+  done
+  [ "$rules_refused" = 9 ] || fail "$rules_refused creates for the CEL rules, not 9"
+  # A write to /status: the spec and a label in the same patch are ignored, and status keeps no
+  # field. resourceVersion and managedFields record any write; the rest of metadata stays.
+  incident_now() {
+    k -n "$TARGET" get "$INCIDENTS" "$crasher_incident" -o json | python3 -I -c '
+import json, sys
+item = json.load(sys.stdin)
+for key in ("resourceVersion", "managedFields"):
+    item["metadata"].pop(key, None)
+print(json.dumps([item["metadata"], item["spec"], item.get("status") or {}], sort_keys=True))
+'
+  }
+  before=$(incident_now)
+  k -n "$TARGET" patch "$INCIDENTS" "$crasher_incident" --subresource=status --type merge \
+    -p '{"metadata":{"labels":{"e2e":"status"}},"spec":{"facts":{"podsNow":2}},"status":{}}' \
+    >/dev/null
+  [ "$(incident_now)" = "$before" ] || fail "a write to /status changed the metadata or the spec"
+  echo "the API server: a spec patch, a create with no spec and $rules_refused creates, one for" \
+    "each CEL rule, refused; a /status write changed nothing"
+
+  # view, edit and admin read incidents through the reader role, and do nothing else with them.
+  # For each subject, watch, get and list answer yes before its never rows, so that a subject that
+  # does not exist, for which can-i answers no to everything, fails here.
+  k -n "$TARGET" create serviceaccount e2e-incident-admin
+  k -n "$TARGET" create rolebinding e2e-incident-admin --clusterrole=admin \
+    --serviceaccount="$TARGET:e2e-incident-admin"
+  for as in "system:serviceaccount:$TARGET:e2e-view" "system:serviceaccount:$TARGET:e2e-edit" \
+    "system:serviceaccount:$TARGET:e2e-incident-admin"; do
+    readable=""
+    for _ in $(seq 1 30); do
+      [ "$(k auth can-i --as="$as" watch "$INCIDENTS" -n "$TARGET" 2>/dev/null)" = yes ] &&
+        readable=yes && break
+      sleep 2
+    done
+    [ -n "$readable" ] || fail "$as cannot watch $INCIDENTS in $TARGET"
+    for verb in get list; do
+      [ "$(k auth can-i --as="$as" "$verb" "$INCIDENTS" -n "$TARGET" 2>/dev/null)" = yes ] ||
+        fail "$as cannot $verb $INCIDENTS in $TARGET"
+    done
+    k --as="$as" -n "$TARGET" get "$INCIDENTS" -o name |
+      grep -qxF -- "incident.kausa.fedeam.com/$crasher_incident" ||
+      fail "$as does not list $crasher_incident"
+    for check in "create $INCIDENTS" "update $INCIDENTS" "patch $INCIDENTS" "delete $INCIDENTS" \
+      "deletecollection $INCIDENTS" "get $INCIDENTS --subresource=status" \
+      "patch $INCIDENTS --subresource=status" "update $INCIDENTS --subresource=status"; do
+      read -ra check_words <<<"$check"
+      if [ "$(k auth can-i --as="$as" "${check_words[@]}" -n "$TARGET" 2>/dev/null)" = yes ]; then
+        fail "$as can $check in $TARGET"
+      fi
+    done
+  done
+  k -n "$TARGET" delete rolebinding e2e-incident-admin >/dev/null
+  k -n "$TARGET" delete serviceaccount e2e-incident-admin >/dev/null
+  echo "view, edit and admin: get, list and watch incidents, nothing else"
+
+  # The sweep at start comes before any create of the new process (point 4). kausa is scaled to
+  # 0 first, so that every Incident named kausa.* whose metadata.uid was not there then is the new
+  # process's. By UID, not by name: once the sweep has deleted an old Incident, a create of the
+  # same name could succeed, and a name alone would take it for an old one.
+  # 500 hand-made Incidents, made after kausa's, bring the count past 500, so that the sweep
+  # deletes kausa's oldest and logs incidents swept when it has ended; every Incident the new
+  # process creates is newer than that line, at the second creationTimestamp keeps. A create that
+  # comes first is refused as starting: either may happen, an Incident created earlier may not.
+  k -n "$NAMESPACE" scale deploy/kausa --replicas=0 >/dev/null
+  stopped=""
+  for _ in $(seq 1 60); do
+    [ -z "$(k -n "$NAMESPACE" get pods -l app.kubernetes.io/name=kausa -o name)" ] &&
+      stopped=yes && break
+    sleep 1
+  done
+  [ -n "$stopped" ] || fail "a kausa Pod is left 60 s after scaling kausa to 0"
+  k get "$INCIDENTS" -A -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}' \
+    > "$WORK/incidents-before.txt"
+  python3 -I -c '
+import json, sys
+work, target = sys.argv[1:3]
+items = json.load(open(work + "/incidents.json"))["items"]
+base = next(i["spec"] for i in items if i["spec"]["detection"] == "D001")
+print(json.dumps({"apiVersion": "v1", "kind": "List", "items": [
+    {"apiVersion": "kausa.fedeam.com/v1alpha1", "kind": "Incident",
+     "metadata": {"name": "e2e-seed-%03d" % n, "namespace": target}, "spec": base}
+    for n in range(500)]}))
+' "$WORK" "$TARGET" > "$WORK/incident-seeds.json"
+  k create -f "$WORK/incident-seeds.json" >/dev/null
+  k -n "$NAMESPACE" scale deploy/kausa --replicas=1 >/dev/null
+  k -n "$NAMESPACE" rollout status deploy/kausa --timeout 120s
+  pod=pod/$(kausa_pods | head -n 1)
+  swept=""
+  for _ in $(seq 1 40); do
+    k get "$INCIDENTS" -A -o json > "$WORK/incidents.json"
+    kausa_log "$pod"
+    # The Service may not route to the new Pod yet: an empty file reads as no series.
+    kausa_metrics > "$WORK/metrics.txt" 2>/dev/null || : > "$WORK/metrics.txt"
+    starting=$(metric_of 'kausa_incidents_refused_total{reason="starting"}' "$WORK/metrics.txt")
+    swept=$(python3 -I -c '
+import json, sys
+from datetime import datetime, timezone
+work, starting = sys.argv[1], int(sys.argv[2] or 0)
+
+def at(time):
+    return datetime.strptime(time[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+
+lines = []
+for line in open(work + "/kausa.log"):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(entry, dict) and entry.get("msg") == "incidents swept":
+        lines.append(entry)
+def fail(message):
+    print("FAIL: " + message)
+    sys.exit(2)
+
+if len(lines) > 1:
+    fail("%d incidents swept lines after the restart" % len(lines))
+if not lines:
+    sys.exit(1)
+if lines[0].get("deleted_by_cap", 0) < 1:
+    fail("the sweep at start deleted nothing by the cap of 500")
+ended = at(lines[0]["ts"])
+before = set(open(work + "/incidents-before.txt").read().split())
+new = [i for i in json.load(open(work + "/incidents.json"))["items"]
+       if i["metadata"]["name"].startswith("kausa.") and i["metadata"]["uid"] not in before]
+early = [i["metadata"]["name"] for i in new if at(i["metadata"]["creationTimestamp"]) < ended]
+if early:
+    fail("%d Incidents created before the sweep at start ended" % len(early))
+if not new and not starting:
+    sys.exit(1)
+print("%d new Incidents, %d refused as starting" % (len(new), starting))
+' "$WORK" "${starting:-0}") && break
+    case "$swept" in FAIL:*) fail "${swept#FAIL: }" ;; esac
+    swept=""
+    sleep 3
+  done
+  [ -n "$swept" ] || fail "no incidents swept line, or no Incident and no starting refusal, after" \
+    "the restart"
+  kausa_metrics > "$WORK/metrics.txt"
+  [ "$(metric_of 'kausa_incidents_deleted_total{reason="cap"}' "$WORK/metrics.txt")" -ge 1 ] ||
+    fail "kausa_incidents_deleted_total{reason=\"cap\"} does not count the sweep at start"
+  echo "the sweep at start: ended before any create of the new process ($swept)"
+
+  # No Remediation resource, no flag for it, and nothing about it in the log.
+  [ -z "$(k get crd "$REMEDIATIONS" --ignore-not-found -o name)" ] ||
+    fail "the CustomResourceDefinition $REMEDIATIONS is installed"
+  [ -z "$(k api-resources --api-group=kurita.fedeam.com -o name)" ] ||
+    fail "the API server serves kurita.fedeam.com"
+  if kausa_args "$pod" | grep -qi remediation; then
+    fail "the kausa Pod runs with an argument about Remediations"
+  fi
+  if grep -qi remediation "$WORK/kausa.log"; then fail "kausa's log names a Remediation"; fi
+  echo "no Remediation resource, argument or log line"
+
+  # Off again: the CustomResourceDefinition goes with every Incident, the reader role and the rule
+  # go, the args and the counters are those of before, and the matrix is today's.
+  h upgrade "$RELEASE" charts/kausa -n "$NAMESPACE" --wait --timeout 180s --reuse-values \
+    --set incidents.enabled=false
+  [ "$(pods_ready 1)" = yes ] || fail "the upgrade without incidents left no one Ready kausa Pod"
+  gone=""
+  for _ in $(seq 1 60); do
+    [ -z "$(k get crd "$INCIDENTS" --ignore-not-found -o name)" ] && gone=yes && break
+    sleep 2
+  done
+  [ -n "$gone" ] || fail "the CustomResourceDefinition $INCIDENTS is still there"
+  [ -z "$(k get clusterrole "$INCIDENT_READER" --ignore-not-found -o name)" ] ||
+    fail "the ClusterRole $INCIDENT_READER remains without incidents"
+  pod=pod/$(kausa_pods | head -n 1)
+  args=$(kausa_args "$pod")
+  if printf '%s\n' "$args" | grep -qE -- '^--incident'; then
+    fail "the kausa Pod runs with an incidents flag without incidents"
+  fi
+  [ "$(printf '%s\n' "$args" | grep -cxF -- --dedup-hours)" = 1 ] ||
+    fail "the kausa Pod does not run with exactly one --dedup-hours without incidents"
+  incident_rules_are off
+  incident_rows off
+  matrix_today
+  kausa_metrics > "$WORK/metrics.txt"
+  no_incident_metrics
+  echo "incidents off again: no CustomResourceDefinition, reader role, rule, flag or counter;" \
+    "the matrix is today's"
 fi
 
 # Without a model (docs/adr/0027-fact-statement-for-the-detections.md), in both scopes, with one

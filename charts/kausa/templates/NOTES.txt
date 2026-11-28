@@ -89,6 +89,35 @@ CustomResourceDefinition and every Explanation, this release's too; uninstalling
 does not delete its Explanations.
 {{- end }}
 {{- end }}
+{{- if include "kausa.writesIncidents" . }}
+{{- $incidentDays := include "kausa.incidentDays" . }}
+
+kausa publishes each incident as an Incident object in the namespace of its workload, and deletes
+the ones older than {{ $incidentDays }} {{ if eq $incidentDays "1" }}day{{ else }}days{{ end }} (incidents.days):
+{{ if eq $scope "namespaced" }}
+{{- range $namespaces }}
+  kubectl get incidents -n {{ . }}
+{{- end }}
+{{- else }}
+  kubectl get incidents -A
+{{- end }}
+  kubectl get incident -n <namespace> <name> -o yaml
+{{- if include "kausa.installsIncidentCRD" . }}
+
+This release installs the CustomResourceDefinition incidents.kausa.fedeam.com: uninstalling it,
+or turning its Incidents off (incidents.enabled=false or dryRun=true), deletes the
+CustomResourceDefinition and every Incident.
+{{- else }}
+
+incidents.installCRD is false: this release does not install the CustomResourceDefinition
+incidents.kausa.fedeam.com, and a cluster administrator installs it (helm template with the same
+values, incidents.installCRD=true and --show-only on templates/incident-crd.yaml and
+templates/incident-reader.yaml). Until it exists, kausa only logs warnings. Uninstalling the
+release that installs it, or turning that release's Incidents off, deletes the
+CustomResourceDefinition and every Incident, this release's too; uninstalling this release does
+not delete its Incidents.
+{{- end }}
+{{- end }}
 {{- if include "kausa.notifies" . }}
 {{- $notify := .Values.notifications | default dict }}
 

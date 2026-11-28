@@ -628,6 +628,194 @@ fn help_lists_the_history_flags_and_what_kausa_writes() {
     assert!(help.lines().all(|l| l.len() <= 84), "{help}");
 }
 
+// `kausa run --incidents` and `--incident-days`
+// (docs/adr/0028-incident-resource-and-remediation-report.md, points 1 and 4): usage errors with
+// the exact message, in the order of the checks, before anything connects; the accepted forms get
+// past the flags and fail only on the missing cluster. Incidents need no endpoint.
+
+const INCIDENTS_NOT_IN_DRY_RUN: &str =
+    "--incidents is not used with --dry-run: no Incident is written";
+const DAYS_NEED_INCIDENTS: &str = "--incident-days needs --incidents";
+
+fn not_a_number_of_incident_days(value: &str) -> String {
+    format!("--incident-days takes a whole number of days from 1 to 30, not '{value}'")
+}
+
+#[test]
+fn incidents_are_not_used_with_dry_run() {
+    for args in [
+        &["run", "--incidents", "--dry-run"][..],
+        &["run", "--dry-run", "--incidents"][..],
+        &["run", "--incidents", "--incident-days", "3", "--dry-run"][..],
+        &["run", "--incidents", "--endpoint", ENDPOINT, "--dry-run"][..],
+        &["run", "--incidents", "--no-events", "--dry-run"][..],
+    ] {
+        assert_usage_error(&kausa(args), INCIDENTS_NOT_IN_DRY_RUN, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn incident_days_need_incidents() {
+    for args in [
+        &["run", "--incident-days", "1"][..],
+        &["run", "--incident-days", "30", "--no-events"][..],
+        &[
+            "run",
+            "--incident-days",
+            "7",
+            "--history",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+        ][..],
+        // Before the dry-run check.
+        &["run", "--incident-days", "7", "--dry-run"][..],
+    ] {
+        assert_usage_error(&kausa(args), DAYS_NEED_INCIDENTS, &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn incident_days_need_a_value() {
+    for args in [
+        &["run", "--incident-days"][..],
+        &["run", "--incident-days", ""][..],
+        &["run", "--incidents", "--incident-days"][..],
+    ] {
+        assert_usage_error(
+            &kausa(args),
+            "--incident-days needs a value",
+            &format!("{args:?}"),
+        );
+    }
+}
+
+#[test]
+fn incident_days_take_a_whole_number_from_1_to_30() {
+    for value in [
+        "0", "31", "abc", "-1", "1.5", "100", "1e1", " 1", "1 ", "one",
+    ] {
+        let message = not_a_number_of_incident_days(value);
+        // Checked as the flag is read: before every other check.
+        for args in [
+            &["run", "--incident-days", value][..],
+            &["run", "--incidents", "--incident-days", value][..],
+            &["run", "--incident-days", value, "--namespace", "Shop"][..],
+            &["run", "--incident-days", value, "--dry-run"][..],
+        ] {
+            assert_usage_error(&kausa(args), &message, &format!("{args:?}"));
+        }
+    }
+}
+
+#[test]
+fn the_incident_checks_come_in_order() {
+    // --namespace first.
+    assert_usage_error(
+        &kausa(&["run", "--namespace", "Shop", "--incidents", "--dry-run"]),
+        &not_a_namespace_name("Shop"),
+        "a bad namespace, --incidents and --dry-run",
+    );
+    // Then the history's checks.
+    assert_usage_error(
+        &kausa(&["run", "--history", "--incidents", "--dry-run"]),
+        HISTORY_NOT_IN_DRY_RUN,
+        "--history, --incidents, --dry-run",
+    );
+    assert_usage_error(
+        &kausa(&["run", "--history-days", "7", "--incident-days", "7"]),
+        DAYS_NEED_HISTORY,
+        "--history-days, --incident-days",
+    );
+    // Then --incident-days without --incidents, then --dry-run.
+    assert_usage_error(
+        &kausa(&["run", "--incident-days", "7", "--dry-run", "--model", "m"]),
+        DAYS_NEED_INCIDENTS,
+        "--incident-days, --dry-run",
+    );
+    assert_usage_error(
+        &kausa(&["run", "--incidents", "--dry-run", "--model", "m"]),
+        INCIDENTS_NOT_IN_DRY_RUN,
+        "--incidents, --dry-run, --model",
+    );
+    // Then the explanation settings, as today.
+    assert_usage_error(
+        &kausa(&["run", "--incidents", "--endpoint", ENDPOINT]),
+        "--endpoint needs --model",
+        "--incidents --endpoint without --model",
+    );
+}
+
+#[test]
+fn run_accepts_the_incident_flags_and_fails_only_on_the_missing_cluster() {
+    let cases: [&[&str]; 7] = [
+        &["run", "--incidents"],
+        &["run", "--incidents", "--incident-days", "1"],
+        &["run", "--incident-days", "30", "--incidents"],
+        // With no Events and no webhook: the Incidents alone make the fact path.
+        &["run", "--incidents", "--no-events"],
+        &[
+            "run",
+            "--incidents",
+            "--dedup-hours",
+            "24",
+            "--namespace",
+            "shop",
+        ],
+        &[
+            "run",
+            "--incidents",
+            "--incident-days",
+            "7",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+        ],
+        &[
+            "run",
+            "--incidents",
+            "--history",
+            "--endpoint",
+            ENDPOINT,
+            "--model",
+            "m",
+        ],
+    ];
+    for args in cases {
+        assert_gets_past_the_flags(&kausa(args), &format!("{args:?}"));
+    }
+}
+
+#[test]
+fn help_lists_the_incident_flags_and_what_kausa_writes() {
+    let output = kausa(&["--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = stdout(&output);
+    let lines: Vec<&str> = help.lines().collect();
+    let expected = [
+        "  --history-days <N>     Delete history older than N days (1-30, default 7)",
+        "  --incidents            Keep each settled incident's facts in an Incident",
+        "                         object in its namespace (needs the CRD)",
+        "  --incident-days <N>    Delete Incidents older than N days (1-30, default 1)",
+    ];
+    assert!(
+        lines.windows(expected.len()).any(|w| w == expected),
+        "the incident lines do not follow --history-days: {help}"
+    );
+    let collapsed = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        collapsed.contains(
+            "writes nothing but Events and, with --history, its own Explanation objects, with \
+             --incidents, its own Incident objects, and, with --leader-lease, the spec of its one \
+             Lease,"
+        ),
+        "{help}"
+    );
+    assert!(help.lines().all(|l| l.len() <= 84), "{help}");
+}
+
 // `kausa run --notify-*` (docs/adr/0015-notifications.md): usage errors with the exact message,
 // in the order of the checks, before anything connects, and never with the content of the URL
 // or token file; the accepted setups get past the flags and fail only on the missing cluster.
@@ -1826,8 +2014,9 @@ fn help_lists_the_leader_lease_flag_and_what_kausa_writes() {
         .collect::<Vec<_>>()
         .join(" ");
     for words in [
-        "writes nothing but Events and, with --history, its own Explanation objects, and, with \
-         --leader-lease, the spec of its one Lease,",
+        "writes nothing but Events and, with --history, its own Explanation objects, with \
+         --incidents, its own Incident objects, and, with --leader-lease, the spec of its one \
+         Lease,",
         "nothing unredacted",
     ] {
         assert!(by_design.contains(words), "no '{words}' in: {by_design}");
@@ -1890,7 +2079,7 @@ const PLAIN_HTTP: &str = "the endpoint uses plain HTTP: pass --allow-http for an
                           the cluster or the same private network";
 const NEEDS_ENDPOINT_OR_DRY_RUN: &str = "--model, --api-key-file, --allow-http, --no-json-schema \
                                          and --model-timeout need --endpoint or --dry-run";
-const RUN_ONLY: [&str; 20] = [
+const RUN_ONLY: [&str; 22] = [
     "--settle-seconds",
     "--namespace",
     "--no-rollouts",
@@ -1899,6 +2088,8 @@ const RUN_ONLY: [&str; 20] = [
     "--no-events",
     "--history",
     "--history-days",
+    "--incidents",
+    "--incident-days",
     "--notify-url-file",
     "--notify-format",
     "--notify-telegram-chat-id",

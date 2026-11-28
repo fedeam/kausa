@@ -11,6 +11,7 @@ use std::collections::BinaryHeap;
 
 use serde_json::{Value, json};
 
+use crate::owner::{is_dns_label, is_dns_subdomain};
 use crate::prompt::{
     self, Explanation, MAX_CAUSE, MAX_STEP, MAX_STEPS, MAX_SUMMARY, PROMPT_VERSION,
 };
@@ -448,12 +449,14 @@ impl Reason {
     }
 }
 
-/// One delete of the sweep, sent with `resource_version` as a precondition.
+/// One delete of the sweep, sent with `resource_version` as a precondition, and with `uid` too
+/// for an Incident (docs/adr/0028-incident-resource-and-remediation-report.md, point 4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Delete {
     pub(crate) namespace: String,
     pub(crate) name: String,
     pub(crate) resource_version: String,
+    pub(crate) uid: Option<String>,
     pub(crate) reason: Reason,
 }
 
@@ -464,6 +467,7 @@ struct Held {
     namespace: String,
     name: String,
     resource_version: String,
+    uid: Option<String>,
 }
 
 impl Held {
@@ -472,9 +476,17 @@ impl Held {
             namespace: self.namespace,
             name: self.name,
             resource_version: self.resource_version,
+            uid: self.uid,
             reason,
         }
     }
+}
+
+/// What the sweep lists: kausa's Explanations, or every Incident.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Swept {
+    Explanations,
+    Incidents,
 }
 
 /// The sweep's plan, fed one page of the list at a time. Objects older than the cutoff are deleted
@@ -483,6 +495,7 @@ impl Held {
 /// beyond the cap however the list ends. Nothing still held is ever deleted.
 #[derive(Debug)]
 pub(crate) struct SweepPlan {
+    swept: Swept,
     now: String,
     cutoff: String,
     heap: BinaryHeap<Reverse<Held>>,
@@ -491,14 +504,28 @@ pub(crate) struct SweepPlan {
 impl SweepPlan {
     pub(crate) fn new(now: &str, cutoff: &str) -> Self {
         Self {
+            swept: Swept::Explanations,
             now: now.to_owned(),
             cutoff: cutoff.to_owned(),
             heap: BinaryHeap::with_capacity(MAX_OBJECTS + 1),
         }
     }
 
-    /// The deletes one page of listed objects calls for. Objects that are not kausa-shaped, or
-    /// have no readable time, namespace or `resourceVersion`, are neither counted nor deleted.
+    /// The plan of the Incident sweep (docs/adr/0028-incident-resource-and-remediation-report.md,
+    /// point 4): every listed Incident counts, whoever wrote it, by its `creationTimestamp` only,
+    /// which the API server sets, never by anything in its `spec`; each delete carries its UID.
+    pub(crate) fn incidents(cutoff: &str) -> Self {
+        Self {
+            swept: Swept::Incidents,
+            now: String::new(),
+            cutoff: cutoff.to_owned(),
+            heap: BinaryHeap::with_capacity(MAX_OBJECTS + 1),
+        }
+    }
+
+    /// The deletes one page of listed objects calls for. Objects that are not kausa-shaped (for
+    /// Explanations), or have no readable time, namespace or `resourceVersion` (or, for Incidents,
+    /// UID), are neither counted nor deleted.
     pub(crate) fn page(&mut self, items: &[Value]) -> Vec<Delete> {
         let mut deletes = Vec::new();
         for item in items {
@@ -527,12 +554,28 @@ impl SweepPlan {
 
     /// A listed object as a tuple: its time is `status.lastTime` if it is in the one format and
     /// not after now, else `metadata.creationTimestamp` if that is in the one format.
+    /// An Incident's time is its `metadata.creationTimestamp` if that is in the one format, and it
+    /// needs a UID, a namespace that is a DNS label and a name that is a DNS subdomain.
     fn reduce(&self, item: &Value) -> Option<Held> {
+        let metadata = item.get("metadata")?;
+        let string = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
+        if self.swept == Swept::Incidents {
+            return Some(Held {
+                time: metadata
+                    .get("creationTimestamp")
+                    .and_then(Value::as_str)
+                    .filter(|t| is_time(t))?
+                    .to_owned(),
+                // Both go into the delete's path: only names the API server can give an object.
+                namespace: string(metadata.get("namespace")).filter(|n| is_dns_label(n))?,
+                name: string(metadata.get("name")).filter(|n| is_dns_subdomain(n))?,
+                resource_version: string(metadata.get("resourceVersion"))?,
+                uid: Some(string(metadata.get("uid"))?),
+            });
+        }
         if !is_kausa_shaped(item) {
             return None;
         }
-        let metadata = item.get("metadata")?;
-        let string = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
         let last = item
             .get("status")
             .and_then(|s| s.get("lastTime"))
@@ -551,6 +594,7 @@ impl SweepPlan {
             namespace: string(metadata.get("namespace"))?,
             name: string(metadata.get("name"))?,
             resource_version: string(metadata.get("resourceVersion"))?,
+            uid: None,
         })
     }
 }
@@ -1593,6 +1637,7 @@ mod tests {
             namespace: namespace.into(),
             name: name(&fingerprint(i)),
             resource_version: format!("rv-{namespace}-{i}"),
+            uid: None,
             reason,
         }
     }
@@ -1811,6 +1856,122 @@ mod tests {
         let mut plan = SweepPlan::new(NOW, CUTOFF);
         let deletes: Vec<Delete> = objects.chunks(50).flat_map(|c| plan.page(c)).collect();
         assert_eq!(deletes, [delete("a", MAX_OBJECTS, Reason::Cap)]);
+    }
+
+    // --- The Incident sweep's plan (docs/adr/0028, point 4) ----------------------------------
+
+    /// A listed Incident, with no label and nothing kausa-shaped: a forged `spec.firstSeen` and
+    /// `status.lastTime`, both older than anything, beside its `creationTimestamp`.
+    fn incident(namespace: &str, i: usize, created: &str) -> Value {
+        json!({
+            "apiVersion": "kausa.fedeam.com/v1alpha1",
+            "kind": "Incident",
+            "metadata": {
+                "name": name(&fingerprint(i)),
+                "namespace": namespace,
+                "resourceVersion": format!("rv-{namespace}-{i}"),
+                "uid": format!("uid-{namespace}-{i}"),
+                "creationTimestamp": created,
+            },
+            "spec": {"firstSeen": "1970-01-01T00:00:00Z"},
+            "status": {"lastTime": "1970-01-01T00:00:00Z"},
+        })
+    }
+
+    fn incident_delete(namespace: &str, i: usize, reason: Reason) -> Delete {
+        Delete {
+            uid: Some(format!("uid-{namespace}-{i}")),
+            ..delete(namespace, i, reason)
+        }
+    }
+
+    #[test]
+    fn an_incident_is_deleted_by_its_creation_time_only_and_with_its_uid() {
+        let mut plan = SweepPlan::incidents(CUTOFF);
+        // Not kausa-shaped, and still swept: every Incident counts, whoever wrote it.
+        assert!(!is_kausa_shaped(&incident("shop", 1, OLD)));
+        let deletes = plan.page(&[
+            incident("shop", 1, OLD),
+            incident("shop", 2, CUTOFF),
+            incident("web", 3, &fresh(3)),
+        ]);
+        // The forged times older than everything delete nothing that was created inside the age.
+        assert_eq!(deletes, [incident_delete("shop", 1, Reason::Age)]);
+        assert_eq!(plan.held(), 2);
+    }
+
+    #[test]
+    fn a_forged_older_first_seen_keeps_an_incident_s_place_for_the_cap() {
+        // MAX_OBJECTS + 1 Incidents created inside the age, each with the forged times: the one
+        // deleted for the cap is still the oldest created.
+        let objects: Vec<Value> = shuffled(MAX_OBJECTS + 1)
+            .into_iter()
+            .map(|i| incident("shop", i, &fresh(i)))
+            .collect();
+        let mut plan = SweepPlan::incidents(CUTOFF);
+        let deletes: Vec<Delete> = objects.chunks(2).flat_map(|c| plan.page(c)).collect();
+        assert_eq!(deletes, [incident_delete("shop", 0, Reason::Cap)]);
+        assert_eq!(plan.held(), MAX_OBJECTS);
+    }
+
+    #[test]
+    fn an_incident_without_a_uid_or_a_creation_time_is_neither_counted_nor_deleted() {
+        let mut plan = SweepPlan::incidents(CUTOFF);
+        for field in [
+            "uid",
+            "creationTimestamp",
+            "resourceVersion",
+            "namespace",
+            "name",
+        ] {
+            let mut object = incident("shop", 1, OLD);
+            object["metadata"]
+                .as_object_mut()
+                .expect("an object")
+                .remove(field);
+            assert_eq!(plan.page(&[object]), [], "{field}");
+        }
+        let mut object = incident("shop", 1, OLD);
+        object["metadata"]["creationTimestamp"] = json!("2026-10-01T00:00:00.5Z");
+        assert_eq!(plan.page(&[object]), []);
+        assert_eq!(plan.held(), 0);
+    }
+
+    #[test]
+    fn an_incident_whose_namespace_or_name_could_not_be_stored_is_neither_counted_nor_deleted() {
+        // Each goes into the delete's path: a namespace that is not a DNS label, or a name that
+        // is not a DNS subdomain, is held by nothing, however old.
+        let mut plan = SweepPlan::incidents(CUTOFF);
+        for (field, value) in [
+            ("namespace", "Shop"),
+            ("namespace", "shop/../kube-system"),
+            ("namespace", "shop?x=1"),
+            ("namespace", "a.b"),
+            ("namespace", &*"a".repeat(64)),
+            ("name", "Incident"),
+            ("name", "x/../../namespaces/kube-system/pods/api-1"),
+            ("name", "x?dryRun=All"),
+            ("name", ""),
+            ("name", &*"a".repeat(254)),
+        ] {
+            let mut object = incident("shop", 1, OLD);
+            object["metadata"][field] = json!(value);
+            assert_eq!(plan.page(&[object]), [], "{field}: {value}");
+        }
+        assert_eq!(plan.held(), 0);
+        // The longest of each is still held, and deleted.
+        let mut object = incident("shop", 1, OLD);
+        object["metadata"]["namespace"] = json!("a".repeat(63));
+        object["metadata"]["name"] = json!(format!("{}.{}", "a".repeat(63), "b".repeat(189)));
+        assert_eq!(plan.page(&[object]).len(), 1);
+    }
+
+    #[test]
+    fn an_explanation_s_delete_carries_no_uid() {
+        let mut plan = SweepPlan::new(NOW, CUTOFF);
+        let deletes = plan.page(&[at("shop", 1, OLD)]);
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].uid, None);
     }
 
     // --- The schema file, shared with the chart -----------------------------------------------

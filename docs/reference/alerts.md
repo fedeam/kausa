@@ -468,7 +468,11 @@ failure.
 
 The relists (`kausa_watch_relists_total`, normal after an expired resource version), the facts
 dropped from a full fact queue (`kausa_facts_dropped_total`) and the reasons left out of a
-statement (`kausa_fact_reasons_omitted_total`), whose rates nobody has measured, the call
+statement (`kausa_fact_reasons_omitted_total`), whose rates nobody has measured, the four
+counters of the Incidents (`kausa_incidents_refused_total`, `kausa_incident_write_errors_total`,
+`kausa_incidents_deleted_total` and `kausa_incident_sweep_errors_total`, shown only with
+`--incidents`; [Incident resource](incident-resource.md#refusals-log-lines-and-counters)), whose
+rates nobody has measured either, the call
 duration histogram (no latency objective exists), the record and cache gauges (no threshold has
 been measured) and `kausa_answer_redactions_total`, whose alert waits for a measured rate ([0022. Pass the model's
 answer through the pattern redaction rules before it is written anywhere, and redact the query of

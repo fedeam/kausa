@@ -2,37 +2,43 @@
 
 The commands and flags of the `kausa` binary, its exit codes, and the JSON lines it writes.
 
-Status as of 2026-11-24: what v0.6.3 does, and the `Detected` Event and the `detected` messages of
-the release after it, with the namespaced mode, the explanation history and the notifications of
-v0.3.0 (`--namespace`, `--history`, `--history-days` and the `--notify-*` flags) and the Deployment
-watch and the standby of v0.4.0 (`--no-rollouts` and `--leader-lease`). `kausa run` detects and
-groups failures, logs incidents and writes each one's facts as a `Detected` Event; with `--endpoint`
-it explains each one within a call budget, reuses explanations of repeated incidents, and writes the
-explanation as an Event on the failing workload; with `--dry-run` it logs the request instead; with
-`--metrics-address` it serves Prometheus metrics ([0001. Build a small, read-only explainer that
-writes one redacted explanation per incident](../adr/0001-scope-and-positioning.md)); with
-`--namespace` it watches only the namespaces given ([0013. Offer a namespaced install mode: one
-watch pair and one Role per listed namespace, and nothing
-cluster-wide](../adr/0013-namespaced-install-mode.md)); with `--history` it also keeps each
-explained incident's full explanations in an Explanation object in its namespace ([0014. Keep each
-incident's full explanations in a namespaced Explanation resource, off by
+Status as of 2026-11-25: what v0.6.3 does, and the `Detected` Event, the `detected` messages and
+the Incidents (`--incidents`, `--incident-days`) of the release after it, with the namespaced mode,
+the explanation history and the notifications of v0.3.0 (`--namespace`, `--history`,
+`--history-days` and the `--notify-*` flags) and the Deployment watch and the standby of v0.4.0
+(`--no-rollouts` and `--leader-lease`). `kausa run` detects and groups failures, logs incidents and
+writes each one's facts as a `Detected` Event; with `--endpoint` it explains each one within a call
+budget, reuses explanations of repeated incidents, and writes the explanation as an Event on the
+failing workload; with `--dry-run` it logs the request instead; with `--metrics-address` it serves
+Prometheus metrics ([0001. Build a small, read-only explainer that writes one redacted explanation
+per incident](../adr/0001-scope-and-positioning.md)); with `--namespace` it watches only the
+namespaces given ([0013. Offer a namespaced install mode: one watch pair and one Role per listed
+namespace, and nothing cluster-wide](../adr/0013-namespaced-install-mode.md)); with `--history` it
+also keeps each explained incident's full explanations in an Explanation object in its namespace
+([0014. Keep each incident's full explanations in a namespaced Explanation resource, off by
 default](../adr/0014-explanation-history.md)); with `--notify-url-file` it also posts each new
-explanation, and each settled incident as below, to one webhook ([0015. Post each new explanation to one optional webhook, as JSON, Slack
-or Telegram](../adr/0015-notifications.md)). v0.4.0 adds a watch on Deployments for stalled rollouts
-(`D014`), on unless `--no-rollouts` ([0018. Explain a Deployment past its progress deadline (`D014`)
-from a Deployment watch that is on by default, and add nothing for StatefulSets or
-DaemonSets](../adr/0018-stuck-rollouts.md)), and `--leader-lease`, which makes a replica act only
-while it holds a Lease, for a standby beside it ([0019. Offer an optional standby replica that takes
-over through a chart-created Lease, elected by kausa's own code](../adr/0019-high-availability.md)).
-Since v0.5.0, `kausa check-endpoint` sends one synthetic request to the model endpoint on demand,
-`--model-timeout` sets a call's timeout, and `kausa run` holds its calls behind a breaker while the
-endpoint fails ([0020. Check the model endpoint on demand with `kausa check-endpoint` and `helm
-test`, and hold calls behind a breaker while it fails](../adr/0020-check-the-endpoint.md)). Since
-the release after v0.6.3, `kausa run` writes a `Detected` Event with the incident's fact statement
-for each settled incident, with or without `--endpoint`, and with `--notify-url-file` posts it to
-the webhook, with no model needed ([0027. Report each settled incident as a fact statement in its
-own `Detected` Event and webhook message, with or without a model, and mark the model's text as a
-model's](../adr/0027-fact-statement-for-the-detections.md)).
+explanation, and each settled incident as below, to one webhook ([0015. Post each new explanation to
+one optional webhook, as JSON, Slack or Telegram](../adr/0015-notifications.md)). v0.4.0 adds a
+watch on Deployments for stalled rollouts (`D014`), on unless `--no-rollouts` ([0018. Explain a
+Deployment past its progress deadline (`D014`) from a Deployment watch that is on by default, and
+add nothing for StatefulSets or DaemonSets](../adr/0018-stuck-rollouts.md)), and `--leader-lease`,
+which makes a replica act only while it holds a Lease, for a standby beside it ([0019. Offer an
+optional standby replica that takes over through a chart-created Lease, elected by kausa's own
+code](../adr/0019-high-availability.md)). Since v0.5.0, `kausa check-endpoint` sends one synthetic
+request to the model endpoint on demand, `--model-timeout` sets a call's timeout, and `kausa run`
+holds its calls behind a breaker while the endpoint fails ([0020. Check the model endpoint on demand
+with `kausa check-endpoint` and `helm test`, and hold calls behind a breaker while it
+fails](../adr/0020-check-the-endpoint.md)). Since the release after v0.6.3, `kausa run` writes a
+`Detected` Event with the incident's fact statement for each settled incident, with or without
+`--endpoint`, and with `--notify-url-file` posts it to the webhook, with no model needed ([0027.
+Report each settled incident as a fact statement in its own `Detected` Event and webhook message,
+with or without a model, and mark the model's text as a
+model's](../adr/0027-fact-statement-for-the-detections.md)). In `main` for the release after v0.6.3,
+`--incidents` also keeps each settled incident's facts in an immutable Incident object in its
+namespace, with or without `--endpoint` ([0028. Publish each incident as an immutable Incident that
+only kausa writes, and report by webhook what kurita proposed for it, both off by
+default](../adr/0028-incident-resource-and-remediation-report.md), `proposed`; [Incident
+resource](incident-resource.md)).
 
 ## Commands
 
@@ -61,6 +67,8 @@ Options of `kausa run`:
 | `--no-events` | Do not write Events (neither `Detected` nor the explanation's); the incidents and explanations are only logged. Events are never written in dry-run |
 | `--history` | Keep each explained incident's explanations (fresh or from the deduplication cache) in an Explanation object named `kausa.<fingerprint>` in its namespace, after the Event and independent of it, and delete old ones: needs the CustomResourceDefinition `explanations.kausa.fedeam.com` ([Explanation resource](explanation-resource.md)). Needs `--endpoint`; not with `--dry-run`. With `--no-events`, kausa writes the history only |
 | `--history-days <N>` | Delete Explanations, and drop entries, last written more than `N` days ago, from `1` to `30`; `7` by default. Needs `--history` |
+| `--incidents` | Create one immutable Incident object, named `kausa.<fingerprint>.<first-seen Unix seconds>`, in the incident's namespace for each settled incident, at most once per fingerprint per `--dedup-hours`, after its `Detected` Event and its `detected` message, and delete old ones: needs the CustomResourceDefinition `incidents.kausa.fedeam.com` ([Incident resource](incident-resource.md)). With or without `--endpoint`, `--no-events` or a webhook; not with `--dry-run` |
+| `--incident-days <N>` | Delete Incidents created more than `N` days ago, from `1` to `30`; `1` by default. Needs `--incidents` |
 | `--notify-url-file <PATH>` | Post each settled incident (`detected`), after its `Detected` Event, and each new explanation (`explained`), after its Event, to the webhook whose URL is the content of this file (trimmed), read once at start. The URL is a secret: no flag value or environment variable form, and it is never logged. Needs no `--endpoint`; not with `--dry-run`. What is sent: [Data sent in notifications](data-sent-in-notifications.md) |
 | `--notify-format <FORMAT>` | The body: `json` (the default), `slack` or `telegram` |
 | `--notify-telegram-chat-id <ID>` | With `telegram` only, and required with it: the chat, an integer that is not `0` (a leading `-`, no `+`) or `@` and a channel's username (a letter, then 4 to 31 letters, digits or `_`). Not a secret |
@@ -70,7 +78,7 @@ Options of `kausa run`:
 | `--max-calls-per-hour <N>` | Model calls allowed in any hour, `30` by default; `0` allows none. Each start allows 3 at once (`N` if fewer), then one every `3600/N` seconds, up to `N` saved; with `--leader-lease`, each takeover also starts with at most 3 ([0021](../adr/0021-refill-the-call-budget.md)). Help: `Model calls allowed in any hour (default 30); each start allows 3 at once, then one every 3600/N seconds` |
 | `--max-calls-per-day <N>` | Model calls allowed in any 24 hours, per process, `200` by default. A restart starts a new process: for the daily cap to hold across restarts, up to the bursts of 3, set `--max-calls-per-hour` to at most a 24th of it |
 | `--max-input-tokens <N>` | Cap on a request's estimated input tokens (a quarter of its bytes), `6000` by default: the context is cut to fit, and an incident that still does not fit is skipped |
-| `--dedup-hours <N>` | How long an incident's explanation is reused when the same incident (same fingerprint) comes back, `6` by default; `0` turns the reuse off |
+| `--dedup-hours <N>` | One window, `6` hours by default, a whole number from `0` to `1000000`, for three things: how long an incident's explanation is reused when the same incident (same fingerprint) comes back, how long a `detected` message is sent only once per fingerprint ([Notifications](#notifications)), and, with `--incidents`, how long an Incident is created only once per fingerprint ([Incident resource](incident-resource.md)). `0` turns all three off: no reuse, and no once-per-fingerprint for the messages or the Incidents (their other bounds still hold) |
 | `--metrics-address <ADDR>` | Serve `/metrics`, `/healthz` and `/readyz` on this IP address and port, for example `[::]:9090` in a Pod (IPv4 and IPv6 on Linux) or `127.0.0.1:9090` on a machine; not served by default |
 | `--leader-lease <NAMESPACE>/<NAME>` | Act only while holding this Lease, and wait as a standby otherwise: for two replicas, of which one acts ([Leader election](#leader-election)). The Lease must exist (the Helm chart creates it with `replicaCount: 2`); kausa needs `get` and `patch` on it and never creates it. Needs `POD_NAME`, the identity this replica holds the Lease with. Works in every mode, log-only and `--dry-run` included |
 
@@ -121,6 +129,16 @@ and `--model` (so `--history --endpoint <URL>` without `--model` still says `--e
 | `--history-days` without `--history` | `--history-days needs --history` |
 | `--history` with `--dry-run`, with or without `--endpoint` | `--history is not used with --dry-run: no explanation is written` |
 | `--history` without `--endpoint` | `--history needs --endpoint` |
+
+The usage errors of the Incidents: the first two rows when the flag is read, the others after the
+errors of the history and before those of the notifications, in this order:
+
+| Case | Message after `error: ` |
+|---|---|
+| `--incident-days` without a value | `--incident-days needs a value` |
+| `--incident-days` with a value that is not a whole number from 1 to 30 (`0`, `31`, `abc`, `-1`, `1.5`) | `--incident-days takes a whole number of days from 1 to 30, not '<value>'` |
+| `--incident-days` without `--incidents` | `--incident-days needs --incidents` |
+| `--incidents` with `--dry-run`, with or without `--endpoint` | `--incidents is not used with --dry-run: no Incident is written` |
 
 The usage errors of the notifications: the first two rows when the flag is read, the others
 after the errors of the history and before those of `--endpoint` and `--model`, in this order. No message carries the content of either file, and no
@@ -187,7 +205,7 @@ missing `--endpoint`, the key file, the endpoint's scheme and a missing `--model
 
 | Case | Message after `error: ` |
 |---|---|
-| A flag of `kausa run` alone (`--settle-seconds`, `--namespace`, `--no-rollouts`, `--dry-run`, `--no-logs`, `--no-events`, `--history`, `--history-days`, the `--notify-*` flags, `--max-calls-per-hour`, `--max-calls-per-day`, `--max-input-tokens`, `--dedup-hours`, `--metrics-address`, `--leader-lease`) | `<flag> is a flag of kausa run, not of kausa check-endpoint` |
+| A flag of `kausa run` alone (`--settle-seconds`, `--namespace`, `--no-rollouts`, `--dry-run`, `--no-logs`, `--no-events`, `--history`, `--history-days`, `--incidents`, `--incident-days`, the `--notify-*` flags, `--max-calls-per-hour`, `--max-calls-per-day`, `--max-input-tokens`, `--dedup-hours`, `--metrics-address`, `--leader-lease`) | `<flag> is a flag of kausa run, not of kausa check-endpoint` |
 | One of the six flags given twice | `<flag> is given twice` |
 | A flag without its value (or with an empty one, but for `--api-key-file`) | `<flag> needs a value` |
 | `--model-timeout` outside 10-600, or not a whole number | `--model-timeout takes a whole number of seconds from 10 to 600, not '<value>'` |
@@ -391,6 +409,10 @@ order. Messages and notes taken from the cluster are cut at 1024 bytes.
 | `history write refused` | warn | `fingerprint`, `namespace`, `reason`: an object of that name exists and is not kausa's to append to: `the Explanation kausa.<fingerprint> does not carry the label app.kubernetes.io/managed-by=kausa` or `the Explanation kausa.<fingerprint> is about another rule or target` |
 | `history sweep failed` | warn | `namespace` (the listed namespace whose list or delete failed, or `null` in cluster scope), `error` (the same `404` text when the CRD is missing; otherwise, when the API server refused the list or a delete, its code and reason only, since its message can quote an object or name a listed namespace, and kube-rs's text for any other failure). A failed list ends that namespace's part of the sweep; the next namespace goes on |
 | `history swept` | info | `deleted_by_age`, `deleted_by_cap`: what one sweep deleted, only when it deleted something |
+| `incident refused` | warn | `reason` (`table-full`, `schema`, `starting`), `namespace` (or `null` when it is not a DNS label), `fingerprint`, `field` (with `schema`, the path of the field that did not fit, such as `object.name`; otherwise `null`): no Incident was created for this occurrence. At most once an hour per reason ([Incident resource](incident-resource.md#refusals-log-lines-and-counters)) |
+| `incident write failed` | warn | `fingerprint`, `namespace`, `error`: the create failed and is not retried. `error` is `no answer within 10 seconds`, `the answer is over 65536 bytes`, `the answer carries no UID`, `the answer could not be read: <kube-rs's text>`, `the term ended before the read` or `before the create` (with `--leader-lease`), `the table is full` or `the entry was refused` (the answer came but its entry could not be kept), `<code> <reason> (the API server's message is not logged: it can quote the stored object)` when the API server refused the create, and kube-rs's text for any other failed request |
+| `incident sweep failed` | warn | `namespace` (the listed namespace whose list or delete failed, or `null` in cluster scope), `error` (`the CustomResourceDefinition incidents.kausa.fedeam.com is not installed` when a list answered `404`; otherwise the code and reason as for `incident write failed`, or kube-rs's text) |
+| `incidents swept` | info | `deleted_by_age`, `deleted_by_cap`: what one sweep of Incidents deleted, only when it deleted something |
 | `log read failed` | warn | `namespace`, `pod`, `container`, `error`; the request is built without the log |
 | `notification sent` | info | `fingerprint`, `namespace`, `owner` (`kind`, `name`), `format`, `status` (the HTTP status code, a number) and `attempt` (`1`, or `2` after a retry): the webhook answered `2xx`. For the `capped` message, `fingerprint`, `namespace` and `owner` are `null` |
 | `notification capped` | warn | `fingerprint`, `limit`: a `detected` message was over `--notify-max-per-hour` and is not sent; once per capped message |
@@ -466,7 +488,9 @@ No log line carries the webhook's URL or token, the body of a notification or th
 answer: kausa reads only its status code.
 
 Nothing read back from a stored Explanation appears in a log line: the history lines carry only
-kausa's own fingerprint and namespace, fixed texts and the API server's error codes.
+kausa's own fingerprint and namespace, fixed texts and the API server's error codes. The same holds
+for Incidents: the incident lines carry kausa's own fingerprint and namespace, a field's path,
+fixed texts and the API server's error codes, never a value read back from an Incident.
 
 The log carries real names and messages from the cluster, as [Data sent to the
 provider](data-sent-to-the-provider.md) says under "What stays in the cluster": who can read
@@ -520,6 +544,14 @@ within 2 seconds gets none. The counters live in memory and start over when kaus
 | `kausa_watch_errors_total` | `watch` (`pods`, `events`, `deployments`) | Errors of the Pod, Event and Deployment watches (every namespace's together; the namespace is in the log line), which retry with backoff; an expired resource version (`410`) is a relist, not an error (the counter's help text: `Errors of the Pod, Event and Deployment watches, which retry with backoff, by watch.`); a steady rise with no incidents means kausa is not seeing the cluster |
 | `kausa_watch_relists_total` | `watch` (`pods`, `events`, `deployments`) | Lists of a watch after its first in a term, every namespace's together: after an expired resource version (`410`), or a new watcher after a `403` or after another error inside an open watch (help text: `Lists of the Pod, Event and Deployment watches after the first of each watch, by watch.`). Normal now and then; no alert reads it |
 | `kausa_watch_restarts_total` | `watch` (`pods`, `events`, `deployments`) | New watchers started after the API server refused a watch with a `403`, every namespace's together; each is also a watch error (help text: `New watchers started after the API server refused a watch (403), by watch.`). A new watcher after another error inside an open watch is not counted here: it is a watch error and a relist. One that keeps rising is a refusal that lasts ([`KausaWatchRefused`](alerts.md#kausawatchrefused)) |
+| `kausa_incidents_refused_total` | `reason` (`table-full`, `schema`, `starting`) | With `--incidents` only. Incident objects not created, by reason ([Incident resource](incident-resource.md#refusals-log-lines-and-counters)) (help text: `Incident objects not created, by reason (table-full, schema, starting).`) |
+| `kausa_incident_write_errors_total` | | With `--incidents` only. Incident objects that could not be created (help text: `Incident objects that could not be created.`) |
+| `kausa_incidents_deleted_total` | `reason` (`age`, `cap`) | With `--incidents` only. Incident objects deleted by the sweep, by reason (help text: `Incident objects deleted by the sweep, by reason (age, cap).`) |
+| `kausa_incident_sweep_errors_total` | | With `--incidents` only. Failed list or delete calls of the incident sweep; a delete answered `404` or `409` is not one (help text: `Failed list or delete calls of the incident sweep.`) |
+
+The four counters of the Incidents come after the others, and only with `--incidents`: without it
+the exposition has no line of them, so that with the defaults it is the same, byte for byte, as
+before they existed (`tests/golden/metrics-start.prom`, checked by a test in `src/run.rs`).
 
 The counters whose `0` series show from the start, one per value:
 
@@ -531,6 +563,7 @@ The counters whose `0` series show from the start, one per value:
 | `kausa_notifications_total` | `outcome`: `sent`, `failed`, `dropped`, `capped` | With `--notify-url-file` |
 | `kausa_events_written_total` | `reason`: `Detected` | Without `--no-events` and `--dry-run` |
 | `kausa_leadership_changes_total` | `to`: `leader`, `standby` | With `--leader-lease` |
+| `kausa_incidents_refused_total`, `kausa_incidents_deleted_total` | `reason`: `table-full`, `schema`, `starting`; `age`, `cap` | With `--incidents`, and `kausa_incident_write_errors_total` and `kausa_incident_sweep_errors_total` as `name 0` |
 
 The gauges, rendered after the counters, in this order, each with `# TYPE <name> gauge`.
 `kausa_leader` is always rendered, and `kausa_endpoint_state`, `kausa_build_info`,

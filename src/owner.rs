@@ -29,10 +29,10 @@ impl Hop {
 }
 
 /// The longest name Kubernetes accepts for the objects kausa looks up (a DNS-1123 subdomain).
-const MAX_NAME_LEN: usize = 253;
+pub(crate) const MAX_NAME_LEN: usize = 253;
 
 /// The longest namespace Kubernetes accepts (a DNS-1123 label).
-const MAX_NAMESPACE_LEN: usize = 63;
+pub(crate) const MAX_NAMESPACE_LEN: usize = 63;
 
 /// What a lookup answers for a name that is not a DNS-1123 subdomain or a namespace that is not a
 /// DNS-1123 label: it is never sent, so the answer is a failed lookup that quotes nothing from the
@@ -86,6 +86,18 @@ pub(crate) trait OwnerLookup {
         namespace: &str,
         name: &str,
     ) -> impl Future<Output = Result<Option<OwnerRef>, String>>;
+
+    /// The UID and the revision of the ReplicaSet `name` in `namespace`, read through the same
+    /// cache as `controller_of` and refused by the same rule (docs/adr/0028, point 3).
+    /// `Err(())` when the read failed or is not kept: a lookup that keeps no revision answers so
+    /// with no request. The fact slot's create calls it, only with incidents on (0028, point 1).
+    fn replica_set(
+        &self,
+        _namespace: &str,
+        _name: &str,
+    ) -> impl Future<Output = Result<(crate::record::Uid, u64), ()>> {
+        std::future::ready(Err(()))
+    }
 
     /// The lookups held in a cache, expired ones included (the `kausa_owner_cache_entries`
     /// gauge); 0 for a lookup without one.

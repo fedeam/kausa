@@ -1,0 +1,362 @@
+{
+  "type": "object",
+  "description": "One incident kausa detected, written by kausa in one create and never changed: what it read, as typed values, and nothing a tenant or a model wrote. Named kausa.<fingerprint>.<firstSeenUnix>, in the namespace of the workload it is about.",
+  "required": [
+    "spec"
+  ],
+  "properties": {
+    "spec": {
+      "type": "object",
+      "description": "The incident, as kausa read it when it settled. It is required and immutable, for kausa and for everyone else.",
+      "required": [
+        "detection",
+        "fingerprint",
+        "firstSeen",
+        "settledAt",
+        "object",
+        "facts",
+        "missing"
+      ],
+      "x-kubernetes-validations": [
+        {
+          "rule": "self == oldSelf",
+          "message": "spec is immutable"
+        },
+        {
+          "rule": "has(self.sample) == (self.facts.podsSeen > 0)",
+          "message": "sample is set exactly when podsSeen is above 0"
+        },
+        {
+          "rule": "(self.facts.podsSeen == 0) == (self.detection in ['D008', 'D011', 'D012', 'D013', 'D014'])",
+          "message": "podsSeen is 0 exactly for D008 and D011 to D014"
+        },
+        {
+          "rule": "has(self.deployment) == (self.detection == 'D014')",
+          "message": "deployment is set exactly for D014"
+        },
+        {
+          "rule": "('revision-lookup-failed' in self.missing) == (has(self.sample) && has(self.sample.controller) && self.sample.controller.kind == 'ReplicaSet' && !has(self.sample.controller.revision))",
+          "message": "missing names revision-lookup-failed exactly when a ReplicaSet controller has no revision"
+        },
+        {
+          "rule": "!(has(self.sample) && has(self.regarding))",
+          "message": "sample and regarding are never both set"
+        },
+        {
+          "rule": "!('owner-lookup-failed' in self.missing) || has(self.sample) || self.detection in ['D008', 'D011']",
+          "message": "missing names owner-lookup-failed only for an incident about a Pod, D008 or D011"
+        },
+        {
+          "rule": "!('owner-lookup-failed' in self.missing && self.detection in ['D008', 'D011']) || (has(self.regarding) && ((self.object.kind == 'Job' && self.object.apiVersion == 'batch/v1') || (self.object.kind == 'ReplicaSet' && self.object.apiVersion == 'apps/v1')) && self.object.kind == self.regarding.kind && self.object.name == self.regarding.name && has(self.object.uid) == has(self.regarding.uid) && (!has(self.object.uid) || self.object.uid == self.regarding.uid))",
+          "message": "a D008 or D011 with owner-lookup-failed names in object the object of regarding, a Job of batch/v1 or a ReplicaSet of apps/v1"
+        }
+      ],
+      "properties": {
+        "detection": {
+          "type": "string",
+          "description": "The id of the detection rule that found the incident.",
+          "enum": [
+            "D001",
+            "D002",
+            "D003",
+            "D004",
+            "D005",
+            "D006",
+            "D007",
+            "D008",
+            "D009",
+            "D010",
+            "D011",
+            "D012",
+            "D013",
+            "D014"
+          ]
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "The incident's fingerprint: 16 hexadecimal characters.",
+          "pattern": "^[0-9a-f]{16}$",
+          "maxLength": 16
+        },
+        "firstSeen": {
+          "type": "string",
+          "description": "When kausa first saw the incident's failure, in UTC to the second, for example 2026-11-24T10:00:00Z. The name holds it in Unix seconds.",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "maxLength": 20
+        },
+        "settledAt": {
+          "type": "string",
+          "description": "When the incident settled and kausa reported it, in UTC to the second.",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "maxLength": 20
+        },
+        "object": {
+          "type": "object",
+          "description": "The incident's top-level owner, the object its Detected Event is about.",
+          "required": [
+            "apiVersion",
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "apiVersion": {
+              "type": "string",
+              "description": "The owner's apiVersion, for example apps/v1.",
+              "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[a-z]([-a-z0-9]*[a-z0-9])?$",
+              "maxLength": 253
+            },
+            "kind": {
+              "type": "string",
+              "description": "The owner's kind, for example Deployment.",
+              "pattern": "^[A-Z][A-Za-z0-9]*$",
+              "maxLength": 63
+            },
+            "name": {
+              "type": "string",
+              "description": "The owner's name.",
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+              "maxLength": 253
+            },
+            "uid": {
+              "type": "string",
+              "description": "The owner's UID, when kausa holds one: an Event incident's owner may have none.",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "maxLength": 36
+            }
+          }
+        },
+        "facts": {
+          "type": "object",
+          "description": "The values of the incident's fact statement but its revision, which deployment holds.",
+          "required": [
+            "podsSeen",
+            "podsSeenIsMinimum",
+            "podsNow"
+          ],
+          "x-kubernetes-validations": [
+            {
+              "rule": "self.podsSeenIsMinimum == (self.podsSeen == 100)",
+              "message": "podsSeenIsMinimum is true exactly when podsSeen is 100"
+            }
+          ],
+          "properties": {
+            "reason": {
+              "type": "string",
+              "description": "The sample's reason, when it is on the list of a detection.",
+              "enum": [
+                "CrashLoopBackOff",
+                "Error",
+                "ErrImagePull",
+                "ImagePullBackOff",
+                "InvalidImageName",
+                "ErrImageNeverPull",
+                "OOMKilled",
+                "CreateContainerConfigError",
+                "CreateContainerError",
+                "RunContainerError",
+                "Unschedulable",
+                "SchedulerError",
+                "Unhealthy",
+                "FailedMount",
+                "FailedAttachVolume",
+                "BackoffLimitExceeded",
+                "DeadlineExceeded",
+                "PodFailurePolicy",
+                "MaxFailedIndexesExceeded",
+                "FailedIndexes",
+                "Evicted",
+                "FailedCreatePodSandBox",
+                "FailedCreate",
+                "ProvisioningFailed",
+                "FailedGetResourceMetric",
+                "FailedGetContainerResourceMetric",
+                "FailedGetPodsMetric",
+                "FailedGetObjectMetric",
+                "FailedGetExternalMetric",
+                "FailedComputeMetricsReplicas",
+                "FailedGetScale",
+                "ProgressDeadlineExceeded"
+              ]
+            },
+            "exitCode": {
+              "type": "integer",
+              "description": "The sample container's exit code, when it has one.",
+              "format": "int32",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            "container": {
+              "type": "string",
+              "description": "The sample container's name, when it is a DNS-1123 label.",
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+              "maxLength": 63
+            },
+            "podsSeen": {
+              "type": "integer",
+              "description": "How many Pods kausa saw failing, at most 100; 0 for an incident about an object that is not a Pod.",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "podsSeenIsMinimum": {
+              "type": "boolean",
+              "description": "Whether podsSeen is a lower bound: true when kausa saw 100 failing Pods or more."
+            },
+            "podsNow": {
+              "type": "integer",
+              "description": "How many Pods of the owner kausa held in the namespace when the incident settled.",
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          }
+        },
+        "sample": {
+          "type": "object",
+          "description": "The sample Pod, for an incident about Pods, and its controller.",
+          "required": [
+            "pod"
+          ],
+          "properties": {
+            "pod": {
+              "type": "object",
+              "description": "The sample Pod's name and UID.",
+              "required": [
+                "name",
+                "uid"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The sample Pod's name.",
+                  "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+                  "maxLength": 253
+                },
+                "uid": {
+                  "type": "string",
+                  "description": "The sample Pod's UID.",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                  "maxLength": 36
+                }
+              }
+            },
+            "controller": {
+              "type": "object",
+              "description": "The sample Pod's controller ownerReference, when it has one.",
+              "required": [
+                "kind",
+                "uid"
+              ],
+              "x-kubernetes-validations": [
+                {
+                  "rule": "!has(self.revision) || self.kind == 'ReplicaSet'",
+                  "message": "only a ReplicaSet has a revision"
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "description": "The controller's kind; Other for any kind not listed.",
+                  "enum": [
+                    "ReplicaSet",
+                    "Job",
+                    "StatefulSet",
+                    "DaemonSet",
+                    "Other"
+                  ]
+                },
+                "uid": {
+                  "type": "string",
+                  "description": "The controller's UID, from the Pod's ownerReference.",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                  "maxLength": 36
+                },
+                "revision": {
+                  "type": "integer",
+                  "description": "A ReplicaSet's deployment.kubernetes.io/revision, as kausa read it before the create; absent when that read failed.",
+                  "format": "int64",
+                  "minimum": 1,
+                  "maximum": 9007199254740992
+                }
+              }
+            }
+          }
+        },
+        "deployment": {
+          "type": "object",
+          "description": "For D014, the Deployment's generation and revision when the rule matched.",
+          "required": [
+            "generation",
+            "revision"
+          ],
+          "properties": {
+            "generation": {
+              "type": "integer",
+              "description": "The Deployment's metadata.generation.",
+              "format": "int64",
+              "minimum": 1
+            },
+            "revision": {
+              "type": "integer",
+              "description": "The Deployment's deployment.kubernetes.io/revision.",
+              "format": "int64",
+              "minimum": 1,
+              "maximum": 9007199254740992
+            }
+          }
+        },
+        "regarding": {
+          "type": "object",
+          "description": "For an Event incident about an object that is not a Pod, that object.",
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "The object's kind.",
+              "enum": [
+                "Job",
+                "ReplicaSet",
+                "StatefulSet",
+                "DaemonSet",
+                "CronJob",
+                "PersistentVolumeClaim",
+                "HorizontalPodAutoscaler"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "description": "The object's name.",
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+              "maxLength": 253
+            },
+            "uid": {
+              "type": "string",
+              "description": "The object's UID, when the Event gives one.",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "maxLength": 36
+            }
+          }
+        },
+        "missing": {
+          "type": "array",
+          "description": "Which of kausa's reads failed: the owner lookup, the read of a ReplicaSet's revision, both or none.",
+          "maxItems": 2,
+          "x-kubernetes-list-type": "set",
+          "items": {
+            "type": "string",
+            "description": "A read that failed.",
+            "enum": [
+              "owner-lookup-failed",
+              "revision-lookup-failed"
+            ]
+          }
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "description": "Empty: kausa writes no status, and the schema keeps no field in it."
+    }
+  }
+}

@@ -38,6 +38,7 @@ use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::events::v1::Event;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
 use k8s_openapi::serde::de::DeserializeOwned;
 use kube::config::KubeConfigOptions;
@@ -58,6 +59,8 @@ use crate::explain::{self, LogSource, Next, QUEUE_LIMIT, Settings, Shared, Work}
 use crate::fact;
 use crate::history::{self, History};
 use crate::incident::{EventView, Incident, PodView, Tracker, collect_signals, rollout_signals};
+use crate::incident_resource::table::Refusal;
+use crate::incidents::{self, Incidents};
 use crate::leader::pure::{TIMINGS, Timings};
 use crate::leader::{self, KubeLease, LEASE_ERROR_PERIOD, LeaseApi, LeaseErrors, Lost, Term};
 use crate::log;
@@ -67,8 +70,11 @@ use crate::owner::{
     Hop, OwnerLookup, REFUSED, bounded_name, is_dns_label, is_dns_subdomain, top_owner,
 };
 use crate::prompt;
-use crate::record::{DeploymentRecord, EventRecord, OwnerRef, PodRecord, controller_of};
-use crate::report::{self, Fact, Reporter};
+use crate::record::{
+    DeploymentRecord, EventRecord, OwnerRef, PodRecord, REVISION_ANNOTATION, Uid, controller_of,
+    parse_revision,
+};
+use crate::report::{self, About, Fact, IncidentData, MaybeUid, Reporter};
 
 /// The reporting controller of the Events kausa writes, excluded from its own watch.
 pub const REPORTING_CONTROLLER: &str = "kausa";
@@ -116,6 +122,10 @@ pub struct Options {
     /// With `--notify-url-file`, the webhook and the bounds of its `detected` messages
     /// (docs/adr/0015-notifications.md, docs/adr/0027-fact-statement-for-the-detections.md).
     pub notify: Option<Notify>,
+    /// With `--incidents`, each settled fact keeps what its Incident needs, the fact slot creates
+    /// it and a slot of its own sweeps them
+    /// (docs/adr/0028-incident-resource-and-remediation-report.md, points 1, 3 and 4).
+    pub incidents: Option<crate::incidents::Settings>,
 }
 
 /// The webhook of `--notify-url-file` and the bounds of its `detected` messages.
@@ -555,22 +565,21 @@ pub async fn run(options: Options) -> Result<(), RunError> {
         outbox: outbox.as_ref(),
         term: &term,
     });
-    // The fact path: its Events, its `detected` messages, or both.
-    let reporter = (options.detected.is_some() || outbox.is_some()).then(|| Reporter {
-        writer: options
-            .detected
-            .as_ref()
-            .map(|instance| Writer::new(client.clone(), instance.clone())),
-        outbox: outbox.as_ref(),
-        metrics: &metrics,
-        term: &term,
-    });
+    let incidents = incidents_of(&client, &options, &metrics);
+    let reporter = reporter(
+        &client,
+        &options,
+        outbox.as_ref(),
+        incidents.as_ref(),
+        &metrics,
+        &term,
+    );
     show_start(&metrics, &options, shared.as_ref(), Instant::now());
     let lease = options
         .leader_lease
         .as_ref()
         .map(|l| KubeLease::new(client.clone(), &l.namespace, &l.name, TIMINGS.call_timeout));
-    let cluster = KubeCluster { client };
+    let cluster = KubeCluster::new(client, &options);
     // A signal ends the process, so the stop is awaited at most once.
     let stop = async move {
         tokio::select! {
@@ -626,9 +635,56 @@ struct Watched {
     deployments: Option<Watches<Deployment>>,
 }
 
+/// The Incidents and their table, across terms, only with `options.incidents`
+/// (docs/adr/0028-incident-resource-and-remediation-report.md, point 1).
+fn incidents_of<'a>(
+    client: &Client,
+    options: &Options,
+    metrics: &'a Metrics,
+) -> Option<Incidents<'a>> {
+    options
+        .incidents
+        .map(|settings| Incidents::new(client.clone(), settings, metrics))
+}
+
+/// The fact path: its Events, its `detected` messages, its Incidents, or any of them; `None` with
+/// none of them.
+fn reporter<'a>(
+    client: &Client,
+    options: &Options,
+    outbox: Option<&'a Outbox<'a>>,
+    incidents: Option<&'a Incidents<'a>>,
+    metrics: &'a Metrics,
+    term: &'a Term,
+) -> Option<Reporter<'a>> {
+    (options.detected.is_some() || outbox.is_some() || incidents.is_some()).then(|| Reporter {
+        writer: options
+            .detected
+            .as_ref()
+            .map(|instance| Writer::new(client.clone(), instance.clone())),
+        outbox,
+        incidents,
+        metrics,
+        term,
+    })
+}
+
 /// The cluster through the API server.
 struct KubeCluster {
     client: Client,
+    /// Whether the owner lookups keep a ReplicaSet's revision: with incidents on.
+    keep_revision: bool,
+}
+
+impl KubeCluster {
+    /// The cluster of `client`, whose owner lookups keep a ReplicaSet's revision only with
+    /// `options.incidents` (docs/adr/0028-incident-resource-and-remediation-report.md, point 3).
+    fn new(client: Client, options: &Options) -> KubeCluster {
+        KubeCluster {
+            client,
+            keep_revision: options.incidents.is_some(),
+        }
+    }
 }
 
 impl Cluster for KubeCluster {
@@ -654,6 +710,7 @@ impl Cluster for KubeCluster {
         KubeLookup {
             client: self.client.clone(),
             cache: RefCell::new(HashMap::new()),
+            keep_revision: self.keep_revision,
         }
     }
 
@@ -1005,13 +1062,31 @@ async fn lead<C: Cluster>(
     // (docs/adr/0027-fact-statement-for-the-detections.md).
     let mut facts = report::Queue::default();
     let mut reporting: Option<Notifying<'_>> = None;
+    // The Incident sweep being run, and when the last one began: never in the fact slot nor in
+    // the explanation slot, so a fact waits for it no longer than for a write (invariant 6).
+    let mut incident_sweeping: Option<Notifying<'_>> = None;
+    let mut last_incident_sweep: Option<Instant> = None;
 
     loop {
         if let Some(reporter) = reporter
             && reporting.is_none()
             && let Some(fact) = facts.pop()
         {
-            reporting = Some(Box::pin(reporter.report(fact)));
+            reporting = Some(Box::pin(reporter.report(fact, &lookup)));
+        }
+        // The Incident sweep, in a slot of its own, with incidents on: at the start of each term
+        // and then hourly, while the term holds (docs/adr/0028, point 4).
+        if let Some(reporter) = reporter
+            && let Some(incidents) = reporter.incidents
+            && incident_sweeping.is_none()
+            && reporter.term.holds()
+            && sweep_due(last_incident_sweep, Instant::now())
+        {
+            last_incident_sweep = Some(Instant::now());
+            let namespaces = &options.namespaces;
+            incident_sweeping = Some(Box::pin(async move {
+                incidents.sweep(namespaces, reporter.term).await.map(drop)
+            }));
         }
         if let (Some(settings), Some(shared)) = (options.explain.as_ref(), shared) {
             let now = Instant::now();
@@ -1111,6 +1186,12 @@ async fn lead<C: Cluster>(
                 if reporting.is_some() => {
                 reporting = None;
                 // A failed write is only logged and counted; the error is kausa's own log.
+                result?;
+            }
+            result = async { incident_sweeping.as_mut().expect("guarded by the condition").await },
+                if incident_sweeping.is_some() => {
+                incident_sweeping = None;
+                // A failed call is only logged and counted; the error is kausa's own log.
                 result?;
             }
             item = pods.next() => match item {
@@ -1216,7 +1297,7 @@ async fn lead<C: Cluster>(
                     if reporter.is_some() {
                         report::enqueue(
                             &mut facts,
-                            Fact::new(&incident, statement.facts),
+                            state.fact(&incident, statement.facts, options, now),
                             metrics,
                             reporter.as_ref().and_then(|r| r.outbox),
                         )?;
@@ -1283,7 +1364,8 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
         &["pods", "events"]
     };
     let settings = options.explain.as_ref();
-    let counters: [(&'static str, &str, &[&str], bool); 8] = [
+    let refusals = Refusal::ALL.map(Refusal::as_str);
+    let counters: [(&'static str, &str, &[&str], bool); 10] = [
         ("kausa_watch_errors_total", "watch", watches, true),
         ("kausa_watch_relists_total", "watch", watches, true),
         ("kausa_watch_restarts_total", "watch", watches, true),
@@ -1317,6 +1399,20 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
             &["Detected"],
             options.detected.is_some(),
         ),
+        // The counters of the Incidents (docs/adr/0028-incident-resource-and-remediation-report.md)
+        // have no line at all with incidents off.
+        (
+            incidents::REFUSED,
+            "reason",
+            &refusals,
+            options.incidents.is_some(),
+        ),
+        (
+            incidents::DELETED,
+            "reason",
+            &["age", "cap"],
+            options.incidents.is_some(),
+        ),
     ];
     for (name, label, values, shown) in counters {
         if shown {
@@ -1324,6 +1420,10 @@ fn show_zero_counters(metrics: &Metrics, options: &Options) {
                 metrics.add(name, &[(label, value)], 0);
             }
         }
+    }
+    if options.incidents.is_some() {
+        metrics.add(incidents::WRITE_ERRORS, &[], 0);
+        metrics.add(incidents::SWEEP_ERRORS, &[], 0);
     }
 }
 
@@ -1416,14 +1516,19 @@ fn log_incident(incident: &Incident, pods_total: usize, statement: &str) -> io::
 /// leaves the ReplicaSet or Job as a stand-in, retried on the Pod's next update).
 type PodEntry = (PodRecord, OwnerRef, bool);
 
+/// An Event's record, the top-level owner of the object it is about when that is not a Pod, and
+/// whether that owner's lookup failed.
+type EventEntry = (EventRecord, Option<OwnerRef>, bool);
+
 /// The records kausa keeps, keyed by UID.
 #[derive(Default)]
 struct State {
     pods: HashMap<String, PodEntry>,
     /// Only Warning events that a detection matches, with the top-level owner of the object an
     /// event is about when that is not a Pod (the Job's for `D008`, the controller's for `D011`,
-    /// the claim or the autoscaler itself for `D012` and `D013`).
-    events: HashMap<String, (EventRecord, Option<OwnerRef>)>,
+    /// the claim or the autoscaler itself for `D012` and `D013`), and whether that owner's lookup
+    /// failed.
+    events: HashMap<String, EventEntry>,
     /// The UIDs seen during the open relist of each watch, to drop the ones that disappeared
     /// from that watch.
     pod_relist: HashMap<WatchKey, HashSet<String>>,
@@ -1517,7 +1622,7 @@ impl State {
             }
             watcher::Event::InitDone => {
                 if let Some(seen) = self.event_relist.remove(watch) {
-                    self.events.retain(|uid, (record, _)| {
+                    self.events.retain(|uid, (record, _, _)| {
                         !inside(watch, &record.regarding.namespace) || seen.contains(uid)
                     });
                 }
@@ -1544,8 +1649,8 @@ impl State {
                 // An event about an object that is not a Pod is about that object's top-level
                 // owner: a Job's CronJob, a ReplicaSet's Deployment, through the hops kausa may
                 // follow (`owner.rs`); any other object is its own.
-                let job_owner = if record.regarding.kind == "Pod" {
-                    None
+                let (job_owner, lookup_failed) = if record.regarding.kind == "Pod" {
+                    (None, false)
                 } else {
                     let object = OwnerRef {
                         api_version: record.regarding.api_version.clone(),
@@ -1556,15 +1661,16 @@ impl State {
                     let namespace = record.regarding.namespace.clone();
                     let (owner, error) =
                         top_owner(lookup, &namespace, Some(&object), &object).await;
-                    if let Some(error) = error {
+                    if let Some(error) = &error {
                         log::warn(
                             "owner lookup failed",
-                            owner_lookup_failed_fields(&namespace, &object, &error),
+                            owner_lookup_failed_fields(&namespace, &object, error),
                         )?;
                     }
-                    Some(owner)
+                    (Some(owner), error.is_some())
                 };
-                self.events.insert(record.uid.clone(), (record, job_owner));
+                self.events
+                    .insert(record.uid.clone(), (record, job_owner, lookup_failed));
             }
             watcher::Event::Delete(event) => {
                 if let Some(uid) = event.metadata.uid {
@@ -1628,7 +1734,7 @@ impl State {
             Kind::Events => {
                 self.event_relist.remove(watch);
                 self.events
-                    .retain(|_, (record, _)| !inside(watch, &record.regarding.namespace));
+                    .retain(|_, (record, _, _)| !inside(watch, &record.regarding.namespace));
             }
             Kind::Deployments => {
                 self.deployment_relist.remove(watch);
@@ -1641,7 +1747,7 @@ impl State {
     /// Drops events that can no longer be a signal, so the map holds only what happened in the
     /// last few minutes.
     fn prune_events(&mut self, now: Timestamp) {
-        self.events.retain(|_, (record, _)| {
+        self.events.retain(|_, (record, _, _)| {
             record
                 .last_seen
                 .is_some_and(|seen| now.duration_since(seen.min(now)) <= EVENT_FRESHNESS)
@@ -1657,7 +1763,7 @@ impl State {
         let events: Vec<_> = self
             .events
             .values()
-            .map(|(record, job_owner)| EventView {
+            .map(|(record, job_owner, _)| EventView {
                 record,
                 job_owner: job_owner.as_ref(),
             })
@@ -1666,6 +1772,75 @@ impl State {
         let rollouts: Vec<_> = self.deployments.values().collect();
         signals.extend(rollout_signals(&rollouts, now));
         tracker.tick(now, signals)
+    }
+
+    /// The fact of `incident` for the fact slot, with `facts` from its statement. With
+    /// `options.incidents`, it keeps what the incident's Incident needs, from the records of this
+    /// tick (docs/adr/0028-incident-resource-and-remediation-report.md, point 3): one map read by
+    /// UID for the sample Pod, the Event or the Deployment, never by name and never a scan.
+    fn fact(
+        &self,
+        incident: &Incident,
+        facts: fact::Facts,
+        options: &Options,
+        now: Timestamp,
+    ) -> Fact {
+        let mut fact = Fact::new(incident, facts);
+        if options.incidents.is_none() {
+            return fact;
+        }
+        let (about, owner_lookup_failed) = if incident.key.detection == Detection::RolloutStalled {
+            (
+                About::deployment(self.deployments.get(&incident.owner.uid)),
+                false,
+            )
+        } else if incident.sample.pod.is_some() {
+            // The record the sample was taken from, by its UID: a name can name two records.
+            let record = incident
+                .sample
+                .pod_uid
+                .as_ref()
+                .and_then(|uid| self.pods.get(uid));
+            match record {
+                Some((record, _, resolved)) => (About::sample(record), !resolved),
+                // Not reached: the tick emits an incident about a Pod only from the records it
+                // holds, and nothing changes them before its facts. The Incident's check refuses
+                // a sample with no UID.
+                None => (
+                    About::Sample {
+                        pod_uid: None,
+                        controller: None,
+                    },
+                    false,
+                ),
+            }
+        } else {
+            let event = incident
+                .sample
+                .event
+                .as_ref()
+                .and_then(|(uid, _)| self.events.get(uid));
+            match event {
+                Some((record, _, lookup_failed)) => {
+                    (About::regarding(&record.regarding), *lookup_failed)
+                }
+                // Not reached either; the check refuses a `regarding` with no kind.
+                None => (
+                    About::Regarding {
+                        kind: None,
+                        name: None,
+                        uid: MaybeUid::Absent,
+                    },
+                    false,
+                ),
+            }
+        };
+        fact.incident = Some(Box::new(IncidentData {
+            settled_at: now,
+            owner_lookup_failed,
+            about,
+        }));
+        fact
     }
 
     /// What an explanation needs about an incident, copied out of the state: the incident's Pods
@@ -1688,14 +1863,14 @@ impl State {
         let mut events: Vec<EventRecord> = self
             .events
             .values()
-            .filter(|(record, job_owner)| {
+            .filter(|(record, job_owner, _)| {
                 record.regarding.namespace == namespace
                     && (incident.pods.contains(&record.regarding.name)
                         || job_owner
                             .as_ref()
                             .is_some_and(|o| o.uid == incident.owner.uid))
             })
-            .map(|(record, _)| record.clone())
+            .map(|(record, _, _)| record.clone())
             .collect();
         events.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.uid.cmp(&b.uid)));
         let log = self.log_source(&incident, &pods);
@@ -1914,13 +2089,25 @@ fn announce(announced: &mut bool, queue_empty: bool, held: bool) -> bool {
     false
 }
 
-/// A cached owner lookup: the answer (or the error) and when it was read.
-type CachedLookup = (Result<Option<OwnerRef>, String>, Instant);
+/// A cached owner lookup: the answer (or the error), when it was read and, with incidents on,
+/// what the answer of a ReplicaSet's `get` said of it (`ReplicaSetRead`).
+type CachedLookup = (
+    Result<Option<OwnerRef>, String>,
+    Instant,
+    Option<Box<ReplicaSetRead>>,
+);
+
+/// A ReplicaSet's `metadata.uid` and the revision in its annotation, kept only when both parse
+/// (docs/adr/0028-incident-resource-and-remediation-report.md, point 3).
+type ReplicaSetRead = (Uid, u64);
 
 /// Owner lookups against the API server: metadata only, with a timeout, cached for a while.
 struct KubeLookup {
     client: Client,
     cache: RefCell<HashMap<(Hop, String, String), CachedLookup>>,
+    /// Whether a ReplicaSet's `get` keeps its UID and revision: with incidents on. Off, no
+    /// annotation is read and every entry's read is `None`.
+    keep_revision: bool,
 }
 
 impl OwnerLookup for KubeLookup {
@@ -1946,7 +2133,7 @@ impl OwnerLookup for KubeLookup {
             at.elapsed() < ttl
         };
         let key = (hop, namespace.to_owned(), name.to_owned());
-        if let Some((answer, at)) = self.cache.borrow().get(&key)
+        if let Some((answer, at, _)) = self.cache.borrow().get(&key)
             && fresh(answer, at)
         {
             return answer.clone();
@@ -1963,23 +2150,58 @@ impl OwnerLookup for KubeLookup {
                     .map(|m| m.metadata),
             }
         };
-        let answer = match tokio::time::timeout(OWNER_LOOKUP_TIMEOUT, get).await {
-            Ok(Ok(metadata)) => Ok(controller_of(metadata.owner_references.as_ref())),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(_) => Err(format!(
-                "no answer within {} seconds",
-                OWNER_LOOKUP_TIMEOUT.as_secs()
-            )),
+        let (answer, read) = match tokio::time::timeout(OWNER_LOOKUP_TIMEOUT, get).await {
+            Ok(Ok(metadata)) => {
+                let read = (self.keep_revision && hop == Hop::ReplicaSet)
+                    .then(|| replica_set_read(&metadata))
+                    .flatten()
+                    .map(Box::new);
+                (Ok(controller_of(metadata.owner_references.as_ref())), read)
+            }
+            Ok(Err(error)) => (Err(error.to_string()), None),
+            Err(_) => (
+                Err(format!(
+                    "no answer within {} seconds",
+                    OWNER_LOOKUP_TIMEOUT.as_secs()
+                )),
+                None,
+            ),
         };
         let mut cache = self.cache.borrow_mut();
-        cache.retain(|_, (answer, at)| fresh(answer, at));
-        cache.insert(key, (answer.clone(), Instant::now()));
+        cache.retain(|_, (answer, at, _)| fresh(answer, at));
+        cache.insert(key, (answer.clone(), Instant::now(), read));
         answer
+    }
+
+    async fn replica_set(&self, namespace: &str, name: &str) -> Result<(Uid, u64), ()> {
+        // Off, nothing is kept to answer from: no request.
+        if !self.keep_revision {
+            return Err(());
+        }
+        // The same name rule, the same cache, timeout and error TTL: the `get` is
+        // `controller_of`'s, which keeps the read in the entry it answers from.
+        self.controller_of(Hop::ReplicaSet, namespace, name)
+            .await
+            .map_err(|_| ())?;
+        let key = (Hop::ReplicaSet, namespace.to_owned(), name.to_owned());
+        self.cache
+            .borrow()
+            .get(&key)
+            .and_then(|(_, _, read)| read.as_deref().copied())
+            .ok_or(())
     }
 
     fn cached(&self) -> usize {
         self.cache.borrow().len()
     }
+}
+
+/// What a ReplicaSet's metadata says for an Incident: its UID as 16 bytes and its revision, or
+/// `None` when either does not parse. Nothing of the annotation's text is kept.
+fn replica_set_read(metadata: &ObjectMeta) -> Option<ReplicaSetRead> {
+    let uid = Uid::parse(metadata.uid.as_deref()?)?;
+    let revision = parse_revision(metadata.annotations.as_ref()?.get(REVISION_ANNOTATION)?)?;
+    Some((uid, revision))
 }
 
 // Tests of the namespaced mode (docs/adr/0013-namespaced-install-mode.md), without a cluster: the
@@ -1992,6 +2214,12 @@ mod tests {
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
     use kube::core::Status;
+
+    /// Incidents on, with the gate's default window of 24 hours.
+    const INCIDENTS: crate::incidents::Settings = crate::incidents::Settings {
+        window: Duration::from_secs(24 * 3600),
+        days: 1,
+    };
 
     /// Every Pod in these tests has no owner, so no lookup is made; a lookup is an error.
     struct NoLookup;
@@ -3246,6 +3474,7 @@ mod tests {
                 lookup: KubeLookup {
                     client,
                     cache: RefCell::new(HashMap::new()),
+                    keep_revision: true,
                 },
                 runtime,
             }
@@ -3334,6 +3563,626 @@ mod tests {
         assert_eq!(spy.connections(), 3);
     }
 
+    /// A `KubeLookup` whose client points at a local API server that answers each connection, in
+    /// order, with one of `answers` (a status and a body) and counts the requests it reads.
+    struct Served {
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        lookup: KubeLookup,
+        runtime: tokio::runtime::Runtime,
+    }
+
+    impl Served {
+        /// With `incidents`, the lookup of a process whose options have them on, built as `run`
+        /// builds it.
+        fn new(on: bool, answers: Vec<(&'static str, serde_json::Value)>) -> Served {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
+            let addr = listener.local_addr().expect("an address");
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = requests.clone();
+            std::thread::spawn(move || {
+                for (status, body) in answers {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        return;
+                    };
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buffer[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&request).into_owned();
+                    let line = text.lines().next().unwrap_or_default().to_owned();
+                    seen.lock().expect("the requests").push(line);
+                    let body = body.to_string();
+                    let answer = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(answer.as_bytes());
+                }
+            });
+            let config = kube::Config::new(format!("http://{addr}").parse().expect("a URL"));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let client = {
+                let _guard = runtime.enter();
+                Client::try_from(config).expect("a client")
+            };
+            let options = Options {
+                incidents: on.then_some(INCIDENTS),
+                ..options(false, 10)
+            };
+            Served {
+                requests,
+                lookup: KubeCluster::new(client, &options).lookup(),
+                runtime,
+            }
+        }
+
+        fn run<F: Future>(&self, future: F) -> F::Output {
+            self.runtime.block_on(future)
+        }
+
+        /// The request lines read so far; a lookup that returned had its request read.
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().expect("the requests").clone()
+        }
+
+        /// Moves every cache entry `by` into the past.
+        fn age(&self, by: Duration) {
+            for (_, at, _) in self.lookup.cache.borrow_mut().values_mut() {
+                *at = at.checked_sub(by).expect("an earlier instant");
+            }
+        }
+
+        /// The read kept in the entry of the ReplicaSet `name` of `shop`.
+        fn kept(&self, name: &str) -> Option<ReplicaSetRead> {
+            let key = (Hop::ReplicaSet, "shop".to_owned(), name.to_owned());
+            let cache = self.lookup.cache.borrow();
+            cache
+                .get(&key)
+                .and_then(|(_, _, read)| read.as_deref().copied())
+        }
+    }
+
+    const RS_UID: &str = "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b";
+
+    /// The metadata of the ReplicaSet `web-7d4b9c6f5d`, owned by the Deployment `web`, with
+    /// `uid` and, when given, `revision` as its annotation.
+    fn replica_set_metadata(uid: Option<&str>, revision: Option<&str>) -> serde_json::Value {
+        let mut metadata = json!({
+            "name": "web-7d4b9c6f5d",
+            "namespace": "shop",
+            "ownerReferences": [{
+                "apiVersion": "apps/v1", "kind": "Deployment", "name": "web",
+                "uid": "uid-web", "controller": true
+            }],
+        });
+        if let Some(uid) = uid {
+            metadata["uid"] = json!(uid);
+        }
+        if let Some(revision) = revision {
+            metadata["annotations"] = json!({ REVISION_ANNOTATION: revision, "other": "x" });
+        }
+        json!({
+            "apiVersion": "meta.k8s.io/v1",
+            "kind": "PartialObjectMetadata",
+            "metadata": metadata,
+        })
+    }
+
+    fn rs_uid() -> Uid {
+        Uid::parse(RS_UID).expect("a UID")
+    }
+
+    /// One fact through the reporter and the lookup `run` builds from `options`, against a fake
+    /// API server that echoes each Event, answers a ReplicaSet's `get` with its revision and
+    /// creates the Incident: the requests, as method and path.
+    fn report_through_run(options: &Options) -> Vec<(String, String)> {
+        use crate::incident_resource::tests::{UID_RS, sample_fact};
+        use crate::incidents::tests::{Answer, api_server, client, created, reply, runtime, sent};
+        let (url, requests) = api_server(|request| match request.method.as_str() {
+            "POST" if request.path.contains("/events") => Answer::Reply(201, request.body.clone()),
+            "GET" => reply(200, replica_set_metadata(Some(UID_RS), Some("7"))),
+            _ => created(),
+        });
+        let rt = runtime();
+        let metrics = Metrics::default();
+        let term = Term::unbounded();
+        rt.block_on(async {
+            let client = client(&url);
+            let incidents = incidents_of(&client, options, &metrics);
+            if let Some(incidents) = &incidents {
+                incidents.table_mut().start_sweep_ended();
+            }
+            let reporter = reporter(&client, options, None, incidents.as_ref(), &metrics, &term)
+                .expect("a reporter");
+            let lookup = KubeCluster::new(client, options).lookup();
+            reporter
+                .report(sample_fact(), &lookup)
+                .await
+                .expect("a log");
+        });
+        sent(&requests)
+            .into_iter()
+            .map(|request| (request.method, request.path))
+            .collect()
+    }
+
+    #[test]
+    fn a_fact_is_written_as_its_event_then_its_replica_set_is_read_then_its_incident_created() {
+        let on = Options {
+            detected: Some(ME.into()),
+            incidents: Some(INCIDENTS),
+            ..options(false, 10)
+        };
+        let requests = report_through_run(&on);
+        let methods: Vec<&str> = requests.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(methods, ["POST", "GET", "POST"], "{requests:?}");
+        assert!(
+            requests[0]
+                .1
+                .starts_with("/apis/events.k8s.io/v1/namespaces/shop/events")
+        );
+        assert_eq!(
+            requests[1].1,
+            "/apis/apps/v1/namespaces/shop/replicasets/web-7d4b9c6f5d"
+        );
+        assert_eq!(requests[2].1, crate::incidents::tests::PATH);
+        // Off, the same fact sends only its Event: no read and no create.
+        let off = Options {
+            detected: Some(ME.into()),
+            ..options(false, 10)
+        };
+        let requests = report_through_run(&off);
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(
+            requests[0]
+                .1
+                .starts_with("/apis/events.k8s.io/v1/namespaces/shop/events")
+        );
+    }
+
+    #[test]
+    fn with_no_events_and_no_webhook_an_incident_is_still_created() {
+        // `--incidents --no-events` and no webhook: the Incidents alone make the fact path.
+        let only_incidents = Options {
+            detected: None,
+            notify: None,
+            incidents: Some(INCIDENTS),
+            ..options(false, 10)
+        };
+        let requests = report_through_run(&only_incidents);
+        assert_eq!(
+            requests,
+            [
+                (
+                    "GET".to_owned(),
+                    "/apis/apps/v1/namespaces/shop/replicasets/web-7d4b9c6f5d".to_owned()
+                ),
+                ("POST".to_owned(), crate::incidents::tests::PATH.to_owned()),
+            ]
+        );
+        // With none of the three, there is no fact path at all.
+        let none = Options {
+            detected: None,
+            notify: None,
+            ..options(false, 10)
+        };
+        let metrics = Metrics::default();
+        let term = Term::unbounded();
+        let rt = crate::incidents::tests::runtime();
+        let _guard = rt.enter();
+        let client = crate::incidents::tests::client("http://127.0.0.1:9");
+        assert!(incidents_of(&client, &none, &metrics).is_none());
+        assert!(reporter(&client, &none, None, None, &metrics, &term).is_none());
+    }
+
+    #[test]
+    fn a_term_that_ends_during_the_replica_set_read_sends_no_create() {
+        use crate::incident_resource::tests::{UID_RS, sample_fact};
+        use crate::incidents::tests::{api_server, client, created, reply, runtime, sent};
+        let (held, hold) = crate::leader::hold::new();
+        let held = std::sync::Mutex::new(Some(held));
+        let (url, requests) = api_server(move |request| match request.method.as_str() {
+            "GET" => {
+                if let Some(held) = held.lock().expect("the hold").take() {
+                    held.wait();
+                }
+                reply(200, replica_set_metadata(Some(UID_RS), Some("7")))
+            }
+            _ => created(),
+        });
+        let on = Options {
+            detected: Some(ME.into()),
+            incidents: Some(INCIDENTS),
+            ..options(false, 10)
+        };
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let write_errors = runtime().block_on(async {
+            let client = client(&url);
+            let incidents = incidents_of(&client, &on, &metrics).expect("the incidents");
+            incidents.table_mut().start_sweep_ended();
+            let lookup = KubeCluster::new(client, &on).lookup();
+            let fact = sample_fact();
+            let (created, ()) =
+                futures::join!(incidents.create(&fact, &lookup, &term), hold.end(&term));
+            created.expect("a log");
+            assert_eq!(incidents.table().len(), 0);
+            incidents.write_errors()
+        });
+        let requests = sent(&requests);
+        let methods: Vec<&str> = requests.iter().map(|r| r.method.as_str()).collect();
+        assert_eq!(methods, ["GET"], "{requests:?}");
+        assert_eq!(write_errors, 1);
+    }
+
+    /// One term of `lead` with the fact path of `options` and an outbox, over a crashing Pod,
+    /// against a fake API server that echoes each Event and never answers a list of Incidents,
+    /// until the Pod's `Detected` Event was written and its `detected` message queued: the
+    /// requests, as method and path, how long that took, and the `starting` refusals.
+    fn lead_with_a_hung_sweep(options: &Options) -> (Vec<(String, String)>, Duration, u64) {
+        use crate::incidents::tests::{Answer, api_server, client, sent};
+        let (url, requests) = api_server(|request| match request.method.as_str() {
+            "POST" if request.path.contains("/events") => Answer::Reply(201, request.body.clone()),
+            _ => Answer::Hang,
+        });
+        let cluster = ScriptedCluster::new(list(&CLUSTER, vec![crashing("api-1")]), vec![], vec![]);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        // A webhook that is never reached: the message is only queued.
+        let notifier = crate::notify::Notifier::new(
+            "http://192.0.2.1/hook".parse().expect("a URL"),
+            crate::notify::Format::Json,
+            None,
+            true,
+        )
+        .expect("a notifier");
+        let outbox = Outbox::new(&notifier, Duration::ZERO, 30, &metrics, &term);
+        let events = || {
+            sent(&requests)
+                .iter()
+                .filter(|r| r.path.contains("/events"))
+                .count()
+        };
+        let (took, refused) = runtime().block_on(async {
+            let client = client(&url);
+            let incidents = incidents_of(&client, options, &metrics);
+            let reporter = reporter(
+                &client,
+                options,
+                Some(&outbox),
+                incidents.as_ref(),
+                &metrics,
+                &term,
+            )
+            .expect("a reporter");
+            let start = Instant::now();
+            let leading = lead(
+                options,
+                &cluster,
+                None,
+                Some(&reporter),
+                None,
+                &metrics,
+                TEST_TICK,
+            );
+            tokio::select! {
+                result = leading => {
+                    let Err(error) = result;
+                    match error {
+                        RunError::Failure(error) => panic!("the term ended: {error}"),
+                        RunError::Output(error) => panic!("the log failed: {error}"),
+                    }
+                }
+                done = until(WAIT, || events() == 1 && outbox.queue().len() == 1) => {
+                    assert!(done, "no Event or no message within {WAIT:?}");
+                }
+            }
+            let refused = incidents.map_or(0, |i| i.refused(Refusal::Starting));
+            (start.elapsed(), refused)
+        });
+        let requests = sent(&requests)
+            .into_iter()
+            .map(|request| (request.method, request.path))
+            .collect();
+        (requests, took, refused)
+    }
+
+    #[test]
+    fn a_hung_incident_sweep_delays_neither_an_event_nor_a_detected_message() {
+        let on = Options {
+            detected: Some(ME.into()),
+            incidents: Some(INCIDENTS),
+            ..watching(&[], false)
+        };
+        let (requests, took, refused) = lead_with_a_hung_sweep(&on);
+        // The sweep began with the term and its list is still unanswered; the Event and the
+        // message came well before the list's own bound, which is the write's.
+        assert!(took < crate::leader::pure::WRITE_BOUND / 2, "{took:?}");
+        let lists: Vec<&(String, String)> = requests
+            .iter()
+            .filter(|(m, p)| m == "GET" && p.starts_with("/apis/kausa.fedeam.com/"))
+            .collect();
+        assert_eq!(lists.len(), 1, "{requests:?}");
+        assert!(
+            lists[0]
+                .1
+                .starts_with("/apis/kausa.fedeam.com/v1alpha1/incidents?")
+        );
+        // The create arrived before the sweep ended: refused, and nothing sent for it.
+        assert_eq!(refused, 1);
+        assert_eq!(
+            requests.iter().filter(|(m, _)| m == "POST").count(),
+            1,
+            "only the Event: {requests:?}"
+        );
+        // Off, no list of Incidents is ever sent: the same term sends only the Event.
+        let off = Options {
+            detected: Some(ME.into()),
+            ..watching(&[], false)
+        };
+        let (requests, _, refused) = lead_with_a_hung_sweep(&off);
+        assert_eq!(refused, 0);
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(
+            requests[0]
+                .1
+                .starts_with("/apis/events.k8s.io/v1/namespaces/shop/events")
+        );
+    }
+
+    #[test]
+    fn an_incident_sweep_that_completes_is_not_run_again_within_its_interval() {
+        use crate::incidents::tests::{Answer, api_server, client, created, failure, reply, sent};
+        // Each list of Incidents is answered at once, with none: the sweep completes in a tick.
+        let (url, requests) = api_server(|request| match request.method.as_str() {
+            "POST" if request.path.contains("/events") => Answer::Reply(201, request.body.clone()),
+            "POST" => created(),
+            "GET" if request.path.starts_with("/apis/kausa.fedeam.com/") => reply(
+                200,
+                json!({
+                    "apiVersion": "kausa.fedeam.com/v1alpha1",
+                    "kind": "IncidentList",
+                    "metadata": {"resourceVersion": "1"},
+                    "items": [],
+                }),
+            ),
+            _ => failure(404),
+        });
+        let on = Options {
+            detected: Some(ME.into()),
+            incidents: Some(INCIDENTS),
+            ..watching(&[], false)
+        };
+        let cluster = ScriptedCluster::new(list(&CLUSTER, vec![crashing("api-1")]), vec![], vec![]);
+        let (metrics, term) = (Metrics::default(), Term::unbounded());
+        let lists = || {
+            sent(&requests)
+                .iter()
+                .filter(|r| r.method == "GET" && r.path.starts_with("/apis/kausa.fedeam.com/"))
+                .count()
+        };
+        runtime().block_on(async {
+            let client = client(&url);
+            let incidents = incidents_of(&client, &on, &metrics);
+            let reporter = reporter(&client, &on, None, incidents.as_ref(), &metrics, &term)
+                .expect("a reporter");
+            let leading = lead(
+                &on,
+                &cluster,
+                None,
+                Some(&reporter),
+                None,
+                &metrics,
+                TEST_TICK,
+            );
+            // Twenty ticks, far less than the interval: the slot is free on each of them.
+            tokio::select! {
+                result = leading => {
+                    let Err(error) = result;
+                    match error {
+                        RunError::Failure(error) => panic!("the term ended: {error}"),
+                        RunError::Output(error) => panic!("the log failed: {error}"),
+                    }
+                }
+                () = tokio::time::sleep(TEST_TICK * 20) => {}
+            }
+            let incidents = incidents.expect("the incidents");
+            assert!(incidents.table().sweep_ended(), "the sweep did not end");
+        });
+        assert_eq!(lists(), 1, "{:?}", sent(&requests));
+    }
+
+    #[test]
+    fn the_replica_set_read_shares_the_owner_lookup_s_get_and_cache() {
+        let ok = || ("200 OK", replica_set_metadata(Some(RS_UID), Some("7")));
+        let served = Served::new(true, vec![ok(), ok()]);
+        let lookup = &served.lookup;
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Ok((rs_uid(), 7))
+        );
+        assert_eq!(
+            served.requests(),
+            ["GET /apis/apps/v1/namespaces/shop/replicasets/web-7d4b9c6f5d HTTP/1.1"]
+        );
+        // A fresh entry answers both calls with no request.
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Ok((rs_uid(), 7))
+        );
+        let owner = served.run(lookup.controller_of(Hop::ReplicaSet, "shop", "web-7d4b9c6f5d"));
+        assert_eq!(owner.expect("an answer").expect("an owner").name, "web");
+        assert_eq!(served.requests().len(), 1);
+        assert_eq!(lookup.cached(), 1);
+        // Still fresh at 599 seconds.
+        served.age(Duration::from_secs(599));
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Ok((rs_uid(), 7))
+        );
+        assert_eq!(served.requests().len(), 1);
+        // An expired entry costs one `get`, and is replaced.
+        served.age(Duration::from_secs(1));
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Ok((rs_uid(), 7))
+        );
+        assert_eq!(served.requests().len(), 2);
+        assert_eq!(lookup.cached(), 1);
+    }
+
+    #[test]
+    fn a_failed_replica_set_read_is_answered_from_the_cache_for_30_seconds() {
+        let ok = ("200 OK", replica_set_metadata(Some(RS_UID), Some("3")));
+        let error = ("500 Internal Server Error", json!({"kind": "Status"}));
+        let served = Served::new(true, vec![error, ok]);
+        let lookup = &served.lookup;
+        assert_eq!(served.run(lookup.replica_set("shop", "web")), Err(()));
+        assert_eq!(served.requests().len(), 1);
+        served.age(Duration::from_secs(29));
+        assert_eq!(served.run(lookup.replica_set("shop", "web")), Err(()));
+        assert_eq!(served.requests().len(), 1);
+        served.age(Duration::from_secs(1));
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web")),
+            Ok((rs_uid(), 3))
+        );
+        assert_eq!(served.requests().len(), 2);
+    }
+
+    #[test]
+    fn a_replica_set_read_fails_for_a_revision_or_a_uid_that_does_not_parse() {
+        let too_high = (crate::record::MAX_REVISION + 1).to_string();
+        let revisions = [
+            None,
+            Some("0"),
+            Some(too_high.as_str()),
+            Some("x"),
+            Some("+7"),
+            Some("-7"),
+            Some(" 7"),
+            Some("7 "),
+            Some("07"),
+            Some(""),
+            Some("18446744073709551616"),
+        ];
+        let mut answers: Vec<_> = revisions
+            .iter()
+            .map(|r| ("200 OK", replica_set_metadata(Some(RS_UID), *r)))
+            .collect();
+        for uid in [
+            None,
+            Some("uid-web-7d4b9c6f5d"),
+            Some(&RS_UID.to_uppercase()[..]),
+        ] {
+            answers.push(("200 OK", replica_set_metadata(uid, Some("7"))));
+        }
+        let count = answers.len();
+        let served = Served::new(true, answers);
+        for i in 0..count {
+            let name = format!("web-{i}");
+            assert_eq!(
+                served.run(served.lookup.replica_set("shop", &name)),
+                Err(()),
+                "{i}"
+            );
+            // The owner lookup itself worked, and its entry keeps no read.
+            assert!(
+                served
+                    .lookup
+                    .cache
+                    .borrow()
+                    .values()
+                    .all(|(a, _, _)| a.is_ok())
+            );
+            assert_eq!(served.kept(&name), None, "{i}");
+        }
+        assert_eq!(served.requests().len(), count);
+        // The highest revision is kept.
+        let highest = crate::record::MAX_REVISION.to_string();
+        let served = Served::new(
+            true,
+            vec![("200 OK", replica_set_metadata(Some(RS_UID), Some(&highest)))],
+        );
+        assert_eq!(
+            served.run(served.lookup.replica_set("shop", "web")),
+            Ok((rs_uid(), crate::record::MAX_REVISION))
+        );
+    }
+
+    #[test]
+    fn with_incidents_off_the_owner_cache_reads_no_revision_and_sends_no_request_for_one() {
+        let ok = || ("200 OK", replica_set_metadata(Some(RS_UID), Some("7")));
+        let served = Served::new(false, vec![ok(), ok()]);
+        let lookup = &served.lookup;
+        // Off, the read answers failed with no request and no entry.
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Err(())
+        );
+        assert_eq!(lookup.cached(), 0);
+        // The owner lookup's entry keeps no read.
+        let owner = served.run(lookup.controller_of(Hop::ReplicaSet, "shop", "web-7d4b9c6f5d"));
+        assert!(owner.is_ok_and(|o| o.is_some()));
+        assert_eq!(served.kept("web-7d4b9c6f5d"), None);
+        assert_eq!(
+            served.run(lookup.replica_set("shop", "web-7d4b9c6f5d")),
+            Err(())
+        );
+        assert_eq!(served.requests().len(), 1);
+        // On, a Job's entry keeps none either.
+        let job = json!({"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadata",
+            "metadata": replica_set_metadata(Some(RS_UID), Some("7"))["metadata"].clone()});
+        let served = Served::new(true, vec![("200 OK", job)]);
+        let owner = served.run(
+            served
+                .lookup
+                .controller_of(Hop::Job, "shop", "web-7d4b9c6f5d"),
+        );
+        assert!(owner.is_ok());
+        let cache = served.lookup.cache.borrow();
+        assert!(cache.values().all(|(_, _, read)| read.is_none()));
+        // The entry gains one pointer, 8 bytes, whether incidents are on or off; with them on, a
+        // ReplicaSet entry whose read parsed points to 24 more (16 of UID and 8 of revision).
+        let today = std::mem::size_of::<(Result<Option<OwnerRef>, String>, Instant)>();
+        assert_eq!(std::mem::size_of::<CachedLookup>(), today + 8);
+        assert_eq!(std::mem::size_of::<ReplicaSetRead>(), 24);
+        // The table of Events: the flag of a failed lookup takes an entry from 368 to 376 bytes,
+        // with incidents off too.
+        let today = std::mem::size_of::<(EventRecord, Option<OwnerRef>)>();
+        assert_eq!((today, std::mem::size_of::<EventEntry>()), (368, 376));
+    }
+
+    #[test]
+    fn the_replica_set_read_refuses_a_name_or_namespace_before_any_request() {
+        let spy = Spy::new();
+        let too_long = "a".repeat(254);
+        for name in ["a/b", "../x", "a?x=1", "Web", "", "a\nb", too_long.as_str()] {
+            assert_eq!(
+                spy.run(spy.lookup.replica_set("shop", name)),
+                Err(()),
+                "{name:?}"
+            );
+        }
+        let long_namespace = "a".repeat(64);
+        for namespace in ["a/b", "..", "", "Shop", "a\nb", long_namespace.as_str()] {
+            let answer = spy.run(spy.lookup.replica_set(namespace, "web"));
+            assert_eq!(answer, Err(()), "{namespace:?}");
+        }
+        assert_eq!(spy.lookup.cached(), 0);
+        assert_eq!(spy.connections_after_a_wait(), 0);
+        // A valid one is sent.
+        assert_eq!(spy.run(spy.lookup.replica_set("shop", "web")), Err(()));
+        assert_eq!((spy.lookup.cached(), spy.connections()), (1, 1));
+    }
+
     #[test]
     fn a_pod_whose_owner_has_a_bad_name_is_grouped_under_the_owner_as_given() {
         let spy = Spy::new();
@@ -3392,7 +4241,7 @@ mod tests {
             &spy.lookup,
         ))
         .expect("the log is written");
-        let (_, owner) = state.events.values().next().expect("the Event is kept");
+        let (_, owner, _) = state.events.values().next().expect("the Event is kept");
         let owner = owner.as_ref().expect("an owner");
         assert_eq!(
             (owner.kind.as_str(), owner.name.as_str()),
@@ -3413,7 +4262,7 @@ mod tests {
         let owners: Vec<_> = state
             .events
             .values()
-            .filter(|(record, _)| record.regarding.namespace == "a/b")
+            .filter(|(record, _, _)| record.regarding.namespace == "a/b")
             .collect();
         assert_eq!(owners.len(), 1);
         let owner = owners[0].1.as_ref().expect("an owner");
@@ -4360,6 +5209,7 @@ mod tests {
             }),
             detected: None,
             notify: None,
+            incidents: None,
         }
     }
 
@@ -5974,6 +6824,70 @@ mod tests {
         assert_eq!(gauge(&text, LAST_SUCCESS), Some(0), "{text}");
     }
 
+    /// The options of `kausa run` with no flag: no model and no dry run, the `Detected` Events,
+    /// the Deployment watch, no webhook, no Lease and no incidents.
+    fn default_options() -> Options {
+        let mut defaults = options(false, 30);
+        defaults.explain = None;
+        defaults.detected = Some("kausa".to_owned());
+        defaults
+    }
+
+    #[test]
+    fn the_start_shows_the_incident_counters_at_0_only_with_incidents_on() {
+        let off = Metrics::default();
+        show_start(&off, &default_options(), None, Instant::now());
+        let on = Metrics::default();
+        let with_incidents = Options {
+            incidents: Some(INCIDENTS),
+            ..default_options()
+        };
+        show_start(&on, &with_incidents, None, Instant::now());
+        let (off, on) = (off.render(), on.render());
+        // `kausa_incidents_total`, the settled incidents, is an older counter and stays.
+        let names = metrics::INCIDENT_COUNTERS.map(|(name, _)| name);
+        let of_incidents = |line: &str| names.iter().any(|name| line.contains(name));
+        assert!(!off.lines().any(of_incidents), "{off}");
+        let series: Vec<&str> = on
+            .lines()
+            .filter(|l| of_incidents(l) && !l.starts_with('#'))
+            .collect();
+        assert_eq!(
+            series,
+            [
+                "kausa_incidents_refused_total{reason=\"schema\"} 0",
+                "kausa_incidents_refused_total{reason=\"starting\"} 0",
+                "kausa_incidents_refused_total{reason=\"table-full\"} 0",
+                "kausa_incident_write_errors_total 0",
+                "kausa_incidents_deleted_total{reason=\"age\"} 0",
+                "kausa_incidents_deleted_total{reason=\"cap\"} 0",
+                "kausa_incident_sweep_errors_total 0",
+            ]
+        );
+        // Nothing else differs.
+        let rest: Vec<&str> = on.lines().filter(|l| !of_incidents(l)).collect();
+        assert_eq!(rest, off.lines().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_start_exposition_with_the_defaults_is_the_golden_file() {
+        // Rendered by the code before incidents could be turned on, and kept byte for byte: a
+        // feature that is off by default shows nothing new (tests/golden/metrics-start.prom).
+        let golden = include_str!("../tests/golden/metrics-start.prom");
+        let metrics = Metrics::default();
+        show_start(&metrics, &default_options(), None, Instant::now());
+        // A fixed version and prompt version, so that a release does not change the file.
+        let version = concat!("version=\"", env!("CARGO_PKG_VERSION"), "\"");
+        let prompt = format!("prompt_version=\"{}\"", prompt::PROMPT_VERSION);
+        let text = metrics
+            .render()
+            .replace(version, "version=\"0.0.0-golden\"")
+            .replace(&prompt, "prompt_version=\"0\"");
+        if text != golden {
+            panic!("the start exposition differs from tests/golden/metrics-start.prom:\n{text}");
+        }
+    }
+
     #[test]
     fn the_gate_that_holds_names_the_wait_and_only_the_budget_waits_for_budget() {
         let until = Instant::now() + Duration::from_secs(60);
@@ -6670,6 +7584,193 @@ mod tests {
         assert_eq!(cluster.watches.get(), 2, "two terms' watches");
         for watch in ["pods", "events", "deployments"] {
             assert_eq!(relists(&metrics, watch), 0, "{watch}");
+        }
+    }
+
+    // docs/adr/0028-incident-resource-and-remediation-report.md, point 3: what a settled fact
+    // keeps for its Incident, from the records of the tick that emits it.
+
+    const POD_UID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+    const OWNER_UID: &str = "1f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+    /// The one incident of `state` at a tick, and its fact with incidents off and on, from the
+    /// options `lead` passes: `run`'s options leave them off.
+    fn facts_of(state: &State) -> (Fact, Fact) {
+        let now = Timestamp::now();
+        let mut tracker = Tracker::new(SignedDuration::ZERO);
+        let incidents = state.tick(&mut tracker, now);
+        assert_eq!(incidents.len(), 1);
+        let incident = &incidents[0];
+        let facts = || fact::statement(incident, 1).facts;
+        let mut options = options(false, 10);
+        let off = state.fact(incident, facts(), &options, now);
+        options.incidents = Some(INCIDENTS);
+        let on = state.fact(incident, facts(), &options, now);
+        assert_eq!(on.incident.as_ref().expect("the data").settled_at, now);
+        // The data is the only difference.
+        assert_eq!(
+            Fact {
+                incident: None,
+                ..on.clone()
+            },
+            off
+        );
+        (off, on)
+    }
+
+    fn about(fact: &Fact) -> (&About, bool) {
+        let data = fact.incident.as_ref().expect("the data");
+        (&data.about, data.owner_lookup_failed)
+    }
+
+    #[test]
+    fn a_fact_keeps_its_incident_data_only_with_incidents_on() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+        let uid = |text| crate::record::Uid::parse(text);
+        // `D001`, a Pod of a ReplicaSet: its UID, its controller's kind and UID, and the
+        // ReplicaSet's name, from the Pod's records; the lookup worked, then failed.
+        let mut pod = crashing("checkout-7fffb9bf5c-x1y2z");
+        pod.metadata.uid = Some(POD_UID.into());
+        pod.metadata.owner_references = Some(vec![OwnerReference {
+            api_version: "apps/v1".into(),
+            kind: "ReplicaSet".into(),
+            name: "checkout-7fffb9bf5c".into(),
+            uid: OWNER_UID.into(),
+            controller: Some(true),
+            ..OwnerReference::default()
+        }]);
+        let sample = About::Sample {
+            pod_uid: uid(POD_UID),
+            controller: Some(report::Controller {
+                kind: report::ControllerKind::ReplicaSet,
+                uid: uid(OWNER_UID),
+                replica_set: Some("checkout-7fffb9bf5c".into()),
+            }),
+        };
+        for (failed, counted) in [(false, 0), (true, 1)] {
+            let calls = Rc::new(Cell::new(0));
+            let mut state = State::default();
+            let event = watcher::Event::Apply(pod.clone());
+            if failed {
+                block_on(state.on_pod(&CLUSTER, event, &CountingLookup(calls.clone())))
+            } else {
+                block_on(state.on_pod(&CLUSTER, event, &Parents))
+            }
+            .expect("the log is written");
+            assert_eq!(calls.get(), counted);
+            let (off, on) = facts_of(&state);
+            assert_eq!(off.incident, None);
+            assert_eq!(about(&on), (&sample, failed));
+        }
+
+        // `D008`, a failed Job whose lookup failed: the Event's entry keeps the failure, with
+        // incidents off too, and the data names the Job.
+        let mut event = event_about(
+            ("batch/v1", "Job", "nightly-29000000"),
+            "BackoffLimitExceeded",
+        );
+        event.regarding.as_mut().expect("regarding").uid = Some(OWNER_UID.into());
+        let mut state = State::default();
+        let calls = Rc::new(Cell::new(0));
+        block_on(state.on_event(
+            &CLUSTER,
+            watcher::Event::Apply(event),
+            &CountingLookup(calls.clone()),
+        ))
+        .expect("the log is written");
+        assert_eq!(calls.get(), 1);
+        let (_, _, lookup_failed) = state.events.values().next().expect("the Event is kept");
+        assert!(lookup_failed);
+        let (off, on) = facts_of(&state);
+        assert_eq!(off.incident, None);
+        let regarding = About::Regarding {
+            kind: Some("Job"),
+            name: Some("nightly-29000000".into()),
+            uid: MaybeUid::Uid(uid(OWNER_UID).expect("a UID")),
+        };
+        assert_eq!(about(&on), (&regarding, true));
+
+        // `D011`, a ReplicaSet whose lookup worked; the fixture's UID is not one.
+        let event = event_about(
+            ("apps/v1", "ReplicaSet", "checkout-7fffb9bf5c"),
+            "FailedCreate",
+        );
+        let mut state = State::default();
+        block_on(state.on_event(&CLUSTER, watcher::Event::Apply(event), &Parents))
+            .expect("the log is written");
+        let (_, _, lookup_failed) = state.events.values().next().expect("the Event is kept");
+        assert!(!lookup_failed);
+        let (_, on) = facts_of(&state);
+        let regarding = About::Regarding {
+            kind: Some("ReplicaSet"),
+            name: Some("checkout-7fffb9bf5c".into()),
+            uid: MaybeUid::NotAUid,
+        };
+        assert_eq!(about(&on), (&regarding, false));
+
+        // `D014`: the Deployment's generation and revision, from its record.
+        let mut state = State::default();
+        on_deployment(
+            &mut state,
+            &CLUSTER,
+            watcher::Event::Apply(deployment("shop", "checkout", true)),
+        );
+        let (off, on) = facts_of(&state);
+        assert_eq!(off.incident, None);
+        let rollout = About::Deployment {
+            generation: Some(2),
+            revision: Some(3),
+        };
+        assert_eq!(about(&on), (&rollout, false));
+    }
+
+    #[test]
+    fn the_data_names_the_record_the_sample_was_taken_from_when_two_share_a_name() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+        // While a relist is open, the old record of a Pod deleted in a watch gap sits beside its
+        // replacement of the same name: here the old one crashes and the new one runs.
+        const OLD: &str = "2f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        const NEW: &str = "3f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        const OLD_RS: &str = "4f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        const NEW_RS: &str = "5f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+        let of = |mut pod: Pod, uid: &str, rs_uid: &str| {
+            pod.metadata.uid = Some(uid.into());
+            pod.metadata.owner_references = Some(vec![OwnerReference {
+                api_version: "apps/v1".into(),
+                kind: "ReplicaSet".into(),
+                name: "checkout-7fffb9bf5c".into(),
+                uid: rs_uid.into(),
+                controller: Some(true),
+                ..OwnerReference::default()
+            }]);
+            pod
+        };
+        let name = "checkout-7fffb9bf5c-x1y2z";
+        let old = of(crashing(name), OLD, OLD_RS);
+        let new = of(pod("shop", name), NEW, NEW_RS);
+        let uid = |text| crate::record::Uid::parse(text);
+        let sample = About::Sample {
+            pod_uid: uid(OLD),
+            controller: Some(report::Controller {
+                kind: report::ControllerKind::ReplicaSet,
+                uid: uid(OLD_RS),
+                replica_set: Some("checkout-7fffb9bf5c".into()),
+            }),
+        };
+        // Each map has its own order: both orders of arrival, many times.
+        for run in 0..128 {
+            let mut state = State::default();
+            let pods = if run % 2 == 0 {
+                [old.clone(), new.clone()]
+            } else {
+                [new.clone(), old.clone()]
+            };
+            for pod in pods {
+                on_pod(&mut state, &CLUSTER, watcher::Event::Apply(pod));
+            }
+            assert_eq!(state.pods.len(), 2);
+            let (_, on) = facts_of(&state);
+            assert_eq!(about(&on), (&sample, true), "run {run}");
         }
     }
 }

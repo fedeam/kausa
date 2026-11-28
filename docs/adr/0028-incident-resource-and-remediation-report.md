@@ -153,7 +153,10 @@ version `v1alpha1`, kind `Incident`:
 
 - **Namespaced**, in the namespace of the workload it is about, named
   `kausa.<fingerprint>.<firstSeenUnix>` (the 16 hexadecimal characters of the fingerprint and the
-  incident's first-seen time in Unix seconds), so one name per occurrence.
+  incident's first-seen time in Unix seconds), so one name per occurrence. The seconds have 1 to 10
+  digits, as kurita parses the name, `^kausa\.[0-9a-f]{16}\.[0-9]{1,10}$`: a `firstSeen` before
+  1970-01-01T00:00:00Z, or at or after 2286-11-20T17:46:40Z (10^10 seconds), gets no Incident, a
+  refusal with the reason `schema` (point 2).
 - **Immutable.** It is written by one `create` and never patched. `spec` is required at the root
   of the schema, and a CEL rule `self == oldSelf` on it refuses any change of the `spec`, for every
   writer. The `spec` must be required: a transition rule is not evaluated when there is no old
@@ -164,7 +167,8 @@ version `v1alpha1`, kind `Incident`:
   (point 3), within the 10 seconds a write has there, and never before the incident's
   `incident` log line. A failed create is logged and counted (this ADR proposes
   `kausa_incident_write_errors_total`; the reference page fixes the name with the code) and not
-  retried.
+  retried. A create answered `409 AlreadyExists` is such a failure, and its fingerprint is not
+  marked: the table keeps an entry only with the UID the server gave a create it accepted.
 - **At most one create per fingerprint per `--dedup-hours`**, the window of 0027's point 5 (6 by
   default; with `0`, every occurrence). The gate reads kausa's own table of the Incidents it created
   in this process (below), never a list of the resource, and a fingerprint is marked only after a
@@ -196,16 +200,25 @@ version `v1alpha1`, kind `Incident`:
   oldest first, when room is needed. It is never seeded from a list of Incidents (point 10).
 - **While the table holds 500 entries younger than 6 hours, kausa creates no Incident.** The
   occurrence is counted (this ADR proposes `kausa_incidents_refused_total`, with a label `reason` of
-  two values, `table-full` for this stop and `schema` for point 2's rule; the reference page fixes
-  the names) and logged as `incident refused` at most once an hour for each reason; the incident's
+  three values, `table-full` for this stop, `schema` for point 2's rule and `starting` for a create
+  that arrives before any sweep of this process has ended (point 4); the reference page fixes the
+  names) and logged as `incident refused` at most once an hour for each reason; the incident's
   Events, its `incident` log line and its `detected` message are not affected, and its fingerprint
   is not marked, so a later occurrence creates one once there is room. So a process creates at most
   500 Incidents in any 6 hours: every Incident it created in the last 6 hours is still in the table,
-  and the table holds at most 500. The label is the manager's decision, from the security reader's
-  ninth review: with one counter and one line an hour, one refusal of point 2's rule an hour, which
-  a writer of Pods or Events in N can cause, would take the line and hide this stop, which holds
-  Incidents back in every namespace. The label's values are a closed set and name nothing of the
-  cluster, as 0027's counters do, and both series show 0 from the start with incidents on.
+  and the table holds at most 500. The one exception is a create the server stored but kausa got no
+  valid answer for: no answer within the 10 seconds, an answer over 64 KiB, or one with no UID.
+  kausa then inserts no entry and marks no fingerprint, and that create does not count toward the
+  500, so a later occurrence of the incident creates again. Such creates are bounded only by the
+  rate of the fact slot, which writes one fact at a time (0027's point 3), and the Incidents they
+  leave by the hourly sweep's cap of 500 (point 4). A Remediation about such an Incident finds no
+  entry and is not reported (`incident-unknown`). The label is the manager's decision, from the
+  security reader's ninth review: with one counter and one line an hour, one refusal of point 2's
+  rule an hour, which a writer of Pods or Events in N can cause, would take the line and hide this
+  stop, which holds Incidents back in every namespace. The label's values are a closed set and name
+  nothing of the cluster, as 0027's counters do, and the three series show 0 from the start with
+  incidents on. The hour is kept per reason and across namespaces, so the line names the first
+  refusal of the hour for its reason and the counter counts every one.
 - **No `ownerReference`** to the workload or to anything else, and nothing points to it.
 - **Not with `--dry-run`**, as `--history`: kausa refuses to start with incidents on and
   `--dry-run`, and the chart turns incidents off with `dryRun`.
@@ -228,7 +241,8 @@ spec:                       # required; CEL: self == oldSelf
   firstSeen: Time
   settledAt: Time
   object:                   # the incident's top-level owner
-    apiVersion: at most 253, a group/version pattern
+    apiVersion: at most 253, a group/version pattern: a group and a version, or a version
+                alone; the version starts with a letter
     kind: ^[A-Z][A-Za-z0-9]*$, at most 63
     name: Name
     uid: UID                # optional: an Event incident's owner may have none
@@ -249,20 +263,25 @@ spec:                       # required; CEL: self == oldSelf
                                 # failed, answered with another UID than the Pod's
                                 # ownerReference, or found the annotation absent or not a
                                 # whole number in 1..2^53); CEL: only with kind ReplicaSet
-  deployment: {generation: int64 >= 1, revision: int64 >= 1}   # CEL: D014 only
-  regarding:                # an Event incident about something other than a Pod
+  deployment: {generation: int64 >= 1, revision: int64 1..2^53}   # CEL: exactly for D014
+  regarding:                # an Event incident about something other than a Pod; CEL: never
+                            # with sample
     kind: Job | ReplicaSet | StatefulSet | DaemonSet | CronJob | PersistentVolumeClaim
           | HorizontalPodAutoscaler
     name: Name
     uid: UID                # optional
   missing: at most 2 of owner-lookup-failed | revision-lookup-failed, a set
+                            # CEL: owner-lookup-failed only with sample or for D008 and D011,
+                            # and for those two only with a regarding whose kind, name and uid
+                            # (both absent or equal) are object's, and an object that is a Job
+                            # of batch/v1 or a ReplicaSet of apps/v1
 ```
 
-`Time` is the pattern `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$` with at most 20 characters; `UID`
-a UID pattern of 36 characters; `Name` a DNS-1123 subdomain of at most 253. Every string is an
-enum, or a pattern with a maximum length; a test walks the schema to check it, and another checks
-that the `reason` enum equals the list compiled in `src/fact.rs`. At the longest names the `spec`
-is about 1.5 KB (an estimate; bar 6 measures the stored object).
+`Time` is the pattern `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$` with at most 20
+characters; `UID` a UID pattern of 36 characters; `Name` a DNS-1123 subdomain of at most 253. Every
+string is an enum, or a pattern with a maximum length; a test walks the schema to check it, and
+another checks that the `reason` enum equals the list compiled in `src/fact.rs`. At the longest
+names the `spec` is about 1.5 KB (an estimate; bar 6 measures the stored object).
 
 `facts` holds 0027's point 5 vocabulary but its `revision` (`src/fact.rs:101`), which only `D014`
 has: that revision travels in `deployment.revision`, with the generation, and not twice.
@@ -287,8 +306,9 @@ is never kept and never sent:
   `revision-lookup-failed` when the annotation is absent or not a whole number in 1..2^53 (point 3).
 - **Every other value read from the cluster**, required or optional: `object`'s `apiVersion`,
   `kind`, `name` and `uid`; `sample.controller.uid`; `regarding`'s `kind`, `name` and `uid`;
-  `deployment.revision` of `D014`, which the fact statement parses as any `u64`
-  (`src/fact.rs:135-138`); and `firstSeen`, which also sets the name. An owner's name the lookup
+  `deployment.generation` of `D014`, so a `D014` with no generation is refused, and its
+  `deployment.revision`, which the fact statement parses as any `u64` (`src/fact.rs:135-138`); and
+  `firstSeen`, which also sets the name. An owner's name the lookup
   refused (point 3) is one of these. One that does not fit means no create: the incident's Events,
   its `incident` log line and its `detected` message are not affected; the occurrence is counted and
   logged as a refusal of point 1 with the reason `schema`
@@ -332,7 +352,12 @@ Each entry of the fact queue gains one optional pointer, filled only with incide
   about a Pod (`D001` to `D007`, `D009` and `D010`) is emitted only at a tick where each of its
   signals comes from a Pod record kausa holds (`src/incident.rs:99`, `:194-197`), and every such
   record has a UID (`src/record.rs:548`), so for those `sample.pod` is always set. `D008`, `D011` to
-  `D014` have no sample Pod, and no `sample`.
+  `D014` have no sample Pod, and no `sample`. Update 2026-11-25: the record is found by the UID the
+  sample's signal carries (`Signal.pod_uid`, the record's own for a Pod's state, and for an Event
+  about a Pod the UID of the record the tick takes the Pod's owner from), never by name: while a
+  relist is open, kausa holds the old record of a Pod deleted in a watch gap beside its replacement
+  of the same name (`on_pod` drops a vanished UID only at `InitDone`), and by name the data could
+  name the one that is not failing.
 - **The sample Pod's controller, when the Pod has a controller `ownerReference`:** its kind and its
   UID, from the Pod's own `ownerReference`, and, for a ReplicaSet, its name and the revision in its
   `deployment.kubernetes.io/revision` annotation, read in the fact slot as the next paragraph says.
@@ -348,7 +373,9 @@ Each entry of the fact queue gains one optional pointer, filled only with incide
   Pod's entry, `src/run.rs:1399-1401`); for an Event incident about a Job or a ReplicaSet (`D008`,
   `D011`), the lookup of the Event's object (`src/run.rs:1540-1548`), whose failure an Event's entry
   does not keep today (`:1410`, only logged): the entry gains the same flag, kept with incidents off
-  too, and then `object` and `regarding` name the same Job or ReplicaSet. Both are taken in the
+  too, and then `object` and `regarding` name the same Job or ReplicaSet: same kind, name and UID,
+  and an `object` that is a Job of `batch/v1` or a ReplicaSet of `apps/v1`, the two kurita's parse
+  admits (a CEL rule on `spec` and the check say it in these words). Both are taken in the
   tick. `revision-lookup-failed`: the read of the revision in the fact slot found none, because its
   `get` failed or gave no answer within 5 seconds, because it answered for a ReplicaSet with another
   UID than the one in the Pod's `ownerReference`, or because the annotation is absent or not a whole
@@ -400,13 +427,18 @@ gate of point 1 admits the create and after the table of created Incidents is fo
 and before the create. It calls the lookup for the sample's ReplicaSet: a fresh entry answers with
 no request; an absent or expired one costs the existing metadata `get` of `replicasets`, with its
 timeout of 5 seconds (`OWNER_LOOKUP_TIMEOUT`, `:89`); a failed one is answered from the cache for 30
-seconds (`OWNER_ERROR_TTL`, `:83`). The slot compares the UID the entry's `get` returned with the
-UID in the Pod's `ownerReference`, and gives `revision-lookup-failed` when they differ. The slot can
-reach the lookup as the code stands: the term's lookup (`src/run.rs:973`) is created before the
-slot's future, which is assigned at `:1012` (`reporter.report(fact)`; `reporting` is declared at
-`:1005`), and outlives it; it is passed to `Reporter::report` as an argument, since the reporter
-outlives terms; and its cache is a `RefCell` (`:1905`) never borrowed across an `await`, so the slot
-and `on_pod` share it. So:
+seconds (`OWNER_ERROR_TTL`, `:83`). An answer whose `metadata.uid` or revision annotation cannot be
+read is kept as a failed read for the answer's 600 seconds, not the error's 30: the 30 seconds are
+for a request that failed. A ReplicaSet's revision is read in one strict spelling (digits, no sign,
+no leading zero, 1 to 2^53; `parse_revision`, `src/record.rs:824`); a Deployment's, for `D014`, is
+the fact statement's parse (`src/record.rs:885-889`, any spelling Rust's `u64` parse takes, such as
+`+7` or `007`), then bounded 1 to 2^53 by the check. The slot compares the UID the entry's `get`
+returned with the UID in the Pod's `ownerReference`, and gives `revision-lookup-failed` when they
+differ. The slot can reach the lookup as the code stands: the term's lookup (`src/run.rs:1028`) is
+created before the slot's future, which is assigned at `:1071` (`reporter.report(fact, &lookup)`;
+`reporting` is declared at `:1060`), and outlives it; it is passed to `Reporter::report` as an
+argument, since the reporter outlives terms; and its cache is a `RefCell` (`:2084`) never borrowed
+across an `await`, so the slot and `on_pod` share it. So:
 
 - **Fresh at the read, within 600 seconds, and of the same ReplicaSet.** The owner cache keys an
   entry by hop, namespace and name, not by UID; the UID kept in the entry makes a ReplicaSet deleted
@@ -449,39 +481,49 @@ and `on_pod` share it. So:
 | Age, by `metadata.creationTimestamp` | `incidents.days`, 1 to 30 | 1 |
 | Incidents per kausa | constant, the same as 0014's `MAX_OBJECTS` | 500 |
 
-- **0014's sweep, applied to Incidents**: at start and hourly, for at most 30 seconds, in pages of
-  2 (0014's `Update 2026-10-28`), dropping the `metadata` it does not read before it reduces each
+- **0014's sweep, applied to Incidents**: at start and hourly, for at most 30 seconds, in pages of 2
+  (0014's `Update 2026-10-28`), dropping the `metadata` it does not read before it reduces each
   object. It deletes, with UID and `resourceVersion` preconditions, the Incidents older than
-  `incidents.days` and, through a bounded heap, the oldest beyond 500. Which slot runs it is
-  decided with the code, under invariant 6: a fact never waits for it longer than for a write.
+  `incidents.days` and, through a bounded heap, the oldest beyond 500. It runs in a slot of its own,
+  at the start of each term and then hourly (`src/run.rs:1062-1085`, the condition at `:1079`),
+  under invariant 6: a fact never waits for it longer than for a write.
 - **"Oldest" is by `metadata.creationTimestamp`**, which the API server sets and no writer can,
   never by `firstSeen`, which any writer of Incidents sets.
 - **One day covers kurita's window**: kurita decides an Incident only while it is younger than 6
   hours by `creationTimestamp` (its ADR 0008, point 3). The outcome check may raise the default.
-- **The cap of 500 is the sweep's target, and kausa's own creates are bounded apart.** The sweep
-  at start runs before the first create of the process. Between two sweeps one process creates at
-  most 500 Incidents (point 1: at most 500 in any 6 hours, and the sweeps are an hour apart), so
-  after a sweep that completes the count kausa causes stays at most 500 + 500 = 1,000 until the
-  next one. A restart or a failover empties the table, so each process start allows 500 more:
-  in a crash loop, each start whose sweep does not complete before the process ends can leave up
-  to 500 more Incidents, and the next sweep that completes trims the count to 500 again (bar 8
-  measures that it does within its 30 seconds). Incidents written by anyone else are not bounded
-  by this ADR, as for Explanations (0014).
+- **The cap of 500 is the sweep's target, and kausa's own creates are bounded apart.** The sweep at
+  start ends before the first create of the process: a create that arrives before it ended,
+  completed or stopped (at its 30 seconds, or at a list or a delete with no answer within the 10
+  seconds of a write, an ending that lets creates through as well), does not wait for it, and is
+  refused with the reason `starting` (point 1), counted and logged as the other refusals, its
+  fingerprint not marked, so a later occurrence creates one. A sweep that failed, a list or a delete
+  refused by the server (the CustomResourceDefinition missing among them), has ended too and lets
+  creates through: the count is then not trimmed, and the process's own 500 in any 6 hours (point 1)
+  still bounds its creates. A sweep cut by the loss of the term has not ended, and the next term's
+  sweep counts. Between two sweeps one process creates at most 500 Incidents (point 1: at most 500
+  in any 6 hours, and the sweeps are an hour apart), so after a sweep that completes the count kausa
+  causes stays at most 500 + 500 = 1,000 until the next one. A restart or a failover empties the
+  table, so each process start allows 500 more: in a crash loop, each start whose sweep does not
+  complete before the process ends can leave up to 500 more Incidents, and the next sweep that
+  completes trims the count to 500 again (bar 8 measures that it does within its 30 seconds).
+  Incidents written by anyone else are not bounded by this ADR, as for Explanations (0014).
 - **The cap is shared across namespaces**, as 0014 says of its own: it protects the datastore, not
   fairness. The sweep deletes the oldest Incidents beyond 500 whatever their namespace; only
-  Incidents written by someone other than kausa, or left by earlier processes, can push it to
-  delete ones younger than 6 hours, since one process holds at most 500 of those. kausa's own
-  table is per process and is the bound on creates: whoever makes kausa create 500 Incidents in 6
-  hours, a tenant whose workloads fail that often or a writer of Events (trust statement), stops
-  new Incidents in every namespace until the oldest entry passes 6 hours, and for as long as it
-  goes on: holding the stop takes one create every 6 × 3,600 / 500 = 43.2 seconds, so one forged
-  Event with a new fingerprint every 43.2 seconds holds it indefinitely. With `--dedup-hours` at 6
-  or more, 500 creates take 500 different fingerprints; with less, fewer, down to one fingerprint
-  that recurs at `0`, since the gate of point 1 then lets each occurrence create. That
-  moves kurita towards not proposing; kausa still writes its Events and posts its `detected`
-  messages, and a Remediation of an Incident already in the table is still reported. A
-  ResourceQuota on `count/incidents.kausa.fedeam.com` in a namespace bounds what that namespace can
-  hold, against writers of Incidents; it does not bound kausa's table.
+  Incidents written by someone other than kausa, or left by earlier processes, can push it to delete
+  ones younger than 6 hours, since one process holds at most 500 of those; and so can a kausa clock
+  ahead of the API server's by more than the day less 6 hours, since the age rule compares kausa's
+  wall clock with the server's `creationTimestamp` (`src/incidents.rs:277`). kausa's own table is
+  per process and is the bound on creates: whoever makes kausa create 500 Incidents in 6 hours, a
+  tenant whose workloads fail that often or a writer of Events (trust statement), stops new
+  Incidents in every namespace until the oldest entry passes 6 hours, and for as long as it goes on:
+  holding the stop takes one create every 6 × 3,600 / 500 = 43.2 seconds, so one forged Event with a
+  new fingerprint every 43.2 seconds holds it indefinitely. With `--dedup-hours` at 6 or more, 500
+  creates take 500 different fingerprints; with less, fewer, down to one fingerprint that recurs at
+  `0`, since the gate of point 1 then lets each occurrence create. That moves kurita towards not
+  proposing; kausa still writes its Events and posts its `detected` messages, and a Remediation of
+  an Incident already in the table is still reported. A ResourceQuota on
+  `count/incidents.kausa.fedeam.com` in a namespace bounds what that namespace can hold, against
+  writers of Incidents; it does not bound kausa's table.
 
 ### 5. Permissions
 
@@ -644,10 +686,14 @@ Changed in [ARCHITECTURE.md](../../ARCHITECTURE.md) with the code:
 - **Invariant 2** gains: "and, with incidents on, Incidents (`create`, and, for retention, a
   `delete` with UID and `resourceVersion` preconditions)".
 - **Invariant 5** gains: "Nothing read back from an Incident or a Remediation is logged, sent or
-  reused, except a Remediation's action id and `proposedAt`, which, after the checks of 0028,
-  are sent as a `remediation`
-  message's action and time, and the namespace and name of a dropped Remediation, logged after
-  their patterns are checked."
+  reused, except a Remediation's action id and `proposedAt`, which, after the checks of 0028, are
+  sent as a `remediation` message's action and time, and the namespace and name of a dropped
+  Remediation, logged after their patterns are checked." The `metadata.uid` of the answer to kausa's
+  own create is the stated exception to that text: it is parsed as a UID and kept, as 16 bytes, only
+  in the table of created Incidents (point 1), never logged, sent or reused otherwise; the rest of
+  the answer is read under a cap of 64 KiB and dropped. An error answer is not under that cap:
+  kube-rs reads its body whole before kausa sees it, bounded only by the 10 seconds, as for every
+  request kausa makes, and kausa keeps only its code and reason.
 - **Invariant 11** gains the `remediation` message and its fields.
 - **Invariant 12** gains: "An Incident holds only what a fact statement may hold and the typed
   values of 0028's schema; changing what it may hold needs an ADR."
@@ -819,6 +865,14 @@ of its windows. kausa still writes its Events and posts its `detected` messages.
 the create gate of point 1, by the 500 Incidents in any 6 hours of point 1 and by the `remediation`
 bound of point 6.
 
+**What the create gate's key admits.** The gate of point 1 is keyed by namespace and fingerprint,
+as kurita keys its budget, and that is decided. The fingerprint is not collision resistant: a
+writer of Events in N who can also read N's Incidents can get an Incident created in N whose
+fingerprint equals a genuine incident's, and the genuine occurrence is then a duplicate for
+`--dedup-hours`, so kausa creates no Incident for it, and no refusal is counted. It reaches N only,
+and 0027's dedup of notifications has the same property. It is not demonstrated, since no collision
+was computed, and the key stays.
+
 **Already true before this contract, and out of its scope:** editors of kausa's namespace can read
 the webhook's Secret (`charts/kausa/values.yaml:96-99`) and post anything to the receiver
 directly; and anyone who can create Events can make kausa detect a forged Event incident and post
@@ -854,13 +908,23 @@ bar 2, 3 or 6 measures it.
   prototype, measured](../research/2026-11-20-fact-statement-prototype.md)). So 1.617 × 1.126 = 1.82
   MiB and 1.617 × 1.190 = 1.92 MiB, under the bar of 2 MiB by 0.08 MiB at the highest reading, which
   counts the table (40 KiB computed) as if it were the queue's and so errs high. The bar is not
-  raised. On the Raspberry Pis the prototype did not measure the queue alone.
+  raised. On the Raspberry Pis the prototype did not measure the queue alone. Update 2026-11-25:
+  measured on a 64-bit target, the longest entry holds 1,685 bytes, +349 over `4b85369`'s 1,336:
+  the pointer's 8, an `IncidentData` of 88 and a ReplicaSet's name of 253, its longest. So a full
+  queue holds 1,685 × 1024 = 1,725,440 bytes = 1.6455 MiB computed, and 1.6455 × 1.126 = 1.853 MiB
+  and 1.6455 × 1.190 = 1.958 MiB resident at the ratios above, under the bar by 0.04 MiB at the
+  highest reading. Off, an entry holds 1,344 bytes and a full queue 1,376,256, as computed
+  (`a_full_queue_of_the_longest_entries_is_within_the_computed_bound` in `src/report.rs`).
 - **The table of created Incidents:** about 48 bytes an entry without the report and at most about
   750 bytes with it, estimates carried from the design review, not derived here; bar 3 measures
   them. Then 500 × 48 = 24,000 bytes, about 23 KiB, and 500 × 750 = 375,000 bytes, 0.36 MiB. The
   rule of point 1 keeps a creation time in each entry, a monotonic instant of 16 bytes on a 64-bit
   Linux target; whether the review's estimates count it is not known, so at most 500 × 16 = 8,000
-  bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry.
+  bytes more: 383,000 bytes, 0.37 MiB, with the report. Bar 3 measures the whole entry. Update
+  2026-11-24: measured on a 64-bit target, an entry holds a slot of 152 bytes and at most 632 bytes
+  of names on the heap, 784 bytes, and a full table of the longest entries 500 × 784 = 392,000
+  bytes, 0.37 MiB, under bar 3's 524,288 bytes, which measures them
+  (`a_full_table_of_the_longest_entries_is_within_bar_3` in `src/incident_resource/table.rs`).
 - **The owner cache:** +8 bytes an entry, one optional pointer, empty with incidents off (bar 1);
   with incidents on, 24 bytes more for each entry of a ReplicaSet whose `get` answered, the revision
   (8) and the UID its `get` returned (16), plus the allocator's overhead, not counted. The name in
@@ -869,12 +933,19 @@ bar 2, 3 or 6 measures it.
   `regarding`'s name of any length still enters 0027's fact queue as the incident's object, and its
   `incident` log line, as it does at `4b85369`; this ADR's part of the entry holds only values that
   fit (point 2).
-- **The refusals' counter and log line:** two series of `kausa_incidents_refused_total`, one per
-  reason, and one more hour mark for the second reason's line, a monotonic instant of 16 bytes on a
-  64-bit Linux target (point 1).
+- **The sample's UID in each signal and incident:** a signal about a Pod carries its record's UID
+  (point 3), with incidents off too, since detection does not read the option: measured on a 64-bit
+  target, a `Signal` grows from 392 to 416 bytes and an `Incident` from 648 to 672, and a signal
+  about a Pod clones the UID's 36 bytes to the heap. An incident is held only while its tick handles
+  it and in an explanation's work: queued (at most `explain::QUEUE_LIMIT`, 16), running, or waiting
+  for its retry. No entry of the fact queue grows: a fact does not keep the signal.
+- **The refusals' counter and log line:** three series of `kausa_incidents_refused_total`, one per
+  reason, and three hour marks, one for each reason's line, a monotonic instant of 16 bytes each on
+  a 64-bit Linux target (point 1).
 - **The table of Events:** one flag an entry, whether the owner lookup of the Event's object failed
   (point 3's `missing`), kept with incidents off too: at most 8 bytes an entry with alignment, an
-  estimate; bar 1 measures it.
+  estimate; bar 1 measures it. Update 2026-11-25: measured on a 64-bit target, an entry grows
+  from 368 to 376 bytes.
 - **Reads:** at most one metadata `get` of `replicasets` per create attempted, when the sample's
   owner-cache entry is absent or expired at the read: at most 500 in any 6 hours per process for
   creates the server accepts, 0.023 a second at the most, and, for failed creates, at most one per
@@ -956,7 +1027,11 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
 
 - **Whether the metadata `get` of a ReplicaSet returns its annotations,** where the revision is.
   Test: read a ReplicaSet with a metadata-only `get` in kind and check the
-  `deployment.kubernetes.io/revision` annotation.
+  `deployment.kubernetes.io/revision` annotation. Ran in the pull request's CI at d048b40 (kind,
+  both scopes): the Incident of `crasher` (`D001`) has a `sample.controller` that is a ReplicaSet
+  owned by the Deployment, whose `revision` equals that ReplicaSet's
+  `deployment.kubernetes.io/revision` annotation; kausa reads the revision only from the
+  metadata-only `get` (`controller_of` and `replica_set_read`, `src/run.rs`).
 - **That the API server asks an ownerReference's `uid` only to be non-empty,** on which point 2's
   rule rests for `object.uid` and `sample.controller.uid` (a hypothesis, not read in its source),
   and how long the garbage collector takes to delete a Pod whose owner's UID matches no object.
@@ -1009,13 +1084,17 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   19.5 s to 30 − 3.85 = 26.15 s for the 500 lists, 39 to 52 ms each, a list latency not measured
   anywhere here. Test: bars 5 and 8. A sweep that stops at its deadline still deletes as it
   goes: past the first 500 objects it has listed, each one more pushes the oldest it holds out of
-  its heap, and that one is deleted at once (`src/history/pure.rs:480-519`, as 0014's). So a
+  its heap, and that one is deleted at once (`src/history/pure.rs:491-545`, as 0014's). So a
   sweep that lists k objects deletes k − 500 by the cap, and the count still comes down over the
   hourly sweeps if each lists more than 500 + 84 = 584, since one process creates at most
   500 / 6 = 83.3 Incidents an hour on average over 6 hours (point 1); not measured either.
 - **That a `/status` write cannot change `metadata` or `spec`, and that root CEL rules run on
   `/status` writes:** checked in the source only. Test both in kind before the outcome check
-  relies on them.
+  relies on them. Ran in the pull request's CI at d048b40 (kind, both scopes): a merge patch to the
+  `/status` of an Incident, as the cluster's admin, with a label, a `spec.facts.podsNow` and an
+  empty `status`, left its `metadata` (but `resourceVersion` and `managedFields`), `spec` and
+  `status` unchanged. No case asserts that root CEL rules run on `/status` writes: that part stays
+  unverified.
 - **The CEL cost of the per-detection rules and of `sample`'s rule.** Test: install both
   CustomResourceDefinitions on the oldest supported k3s (bar 7).
 - **That a forged Event yields an `inspect` that kurita's cluster window counts:** test in kind that
@@ -1036,6 +1115,54 @@ maintainer chooses between dropping `regarding.name`, so that kurita gives
   failing Pod, or a ReplicaSet, whose controller `ownerReference` is an object of it; a Deployment
   it owns would not do, since kausa follows only a ReplicaSet's and a Job's controller
   (`src/owner.rs:22-28`).
+- **Which Pod an Incident describes while two records of one name are held,** the old one of a Pod
+  deleted in a watch gap beside its replacement until the relist ends: the sample's Pod is found by
+  UID, but `spec.facts.podsNow` counts both records (`pods_of`, `src/run.rs`), and the owner of an
+  Event about a Pod, which becomes `spec.object`, is looked up by name and can come from the old
+  record (`src/incident.rs:92` and `:95` for the map by name, and `:199-203` for the Pod branch,
+  older than this ADR, as the fact statement reads them). Test: in kind, delete a crashing Pod
+  during a watch gap and compare its Incident with the Pods.
+- **Whether the API server can store an Incident and still give kausa no valid answer,** point 1's
+  one exception to "every Incident it created in the last 6 hours is still in the table": an answer
+  lost or cut after the object was stored. Only kausa's side is tested, against a fake server.
+  Test: in kind, delay the create's answer past the 10 seconds with a proxy, then check that the
+  Incident exists, that no entry was kept, and that the next occurrence creates a second one.
+- **That kausa's wall clock is never ahead of the API server's by more than the day less 6 hours,**
+  on which point 4's "only Incidents written by someone other than kausa, or left by earlier
+  processes" rests: the age rule's cutoff is kausa's clock less the day, and a clock further ahead
+  deletes Incidents kurita may still decide. No test injects the clock. Test: a unit test of the
+  sweep with its time given, and in kind a kausa with its clock set ahead, checking which
+  Incidents the sweep deletes.
+- **Whether an admission webhook can put a text of its own in the reason kausa logs,** of any
+  length: `api_failure` (`src/history.rs:411-418`) logs a refused create's or delete's `reason` as
+  the answer gives it, and leaves out only the message. A webhook that denies a create or delete of
+  an Incident was not checked. Test: in kind, a validating webhook on `incidents` that denies with
+  a long reason, then read kausa's log line.
+- **That `lead` sweeps the Incidents again once the hour has passed, and how a create answered with
+  a success other than `201` is taken.** The hourly sweep rests on the pure test of `sweep_due`
+  (`src/run.rs:1964`, tested near `src/run.rs:3103-3121`); no clock is injected into `lead`, so no
+  test drives it past the hour. And
+  kausa takes any success answer that carries a UID as a create, a `200` or `202` included, since
+  the client gives no status for a success (`send`, `src/incidents.rs`). Test: in kind, a kausa
+  with incidents on, left running past the hour, then its log and its metrics; and a fake server
+  that answers a create with `200` and a UID.
+- **What the API server does with a `metadata` label and a `spec` change sent in a `/status`
+  patch** of an Incident. The kind case (`tests/e2e/run.sh`) sends both, as the cluster's admin,
+  and expects neither to change; that the status subresource keeps everything but `status`, labels
+  included, is taken from the documentation of CustomResourceDefinitions. Ran in the pull
+  request's CI at d048b40 (kind, both scopes): after the patch, the Incident's `metadata` (but
+  `resourceVersion` and `managedFields`), `spec` and `status` equal what they were before it, so
+  neither the label nor the `spec` change was kept, on the one Kubernetes version of that kind.
+- **That the restart case tells the new process's Incidents from old ones,** as it is written: it
+  lists the `metadata.uid` of every Incident once kausa is scaled to 0 and no Pod is left, and takes
+  every Incident named `kausa.*` whose UID is not in that list as created by the new process. It
+  assumes that the API server gives each create a UID it never gave before, and that no create of
+  the old process lands after the list. Ran in the pull request's CI at d048b40 (kind, both
+  scopes): after the restart with 500 seeded Incidents, one `incidents swept` line, at least one
+  deleted by the cap in the line and in `kausa_incidents_deleted_total{reason="cap"}`, no
+  Incident with a new UID created before that line (to the second `creationTimestamp` keeps), and
+  3 new Incidents with 0 refused as `starting`. The two assumptions are not asserted by the case
+  and stay unverified.
 - **Whether the Incident should take as its sample the first signal of the group whose values fit,**
   and refuse only when none fits, so that a signal a writer in N places first does not leave a
   genuine incident without an Incident (the trust statement). Open for the implementation; the

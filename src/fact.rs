@@ -25,7 +25,7 @@ const _: () = assert!(MAX_STATEMENT_BYTES <= crate::events::MAX_NOTE_BYTES);
 
 /// The reasons a statement of `detection` may print: those of docs/reference/rules.md, and `Error`
 /// for a crash loop found by its restart count. Any other value is left out and counted.
-fn reasons(detection: Detection) -> &'static [&'static str] {
+pub(crate) fn reasons(detection: Detection) -> &'static [&'static str] {
     match detection {
         Detection::CrashLoop => &["CrashLoopBackOff", "Error"],
         Detection::ImagePull => &[
@@ -216,6 +216,7 @@ mod tests {
                 event: None,
                 regarding_kind: None,
                 pod: (pods > 0).then(|| "web-0".to_owned()),
+                pod_uid: None,
                 container: None,
                 image: None,
                 reason: reason.into(),

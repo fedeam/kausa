@@ -760,8 +760,77 @@ impl EventRecord {
     }
 }
 
-/// The annotation where the deployment controller writes a Deployment's revision.
-const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
+/// The length of a UID as the API server sets one: a UUID in lowercase hexadecimal, 36
+/// characters with its four `-`.
+pub(crate) const UID_LEN: usize = 36;
+
+/// A UID, kept as its 16 bytes: any 16 bytes spell one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Uid(pub(crate) [u8; 16]);
+
+impl Uid {
+    /// The UID `text` spells, when it fits `UID_PATTERN`; `None` otherwise.
+    pub(crate) fn parse(text: &str) -> Option<Uid> {
+        let bytes = text.as_bytes();
+        if bytes.len() != UID_LEN {
+            return None;
+        }
+        let mut uid = [0u8; 16];
+        let mut nibbles = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                if b != b'-' {
+                    return None;
+                }
+                continue;
+            }
+            let nibble = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                _ => return None,
+            };
+            uid[nibbles / 2] |= nibble << (4 * (1 - nibbles % 2));
+            nibbles += 1;
+        }
+        Some(Uid(uid))
+    }
+}
+
+/// The UID as the API server spells it: lowercase hexadecimal with its four `-`, the one text
+/// `Uid::parse` takes for these bytes.
+impl std::fmt::Display for Uid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, byte) in self.0.iter().enumerate() {
+            if matches!(i, 4 | 6 | 8 | 10) {
+                f.write_str("-")?;
+            }
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The annotation where the deployment controller writes a Deployment's revision, and a
+/// ReplicaSet's.
+pub(crate) const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
+
+/// The highest revision an Incident holds: 2^53, the largest integer every JSON reader holds
+/// exactly (docs/adr/0028-incident-resource-and-remediation-report.md, point 2).
+pub(crate) const MAX_REVISION: u64 = 1 << 53;
+
+/// The revision `text` spells as a whole number in 1..=2^53, written as the deployment
+/// controller writes one: ASCII digits only, the first not `0`; no sign, no space. `None` for
+/// anything else.
+pub(crate) fn parse_revision(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let digits = bytes.first().is_some_and(|b| (b'1'..=b'9').contains(b))
+        && bytes.len() <= 16
+        && bytes.iter().all(u8::is_ascii_digit);
+    digits
+        .then(|| text.parse::<u64>().ok())
+        .flatten()
+        .filter(|r| *r <= MAX_REVISION)
+}
 
 /// What kausa keeps of a Deployment: the fields of `D014` and of its request to the model
 /// (docs/adr/0018-stuck-rollouts.md). Never its Pod template, labels, other annotations, managed
@@ -835,6 +904,40 @@ impl DeploymentRecord {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_revision_is_a_whole_number_in_1_to_2_to_the_53_spelled_plainly() {
+        for (text, revision) in [
+            ("1", 1),
+            ("7", 7),
+            ("10", 10),
+            ("9007199254740992", 1 << 53),
+        ] {
+            assert_eq!(parse_revision(text), Some(revision), "{text:?}");
+        }
+        for text in [
+            "",
+            "0",
+            "00",
+            "07",
+            "+7",
+            "-7",
+            " 7",
+            "7 ",
+            "7\n",
+            "1e3",
+            "7.0",
+            "0x7",
+            "x",
+            "\u{0667}",
+            "9007199254740993",
+            "18446744073709551616",
+            "99999999999999999999",
+        ] {
+            assert_eq!(parse_revision(text), None, "{text:?}");
+        }
+        assert_eq!(MAX_REVISION, 9_007_199_254_740_992);
+    }
 
     // Invented values only: no real cluster output (AGENTS.md, Security rules).
     fn crashing_pod() -> Pod {
@@ -2423,5 +2526,20 @@ mod tests {
             record.progressing_reason.as_deref(),
             Some("NewReplicaSetAvailable")
         );
+    }
+
+    #[test]
+    fn a_uid_is_written_as_the_one_text_it_is_parsed_from() {
+        for text in [
+            "00000000-0000-0000-0000-000000000000",
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ] {
+            let uid = Uid::parse(text).expect("a UID");
+            assert_eq!(uid.to_string(), text);
+            assert_eq!(Uid::parse(&uid.to_string()), Some(uid));
+        }
+        // Uppercase is not the API server's spelling: it is not parsed, so never written.
+        assert_eq!(Uid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0"), None);
     }
 }

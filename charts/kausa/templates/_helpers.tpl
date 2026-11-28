@@ -90,6 +90,43 @@ false (another release or a cluster administrator installs it). */}}
 {{- end }}
 
 {{/*
+The incidents map is read nil-safe, like the history map
+(docs/adr/0028-incident-resource-and-remediation-report.md): a release made before it (helm
+upgrade --reuse-values) or --set incidents=null has none.
+*/}}
+
+{{/* kausa creates Incidents with incidents.enabled outside dry-run, with or without an endpoint;
+dryRun turns them off, as it turns off the history. */}}
+{{- define "kausa.writesIncidents" -}}
+{{- $i := .Values.incidents | default dict }}
+{{- if and $i.enabled (not .Values.dryRun) }}true{{ end }}
+{{- end }}
+
+{{/* incidents.days as a string, 1 when missing; kausa.validate checks it. */}}
+{{- define "kausa.incidentDays" -}}
+{{- $i := .Values.incidents | default dict }}
+{{- if hasKey $i "days" }}{{ toString $i.days }}{{ else }}1{{ end }}
+{{- end }}
+
+{{/* budget.dedupHours as a string: a whole number that YAML read as a float (2000000 is 2e+06) is
+written out whole, anything else as it is; kausa.validate checks it while the chart passes
+--dedup-hours. Read nil-safe. */}}
+{{- define "kausa.dedupHours" -}}
+{{- $b := .Values.budget | default dict }}
+{{- $v := $b.dedupHours }}
+{{- if and (kindIs "float64" $v) (eq $v (float64 (int64 $v))) }}{{ int64 $v }}{{ else }}{{ toString $v }}{{ end }}
+{{- end }}
+
+{{/* The chart installs the Incident CRD while kausa creates Incidents, unless
+incidents.installCRD is false (another release or a cluster administrator installs it). */}}
+{{- define "kausa.installsIncidentCRD" -}}
+{{- $i := .Values.incidents | default dict }}
+{{- $install := true }}
+{{- if hasKey $i "installCRD" }}{{ $install = $i.installCRD }}{{ end }}
+{{- if and (include "kausa.writesIncidents" .) $install }}true{{ end }}
+{{- end }}
+
+{{/*
 The notifications map and networkPolicy.notifications are read nil-safe, like the history map: a
 release made before them (helm upgrade --reuse-values) or --set notifications=null has none.
 */}}
@@ -209,15 +246,20 @@ only here, so that both scopes grant the same.
   resources: ["explanations"]
   verbs: ["list", "create", "patch", "delete"]
 {{- end }}
+{{- if include "kausa.writesIncidents" . }}
+- apiGroups: ["kausa.fedeam.com"]
+  resources: ["incidents"]
+  verbs: ["create", "list", "delete"]
+{{- end }}
 {{- end }}
 
 {{/*
 Refuses to render with a reason. The rbac checks come first, in this order: the scope, the list
 against the scope, every name, the first repeat, and the count. rbac is read nil-safe: a v0.1
 release's stored values and --set rbac=null have no rbac map, and must reach the "not set"
-message, not a nil-pointer error. history.days, replicaCount, model.timeoutSeconds, endpointCheck
-(a map or null) and endpointCheck.enabled come next, with or without an endpoint, and the
-notification checks last, only with notifications.enabled.
+message, not a nil-pointer error. history.days, incidents.days, replicaCount,
+model.timeoutSeconds, endpointCheck (a map or null) and endpointCheck.enabled come next, with or
+without an endpoint, and the notification checks last, only with notifications.enabled.
 */}}
 {{- define "kausa.validate" -}}
 {{- $rbac := .Values.rbac | default dict }}
@@ -268,6 +310,16 @@ notification checks last, only with notifications.enabled.
 {{- $days := include "kausa.historyDays" . }}
 {{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $days) }}
 {{- fail (printf "history.days must be a whole number of days from 1 to 30, not '%s'" $days) }}
+{{- end }}
+{{- $incidentDays := include "kausa.incidentDays" . }}
+{{- if not (regexMatch "^([1-9]|[12][0-9]|30)$" $incidentDays) }}
+{{- fail (printf "incidents.days must be a whole number of days from 1 to 30, not '%s'" $incidentDays) }}
+{{- end }}
+{{- if or .Values.model.endpoint .Values.dryRun (include "kausa.writesIncidents" .) }}
+{{- $dedupHours := include "kausa.dedupHours" . }}
+{{- if not (regexMatch "^(0|[1-9][0-9]{0,5}|1000000)$" $dedupHours) }}
+{{- fail (printf "budget.dedupHours must be a whole number of hours from 0 to 1000000, not '%s'" $dedupHours) }}
+{{- end }}
 {{- end }}
 {{- $replicas := include "kausa.replicas" . }}
 {{- if not (has $replicas (list "1" "2")) }}

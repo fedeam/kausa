@@ -13,6 +13,14 @@ mod prompt;
 #[path = "../../src/history/pure.rs"]
 mod history;
 
+#[allow(dead_code)] // floor-ok: the plan uses only owner's two name checks, and owner needs record
+#[path = "../../src/record.rs"]
+mod record;
+
+#[allow(dead_code)] // floor-ok: the plan uses only its two name checks, like the fact target's
+#[path = "../../src/owner.rs"]
+mod owner;
+
 use libfuzzer_sys::fuzz_target;
 use serde_json::{Value, json};
 

@@ -401,6 +401,20 @@ and without any model:
   cached repeat is posted again only until the webhook acknowledges it ([Data sent in
   notifications](../reference/data-sent-in-notifications.md), [0015. Post each new explanation
   to one optional webhook, as JSON, Slack or Telegram](../adr/0015-notifications.md)).
+- **An Incident**, with `--incidents` (off by default; in `main` for the release after v0.6.3, not
+  released): one immutable object per settled incident, named
+  `kausa.<fingerprint>.<first-seen Unix seconds>` in the failing workload's namespace, created by
+  the fact slot after the `Detected` Event and the `detected` message, with or without an endpoint.
+  It holds only what a fact statement may hold and the typed values of its schema (the workload's
+  UID, the sample Pod's and controller's, a ReplicaSet's revision), never a model's text. A gate
+  in memory allows one create per fingerprint per `--dedup-hours`, a table in memory bounds one
+  process to 500 creates in any 6 hours, each value is checked against the schema before the
+  request, and a sweep at the start of each term and then hourly deletes them after
+  `--incident-days` or beyond 500 objects. kausa never reads one back: it lists only to sweep,
+  keeping the name, UID, version and creation time ([Incident
+  resource](../reference/incident-resource.md), [0028. Publish each incident as an immutable
+  Incident that only kausa writes, and report by webhook what kurita proposed for it, both off by
+  default](../adr/0028-incident-resource-and-remediation-report.md), `proposed`).
 
 ## Configuration and modes
 
@@ -489,6 +503,9 @@ renewal (27.7 to 32.7 s after it stopped), five runs each.
 
 The history ([Explanation resource](../reference/explanation-resource.md)) keeps an incident's
 record across a failover, in the same object, and is never read back into `Dedup` or `Budget`.
+The table of created Incidents is per process: a new leader starts with an empty one, so it can
+create a second Incident for an incident the last one already published, and its first creates
+wait for its first sweep to end (refused as `starting` until then).
 
 **Failing closed.** kausa never creates its Lease. When nobody can hold it, nobody acts: a Lease
 held under another identity, or whose version changes faster than every 30 s, by whoever can
@@ -539,8 +556,9 @@ Summarised here, and in full in the [Security policy](../../SECURITY.md):
 
 - **Read-only, except Events** (a `Detected` Event even without a model). No Secrets, no ConfigMaps, no write verbs but Events
   ([0009. Run with read-only permissions that never include
-  Secrets](../adr/0009-least-privilege-rbac.md)), kausa's own Explanations with the history, and,
-  with a standby, a merge patch of the `spec` of its one Lease.
+  Secrets](../adr/0009-least-privilege-rbac.md)), kausa's own Explanations with the history, its
+  own Incidents (`create`, and `delete` to sweep) with the Incidents on, and, with a standby, a
+  merge patch of the `spec` of its one Lease.
 - **Nothing unredacted reaches the model**, and nothing goes anywhere but the configured
   endpoint and, with notifications on, the configured webhook, which gets only the fields of
   [Data sent in notifications](../reference/data-sent-in-notifications.md).
