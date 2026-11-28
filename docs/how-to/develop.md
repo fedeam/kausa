@@ -178,8 +178,9 @@ anything a cluster could produce), `validate` (validation of anything a model co
 `history` (merging an explanation into any stored Explanation, which also checks that what kausa
 writes survives its next read and that `prompt::clean` is idempotent), `notification` (the webhook
 bodies built from any text), `endpoint_error` (the endpoint's error and chat completion answers)
-and `fact` (the fact statement of any incident, which holds only its allowed bytes within its
-bound). GitHub Actions run them
+`fact` (the fact statement of any incident, which holds only its allowed bytes within its
+bound) and `remediation` (the parse and the checks of any Remediation, whose reported message holds
+only the values of kausa's own Incident). GitHub Actions run them
 with ClusterFuzzLite on pull requests that change that code and every week
 (`.github/workflows/cflite.yml`). To run one locally you need a nightly toolchain and
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (`cargo install cargo-fuzz`):

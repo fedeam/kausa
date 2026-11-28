@@ -1,0 +1,10 @@
+{
+  "schema": "kausa.fedeam.com/notification/v2",
+  "type": "remediation",
+  "kausa_version": "0.8.0",
+  "detection": {"id": "D003", "name": "out of memory"},
+  "object": {"apiVersion": "apps/v1", "kind": "Deployment", "namespace": "shop", "name": "web"},
+  "fingerprint": "5d0c2b7e9a1f4c38",
+  "remediation": {"action": "raise-memory-limit", "result": "proposed",
+                  "time": "2026-11-24T10:00:12Z"}
+}

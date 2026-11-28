@@ -31,6 +31,8 @@ mod owner;
 mod prompt;
 mod record;
 mod redact;
+#[cfg(test)]
+mod remediation;
 mod report;
 mod run;
 

@@ -14,6 +14,7 @@ use crate::fact;
 use crate::incident::MAX_PODS;
 use crate::owner::{MAX_NAME_LEN, is_dns_label, is_dns_subdomain};
 
+#[path = "incident_resource/table.rs"]
 pub(crate) mod table;
 
 #[cfg(test)]

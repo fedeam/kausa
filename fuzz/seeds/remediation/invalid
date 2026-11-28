@@ -1,0 +1,40 @@
+{
+  "apiVersion": "kurita.fedeam.com/v1alpha1",
+  "kind": "Remediation",
+  "metadata": {
+    "namespace": "shop",
+    "name": "kurita.5d0c2b7e9a1f4c38.1795514400",
+    "uid": "00000000-0000-4000-8000-0000000000cc",
+    "labels": {
+      "app.kubernetes.io/name": "kurita"
+    }
+  },
+  "spec": {
+    "incident": {
+      "name": "kausa.5d0c2b7e9a1f4c38.1795514400",
+      "uid": "00000000-0000-4000-8000-0000000000aa",
+      "detection": "D001",
+      "fingerprint": "5d0c2b7e9a1f4c38"
+    },
+    "target": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "name": "web",
+      "uid": "00000000-0000-4000-8000-000000000003"
+    },
+    "action": "rollout-undo",
+    "mode": "executed",
+    "proposedAt": "2026-11-24T10:00:12Z",
+    "rolloutUndo": {
+      "fromRevision": 7,
+      "toRevision": 6
+    },
+    "preconditions": {
+      "generation": 3
+    },
+    "decider": {
+      "rule": "R001",
+      "version": "0.1.0"
+    }
+  }
+}

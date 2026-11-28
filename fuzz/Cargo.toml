@@ -63,3 +63,10 @@ path = "fuzz_targets/fact.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "remediation"
+path = "fuzz_targets/remediation.rs"
+test = false
+doc = false
+bench = false
